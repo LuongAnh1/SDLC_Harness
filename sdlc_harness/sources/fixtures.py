@@ -22,7 +22,7 @@ class UseCaseSource:
     dataset: str
     use_case: str
     source_ref: str
-    source_path: Path
+    source_path: Path | None
     text: str
 
 

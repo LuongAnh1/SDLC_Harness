@@ -26,10 +26,38 @@ Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code
 - [x] Gọi Requirement Refiner adapter và sinh `requirement_packet_v1`.
 - [x] Sinh `formal_use_case_v1` và `formal_check_report_v1` theo grammar TraceDev trước requirement packet.
 - [x] Copy/adapt prompt scaffold cho Designer/Validator/Developer/Tester để chuẩn bị Phase 2/3.
+- [x] Tách Requirement Packet thành exception, postcondition, acceptance criteria và quality/non-functional requirements.
+- [x] Thêm guardrail validator để chặn exception/quality bị phân loại sai trước khi sync checkpoint.
+- [x] Thêm một vòng repair cho Requirement Packet khi guardrail validator bắt lỗi phân loại.
 - [x] Lưu state `waiting_requirement_approval`.
 - [x] Tạo sync report mock.
 - [x] Có lệnh/API `get-status(run_id)`.
-- [x] Niko có thể đọc status qua CLI JSON; tích hợp trực tiếp trong `Niko_Agent` để sau.
+- [x] Niko có thể đọc status qua CLI JSON; đã tích hợp trực tiếp trong `Niko_Agent`.
+
+### Phase 1 Gate - Real Jira/Confluence Sync
+
+Mục đích: khóa điều kiện trước Phase 2 bằng sync thật, không chỉ mock file.
+
+- [x] Viết tài liệu triển khai real sync: `docs/phase-1/real-sync-implementation.md`.
+- [x] Anh tạo/chọn Jira project và issue target cho `eTour UC1`.
+- [x] Anh tạo/chọn Confluence space và parent page target.
+- [x] Anh tạo Atlassian API token và điền `.env` cục bộ.
+- [x] Thêm config sync thật trong SDLC Harness.
+- [x] Thêm Jira comment adapter.
+- [x] Thêm Confluence page adapter.
+- [x] Thêm CLI `sync-run` để sync lại run đã có.
+- [x] Ghi `tool_sync_report_v1.json` với mode/id/url thật.
+- [x] Chạy smoke terminal với sync thật.
+- [x] Chạy smoke qua Niko sau sync thật.
+- [x] Cải thiện format Jira/Confluence sync thành checkpoint dễ review.
+- [x] Re-sync Jira cập nhật comment cũ khi đã có `external_id`, tránh sinh comment lặp.
+- [x] Tách hướng dẫn vận hành CLI sang `docs/phase-1/operator-guide.md`.
+- [x] Thêm CLI `start-from-jira` và source loader Jira issue ở mức unit test.
+- [x] Tích hợp Niko route `sdlc_start_from_jira` ở mức unit test.
+- [x] Chạy smoke live `start-from-jira --issue-key SDLC-1` với Jira issue có nội dung use case thật.
+- [x] Chạy smoke live qua Niko bằng prompt thực hiện issue Jira.
+- [ ] Rerun live sau schema Requirement Packet mới để xác nhận Jira/Confluence checkpoint không còn trộn exception/quality vào acceptance/postcondition.
+- [x] Cập nhật `docs/phase-1/progress.md` với run id và URL thật.
 
 ## Phase 2 - Requirement Packet Đến Design
 

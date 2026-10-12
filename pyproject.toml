@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "sdlc-harness"
 version = "0.1.0"
 description = "Workflow execution harness for SDLC context handoff"

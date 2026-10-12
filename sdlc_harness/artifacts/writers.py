@@ -19,12 +19,13 @@ def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSo
 
     path = store.run_dir(run_id) / "artifacts" / "use_case_packet_v1.md"
     path.parent.mkdir(parents=True, exist_ok=True)
+    source_location = store.relative(source.source_path) if source.source_path else source.source_ref
     content = f"""# Use Case Packet V1
 
 - Dataset: {source.dataset}
 - Use case: {source.use_case}
 - Source ref: `{source.source_ref}`
-- Source path: `{store.relative(source.source_path)}`
+- Source location: `{source_location}`
 
 ## Raw Use Case
 

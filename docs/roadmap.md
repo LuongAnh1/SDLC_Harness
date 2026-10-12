@@ -25,9 +25,9 @@ Tài liệu chi tiết: `docs/phase-1/README.md`. Phase này chỉ tick hoàn th
 Luồng:
 
 ```text
-start-or-get-run(UC1)
+start-or-get-run(UC1) hoặc start-from-jira(SDLC-1)
 -> SDLC Harness kiểm tra active run theo source_ref
--> nếu cần thì load use case
+-> nếu cần thì load fixture hoặc fetch Jira issue
 -> Requirement Refiner LLM tạo requirement_packet_v1
 -> Requirement Validator kiểm tra tối thiểu
 -> sync Jira/Confluence mock

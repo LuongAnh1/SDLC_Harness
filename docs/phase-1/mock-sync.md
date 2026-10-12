@@ -1,6 +1,6 @@
 ﻿# Mock Sync Phase 1
 
-Phase 1 dùng mock sync để chứng minh Harness là nơi đồng bộ artifact lên tool. Mock sync không thay thế API thật; nó chỉ giúp khóa flow trước khi tích hợp Jira/Confluence/GitHub.
+Phase 1 dùng mock sync để chứng minh Harness là nơi đồng bộ artifact lên tool mà không cần gọi API thật. Mock sync hiện là chế độ test an toàn song song với real sync Jira/Confluence.
 
 ## Sync Ownership
 
@@ -67,14 +67,16 @@ Status Phase 1:
 mock_synced
 ```
 
-## Điều Kiện Trước Phase 2
+## Quan Hệ Với Real Sync
 
-Mock sync chỉ dùng cho thử nghiệm đầu. Trước khi sang Phase 2, cần có ít nhất một adapter thật tối thiểu, ưu tiên:
+Mock sync vẫn cần tồn tại sau khi có real sync vì:
 
-1. Jira comment API, hoặc
-2. Confluence page API.
+- unit test và smoke test nhanh không được ghi lên Atlassian;
+- người phát triển có thể kiểm tra runtime layout mà không cần token;
+- Niko contract vẫn đọc `last_sync` giống nhau dù target là mock hay real.
 
-Khi adapter thật có mặt, `tool_sync_report` phải ghi rõ:
+Real sync đã có adapter Jira Cloud comment và Confluence Cloud page. Khi chạy
+real sync, `tool_sync_report` phải ghi rõ:
 
 ```text
 mode: real
@@ -82,3 +84,6 @@ external_id hoặc url
 sync_status
 error nếu thất bại
 ```
+
+Chi tiết setup, biến `.env`, schema report thật và luồng test nằm ở
+`real-sync-implementation.md`. Cách chạy theo workflow nằm ở `operator-guide.md`.

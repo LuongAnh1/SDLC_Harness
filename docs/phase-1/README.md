@@ -1,13 +1,13 @@
 # Phase 1 - Use Case Đến Requirement Packet
 
-Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về, chuẩn hóa thành **formal use case** theo tinh thần TraceDev, sinh **requirement packet** cho người duyệt, kiểm tra bằng Validator, đồng bộ mock tool và trả trạng thái cho Niko đọc.
+Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về từ fixture local hoặc Jira issue, chuẩn hóa thành **formal use case** theo tinh thần TraceDev, sinh **requirement packet** cho người duyệt, kiểm tra bằng Validator, đồng bộ mock hoặc real tool, rồi trả trạng thái cho Niko đọc.
 
 Luồng Phase 1:
 
 ```text
-start-or-get-run(eTour UC1)
+start-or-get-run(eTour UC1) hoặc start-from-jira(SDLC-1)
 -> SDLC Harness kiểm tra active run theo source_ref
--> nếu chưa có active run: load fixture
+-> nếu chưa có active run: load fixture hoặc fetch Jira issue
 -> tạo workflow run
 -> gọi Requirement Refiner LLM để sinh formal use case
 -> Formal Use Case Validator kiểm tra grammar tối thiểu
@@ -15,7 +15,7 @@ start-or-get-run(eTour UC1)
 -> tạo formal_use_case_v1 + formal_check_report_v1
 -> sinh requirement_packet_v1 cho checkpoint người duyệt
 -> tạo trace_graph_v1
--> mock sync Jira/Confluence
+-> sync Jira/Confluence theo cấu hình mock/real
 -> state=waiting_requirement_approval
 -> get-status trả JSON cho Niko
 ```
@@ -30,15 +30,15 @@ Phase 1 cần chứng minh:
 - Requirement Validator tối thiểu kiểm tra packet trước khi tạo checkpoint.
 - Workflow state được lưu trong `.runtime/runs/<run_id>/`.
 - Requirement packet có checkpoint chờ người dùng duyệt.
-- Mock sync report được tạo bởi SDLC Harness, không phải bởi Niko.
+- Sync report được tạo bởi SDLC Harness, không phải bởi Niko.
 - `get-status` trả đủ thông tin để Niko báo lại người dùng.
 
 ## Không Làm Trong Phase 1
 
 - Chưa gọi Designer/Developer/Tester.
 - Chưa tạo design/code/test artifact.
-- Chưa gọi Jira/Confluence/GitHub API thật.
-- Chưa tích hợp Niko thật; Niko sau này chỉ gọi CLI/status, không tự kéo use case hay tự sync tool.
+- Chưa gọi GitHub API thật.
+- Chưa để Niko tự điều khiển approval/change request; Niko hiện chỉ gọi CLI/status ở mức tối thiểu, không tự kéo use case hay tự sync tool.
 - Chưa xử lý nhiều use case hoặc impact analysis.
 - Chưa mở đa ngôn ngữ.
 
@@ -46,9 +46,13 @@ Phase 1 cần chứng minh:
 
 - `flow.md`: luồng xử lý `start-or-get-run` và `get-status`.
 - `cli-contract.md`: contract CLI JSON cho Niko gọi.
+- `operator-guide.md`: cách chạy tay Phase 1, bao gồm `start-or-get-run`,
+  `get-status`, `sync-run` và các bước kiểm tra Jira/Confluence/Niko.
 - `runtime-layout.md`: cấu trúc `.runtime/runs/<run_id>/` và active run index.
 - `artifacts.md`: nội dung tối thiểu của các artifact Phase 1.
 - `mock-sync.md`: cách mock sync Jira/Confluence và ranh giới với API thật.
+- `real-sync-implementation.md`: kế hoạch triển khai sync thật Jira/Confluence
+  Cloud trước khi khóa Phase 1.
 - `phase-1-checklist.md`: checklist triển khai code Phase 1.
 
 ## Đầu Ra Bắt Buộc
@@ -62,8 +66,8 @@ Sau khi Phase 1 code hoàn thành, một smoke test `start-or-get-run` phải t�
 .runtime/runs/<run_id>/artifacts/formal_check_report_v1.json
 .runtime/runs/<run_id>/artifacts/requirement_packet_v1.md
 .runtime/runs/<run_id>/artifacts/trace_graph_v1.json
-.runtime/runs/<run_id>/sync/jira-comment.md
-.runtime/runs/<run_id>/sync/confluence-page.md
+.runtime/runs/<run_id>/sync/jira-comment.md              # mock mode
+.runtime/runs/<run_id>/sync/confluence-page.md           # mock mode
 .runtime/runs/<run_id>/sync/tool_sync_report_v1.json
 .runtime/index/active_runs.json
 ```
@@ -108,20 +112,27 @@ Niko không cần biết UC đã được kéo/load hay chưa. Niko chỉ gọi 
 - CLI `get-status` trả lại state của run vừa tạo.
 - Output runtime đúng layout đã chốt.
 - Requirement Refiner được gọi và tạo requirement packet.
-- Requirement Validator tối thiểu chạy trước checkpoint.
+- Requirement Validator chạy trước checkpoint và chặn các lỗi phân loại thô như
+  nhét exception/quality vào postcondition hoặc acceptance criteria.
 - Requirement checkpoint có `allowed_next_actions` rõ.
-- Mock sync report thể hiện Jira/Confluence đã được cập nhật giả lập.
+- Sync report thể hiện Jira/Confluence đã được cập nhật mock hoặc real theo cấu hình.
 - Checklist Phase 1 được tick sau khi test pass.
 
 ## Trạng Thái Triển Khai
 
-Cập nhật 2026-10-12: Phase 1 đã có package/CLI chạy được với fake LLM, formal use case artifact, unit test pass và smoke test tạo runtime artifact thành công. Chi tiết nằm ở `progress.md`.
+Cập nhật 2026-10-13: Phase 1 đã có package/CLI chạy được với fake LLM, formal use case artifact, unit test pass, real sync Jira/Confluence, re-sync idempotent, Jira source intake và smoke test qua Niko. Sau live run thật, schema requirement packet đã được tách rõ exception/postcondition/acceptance/quality để checkpoint dễ review hơn. Chi tiết nằm ở `progress.md`.
 
-Trước khi chuyển sang Phase 2, không chỉ cần code Phase 1 chạy pass. Phase 1 chỉ được khóa khi đã nối Niko gọi CLI/status ở mức tối thiểu, có sync API/tool thật tối thiểu cho Jira hoặc Confluence, và smoke test lại sau integration.
+Trước khi chuyển sang Phase 2, không chỉ cần code Phase 1 chạy pass. Phase 1 chỉ được khóa khi artifact thật trên Jira/Confluence đã đủ rõ để người duyệt dùng như checkpoint, sau đó mới mở approval/design flow.
 
 ## Requirement Packet Và Formal Use Case
 
 Artifact hiện tại của Phase 1 gồm `formal_use_case_v1.txt` và `requirement_packet_v1.md`. `formal_use_case_v1.txt` là bản máy đọc theo grammar TraceDev để tầng Designer/Validator dùng sau. `requirement_packet_v1.md` là bản dễ đọc để Niko/người dùng duyệt, có Open Questions và Source Evidence.
+
+Requirement packet không được copy mù từ formal use case. Nó phải tách riêng
+happy path, alternative/exception flows, postconditions, acceptance criteria và
+quality/non-functional requirements. `Source Evidence` chỉ dùng nguồn gốc ban
+đầu như Jira issue/comment hoặc fixture, không dùng dòng formal use case do
+model sinh ra làm bằng chứng.
 
 Quy ước đuôi file: prompt/artifact formal use case dùng `.txt` vì là grammar máy đọc; prompt/artifact requirement packet dùng `.md` vì hướng tới checkpoint người duyệt.
 

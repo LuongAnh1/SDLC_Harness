@@ -177,7 +177,7 @@ Niko không tự sync artifact SDLC lên tool. Niko chỉ điều phối hội t
 
 ## Phase 1 Và Điều Kiện Trước Phase 2
 
-Thử nghiệm đầu của Phase 1 được phép dùng mock/local sync. Tuy nhiên trước khi sang Phase 2, cần có ít nhất một sync API thật hoặc adapter thật ở mức tối thiểu, ví dụ Jira comment hoặc Confluence page.
+Thử nghiệm đầu của Phase 1 được phép dùng mock/local sync. Tuy nhiên trước khi sang Phase 2, cần có sync API thật hoặc adapter thật ở mức tối thiểu. Quyết định Phase 0 chỉ yêu cầu ít nhất một target như Jira comment hoặc Confluence page; quyết định cập nhật của Phase 1 chọn triển khai cả Jira comment và Confluence page trước khi khóa phase.
 
 Trước Phase 2 cũng cần cập nhật phía Niko:
 

@@ -2,11 +2,16 @@
 
 Phase 1 dùng CLI trả JSON làm giao tiếp đầu tiên giữa Niko và SDLC Harness. CLI cần dễ test tay và dễ gọi bằng subprocess.
 
+File này mô tả contract kỹ thuật. Nếu cần hướng dẫn chạy theo workflow, xem
+`operator-guide.md`.
+
 ## Entry Point Hiện Tại
 
 ```bash
 python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode fake
+python -m sdlc_harness.cli start-from-jira --issue-key SDLC-1 --requested-by manual --llm-mode fake
 python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
+python -m sdlc_harness.cli sync-run --run-id <run_id>
 ```
 
 Tên module hiện tại là `sdlc_harness.cli`. Behavior và JSON contract không nên thay đổi nếu không cập nhật docs.
@@ -68,10 +73,36 @@ active run tồn tại, status chưa done/cancelled
   -> trả status run hiện tại, không gọi Requirement Refiner lại.
 
 không có active run
-  -> tạo run mới, load fixture, gọi Requirement Refiner, mock sync.
+  -> tạo run mới, load fixture, gọi Requirement Refiner, sync theo cấu hình.
 
 run cũ done/cancelled
   -> tạo run mới khi nhận yêu cầu thực hiện lại.
+```
+
+## `start-from-jira`
+
+Input flags:
+
+| Flag | Bắt buộc | Giá trị Phase 1B |
+| --- | --- | --- |
+| `--issue-key` | có | Jira issue key, ví dụ `SDLC-1` |
+| `--requested-by` | có | id người gọi, ví dụ `manual` hoặc `telegram:<id>` |
+| `--llm-mode` | không | `fake`, `deepseek`, `openai_compatible`; CLI override `.env` để test an toàn |
+| `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
+
+Lệnh này fetch Jira issue, đóng gói summary/description/comment thành source
+text, rồi dùng cùng schema response với `start-or-get-run`.
+
+Idempotency dùng `source_ref=jira_issue:<KEY>`. Nếu issue đã có active run chưa
+done/cancelled, command trả lại status run hiện tại và không fetch/refine lại.
+
+Error codes chính:
+
+```text
+jira_source_config_missing
+jira_source_not_found
+jira_source_empty
+jira_source_fetch_failed
 ```
 
 ## `get-status`
@@ -85,6 +116,28 @@ Input flags:
 | `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
 
 Success response dùng cùng schema với `start-or-get-run` để Niko không cần xử lý hai dạng dữ liệu khác nhau.
+
+## `sync-run`
+
+Input flags:
+
+| Flag | Bắt buộc | Ý nghĩa |
+| --- | --- | --- |
+| `--run-id` | có | run đã có artifact requirement cần sync lại |
+| `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
+
+`sync-run` không tạo artifact mới và không gọi Requirement Refiner. Lệnh này đọc
+`latest_artifacts` trong state hiện tại, sync lại requirement checkpoint theo
+`SDLC_SYNC_MODE`, cập nhật `last_sync`, ghi `tool_sync_report_v1.json`, rồi trả
+cùng schema status như `get-status`.
+
+Lý do có lệnh riêng: `start-or-get-run` cố ý idempotent theo `source_ref`. Nếu
+run cũ đang tồn tại, lệnh start không refine hoặc sync lại mù quáng. Khi chuyển
+từ mock sync sang real sync, dùng `sync-run` để thao tác rõ ràng.
+
+Với real sync, `sync-run` cũng idempotent theo target đã lưu trong report: Jira
+comment cũ được update nếu có `external_id`, Confluence page cũ được update nếu
+có `external_id`. Nếu chưa có `external_id`, adapter có thể tạo target mới.
 
 ## Error Response
 
@@ -136,6 +189,15 @@ SDLC_LLM_MODE=deepseek
 SDLC_LLM_API_KEY=<secret>
 SDLC_LLM_BASE_URL=https://api.deepseek.com
 SDLC_LLM_MODEL=deepseek-chat
+SDLC_SYNC_MODE=mock
+ATLASSIAN_BASE_URL=https://<site>.atlassian.net
+ATLASSIAN_EMAIL=<email>
+ATLASSIAN_API_TOKEN=<token>
+JIRA_SYNC_ENABLED=1
+JIRA_SYNC_ISSUE_KEY=SDLC-1
+CONFLUENCE_SYNC_ENABLED=1
+CONFLUENCE_SYNC_SPACE_ID=<space id>
+CONFLUENCE_SYNC_PARENT_PAGE_ID=<page id>
 ```
 
 CLI flag `--llm-mode` có ưu tiên cao hơn `.env`, nên có thể ép `--llm-mode fake` trong test mà không sửa file cấu hình thật.

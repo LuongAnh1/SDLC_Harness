@@ -44,7 +44,13 @@ Nội dung tối thiểu:
 
 ## Preconditions
 
-## Postconditions / Acceptance Criteria
+## Alternative / Exception Flows
+
+## Postconditions
+
+## Acceptance Criteria
+
+## Quality / Non-functional Requirements
 
 ## Open Questions
 
@@ -55,6 +61,22 @@ Nội dung tối thiểu:
 
 Phase 1 dùng LLM ở role Requirement Refiner để sinh requirement packet. Nếu trường nào không có đủ bằng chứng từ UC1, Requirement Refiner phải ghi vào `Open Questions` hoặc `Notes For Validator`, không bịa.
 
+Requirement packet là artifact cho người duyệt, không phải bản copy máy móc của
+formal use case. `formal_use_case_v1.txt` chỉ là bản chuẩn hóa trung gian theo
+grammar TraceDev; phần `Source Evidence` trong requirement packet phải trích từ
+nguồn gốc ban đầu như Jira issue, comment hoặc fixture, không được dùng các dòng
+do formal use case sinh ra như `UsecaseName:` làm bằng chứng.
+
+Các nhóm nội dung phải tách rõ:
+
+- `Main Flow`: chỉ chứa happy path.
+- `Alternative / Exception Flows`: chứa hủy thao tác, lỗi kết nối, gián đoạn,
+  dữ liệu không hợp lệ hoặc các nhánh ngoại lệ.
+- `Postconditions`: chỉ chứa trạng thái thành công sau khi use case hoàn tất.
+- `Acceptance Criteria`: chứa tiêu chí kiểm thử/review được.
+- `Quality / Non-functional Requirements`: chứa yêu cầu phi chức năng như độ
+  tin cậy, tránh duplicate, hiệu năng, bảo mật hoặc khả năng dùng.
+
 ## Requirement Validator Phase 1
 
 Validator tối thiểu kiểm tra packet có đủ các vùng chính:
@@ -64,12 +86,19 @@ Goal
 Actors
 Main Flow
 Preconditions
-Postconditions / Acceptance Criteria
+Alternative / Exception Flows
+Postconditions
+Acceptance Criteria
+Quality / Non-functional Requirements
 Open Questions
 Source Evidence
 ```
 
-Validator chưa cần chứng minh semantic correctness sâu. Mục tiêu là ngăn packet thiếu cấu trúc hoặc bịa thông tin không có trong UC1.
+Validator Phase 1 hiện là validator cấu trúc cộng guardrail ngữ nghĩa nhẹ. Mục
+tiêu là ngăn packet thiếu cấu trúc, bịa thông tin không có trong nguồn, hoặc
+đẩy nhầm exception/quality vào postcondition hay acceptance criteria. Validator
+không thay thế review của người dùng; nó chỉ chặn các lỗi thô trước khi sync lên
+Jira/Confluence.
 
 ## `trace_graph_v1.json`
 

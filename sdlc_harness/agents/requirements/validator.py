@@ -18,9 +18,43 @@ REQUIRED_SECTIONS = (
     "## Actors",
     "## Preconditions",
     "## Main Flow",
-    "## Postconditions / Acceptance Criteria",
+    "## Alternative / Exception Flows",
+    "## Postconditions",
+    "## Acceptance Criteria",
+    "## Quality / Non-functional Requirements",
     "## Open Questions",
     "## Source Evidence",
+)
+
+EXCEPTION_TERMS = (
+    "cancel",
+    "hủy",
+    "huy",
+    "interruption",
+    "interrupted",
+    "connection",
+    "mất kết nối",
+    "mat ket noi",
+    "gián đoạn",
+    "gian doan",
+    "error",
+    "exception",
+)
+
+QUALITY_TERMS = (
+    "quality",
+    "non-functional",
+    "duplicate",
+    "multiple submission",
+    "multiple submissions",
+    "input control",
+    "input controls",
+    "chặn",
+    "chan",
+    "gửi trùng",
+    "gui trung",
+    "trùng lặp",
+    "trung lap",
 )
 
 FORMAL_SECTION_HEADERS = (
@@ -178,15 +212,34 @@ class RequirementValidator:
                 issues.append(f"Missing required section: {section}")
         if not re.search(r"(?m)^\s*1[\.)]\s+", requirement_packet):
             issues.append("Main Flow must contain at least one numbered step.")
-        if "## Source Evidence" in requirement_packet:
-            evidence = requirement_packet.split("## Source Evidence", 1)[1].strip()
-            if not evidence:
-                issues.append("Source Evidence must not be empty.")
-        if "## Open Questions" in requirement_packet:
-            open_questions = requirement_packet.split("## Open Questions", 1)[1]
-            open_questions = open_questions.split("## Source Evidence", 1)[0].strip()
-            if not open_questions:
-                issues.append("Open Questions must exist; use 'None' only when source is complete.")
+
+        evidence = self._section_text(requirement_packet, "Source Evidence")
+        if "## Source Evidence" in requirement_packet and not evidence:
+            issues.append("Source Evidence must not be empty.")
+        if "UsecaseName:" in evidence or "The goal of this use case is to allow" in evidence:
+            issues.append("Source Evidence must cite the original source, not generated formal use case text.")
+
+        open_questions = self._section_text(requirement_packet, "Open Questions")
+        if "## Open Questions" in requirement_packet and not open_questions:
+            issues.append("Open Questions must exist; use 'None' only when source is complete.")
+
+        alternative = self._section_text(requirement_packet, "Alternative / Exception Flows")
+        postconditions = self._section_text(requirement_packet, "Postconditions")
+        acceptance = self._section_text(requirement_packet, "Acceptance Criteria")
+        quality = self._section_text(requirement_packet, "Quality / Non-functional Requirements")
+        has_exception_signal = self._contains_any(requirement_packet, EXCEPTION_TERMS)
+        if has_exception_signal and self._is_effectively_empty(alternative):
+            issues.append("Alternative / Exception Flows must capture cancel/interruption/error behavior from the source.")
+        if self._contains_any(postconditions, EXCEPTION_TERMS):
+            issues.append("Postconditions must describe successful final state, not cancel/interruption/error behavior.")
+        if self._contains_any(acceptance, EXCEPTION_TERMS):
+            issues.append("Acceptance Criteria must not hide cancel/interruption/error behavior; use Alternative / Exception Flows.")
+        if self._contains_any(postconditions, QUALITY_TERMS):
+            issues.append("Postconditions must not contain quality/non-functional requirements.")
+        if self._contains_any(acceptance, QUALITY_TERMS):
+            issues.append("Acceptance Criteria must not contain quality/non-functional requirements.")
+        if self._contains_any(requirement_packet, QUALITY_TERMS) and self._is_effectively_empty(quality):
+            issues.append("Quality / Non-functional Requirements must capture duplicate-submission or other quality constraints.")
         return ValidationReport(ok=not issues, issues=issues)
 
     def require_valid(self, requirement_packet: str) -> ValidationReport:
@@ -199,3 +252,22 @@ class RequirementValidator:
                 "Requirement packet failed validation: " + "; ".join(report.issues),
             )
         return report
+
+    def _section_text(self, markdown: str, heading: str) -> str:
+        marker = f"## {heading}"
+        if marker not in markdown:
+            return ""
+        section = markdown.split(marker, 1)[1]
+        next_heading = re.search(r"(?m)^##\s+", section)
+        if next_heading:
+            section = section[: next_heading.start()]
+        return section.strip()
+
+    def _contains_any(self, text: str, terms: tuple[str, ...]) -> bool:
+        lowered = text.lower()
+        return any(term.lower() in lowered for term in terms)
+
+    def _is_effectively_empty(self, text: str) -> bool:
+        normalized = re.sub(r"(?m)^\s*[-*]\s*", "", text).strip().lower()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized in {"", "none", "none.", "không có", "khong co", "none from source.", "không có từ source."}

@@ -25,16 +25,45 @@ Luồng xử lý:
 7. Tạo folder `.runtime/runs/<run_id>/`
 8. Ghi state ban đầu: `requirement_drafting`
 9. Tạo `use_case_packet_v1.md`
-10. Gọi Requirement Refiner LLM để tạo nội dung requirement đã chuẩn hóa
-11. Chạy Requirement Validator tối thiểu
-12. Tạo `requirement_packet_v1.md`
-13. Tạo `trace_graph_v1.json`
-14. Mock sync Jira/Confluence
-15. Ghi `tool_sync_report_v1.json`
-16. Cập nhật active run index `.runtime/index/active_runs.json`
-17. Cập nhật state: `waiting_requirement_approval`
-18. Trả JSON status
+10. Gọi Requirement Refiner LLM để tạo `formal_use_case_v1.txt`
+11. Chạy Formal Use Case Validator tối thiểu
+12. Tạo `formal_check_report_v1.json`
+13. Tạo `requirement_packet_v1.md` cho người duyệt
+14. Chạy Requirement Validator cấu trúc + guardrail ngữ nghĩa nhẹ
+15. Nếu validator fail, gọi Requirement Refiner repair `requirement_packet_v1` một vòng
+16. Nếu repair vẫn fail, ghi `state.status=failed`, `last_error`, rồi trả JSON lỗi
+17. Tạo `trace_graph_v1.json`
+18. Sync Jira/Confluence theo `SDLC_SYNC_MODE`
+19. Ghi `tool_sync_report_v1.json`
+20. Cập nhật active run index `.runtime/index/active_runs.json`
+21. Cập nhật state: `waiting_requirement_approval`
+22. Trả JSON status
 ```
+
+## Command `start-from-jira`
+
+Input:
+
+```text
+issue_key=SDLC-1
+requested_by=<id>
+```
+
+Luồng xử lý:
+
+```text
+1. Validate input
+2. Tạo source_ref: jira_issue:<KEY>
+3. Kiểm tra active run theo source_ref
+4. Nếu active run tồn tại và chưa done/cancelled: trả status run hiện tại
+5. Nếu chưa có active run: fetch Jira issue bằng Atlassian API
+6. Đóng gói summary/description/comment thành source text
+7. Chạy chung luồng tạo formal use case, requirement packet, trace graph và sync checkpoint như fixture source
+8. Trả JSON status
+```
+
+Jira source intake thuộc chiều kéo context xuống. Real sync thuộc chiều đẩy
+checkpoint đã xử lý lên Jira/Confluence.
 
 ## Command `get-status`
 
@@ -53,6 +82,30 @@ Luồng xử lý:
 4. Đọc latest sync report
 5. Trả JSON status cho Niko
 ```
+
+## Command `sync-run`
+
+Input:
+
+```text
+run_id=<run_id>
+```
+
+Luồng xử lý:
+
+```text
+1. Tìm `.runtime/runs/<run_id>/state.json`
+2. Nếu không có, trả `run_not_found`
+3. Đọc `latest_artifacts`
+4. Sync lại requirement checkpoint theo `SDLC_SYNC_MODE`
+5. Nếu report đã có Jira/Confluence `external_id`, update target cũ
+6. Ghi lại `tool_sync_report_v1.json`
+7. Cập nhật `last_sync` trong state
+8. Trả JSON status cho Niko/operator
+```
+
+`sync-run` không gọi LLM, không refine lại requirement và không tạo artifact
+mới. Lệnh này chỉ dùng để đồng bộ lại checkpoint đã có.
 
 ## State Cuối Của Phase 1
 
@@ -76,10 +129,33 @@ get_status
 `summary_for_user` cần đủ ngắn để Niko có thể báo lại ngay:
 
 ```text
-Đã chuẩn hóa eTour UC1 thành requirement packet v1 bằng Requirement Refiner và đồng bộ mock Jira/Confluence. Run đang chờ anh duyệt requirement trước khi chuyển sang design.
+Đã chuẩn hóa eTour UC1 thành requirement packet v1 bằng Requirement Refiner và đồng bộ checkpoint. Run đang chờ anh duyệt requirement trước khi chuyển sang design.
 ```
 
 Niko có thể chỉnh giọng văn sau này, nhưng Phase 1 CLI phải trả nội dung đủ thông tin.
+
+## Guardrail Requirement Packet
+
+Requirement Refiner sinh hai artifact khác vai trò:
+
+- `formal_use_case_v1.txt`: bản máy đọc theo grammar TraceDev.
+- `requirement_packet_v1.md`: bản checkpoint cho người duyệt.
+
+Requirement Validator phải chạy trên `requirement_packet_v1.md` trước khi sync.
+Ngoài kiểm tra đủ section, validator còn chặn các lỗi thô sau:
+
+- nhánh hủy, lỗi kết nối, gián đoạn hoặc exception bị đưa vào `Postconditions`;
+- exception bị viết như `Acceptance Criteria` thành công;
+- quality/non-functional requirement bị đưa vào `Postconditions` hoặc
+  `Acceptance Criteria`;
+- `Source Evidence` trích từ formal use case do model sinh ra thay vì nguồn gốc
+  ban đầu.
+
+Nếu validator fail, Phase 1 không nới lỏng luật ngay. SDLC Harness đưa
+`ValidationReport` và packet hiện tại quay lại Requirement Refiner để repair một
+vòng. Chỉ packet sau repair pass validator mới được ghi artifact và sync lên
+tool. Nếu repair vẫn fail, run được ghi `status=failed` để operator có thể tra
+lại bằng `get-status`.
 
 ## Niko Không Kéo Use Case Trực Tiếp
 

@@ -102,6 +102,8 @@ def fake_completion(prompt: str) -> str:
 
     if "Formal Syntactic Constraint" in prompt or "ReconstructedUseCase" in prompt:
         return fake_formal_use_case()
+    if "Repair Requirement Packet v1" in prompt or "Requirement Validation Report" in prompt:
+        return fake_refined_requirement(prompt)
     return fake_refined_requirement(prompt)
 
 
@@ -154,9 +156,19 @@ Cho phép Agency Operator xóa một cultural heritage object đã chọn trong 
 6. Hệ thống xóa cultural heritage object đã chọn.
 7. Hệ thống thông báo thao tác xóa thành công.
 
-## Postconditions / Acceptance Criteria
+## Alternative / Exception Flows
+- Agency Operator có thể hủy thao tác trước khi xác nhận.
+- Kết nối tới server eTour có thể bị gián đoạn trong quá trình thao tác.
+
+## Postconditions
 - Cultural heritage object đã chọn không còn khả dụng trong hệ thống sau khi xóa thành công.
 - Hệ thống hiển thị thông báo xóa thành công.
+
+## Acceptance Criteria
+- Khi Agency Operator xác nhận, hệ thống xóa cultural heritage object đã chọn.
+- Khi xóa thành công, hệ thống hiển thị thông báo thành công.
+
+## Quality / Non-functional Requirements
 - Hệ thống chặn nhiều lần gửi xác nhận trong khi thao tác xóa/hủy đang được xử lý.
 
 ## Open Questions
@@ -169,4 +181,6 @@ Cho phép Agency Operator xóa một cultural heritage object đã chọn trong 
 - "The agency has logged."
 - "Asks confirmation" và "Confirm the operation".
 - "The system shall notify the successful elimination".
+- "Operator Agency cancels the operation."
+- "Interruption of connection to the server ETOUR."
 """.strip()

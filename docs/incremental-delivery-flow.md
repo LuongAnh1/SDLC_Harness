@@ -116,6 +116,6 @@ Mock sync chỉ dùng để mở đường cho thử nghiệm đầu. Trước k
 - SDLC Harness có CLI trả JSON ổn định.
 - Niko có adapter gọi CLI và đọc status.
 - Sync thuộc SDLC Harness; Niko chỉ đọc kết quả sync để báo người dùng.
-- Có ít nhất một tool thật hoặc API thật được chứng minh, ưu tiên Jira comment hoặc Confluence page.
+- Có tool thật hoặc API thật được chứng minh. Theo lựa chọn hiện tại để khóa Phase 1, triển khai cả Jira comment và Confluence page.
 - Runtime/provider cho workflow mới được cấu hình rõ, ưu tiên DeepSeek thay vì phụ thuộc FCC.
 

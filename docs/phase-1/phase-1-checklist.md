@@ -48,8 +48,13 @@ Mục đích: use case được chuẩn hóa thành requirement packet có thể
 - [x] Tạo `use_case_packet_v1.md`.
 - [x] Tạo `requirement_packet_v1.md`.
 - [x] Tạo `trace_graph_v1.json`.
-- [x] `requirement_packet_v1.md` có Goal, Actors, Main Flow, Preconditions, Postconditions/Acceptance Criteria, Open Questions, Source Evidence.
+- [x] `requirement_packet_v1.md` có Goal, Actors, Main Flow, Preconditions, Alternative/Exception Flows, Postconditions, Acceptance Criteria, Quality/Non-functional Requirements, Open Questions, Source Evidence.
 - [x] Không bịa thông tin không có trong UC1; phần thiếu đưa vào Open Questions hoặc Notes.
+- [x] Requirement Validator chặn lỗi thô khi exception bị nhét vào Postconditions/Acceptance Criteria.
+- [x] Requirement Validator chặn lỗi thô khi quality/non-functional requirement bị nhét vào Postconditions/Acceptance Criteria.
+- [x] Requirement Validator chặn `Source Evidence` dùng văn bản formal use case do model sinh ra thay vì nguồn gốc ban đầu.
+- [x] Requirement Refiner repair một vòng khi `requirement_packet_v1` fail validator.
+- [x] Nếu repair vẫn fail, run ghi `status=failed` và `last_error` để Niko/operator tra lại.
 
 ## 5. Mock Sync
 
@@ -94,3 +99,12 @@ Mục đích: Phase 1 thật sự chạy được từ terminal.
 - Đã có fake LLM để test không tốn API, đồng thời có adapter `deepseek`/`openai_compatible` dùng Chat Completions cho bước gọi thật sau khi điền `.env`.
 - Smoke test fake LLM pass; DeepSeek thật cũng đã chạy ngày 2026-10-12 với run `run_20261012_122724_235baa90`, state cuối `waiting_requirement_approval`, Validator pass.
 - Sync Phase 1 vẫn là mock file theo đúng quyết định Phase 0; sync API/tool thật tối thiểu là điều kiện trước Phase 2.
+
+## Ghi chú chỉnh Requirement Packet 2026-10-13
+
+- Live run từ Jira đã cho thấy schema cũ gộp `Postconditions / Acceptance Criteria` làm model dễ đưa nhánh hủy/kết nối lỗi/quality vào sai vùng.
+- Đã tách requirement packet thành các vùng riêng: exception, postcondition, acceptance và quality.
+- Đã thêm guardrail validator để bắt các lỗi phân loại thô trước khi sync checkpoint.
+- Live test đầu tiên sau schema mới bị validator chặn đúng lỗi `connection interruption/cancel` nằm trong Acceptance Criteria.
+- Đã thêm repair loop cho requirement packet để model có cơ hội tự sửa theo `ValidationReport` trước khi trả lỗi ra bot.
+- Cần rerun live `start-from-jira` hoặc qua Niko để anh review artifact thật sau repair loop.

@@ -22,6 +22,15 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_timeout_seconds: int
+    sync_mode: str
+    atlassian_base_url: str
+    atlassian_email: str
+    atlassian_api_token: str
+    jira_sync_enabled: bool
+    jira_sync_issue_key: str
+    confluence_sync_enabled: bool
+    confluence_sync_space_id: str
+    confluence_sync_parent_page_id: str
 
 
 def repo_root() -> Path:
@@ -45,6 +54,14 @@ def _read_dotenv(path: Path) -> dict[str, str]:
     return values
 
 
+def _bool_value(raw: str | None, *, default: bool = False) -> bool:
+    """Đọc biến bật/tắt dạng 1/true/yes/on cho adapter local."""
+
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def load_settings(
     *,
     root: Path | None = None,
@@ -65,6 +82,15 @@ def load_settings(
         "SDLC_LLM_BASE_URL",
         "SDLC_LLM_MODEL",
         "SDLC_LLM_TIMEOUT_SECONDS",
+        "SDLC_SYNC_MODE",
+        "ATLASSIAN_BASE_URL",
+        "ATLASSIAN_EMAIL",
+        "ATLASSIAN_API_TOKEN",
+        "JIRA_SYNC_ENABLED",
+        "JIRA_SYNC_ISSUE_KEY",
+        "CONFLUENCE_SYNC_ENABLED",
+        "CONFLUENCE_SYNC_SPACE_ID",
+        "CONFLUENCE_SYNC_PARENT_PAGE_ID",
     ):
         if key in os.environ:
             merged[key] = os.environ[key]
@@ -78,6 +104,9 @@ def load_settings(
         timeout_seconds = 90
 
     runtime_path = (runtime_root or root_path / ".runtime").resolve()
+    sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
+    if sync_mode not in {"mock", "real", "both"}:
+        sync_mode = "mock"
     return Settings(
         repo_root=root_path,
         runtime_root=runtime_path,
@@ -86,5 +115,14 @@ def load_settings(
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
         llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-chat"),
         llm_timeout_seconds=timeout_seconds,
+        sync_mode=sync_mode,
+        atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),
+        atlassian_email=merged.get("ATLASSIAN_EMAIL", ""),
+        atlassian_api_token=merged.get("ATLASSIAN_API_TOKEN", ""),
+        jira_sync_enabled=_bool_value(merged.get("JIRA_SYNC_ENABLED")),
+        jira_sync_issue_key=merged.get("JIRA_SYNC_ISSUE_KEY", ""),
+        confluence_sync_enabled=_bool_value(merged.get("CONFLUENCE_SYNC_ENABLED")),
+        confluence_sync_space_id=merged.get("CONFLUENCE_SYNC_SPACE_ID", ""),
+        confluence_sync_parent_page_id=merged.get("CONFLUENCE_SYNC_PARENT_PAGE_ID", ""),
     )
 

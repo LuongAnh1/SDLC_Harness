@@ -6,7 +6,7 @@ Tài liệu này ghi lại những việc cần chuẩn bị ở `Niko_Agent` tr
 
 - Phase 1 dùng CLI trả JSON để Niko gọi SDLC Harness.
 - Thử nghiệm đầu của Phase 1 được phép dùng mock/local sync.
-- Trước Phase 2 phải có ít nhất một sync API thật hoặc adapter thật ở mức tối thiểu.
+- Trước Phase 2 phải có sync API thật hoặc adapter thật ở mức tối thiểu. Phase 1 hiện chọn triển khai cả Jira comment và Confluence page trước khi khóa phase.
 - Sync thuộc SDLC Harness; Niko chỉ đọc status/sync result và phản hồi người dùng.
 
 ## Luồng Sync Đúng
@@ -35,5 +35,5 @@ Niko không tự đẩy requirement/design/code artifact lên Jira/Confluence/Gi
 
 - Niko gọi được CLI `get_status` và hiển thị status cho người dùng.
 - Niko gọi được `approve_checkpoint` cho checkpoint requirement.
-- SDLC Harness có `tool_sync_report` thật hoặc API thật tối thiểu.
+- SDLC Harness có `tool_sync_report` thật cho Jira comment và Confluence page, hoặc ghi lỗi rõ ràng nếu sync thất bại.
 - Nếu sync thất bại, Niko báo được lỗi và action tiếp theo thay vì trả lời mơ hồ.

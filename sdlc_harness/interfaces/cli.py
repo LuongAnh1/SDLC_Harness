@@ -27,10 +27,20 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     start.add_argument("--runtime-root", default=None)
 
+    start_jira = subparsers.add_parser("start-from-jira")
+    start_jira.add_argument("--issue-key", required=True)
+    start_jira.add_argument("--requested-by", required=True)
+    start_jira.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    start_jira.add_argument("--runtime-root", default=None)
+
     status = subparsers.add_parser("get-status")
     status.add_argument("--run-id", required=True)
     status.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     status.add_argument("--runtime-root", default=None)
+
+    sync = subparsers.add_parser("sync-run")
+    sync.add_argument("--run-id", required=True)
+    sync.add_argument("--runtime-root", default=None)
     return parser
 
 
@@ -51,8 +61,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             use_case=args.use_case,
             requested_by=args.requested_by,
         )
+    if args.command == "start-from-jira":
+        return workflow.start_from_jira(
+            issue_key=args.issue_key,
+            requested_by=args.requested_by,
+        )
     if args.command == "get-status":
         return workflow.get_status(run_id=args.run_id)
+    if args.command == "sync-run":
+        return workflow.sync_run(run_id=args.run_id)
     raise HarnessError("unknown_command", f"Unknown command: {args.command}")
 
 

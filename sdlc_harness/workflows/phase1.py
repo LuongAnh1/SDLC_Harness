@@ -14,11 +14,13 @@ from ..artifacts.writers import (
     write_use_case_packet,
 )
 from ..core.config import Settings
-from ..sources.fixtures import load_use_case
+from ..core.errors import HarnessError
+from ..sources.fixtures import UseCaseSource, load_use_case
+from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..agents.requirements import RequirementRefiner, RequirementValidator
 from ..storage.runtime import RuntimeStore, utc_now_iso
-from ..sync.mock import mock_sync_requirement_checkpoint
+from ..sync import sync_requirement_checkpoint
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
@@ -41,6 +43,17 @@ class PhaseOneWorkflow:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
 
         source = load_use_case(dataset=dataset, use_case=use_case, repo_root=self.settings.repo_root)
+        return self._start_from_source(source=source, requested_by=requested_by)
+
+    def start_from_jira(self, *, issue_key: str, requested_by: str) -> dict[str, object]:
+        """Tạo run từ Jira issue hoặc trả active run hiện tại cho cùng issue."""
+
+        source = load_jira_issue_source(settings=self.settings, issue_key=issue_key)
+        return self._start_from_source(source=source, requested_by=requested_by)
+
+    def _start_from_source(self, *, source: UseCaseSource, requested_by: str) -> dict[str, object]:
+        """Chạy Phase 1 từ source đã được load, bất kể source là fixture hay Jira."""
+
         active_state = self.store.find_active_run(source.source_ref)
         if active_state:
             return self._status_response(active_state, created_new_run=False)
@@ -51,8 +64,8 @@ class PhaseOneWorkflow:
             "ok": True,
             "run_id": run_id,
             "source_ref": source.source_ref,
-            "dataset": dataset,
-            "use_case": use_case,
+            "dataset": source.dataset,
+            "use_case": source.use_case,
             "requested_by": requested_by,
             "created_at": now,
             "updated_at": now,
@@ -71,26 +84,42 @@ class PhaseOneWorkflow:
         }
         self.store.write_state(state)
 
-        use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
-        formal_refinement = self.refiner.refine_formal_use_case(source)
-        formal_use_case_path = write_formal_use_case(
-            store=self.store,
-            run_id=run_id,
-            formal_use_case=formal_refinement.final_use_case,
-        )
-        formal_check_report_path = write_formal_check_report(
-            store=self.store,
-            run_id=run_id,
-            refinement_result=formal_refinement,
-        )
-        requirement_text = self.refiner.refine(source, formal_use_case=formal_refinement.final_use_case)
-        validation_report = self.validator.require_valid(requirement_text)
-        requirement_packet_path = write_requirement_packet(
-            store=self.store,
-            run_id=run_id,
-            requirement_packet=requirement_text,
-            validation_report=validation_report,
-        )
+        try:
+            use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
+            formal_refinement = self.refiner.refine_formal_use_case(source)
+            formal_use_case_path = write_formal_use_case(
+                store=self.store,
+                run_id=run_id,
+                formal_use_case=formal_refinement.final_use_case,
+            )
+            formal_check_report_path = write_formal_check_report(
+                store=self.store,
+                run_id=run_id,
+                refinement_result=formal_refinement,
+            )
+            requirement_refinement = self.refiner.refine_requirement_packet(
+                source,
+                formal_use_case=formal_refinement.final_use_case,
+            )
+            requirement_text = requirement_refinement.final_packet
+            validation_report = requirement_refinement.final_report
+            requirement_packet_path = write_requirement_packet(
+                store=self.store,
+                run_id=run_id,
+                requirement_packet=requirement_text,
+                validation_report=validation_report,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "status": "failed",
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 1 lỗi khi chuẩn hóa requirement: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
         artifact_paths = {
             "use_case_packet": use_case_packet_path,
             "formal_use_case": formal_use_case_path,
@@ -108,8 +137,9 @@ class PhaseOneWorkflow:
             llm_model=self.settings.llm_model,
         )
         artifact_paths["trace_graph"] = trace_graph_path
-        last_sync = mock_sync_requirement_checkpoint(
+        last_sync = sync_requirement_checkpoint(
             store=self.store,
+            settings=self.settings,
             run_id=run_id,
             source_ref=source.source_ref,
             artifact_paths=artifact_paths,
@@ -132,11 +162,11 @@ class PhaseOneWorkflow:
                 "last_sync": last_sync,
                 "quality_reports": {
                     "formal_use_case": formal_refinement.final_report.to_dict(),
-                    "requirement_packet": validation_report.to_dict(),
+                    "requirement_packet": requirement_refinement.to_report_dict(),
                 },
                 "summary_for_user": (
-                    f"Đã chuẩn hóa {dataset} {use_case} thành formal use case và requirement packet v1 "
-                    "bằng Requirement Refiner, validator đã pass, và đã đồng bộ mock Jira/Confluence. "
+                    f"Đã chuẩn hóa {source.dataset} {source.use_case} thành formal use case và requirement packet v1 "
+                    f"bằng Requirement Refiner, validator đã pass, và sync status={last_sync.get('status')}. "
                     "Run đang chờ anh duyệt requirement trước khi chuyển sang design."
                 ),
             }
@@ -149,6 +179,36 @@ class PhaseOneWorkflow:
         """Đọc state hiện tại của run để Niko phản hồi người dùng."""
 
         state = self.store.read_state(run_id)
+        return self._status_response(state, created_new_run=False)
+
+    def sync_run(self, *, run_id: str) -> dict[str, object]:
+        """Sync lại artifact requirement hiện có của run lên tool theo config hiện tại."""
+
+        state = self.store.read_state(run_id)
+        artifact_paths = state.get("latest_artifacts")
+        if not isinstance(artifact_paths, dict) or "requirement_packet" not in artifact_paths:
+            from ..core.errors import HarnessError
+
+            raise HarnessError("sync_not_ready", f"Run is not ready for sync: {run_id}", run_id=run_id)
+        source_ref = str(state.get("source_ref", ""))
+        last_sync = sync_requirement_checkpoint(
+            store=self.store,
+            settings=self.settings,
+            run_id=run_id,
+            source_ref=source_ref,
+            artifact_paths={str(key): str(value) for key, value in artifact_paths.items()},
+        )
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "last_sync": last_sync,
+                "summary_for_user": (
+                    f"Đã chạy sync cho run {run_id}; sync status={last_sync.get('status')}. "
+                    "Run vẫn đang chờ anh duyệt requirement trước khi chuyển sang design."
+                ),
+            }
+        )
+        self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
