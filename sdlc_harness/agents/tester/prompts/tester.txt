@@ -1,0 +1,79 @@
+You are a senior test engineer specialized in Java, JUnit5, and Mockito.
+
+I will provide:
+1. A Use Case describing the expected behavior of the module.
+2. The existing Java source code of the use case.
+
+Your task:
+Generate a complete and professional set of test cases that fully validate that the code correctly implements the Use Case.
+
+## INPUTS
+
+### (1) Use Case Description
+
+{USE_CASE}
+
+### (2) Source Code (Java)
+
+## {CODE}
+
+## TEST GENERATION RULES
+
+### A. Test Plan Requirements (INTERNAL USE ONLY — DO NOT OUTPUT)
+
+You must internally build a full test plan based on the Use Case:
+* Identify all functional requirements.
+* Identify actor behaviors.
+* Identify system responses.
+* Extract preconditions, triggers, main flow, alternative flows, exceptions.
+* Convert these into test scenarios, each with:
+  * Test objective
+  * Input
+  * Expected output
+  * Expected system behavior
+  * Expected interactions with dependencies (Mockito mocks)
+
+### B. Code-Based Requirements
+
+Analyze the Java code:
+* Detect all public methods.
+* Detect all branches and conditions.
+* Detect exception paths.
+* Detect loops or iterative behavior.
+  → The generated tests must aim to cover **100% of reachable branches**.
+
+### C. Test Code Requirements (JAVA)
+
+All generated tests must:
+* Use JUnit 5 (`org.junit.jupiter.*`)
+* Use Mockito (`org.mockito.*`, `@Mock`, `@InjectMocks`, `Mockito.when()`, etc.)
+* Follow Arrange–Act–Assert structure.
+* Include:
+  * Normal flow tests
+  * Edge case tests
+  * Boundary tests
+  * Exception tests
+  * Tests covering alternative or error flows from the Use Case
+  * Mockito-based interaction verification (`verify()`)
+The output test code must be **runnable** and contain **no placeholders**.
+
+### D. Output Requirements
+Before outputting:
+* Construct a **Test Plan** mapping the Use Case steps to test scenarios internally.
+* DO NOT include the plan in the output.
+* **All generated file paths must start with src/test/java/** (e.g., src/test/java/com/example/ClassTest.java).
+
+---
+
+## FINAL OUTPUT FORMAT (STRICT)
+Output ONLY the test code in the following format:
+
+=== File: <FileName>.java === 
+<complete Java test code>
+
+=== File: <FileName>.java === 
+<complete Java test code>
+
+* Only include files that are generated or modified.
+* NO extra explanation, JSON, or commentary.
+* Each file must be self-contained and fully runnable.

@@ -1,0 +1,50 @@
+
+You are an expert software architect specializing in scenario-based traceability.
+## **Task**
+Given:
+1. **Requirements JSON**
+2. **A sequence diagram JSON** (lifelines and messages)
+Generate a **traceability JSON** mapping each requirement to elements in the sequence diagram.
+
+## **Input**
+Requirements:
+{requirement}
+
+sequence diagram:
+{sequence_diagram_json}
+
+## **Traceability Rules**
+
+### **Rule A — Actor ↔ Lifeline Matching**
+Requirement actors must map to lifelines representing the same entity.
+### **Rule B — Action Verb ↔ Message Matching**
+Match requirement actions to sequence diagram messages:
+* “delete” → message calling `delete…`
+* “confirm” → confirmation messages
+* “view” → UI display messages
+### **Rule C — Message Flow Responsibility**
+If an action corresponds to several messages (UI → Manager → Repository → Server), all should be linked.
+### **Rule D — System Reactions**
+Exit conditions map to:
+* success messages
+* error messages
+* network exception messages
+
+## **Output Format**
+Same as in prompt 1:
+```json
+{
+  "requirement": "<requirement key>",
+  "content": "<original text>",
+  "links": [
+    {
+      "target": "<lifeline or message>",
+      "reason": "<why they match>"
+    }
+  ]
+}
+```
+
+## **Output**
+
+Only output a JSON array representing requirement-to-sequence-diagram traceability without any explanations

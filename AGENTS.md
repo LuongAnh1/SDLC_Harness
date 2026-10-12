@@ -94,6 +94,19 @@ Các file quan trọng:
 - `docs/implementation-checklist.md`
 - `docs/phase-1/README.md`
 
+
+## Package Layout
+
+- `interfaces/`: public CLI/entrypoint. Giữ `sdlc_harness/cli.py` làm wrapper để không phá lệnh Niko gọi.
+- `workflows/`: graph/workflow theo phase. Workflow không tự chứa prompt dài hoặc adapter chi tiết.
+- `agents/requirements/`: Requirement Refiner/Validator và prompt templates. Phase 1 đã sinh cả `formal_use_case_v1.txt` theo grammar TraceDev và `requirement_packet_v1.md` cho checkpoint người duyệt.
+- `sources/`: fixture/dataset/Jira loaders. Niko không đọc source trực tiếp.
+- `storage/`: `.runtime` state store và active-run index.
+- `artifacts/`: artifact writers.
+- `sync/`: mock/real tool sync adapters.
+- `core/`, `llm/`: config/errors chung và LLM provider client.
+
+Khi thêm code mới, đặt theo ownership ở trên. Tránh quay lại kiểu tất cả module nằm phẳng dưới `sdlc_harness/`.
 ## Coding Policy Cho Giai Đoạn Sau
 
 Khi bắt đầu thêm code:
@@ -112,3 +125,5 @@ Sync artifact lên Jira/Confluence/GitHub thuộc SDLC Harness. Niko chỉ gọi
 ## Source Ownership
 
 Niko không trực tiếp kéo use case/Jira/dataset cho workflow SDLC. Niko gọi SDLC Harness bằng `start_or_get_run` hoặc `get_status`. SDLC Harness sở hữu việc load source, gọi Requirement Refiner, validate, sync tool và trả status/sync result.
+
+

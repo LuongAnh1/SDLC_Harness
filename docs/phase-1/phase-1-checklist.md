@@ -1,4 +1,4 @@
-﻿# Phase 1 Checklist
+# Phase 1 Checklist
 
 Checklist này dùng khi bắt đầu triển khai code Phase 1. Không tick các mục dưới đây chỉ vì docs đã viết xong; chỉ tick khi code/test tương ứng đã hoàn thành.
 
@@ -6,79 +6,91 @@ Checklist này dùng khi bắt đầu triển khai code Phase 1. Không tick cá
 
 Mục đích: Niko có thể gọi SDLC Harness bằng subprocess và đọc JSON ổn định.
 
-- [ ] Có CLI `start-or-get-run`.
-- [ ] Có CLI `get-status`.
-- [ ] CLI success trả JSON stdout, không trộn log text.
-- [ ] CLI error trả JSON `ok=false`.
-- [ ] `start-or-get-run` nhận `--dataset`, `--use-case`, `--requested-by`.
-- [ ] `get-status` nhận `--run-id`.
+- [x] Có CLI `start-or-get-run`.
+- [x] Có CLI `get-status`.
+- [x] CLI success trả JSON stdout, không trộn log text.
+- [x] CLI error trả JSON `ok=false`.
+- [x] `start-or-get-run` nhận `--dataset`, `--use-case`, `--requested-by`.
+- [x] `get-status` nhận `--run-id`.
 
 ## 2. Source Ownership Và Fixture Loader
 
 Mục đích: Phase 1 có input độc lập, và SDLC Harness là nơi kéo/load source.
 
-- [ ] Niko không đọc fixture/Jira/dataset trực tiếp; SDLC Harness sở hữu việc load source.
-- [ ] Đọc được `fixtures/etour/UC1.txt`.
-- [ ] Trả `source_not_found` nếu fixture không tồn tại.
-- [ ] Trả `source_not_supported` nếu dataset/use case chưa hỗ trợ.
+- [x] Niko không đọc fixture/Jira/dataset trực tiếp; SDLC Harness sở hữu việc load source.
+- [x] Đọc được `fixtures/etour/UC1.txt`.
+- [x] Trả `source_not_found` nếu fixture không tồn tại.
+- [x] Trả `source_not_supported` nếu dataset/use case chưa hỗ trợ.
 
 ## 3. Workflow State
 
 Mục đích: mỗi run có state để Niko truy vấn.
 
-- [ ] Tạo `source_ref=dataset_use_case:eTour:UC1`.
-- [ ] Nếu active run đã tồn tại thì trả run hiện tại, không refine lại.
-- [ ] Tạo `run_id` duy nhất khi chưa có active run.
-- [ ] Tạo `.runtime/runs/<run_id>/state.json`.
-- [ ] Tạo/cập nhật `.runtime/index/active_runs.json`.
-- [ ] Ghi state trung gian `requirement_drafting`.
-- [ ] Ghi state cuối `waiting_requirement_approval`.
-- [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
+- [x] Tạo `source_ref=dataset_use_case:eTour:UC1`.
+- [x] Nếu active run đã tồn tại thì trả run hiện tại, không refine lại.
+- [x] Tạo `run_id` duy nhất khi chưa có active run.
+- [x] Tạo `.runtime/runs/<run_id>/state.json`.
+- [x] Tạo/cập nhật `.runtime/index/active_runs.json`.
+- [x] Ghi state trung gian `requirement_drafting`.
+- [x] Ghi state cuối `waiting_requirement_approval`.
+- [x] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 
 ## 4. Requirement Refiner Và Artifacts
 
 Mục đích: use case được chuẩn hóa thành requirement packet có thể duyệt.
 
-- [ ] Gọi Requirement Refiner LLM.
-- [ ] Requirement Refiner tạo nội dung requirement packet từ UC1.
-- [ ] Requirement Validator tối thiểu chạy trước khi checkpoint.
-- [ ] Tạo `use_case_packet_v1.md`.
-- [ ] Tạo `requirement_packet_v1.md`.
-- [ ] Tạo `trace_graph_v1.json`.
-- [ ] `requirement_packet_v1.md` có Goal, Actors, Main Flow, Preconditions, Postconditions/Acceptance Criteria, Open Questions, Source Evidence.
-- [ ] Không bịa thông tin không có trong UC1; phần thiếu đưa vào Open Questions hoặc Notes.
+- [x] Gọi Requirement Refiner LLM.
+- [x] Requirement Refiner tạo nội dung requirement packet từ UC1.
+- [x] Requirement Validator tối thiểu chạy trước khi checkpoint.
+- [x] Requirement Refiner tạo `formal_use_case_v1.txt` theo grammar TraceDev trước khi sinh requirement packet.
+- [x] Formal Use Case Validator kiểm tra grammar tối thiểu và lưu `formal_check_report_v1.json`.
+- [x] Có repair prompt một lượt khi formal use case chưa đạt kiểm tra tối thiểu.
+- [x] Tạo `use_case_packet_v1.md`.
+- [x] Tạo `requirement_packet_v1.md`.
+- [x] Tạo `trace_graph_v1.json`.
+- [x] `requirement_packet_v1.md` có Goal, Actors, Main Flow, Preconditions, Postconditions/Acceptance Criteria, Open Questions, Source Evidence.
+- [x] Không bịa thông tin không có trong UC1; phần thiếu đưa vào Open Questions hoặc Notes.
 
 ## 5. Mock Sync
 
 Mục đích: chứng minh sync thuộc SDLC Harness.
 
-- [ ] Tạo mock Jira comment file.
-- [ ] Tạo mock Confluence page file.
-- [ ] Tạo `tool_sync_report_v1.json`.
-- [ ] `last_sync` trong status trỏ tới sync report.
-- [ ] Status thể hiện `mock_synced`.
+- [x] Tạo mock Jira comment file.
+- [x] Tạo mock Confluence page file.
+- [x] Tạo `tool_sync_report_v1.json`.
+- [x] `last_sync` trong status trỏ tới sync report.
+- [x] Status thể hiện `mock_synced`.
 
 ## 6. Status Cho Niko
 
 Mục đích: Niko đọc được trạng thái và phản hồi người dùng.
 
-- [ ] `get-status` trả `current_phase`.
-- [ ] `get-status` trả `pending_checkpoint`.
-- [ ] `get-status` trả `latest_artifacts`.
-- [ ] `get-status` trả `allowed_next_actions`.
-- [ ] `get-status` trả `summary_for_user`.
-- [ ] Run không tồn tại trả `run_not_found`.
+- [x] `get-status` trả `current_phase`.
+- [x] `get-status` trả `pending_checkpoint`.
+- [x] `get-status` trả `latest_artifacts`.
+- [x] `get-status` trả `allowed_next_actions`.
+- [x] `get-status` trả `summary_for_user`.
+- [x] Run không tồn tại trả `run_not_found`.
 
 ## 7. Test Và Acceptance
 
 Mục đích: Phase 1 thật sự chạy được từ terminal.
 
-- [ ] Unit test loader.
-- [ ] Unit test Requirement Refiner adapter hoặc fake refiner.
-- [ ] Unit test start-or-get-run tạo runtime files.
-- [ ] Unit test start-or-get-run trả active run nếu đã tồn tại.
-- [ ] Unit test get-status đọc state.
-- [ ] Unit test run_not_found.
-- [ ] Manual smoke test `start-or-get-run` pass.
-- [ ] Manual smoke test `get-status` pass.
-- [ ] Cập nhật `docs/implementation-checklist.md` sau khi code/test pass.
+- [x] Unit test loader.
+- [x] Unit test Requirement Refiner adapter hoặc fake refiner.
+- [x] Unit test Formal Use Case Validator pass/fail.
+- [x] Unit test prompt scaffold TraceDev cho Designer/Validator/Developer/Tester tồn tại.
+- [x] Unit test start-or-get-run tạo runtime files.
+- [x] Unit test start-or-get-run trả active run nếu đã tồn tại.
+- [x] Unit test get-status đọc state.
+- [x] Unit test run_not_found.
+- [x] Manual smoke test `start-or-get-run` pass.
+- [x] Manual smoke test `get-status` pass.
+- [x] Cập nhật `docs/implementation-checklist.md` sau khi code/test pass.
+
+## Ghi chú triển khai 2026-10-12
+
+- Đã triển khai package `sdlc_harness` với CLI JSON `start-or-get-run` và `get-status`.
+- Đã có fake LLM để test không tốn API, đồng thời có adapter `deepseek`/`openai_compatible` dùng Chat Completions cho bước gọi thật sau khi điền `.env`.
+- Smoke test fake LLM pass; DeepSeek thật cũng đã chạy ngày 2026-10-12 với run `run_20261012_122724_235baa90`, state cuối `waiting_requirement_approval`, Validator pass.
+- Sync Phase 1 vẫn là mock file theo đúng quyết định Phase 0; sync API/tool thật tối thiểu là điều kiện trước Phase 2.

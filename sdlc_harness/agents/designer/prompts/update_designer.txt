@@ -1,0 +1,41 @@
+You are a **senior software designer and UML engineer**.
+
+I will provide you with:
+1. A **Class Diagram** in PlantUML syntax.
+2. A **Sequence Diagram** in PlantUML syntax.
+3. A **UML Audit / Report** listing issues, inconsistencies, missing elements, and recommended modifications.
+
+Your task is to **update both diagrams** according to the report, making the necessary corrections to fix:
+- Missing classes, attributes, or operations.
+- Incorrect visibility, types, or relationships.
+- Missing sequence messages or incorrect message ordering.
+- Missing traceability links to requirements.
+- Any other issues explicitly mentioned in the report.
+
+### Requirements for Output:
+- Output **updated Class Diagram** and **updated Sequence Diagram** in **PlantUML syntax**.
+- Keep all existing correct elements; **only modify or add what is necessary**.
+- For added elements, include comments indicating which requirement they satisfy (e.g., `'// Added to satisfy requirement REQ-001'`).
+- Preserve formatting, notes, and actor/lifeline names from the original diagrams.
+- Ensure all modifications are consistent between Class Diagram and Sequence Diagram.
+
+### Input:
+- Class Diagram and sequence_diagram:
+{diagram}
+
+- Audit Report: {audit_report}
+
+### Output:
+Your final output must follow this structure:
+```
+## Class Diagram
+@startuml
+... PlantUML class diagram ...
+@enduml
+
+## Sequence Diagrams
+### Sequence Diagram for Use Case:
+@startuml
+... PlantUML sequence diagram ...
+@enduml
+```

@@ -15,8 +15,19 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại repo chỉ chứa tài liệu. Phần triển khai code sẽ được thêm theo từng vertical slice: mỗi đoạn chạy được sẽ có state, artifact, checkpoint, đồng bộ tool/mock tool và Niko có thể đọc status ngay.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate formal use case, sinh requirement packet cho người duyệt, ghi runtime artifact, mock sync Jira/Confluence và trả JSON status cho Niko đọc. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
+
+## Cấu Trúc Package
+
+- `sdlc_harness/interfaces/`: CLI/entrypoint công khai để Niko gọi. `sdlc_harness/cli.py` chỉ là wrapper giữ compatibility cho `python -m sdlc_harness.cli`.
+- `sdlc_harness/workflows/`: workflow graph theo phase, hiện có Phase 1 `use case -> requirement checkpoint`.
+- `sdlc_harness/agents/requirements/`: Requirement Refiner, formal use case Validator, requirement packet Validator và prompt templates copy/adapt từ TraceDev.
+- `sdlc_harness/sources/`: loader cho fixture/dataset/Jira source sau này.
+- `sdlc_harness/storage/`: runtime state store và active-run index.
+- `sdlc_harness/artifacts/`: writer cho các artifact sinh ra trong run.
+- `sdlc_harness/sync/`: adapter sync tool, hiện là mock Jira/Confluence.
+- `sdlc_harness/core/` và `sdlc_harness/llm/`: config/errors dùng chung và LLM provider adapter.
 ## Tài Liệu Chính
 
 - `docs/architecture.md`: kiến trúc tổng quan và ranh giới với Niko.
@@ -47,3 +58,22 @@ Giai đoạn hiện tại repo chỉ chứa tài liệu. Phần triển khai cod
 ## Ranh Giới Source Và Status
 
 Khi người dùng bảo Niko thực hiện một use case, Niko không tự kéo dữ liệu từ fixture/Jira/dataset. Niko gọi SDLC Harness bằng `start-or-get-run`; SDLC Harness load/refine/validate/sync nếu cần và trả status cho Niko.
+
+## Chạy Nhanh Phase 1
+
+Chạy smoke test không tốn API bằng fake LLM:
+
+```bash
+python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode fake
+python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
+```
+
+Khi muốn gọi DeepSeek thật, copy `.env.example` thành `.env`, điền `SDLC_LLM_API_KEY`, đặt `SDLC_LLM_MODE=deepseek`, rồi bỏ `--llm-mode fake` hoặc truyền `--llm-mode deepseek`.
+
+Chạy test:
+
+```bash
+python -m unittest discover -s tests -p "test*.py" -v
+```
+
+

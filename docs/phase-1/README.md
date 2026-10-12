@@ -1,6 +1,6 @@
-﻿# Phase 1 - Use Case Đến Requirement Packet
+# Phase 1 - Use Case Đến Requirement Packet
 
-Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về, chuẩn hóa bằng **Requirement Refiner**, kiểm tra tối thiểu bằng **Requirement Validator**, đồng bộ mock tool và trả trạng thái cho Niko đọc.
+Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về, chuẩn hóa thành **formal use case** theo tinh thần TraceDev, sinh **requirement packet** cho người duyệt, kiểm tra bằng Validator, đồng bộ mock tool và trả trạng thái cho Niko đọc.
 
 Luồng Phase 1:
 
@@ -9,10 +9,11 @@ start-or-get-run(eTour UC1)
 -> SDLC Harness kiểm tra active run theo source_ref
 -> nếu chưa có active run: load fixture
 -> tạo workflow run
--> gọi Requirement Refiner LLM
--> Requirement Validator kiểm tra tối thiểu
+-> gọi Requirement Refiner LLM để sinh formal use case
+-> Formal Use Case Validator kiểm tra grammar tối thiểu
 -> tạo use_case_packet_v1
--> tạo requirement_packet_v1
+-> tạo formal_use_case_v1 + formal_check_report_v1
+-> sinh requirement_packet_v1 cho checkpoint người duyệt
 -> tạo trace_graph_v1
 -> mock sync Jira/Confluence
 -> state=waiting_requirement_approval
@@ -57,6 +58,8 @@ Sau khi Phase 1 code hoàn thành, một smoke test `start-or-get-run` phải t�
 ```text
 .runtime/runs/<run_id>/state.json
 .runtime/runs/<run_id>/artifacts/use_case_packet_v1.md
+.runtime/runs/<run_id>/artifacts/formal_use_case_v1.txt
+.runtime/runs/<run_id>/artifacts/formal_check_report_v1.json
 .runtime/runs/<run_id>/artifacts/requirement_packet_v1.md
 .runtime/runs/<run_id>/artifacts/trace_graph_v1.json
 .runtime/runs/<run_id>/sync/jira-comment.md
@@ -109,3 +112,16 @@ Niko không cần biết UC đã được kéo/load hay chưa. Niko chỉ gọi 
 - Requirement checkpoint có `allowed_next_actions` rõ.
 - Mock sync report thể hiện Jira/Confluence đã được cập nhật giả lập.
 - Checklist Phase 1 được tick sau khi test pass.
+
+## Trạng Thái Triển Khai
+
+Cập nhật 2026-10-12: Phase 1 đã có package/CLI chạy được với fake LLM, formal use case artifact, unit test pass và smoke test tạo runtime artifact thành công. Chi tiết nằm ở `progress.md`.
+
+Trước khi chuyển sang Phase 2, cần chạy thêm smoke test với DeepSeek thật sau khi điền `.env`, và cần quyết định sync API/tool thật tối thiểu cho Jira hoặc Confluence.
+
+## Requirement Packet Và Formal Use Case
+
+Artifact hiện tại của Phase 1 gồm `formal_use_case_v1.txt` và `requirement_packet_v1.md`. `formal_use_case_v1.txt` là bản máy đọc theo grammar TraceDev để tầng Designer/Validator dùng sau. `requirement_packet_v1.md` là bản dễ đọc để Niko/người dùng duyệt, có Open Questions và Source Evidence.
+
+Quy ước đuôi file: prompt/artifact formal use case dùng `.txt` vì là grammar máy đọc; prompt/artifact requirement packet dùng `.md` vì hướng tới checkpoint người duyệt.
+

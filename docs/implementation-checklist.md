@@ -1,4 +1,4 @@
-﻿# Implementation Checklist
+# Implementation Checklist
 
 Checklist này dùng để tick tiến độ khi bắt đầu triển khai code. Mỗi nhóm công việc có mục đích riêng để tránh làm rộng mà không chứng minh được flow.
 
@@ -19,15 +19,17 @@ Checklist chi tiết nằm ở `docs/phase-0/phase-0-checklist.md`. Phase 0 đã
 
 Mục đích: chứng minh một use case có thể thành artifact có trạng thái và checkpoint.
 
-Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Chưa tick Phase 1 cho tới khi code CLI, runtime files, artifact và mock sync chạy pass.
+Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 hiện đã pass unit/smoke với fake LLM và đã có một lượt chạy thật DeepSeek; trước Phase 2 vẫn cần chốt sync API/tool thật tối thiểu.
 
-- [ ] Tạo `start-or-get-run` và loader do SDLC Harness sở hữu.
-- [ ] Tạo workflow run, `source_ref` và `run_id`.
-- [ ] Gọi Requirement Refiner LLM và sinh `requirement_packet_v1`.
-- [ ] Lưu state `waiting_requirement_approval`.
-- [ ] Tạo sync report mock.
-- [ ] Có lệnh/API `get-status(run_id)`.
-- [ ] Niko có thể đọc status và báo người dùng.
+- [x] Tạo `start-or-get-run` và loader do SDLC Harness sở hữu.
+- [x] Tạo workflow run, `source_ref` và `run_id`.
+- [x] Gọi Requirement Refiner adapter và sinh `requirement_packet_v1`.
+- [x] Sinh `formal_use_case_v1` và `formal_check_report_v1` theo grammar TraceDev trước requirement packet.
+- [x] Copy/adapt prompt scaffold cho Designer/Validator/Developer/Tester để chuẩn bị Phase 2/3.
+- [x] Lưu state `waiting_requirement_approval`.
+- [x] Tạo sync report mock.
+- [x] Có lệnh/API `get-status(run_id)`.
+- [x] Niko có thể đọc status qua CLI JSON; tích hợp trực tiếp trong `Niko_Agent` để sau.
 
 ## Phase 2 - Requirement Packet Đến Design
 
@@ -82,6 +84,7 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 - [ ] Tạo impact graph tối thiểu.
 - [ ] Khi một use case đổi, liệt kê use case có thể bị ảnh hưởng.
 - [ ] Chạy regression/trace check cho nhóm liên quan.
+
 
 
 

@@ -114,3 +114,9 @@ Nội dung tối thiểu:
 ## Artifact Ownership
 
 SDLC Harness sở hữu tất cả artifact Phase 1. Niko chỉ đọc summary/status và không tự sửa artifact runtime.
+
+## Formal Use Case v1
+
+`formal_use_case_v1.txt` là artifact máy đọc theo grammar TraceDev. Nó dùng các keyword `UsecaseName`, `Description`, `Actors`, `Entry Conditions`, `Flow of Events`, `Exit Conditions`, `Quality Requirement` để Designer/Validator có input ổn định.
+
+`formal_check_report_v1.json` lưu kết quả kiểm tra grammar tối thiểu và cờ `repaired` để biết Requirement Refiner có phải gọi repair prompt hay không.

@@ -2,14 +2,14 @@
 
 Phase 1 dùng CLI trả JSON làm giao tiếp đầu tiên giữa Niko và SDLC Harness. CLI cần dễ test tay và dễ gọi bằng subprocess.
 
-## Entry Point Dự Kiến
+## Entry Point Hiện Tại
 
 ```bash
-python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual
-python -m sdlc_harness.cli get-status --run-id <run_id>
+python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode fake
+python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
 ```
 
-Tên module có thể thay đổi khi code được tạo, nhưng behavior và JSON contract không nên thay đổi nếu không cập nhật docs.
+Tên module hiện tại là `sdlc_harness.cli`. Behavior và JSON contract không nên thay đổi nếu không cập nhật docs.
 
 ## `start-or-get-run`
 
@@ -20,6 +20,8 @@ Input flags:
 | `--dataset` | có | `eTour` |
 | `--use-case` | có | `UC1` |
 | `--requested-by` | có | id người gọi, ví dụ `manual` hoặc `telegram:<id>` |
+| `--llm-mode` | không | `fake`, `deepseek`, `openai_compatible`; CLI override `.env` để test an toàn |
+| `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
 
 Success response:
 
@@ -33,6 +35,8 @@ Success response:
   "status": "waiting_requirement_approval",
   "latest_artifacts": {
     "use_case_packet": ".runtime/runs/<run_id>/artifacts/use_case_packet_v1.md",
+    "formal_use_case": ".runtime/runs/<run_id>/artifacts/formal_use_case_v1.txt",
+    "formal_check_report": ".runtime/runs/<run_id>/artifacts/formal_check_report_v1.json",
     "requirement_packet": ".runtime/runs/<run_id>/artifacts/requirement_packet_v1.md",
     "trace_graph": ".runtime/runs/<run_id>/artifacts/trace_graph_v1.json"
   },
@@ -47,6 +51,10 @@ Success response:
     "report": ".runtime/runs/<run_id>/sync/tool_sync_report_v1.json"
   },
   "last_error": null,
+  "quality_reports": {
+    "formal_use_case": {"ok": true},
+    "requirement_packet": {"ok": true}
+  },
   "summary_for_user": "Đã chuẩn hóa eTour UC1 thành requirement packet v1 và đang chờ duyệt."
 }
 ```
@@ -73,6 +81,8 @@ Input flags:
 | Flag | Bắt buộc | Ý nghĩa |
 | --- | --- | --- |
 | `--run-id` | có | run cần đọc trạng thái |
+| `--llm-mode` | không | giữ schema chung với lệnh start, không gọi LLM trong get-status |
+| `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
 
 Success response dùng cùng schema với `start-or-get-run` để Niko không cần xử lý hai dạng dữ liệu khác nhau.
 
@@ -116,3 +126,17 @@ message
 ```
 
 Những field khác là metadata để debug và dashboard dùng sau.
+
+## Cấu hình LLM
+
+Phase 1 hỗ trợ fake LLM để smoke test không tốn token. Khi chạy thật, copy `.env.example` thành `.env` và điền:
+
+```text
+SDLC_LLM_MODE=deepseek
+SDLC_LLM_API_KEY=<secret>
+SDLC_LLM_BASE_URL=https://api.deepseek.com
+SDLC_LLM_MODEL=deepseek-chat
+```
+
+CLI flag `--llm-mode` có ưu tiên cao hơn `.env`, nên có thể ép `--llm-mode fake` trong test mà không sửa file cấu hình thật.
+

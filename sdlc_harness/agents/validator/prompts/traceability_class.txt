@@ -1,0 +1,56 @@
+You are an expert software architect specializing in requirements-to-design traceability.
+
+## **Task**
+Given:
+1. **A list of requirements** in JSON format
+2. **A class diagram** in JSON format
+Your task is to generate a **traceability JSON** that links each requirement item to one or more classes/methods from the class diagram, following strict architectural reasoning rules.
+
+## **Input**
+Requirements:
+{requirement}
+
+Class diagram:
+{class_diagram_json}
+
+## **Traceability Rules**
+Use the following reasoning rules when building links:
+### **Rule A — Actor ↔ Class Matching**
+If a requirement mentions an **actor**, map it to any class whose name matches or represents that actor.
+### **Rule B — Action Verb ↔ Method Matching**
+If a requirement includes an **action verb** (e.g., delete, confirm, view), map it to class methods that semantically correspond to that action.
+### **Rule C — Responsibility Delegation**
+If the matched method belongs to a high-level class, also link to lower-level classes logically responsible for executing the operation (e.g., Manager → Repository → Server).
+### **Rule D — UI and System Reactions**
+
+If the requirement describes:
+* notifications
+* confirmations
+* cancellations
+* blocking/unblocking UI
+Map them to UI-related classes/methods.
+
+## **Output Format**
+
+Return only a **JSON array** , where each element contains:
+```json
+{
+  "requirement": "<requirement id>",
+  "content": "<original text>",
+  "links": [
+    {
+      "target": "<class or class.method>",
+      "reason": "<why they match>"
+    }
+  ]
+}
+```
+## **Very Important**
+
+* Do NOT invent new classes/methods that do not exist in the class diagram.
+* If no match can be found, output `"links": []`.
+* Explanations must reference Rules A–D.
+
+Please begin, only output Json obejct without any explanations.
+
+

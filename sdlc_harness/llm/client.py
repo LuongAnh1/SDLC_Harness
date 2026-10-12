@@ -1,0 +1,172 @@
+﻿"""LLM adapter tối giản cho SDLC Harness.
+
+Phase đầu có hai chế độ: `fake` để test không tốn API và `deepseek`/
+`openai_compatible` để gọi API thật qua endpoint Chat Completions tương thích
+OpenAI.
+"""
+
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+
+from ..core.config import Settings
+from ..core.errors import HarnessError
+
+
+class LlmClient:
+    """Adapter nhỏ để workflow không phụ thuộc trực tiếp SDK của provider."""
+
+    def __init__(self, settings: Settings):
+        self.settings = settings
+
+    def complete(self, *, system: str, prompt: str) -> str:
+        """Sinh text từ LLM hoặc fake output dùng cho unit/smoke test."""
+
+        if self.settings.llm_mode == "fake":
+            return fake_completion(prompt)
+        if self.settings.llm_mode in {"deepseek", "openai_compatible"}:
+            return self._call_chat_completions(system=system, prompt=prompt)
+        raise HarnessError(
+            "requirement_refiner_failed",
+            f"Unsupported LLM mode: {self.settings.llm_mode}",
+        )
+
+    def _call_chat_completions(self, *, system: str, prompt: str) -> str:
+        """Gọi API Chat Completions tương thích OpenAI bằng stdlib."""
+
+        if not self.settings.llm_api_key:
+            raise HarnessError(
+                "requirement_refiner_failed",
+                "SDLC_LLM_API_KEY is required when SDLC_LLM_MODE is not fake.",
+            )
+        url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.settings.llm_model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+        }
+        request = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.settings.llm_api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.settings.llm_timeout_seconds) as response:
+                raw = response.read().decode("utf-8")
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise HarnessError(
+                "requirement_refiner_failed",
+                f"LLM HTTP error {exc.code}: {body[:500]}",
+            ) from exc
+        except OSError as exc:
+            raise HarnessError(
+                "requirement_refiner_failed",
+                f"LLM request failed: {exc}",
+            ) from exc
+
+        try:
+            data = json.loads(raw)
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            raise HarnessError(
+                "requirement_refiner_failed",
+                "LLM response did not match Chat Completions schema.",
+            ) from exc
+        return strip_code_fence(str(content)).strip()
+
+
+def strip_code_fence(text: str) -> str:
+    """Bỏ markdown code fence nếu model bọc toàn bộ output trong fence."""
+
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    lines = stripped.splitlines()
+    if len(lines) >= 2 and lines[-1].strip() == "```":
+        return "\n".join(lines[1:-1]).strip()
+    return stripped
+
+
+def fake_completion(prompt: str) -> str:
+    """Fake output theo loại prompt để test không gọi API thật."""
+
+    if "Formal Syntactic Constraint" in prompt or "ReconstructedUseCase" in prompt:
+        return fake_formal_use_case()
+    return fake_refined_requirement(prompt)
+
+
+def fake_formal_use_case() -> str:
+    """Formal use case hợp lệ theo grammar tối thiểu kiểu TraceDev."""
+
+    return """UsecaseName: Delete Cultural Heritage
+Description: The goal of this use case is to allow Agency Operator to delete a CulturalHeritage in order to remove an obsolete cultural object from the system
+Actors: Agency Operator
+Entry Conditions:
+Agency Operator IS logged in
+Agency Operator HAS selected CulturalHeritage from SearchCulturalHeritage results
+Flow of Events:
+1. Agency Operator views the list of CulturalHeritage returned by SearchCulturalHeritage.
+2. Agency Operator selects one CulturalHeritage.
+3. Agency Operator activates the delete function.
+4. System asks for confirmation.
+5. Agency Operator confirms the operation.
+6. System deletes the selected CulturalHeritage.
+Exit Conditions:
+System notifies successful deletion of the selected CulturalHeritage.
+Agency Operator cancels the operation.
+Connection to the ETOUR server is interrupted.
+Quality Requirement:
+System blocks input controls after receiving confirmation or cancellation to avoid multiple submissions before the operation ends.""".strip()
+
+
+def fake_refined_requirement(prompt: str) -> str:
+    """Requirement packet ổn định để test contract mà không gọi API thật."""
+
+    return """# Requirement Packet V1
+
+## Goal
+Cho phép Agency Operator xóa một cultural heritage object đã chọn trong hệ thống eTour.
+
+## Actors
+- Agency Operator
+- eTour System
+
+## Preconditions
+- Agency Operator đã đăng nhập.
+- Agency Operator đã tìm và chọn một cultural heritage object từ kết quả SearchCulturalHeritage.
+
+## Main Flow
+1. Agency Operator mở danh sách cultural heritage object từ kết quả tìm kiếm.
+2. Agency Operator chọn một cultural heritage object.
+3. Agency Operator kích hoạt chức năng xóa.
+4. Hệ thống yêu cầu xác nhận thao tác xóa.
+5. Agency Operator xác nhận thao tác.
+6. Hệ thống xóa cultural heritage object đã chọn.
+7. Hệ thống thông báo thao tác xóa thành công.
+
+## Postconditions / Acceptance Criteria
+- Cultural heritage object đã chọn không còn khả dụng trong hệ thống sau khi xóa thành công.
+- Hệ thống hiển thị thông báo xóa thành công.
+- Hệ thống chặn nhiều lần gửi xác nhận trong khi thao tác xóa/hủy đang được xử lý.
+
+## Open Questions
+- UC1 chưa nêu rõ quyền chi tiết của Agency Operator ngoài trạng thái đã đăng nhập.
+- UC1 chưa mô tả kết quả mong muốn nếu mất kết nối tới server eTour giữa lúc xóa.
+- UC1 chưa mô tả nội dung thông báo khi người dùng hủy thao tác.
+
+## Source Evidence
+- "Delete a cultural object in the system."
+- "The agency has logged."
+- "Asks confirmation" và "Confirm the operation".
+- "The system shall notify the successful elimination".
+""".strip()
