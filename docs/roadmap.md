@@ -20,7 +20,7 @@ Việc cần làm:
 
 Mục đích: chạy được lát cắt đầu từ một use case eTour/SMOS/iTrust tới requirement packet có checkpoint.
 
-Tài liệu chi tiết: `docs/phase-1/README.md`. Phase này chỉ tick hoàn thành khi CLI/runtime/artifact/mock sync chạy thật và checklist trong `docs/phase-1/phase-1-checklist.md` pass.
+Tài liệu chi tiết: `docs/phase-1/README.md`. Phase này chỉ tick hoàn thành khi CLI/runtime/artifact chạy thật, mock sync pass cho test, real Jira/Confluence sync pass khi cấu hình Atlassian, và checklist trong `docs/phase-1/phase-1-checklist.md` pass.
 
 Luồng:
 
@@ -123,4 +123,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 
 
 
+
+> Cập nhật 2026-10-13: Phase 1 hiện đã có đường chạy thật từ Jira issue,
+> Requirement Refiner, validator/repair loop và sync Jira/Confluence. Niko gọi
+> SDLC_Harness qua CLI JSON và chỉ format kết quả cho Telegram. Phase 2
+> thiết kế/coding vẫn chưa bắt đầu.
 

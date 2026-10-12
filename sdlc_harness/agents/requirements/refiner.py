@@ -66,7 +66,12 @@ class RequirementPacketRefinementResult:
 
 
 class RequirementRefiner:
-    """Gọi LLM để chuyển use case thô thành formal use case và packet duyệt."""
+    """Agent chuẩn hóa requirement theo hai artifact của Phase 1.
+
+    Refiner sinh formal use case kiểu TraceDev cho execution graph về sau và
+    requirement packet dễ đọc cho người duyệt. Validator có thể yêu cầu repair
+    một vòng, nhưng module này không ghi artifact hay sync tool.
+    """
 
     def __init__(
         self,

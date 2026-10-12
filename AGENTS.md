@@ -127,3 +127,16 @@ Sync artifact lên Jira/Confluence/GitHub thuộc SDLC Harness. Niko chỉ gọi
 Niko không trực tiếp kéo use case/Jira/dataset cho workflow SDLC. Niko gọi SDLC Harness bằng `start_or_get_run` hoặc `get_status`. SDLC Harness sở hữu việc load source, gọi Requirement Refiner, validate, sync tool và trả status/sync result.
 
 
+<!-- SDLC_NIKO_SYNC_START -->
+## Niko Integration Boundary
+
+Niko_Agent là conversational/control harness. SDLC_Harness là nơi sở hữu pipeline
+SDLC Phase 1: source intake từ fixture/Jira, Requirement Refiner, validator,
+repair loop, runtime state, artifact và Jira/Confluence sync. Khi Niko gọi repo
+này, contract phải là CLI JSON ổn định; không in log tự do ra stdout.
+
+Không chuyển logic đọc Jira, ghi artifact, sync Confluence/Jira hoặc validate
+requirement packet sang Niko. Nếu cần trả thêm dữ liệu cho Telegram, mở rộng
+payload JSON của SDLC_Harness trước rồi mới sửa client bên Niko.
+<!-- SDLC_NIKO_SYNC_END -->
+

@@ -15,7 +15,7 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate formal use case, sinh requirement packet cho người duyệt, ghi runtime artifact, mock sync Jira/Confluence và trả JSON status cho Niko đọc. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
 
 ## Cấu Trúc Package
@@ -26,7 +26,7 @@ Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/
 - `sdlc_harness/sources/`: loader cho fixture/dataset/Jira source sau này.
 - `sdlc_harness/storage/`: runtime state store và active-run index.
 - `sdlc_harness/artifacts/`: writer cho các artifact sinh ra trong run.
-- `sdlc_harness/sync/`: adapter sync tool, hiện là mock Jira/Confluence.
+- `sdlc_harness/sync/`: adapter sync tool, gồm real Atlassian sync và mock sync cho test/fallback.
 - `sdlc_harness/core/` và `sdlc_harness/llm/`: config/errors dùng chung và LLM provider adapter.
 ## Tài Liệu Chính
 
@@ -76,4 +76,23 @@ Chạy test:
 python -m unittest discover -s tests -p "test*.py" -v
 ```
 
+
+<!-- SDLC_NIKO_SYNC_START -->
+## Phase 1 Runtime Snapshot
+
+SDLC_Harness hiện là repo sở hữu pipeline Phase 1 cho hướng Agent Harness SDLC:
+đọc use case từ fixture hoặc Jira, chuẩn hóa thành formal use case và
+Requirement Packet, validate/repair, ghi artifact runtime và sync checkpoint lên
+Jira/Confluence. Niko_Agent chỉ gọi repo này qua CLI JSON rồi diễn giải kết quả
+cho người dùng trên Telegram.
+
+Ranh giới hiện tại:
+
+- Phase 1 đã có real Jira source và real Jira/Confluence sync khi cấu hình
+  Atlassian đầy đủ.
+- Mock sync vẫn tồn tại cho unit/smoke test hoặc khi chưa cấu hình tool thật.
+- CLI phải giữ stdout chỉ có JSON vì Niko parse trực tiếp response đó.
+- Phase 2 thiết kế/coding chưa được triển khai trong baseline này.
+
+<!-- SDLC_NIKO_SYNC_END -->
 

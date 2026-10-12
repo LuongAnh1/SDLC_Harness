@@ -1,7 +1,8 @@
-﻿"""Loader nguồn use case cho Phase 1.
+﻿"""Loader fixture use case cho Phase 1.
 
-Niko không đọc fixture hay Jira trực tiếp. Mọi source đầu vào của workflow SDLC
-đi qua module này để SDLC Harness giữ quyền sở hữu source_ref và idempotency.
+Niko không đọc fixture trực tiếp. Fixture eTour đi qua module này để
+SDLC_Harness giữ quyền sở hữu source_ref và idempotency; Jira issue thật nằm ở
+adapter source riêng nhưng cùng trả về `UseCaseSource`.
 """
 
 from __future__ import annotations

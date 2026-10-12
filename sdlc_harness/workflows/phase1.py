@@ -31,7 +31,11 @@ ALLOWED_REQUIREMENT_ACTIONS = [
 
 
 class PhaseOneWorkflow:
-    """Use case độc lập đầu tiên: eTour UC1 -> formal use case + requirement packet."""
+    """Điều phối Phase 1 từ fixture/Jira tới checkpoint requirement.
+
+    Workflow này sở hữu source loading, refiner, validator, artifact runtime và
+    sync Jira/Confluence. Niko chỉ gọi CLI JSON và đọc response đã tóm tắt.
+    """
 
     def __init__(self, settings: Settings):
         self.settings = settings

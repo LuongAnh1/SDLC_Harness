@@ -1,7 +1,8 @@
-﻿"""Mock sync adapters cho Phase 1.
+﻿"""Mock sync adapter cho Phase 1.
 
-Sync thật lên Jira/Confluence để sau. File mock vẫn được đặt dưới run để chứng
-minh ownership: artifact SDLC được sync bởi SDLC Harness, Niko chỉ đọc report.
+Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact giả lập để unit
+test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật; ownership vẫn
+giữ ở SDLC_Harness, Niko chỉ đọc report trả về.
 """
 
 from __future__ import annotations

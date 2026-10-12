@@ -147,3 +147,16 @@ Validator pass.
   bị trộn.
 - Sau khi artifact thật ổn, mới quyết định khóa Phase 1 để mở Phase 2 hoặc bổ
   sung approval/change request nhỏ.
+## Cập nhật 2026-10-13
+
+Phase 1 đã được đồng bộ lại với Niko_Agent:
+
+- Niko gọi SDLC_Harness qua CLI JSON thay vì tự đọc Jira/use case.
+- SDLC_Harness có thể bắt đầu run từ fixture eTour hoặc Jira issue thật.
+- Requirement Packet có validator và repair loop một vòng khi thiếu section bắt
+  buộc.
+- Jira comment và Confluence page có thể sync thật; mock sync còn dùng cho
+  test/fallback.
+- Telegram reply bên Niko chỉ hiển thị tóm tắt dễ đọc, còn artifact/state vẫn
+  nằm trong runtime của SDLC_Harness.
+

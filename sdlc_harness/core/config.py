@@ -13,7 +13,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    """Các giá trị cần cho Requirement Refiner và runtime local."""
+    """Cấu hình chung cho LLM, runtime state và tool sync Phase 1."""
 
     repo_root: Path
     runtime_root: Path
