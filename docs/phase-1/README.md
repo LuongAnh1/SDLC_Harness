@@ -117,7 +117,7 @@ Niko không cần biết UC đã được kéo/load hay chưa. Niko chỉ gọi 
 
 Cập nhật 2026-10-12: Phase 1 đã có package/CLI chạy được với fake LLM, formal use case artifact, unit test pass và smoke test tạo runtime artifact thành công. Chi tiết nằm ở `progress.md`.
 
-Trước khi chuyển sang Phase 2, cần chạy thêm smoke test với DeepSeek thật sau khi điền `.env`, và cần quyết định sync API/tool thật tối thiểu cho Jira hoặc Confluence.
+Trước khi chuyển sang Phase 2, không chỉ cần code Phase 1 chạy pass. Phase 1 chỉ được khóa khi đã nối Niko gọi CLI/status ở mức tối thiểu, có sync API/tool thật tối thiểu cho Jira hoặc Confluence, và smoke test lại sau integration.
 
 ## Requirement Packet Và Formal Use Case
 

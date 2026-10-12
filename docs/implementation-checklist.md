@@ -19,7 +19,7 @@ Checklist chi tiết nằm ở `docs/phase-0/phase-0-checklist.md`. Phase 0 đã
 
 Mục đích: chứng minh một use case có thể thành artifact có trạng thái và checkpoint.
 
-Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 hiện đã pass unit/smoke với fake LLM và đã có một lượt chạy thật DeepSeek; trước Phase 2 vẫn cần chốt sync API/tool thật tối thiểu.
+Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code slice đã pass unit/smoke với fake LLM và đã có một lượt chạy thật DeepSeek, nhưng Phase 1 chưa khóa để mở Phase 2. Trước Phase 2 cần nối Niko gọi CLI/status và có sync API/tool thật tối thiểu.
 
 - [x] Tạo `start-or-get-run` và loader do SDLC Harness sở hữu.
 - [x] Tạo workflow run, `source_ref` và `run_id`.
