@@ -30,12 +30,13 @@ lại.
 
 Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo harness.
 
-- [ ] Có config target repo path/remote.
+- [x] Có target repo path/remote ban đầu: `D:\Dự án cá nhân\Do_an_II\SDLC_Target_eTour` / `LuongAnh1/SDLC_Target_eTour`.
+- [ ] Có config target repo path/remote trong SDLC Harness runtime/config.
 - [ ] Có guard không thao tác nhầm repo `SDLC_Harness`.
 - [ ] Tạo branch theo issue/run.
 - [ ] Commit có issue key.
 - [ ] Không tạo GitHub Issue.
-- [ ] Có Draft PR thật hoặc mock/local report chỉ được đánh dấu là chưa khóa Phase 3.
+- [ ] Có Draft PR thật; mock/local report chỉ được đánh dấu là chưa khóa Phase 3.
 
 ## 4. Developer Agent
 
@@ -110,6 +111,7 @@ Mục đích: Phase 3 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test blocked khi trace fail.
 - [ ] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
+- [x] Tạo private target repo GitHub `LuongAnh1/SDLC_Target_eTour` với Java skeleton tối thiểu.
 - [ ] Smoke test CLI từ run Phase 2 thật sang `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 - [ ] Live run chứng minh đủ chuỗi Requirement Refiner -> Designer/Validator -> Developer/Tester/Validator trong phạm vi một use case.

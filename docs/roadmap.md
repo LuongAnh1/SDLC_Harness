@@ -200,3 +200,7 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Phase 4 trở đi là cải tiến harness cho change request, context động và impact
 > analysis.
 
+> Cập nhật 2026-10-13: đã tạo target test repo private
+> `LuongAnh1/SDLC_Target_eTour` cùng cấp với `Niko_Agent` và `SDLC_Harness`.
+> Repo này là code collaboration lane ban đầu cho Phase 3.
+

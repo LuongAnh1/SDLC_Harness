@@ -28,8 +28,18 @@ Yêu cầu tối thiểu với target repo:
 - phù hợp Java/eTour ban đầu để bám TraceDev và dataset;
 - có thể xóa/reset branch demo khi cần chạy lại.
 
-Tên target repo cụ thể chốt khi triển khai code Phase 3. Tài liệu này chỉ chốt
-contract và hành vi.
+Target repo đã chốt cho Phase 3:
+
+```text
+local: D:\Dự án cá nhân\Do_an_II\SDLC_Target_eTour
+remote: https://github.com/LuongAnh1/SDLC_Target_eTour
+visibility: private
+default branch: main
+```
+
+Repo hiện có Java skeleton tối thiểu và `scripts/test.ps1`. Trên máy hiện tại
+chưa có `javac`, nên script sẽ chạy static validation và báo rõ compile/runtime
+tests đang skipped; khi cài JDK, cùng script sẽ compile và chạy test harness.
 
 ## Branch, Commit Và PR
 

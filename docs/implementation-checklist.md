@@ -103,7 +103,7 @@ Checklist chi tiết nằm ở `docs/phase-3/phase-3-checklist.md`. Phase 3 chư
 GitHub Issue; Jira vẫn là issue nguồn, còn GitHub là code collaboration lane.
 
 - [x] Viết tài liệu triển khai Phase 3 trong `docs/phase-3/`.
-- [ ] Chốt target test repo GitHub.
+- [x] Chốt target test repo GitHub: `LuongAnh1/SDLC_Target_eTour`.
 - [ ] Duyệt design checkpoint để mở Phase 3.
 - [ ] Sinh implementation plan.
 - [ ] Sinh code change report trong target repo.
