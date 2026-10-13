@@ -163,25 +163,29 @@ def write_phase2_design_artifacts(
     run_id: str,
     designer_analysis: str,
     design_model: str,
+    requirement_graph: dict[str, object],
     class_graph: dict[str, object],
     sequence_graph: dict[str, object],
+    class_trace: list[dict[str, object]],
+    sequence_trace: list[dict[str, object]],
+    missing_links: dict[str, list[dict[str, str]]],
     requirement_packet: str,
     formal_use_case: str = "",
     version: int = 1,
 ) -> dict[str, str]:
-    """Ghi artifact design V1 từ Designer và parser PlantUML.
+    """Ghi artifact design V1 từ Designer, parser PlantUML và Validator.
 
-    Lát này mới chứng minh Designer sinh được diagram và parser đọc được graph.
-    Traceability LLM/repair loop chưa chạy, nên các report phải ghi rõ
-    `traceability_pending_v1` thay vì báo pass giả.
+    Validator traceability V1 tạo trace class/sequence thật nhưng chưa tự chạy
+    repair loop. Nếu còn missing links, report ghi rõ để checkpoint human review.
     """
 
     artifact_dir = store.run_dir(run_id) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"v{version}"
-    main_flow = _section_items(requirement_packet, "Main Flow")
-    acceptance = _section_items(requirement_packet, "Acceptance Criteria")
-    requirement_count = max(1, len(main_flow) + len(acceptance))
+    requirement_count = int(requirement_graph.get("count") or len(requirement_graph.get("requirements", [])) or 0)
+    missing_class = missing_links.get("class_diagram", [])
+    missing_sequence = missing_links.get("sequence_diagram", [])
+    missing_count = len(missing_class) + len(missing_sequence)
 
     designer_analysis_path = artifact_dir / f"designer_analysis_{suffix}.md"
     designer_analysis_path.write_text(
@@ -211,20 +215,32 @@ def write_phase2_design_artifacts(
     }
     sequence_graph_path.write_text(json.dumps(sequence_graph_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    requirement_graph_path = artifact_dir / f"requirement_graph_{suffix}.json"
+    requirement_graph_payload = {
+        **requirement_graph,
+        "version": f"requirement_graph_{suffix}",
+        "created_at": utc_now_iso(),
+    }
+    requirement_graph_path.write_text(
+        json.dumps(requirement_graph_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
     trace_path = artifact_dir / f"requirement_design_trace_{suffix}.json"
     trace = {
         "version": f"requirement_design_trace_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "traceability_pending_v1",
+        "mode": "traceability_v1",
         "requirement_count": requirement_count,
-        "links": [],
+        "class_trace": class_trace,
+        "sequence_trace": sequence_trace,
         "inputs": {
             "requirement_packet": "requirement_packet_v1",
             "formal_use_case_attached": bool(formal_use_case.strip()),
+            "requirement_graph": f"requirement_graph_{suffix}",
             "class_diagram_graph": f"class_diagram_graph_{suffix}",
             "sequence_diagram_graph": f"sequence_diagram_graph_{suffix}",
         },
-        "note": "Traceability LLM has not run yet; this file only records parser-ready inputs.",
     }
     trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -232,12 +248,9 @@ def write_phase2_design_artifacts(
     missing = {
         "version": f"missing_design_links_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "traceability_pending_v1",
-        "missing_links": {
-            "class_diagram": [],
-            "sequence_diagram": [],
-        },
-        "note": "Traceability LLM has not run yet, so no coverage conclusion is recorded.",
+        "mode": "traceability_v1",
+        "missing_links": missing_links,
+        "missing_count": missing_count,
     }
     missing_path.write_text(json.dumps(missing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -245,17 +258,19 @@ def write_phase2_design_artifacts(
     quality_path.write_text(
         f"""# Design Quality Report {suffix.upper()}
 
-- Validator mode: parser_only_v1
-- Requirement items prepared for traceability: {requirement_count}
+- Validator mode: traceability_v1
+- Requirement items checked: {requirement_count}
 - Class graph parser: passed
 - Sequence graph parser: passed
-- Traceability LLM: pending
+- Traceability LLM: passed
+- Missing design links: {missing_count}
 - Repair iterations: 0
 
 ## Result
-Design V1 đủ điều kiện tạo checkpoint review ở mức parser graph. Báo cáo này
-chưa kết luận requirement đã được design cover đầy đủ; Validator traceability
-và repair loop sẽ chạy ở lát Phase 2 tiếp theo.
+{_traceability_result_text(missing_count)}
+
+## Missing Links
+{_missing_links_markdown(missing_links)}
 """,
         encoding="utf-8",
     )
@@ -263,6 +278,7 @@ và repair loop sẽ chạy ở lát Phase 2 tiếp theo.
     return {
         "designer_analysis": store.relative(designer_analysis_path),
         "design_artifact": store.relative(design_artifact_path),
+        "requirement_graph": store.relative(requirement_graph_path),
         "class_diagram_graph": store.relative(class_graph_path),
         "sequence_diagram_graph": store.relative(sequence_graph_path),
         "requirement_design_trace": store.relative(trace_path),
@@ -280,25 +296,26 @@ def _with_heading(title: str, content: str) -> str:
     return f"# {title}\n\n{text}\n"
 
 
-def _section_items(markdown: str, heading: str) -> list[str]:
-    lines = markdown.splitlines()
-    in_section = False
-    items: list[str] = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if line.startswith("## "):
-            title = line[3:].strip().lower()
-            if in_section and title != heading.lower():
-                break
-            in_section = title == heading.lower()
-            continue
-        if not in_section or not line or line == "---":
-            continue
-        if line.startswith("#"):
-            break
-        items.append(line.lstrip("- ").strip())
-    return items
+def _traceability_result_text(missing_count: int) -> str:
+    if missing_count == 0:
+        return "Validator traceability V1 không phát hiện missing link ở class hoặc sequence diagram."
+    return (
+        "Validator traceability V1 còn phát hiện missing link. Lát này chưa chạy "
+        "repair loop, nên design vẫn được đưa ra checkpoint để human review."
+    )
 
 
-def _markdown_list(items: list[str]) -> str:
-    return "\n".join(f"- {item}" for item in items)
+def _missing_links_markdown(missing_links: dict[str, list[dict[str, str]]]) -> str:
+    lines: list[str] = []
+    for diagram_key, title in (
+        ("class_diagram", "Class Diagram"),
+        ("sequence_diagram", "Sequence Diagram"),
+    ):
+        items = missing_links.get(diagram_key, [])
+        lines.append(f"### {title}")
+        if not items:
+            lines.append("- none")
+            continue
+        for item in items:
+            lines.append(f"- {item.get('requirement')}: {item.get('content')}")
+    return "\n".join(lines)

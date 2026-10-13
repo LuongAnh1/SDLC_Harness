@@ -75,3 +75,34 @@ Chưa làm trong lát này:
 - Chưa có repair loop `Designer.update_design`.
 - Chưa real sync idempotent cho design checkpoint.
 - Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.
+
+## 2026-10-13 - V2 Validator Traceability
+
+Đã làm:
+
+- Thêm `ValidatorAgent` cho Phase 2.
+- Parse `requirement_packet_v1.md` thành `requirement_graph_v1.json` với ID ổn
+  định như `REQ-MAIN-001`, `REQ-AC-001`, `REQ-NFR-001`.
+- Gọi prompt `traceability_class.txt` để sinh trace requirement -> class/method.
+- Gọi prompt `traceability_sequence.txt` để sinh trace requirement ->
+  lifeline/message.
+- Validate trace output là JSON array và không cho LLM invent target ngoài
+  class/sequence graph đã parse.
+- Ghi `requirement_design_trace_v1.json` ở mode `traceability_v1`, gồm
+  `class_trace` và `sequence_trace`.
+- Ghi `missing_design_links_v1.json` với `missing_count` thật.
+- `quality_reports.design_traceability` chuyển từ `parser_only_v1` sang
+  `traceability_v1`; `ok=false` nếu còn missing links.
+
+Đã kiểm thử:
+
+- `python -m unittest discover -s tests -p "test*.py" -v`: 42 test pass.
+- Unit test cho requirement graph, traceability fake pass, JSON lỗi, target bịa
+  và missing links rỗng.
+
+Chưa làm trong lát này:
+
+- Chưa có repair loop `Designer.update_design`.
+- Chưa chuyển state `design_repairing`.
+- Chưa real sync idempotent cho design checkpoint.
+- Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.

@@ -23,7 +23,6 @@ approve_checkpoint(run_id)
 -> state=design_validating
 -> Parser tạo class diagram graph, sequence diagram graph từ PlantUML
 -> Validator tạo requirement graph và requirement-design trace links
--> Validator sinh requirement-design trace links
 -> Validator phát hiện missing links và tạo design_quality_report_v1
 -> nếu còn missing link: Designer.update_design(report), tạo design_artifact_v2
 -> Validator kiểm lại tối đa số vòng cho phép
@@ -103,13 +102,13 @@ và quality report. Chi tiết contract nằm ở `sync-design-checkpoint.md`.
 
 ## Tiến Độ Hiện Tại
 
-Cập nhật 2026-10-13: đã triển khai lát Phase 2 V1 cho `approve-checkpoint`.
+Cập nhật 2026-10-13: đã triển khai lát Phase 2 V2 cho `approve-checkpoint`.
 Lát này đọc requirement packet đã duyệt, đọc thêm formal use case nếu có, gọi
 Designer Agent fake/LLM-ready để sinh PlantUML, parse class/sequence graph thật,
-tạo `tool_sync_report_v2.json` bằng mock sync và chuyển state sang
-`waiting_design_approval`. Traceability LLM hiện ghi `traceability_pending_v1`;
-chưa có repair loop, chưa real sync Jira/Confluence cho Phase 2 và chưa nối Niko
-route duyệt checkpoint.
+chạy Validator traceability V1 để tạo requirement graph, class trace, sequence
+trace và missing-link report, rồi tạo `tool_sync_report_v2.json` bằng mock sync
+và chuyển state sang `waiting_design_approval`. Chưa có repair loop, chưa real
+sync Jira/Confluence cho Phase 2 và chưa nối Niko route duyệt checkpoint.
 
 ## Không Làm Trong Phase 2
 

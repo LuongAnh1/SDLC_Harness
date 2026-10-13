@@ -153,3 +153,8 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > `traceability_pending_v1`. Validator traceability LLM và repair loop vẫn là
 > bước tiếp theo.
 
+> Cập nhật 2026-10-13: Phase 2 đã có lát V2 cho Validator traceability:
+> requirement graph, class trace, sequence trace và missing-link report được ghi
+> ở mode `traceability_v1`. Repair loop `Designer.update_design`, real sync
+> idempotent và Niko approve route vẫn là bước tiếp theo.
+

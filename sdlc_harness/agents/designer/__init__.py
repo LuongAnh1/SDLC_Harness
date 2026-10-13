@@ -1,4 +1,4 @@
-﻿"""TraceDev-inspired agent role scaffold."""
+"""Designer role cho Phase 2."""
 from .designer import DesignDraft, DesignerAgent
 from .plantuml import (
     ClassDiagramParser,

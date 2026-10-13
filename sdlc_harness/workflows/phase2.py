@@ -8,6 +8,7 @@ sequence graph và tạo checkpoint design. Validator traceability/repair loop v
 from __future__ import annotations
 
 from ..agents.designer import DesignerAgent, parse_design_model
+from ..agents.validator import ValidatorAgent
 from ..artifacts.writers import write_phase2_design_artifacts
 from ..core.config import Settings
 from ..core.errors import HarnessError
@@ -30,6 +31,7 @@ class PhaseTwoWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.designer = DesignerAgent(LlmClient(settings))
+        self.validator = ValidatorAgent(LlmClient(settings))
 
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
         """Duyệt requirement checkpoint hiện tại và tạo design checkpoint."""
@@ -90,19 +92,28 @@ class PhaseTwoWorkflow:
                     "updated_at": utc_now_iso(),
                     "current_phase": "design_validating",
                     "status": "design_validating",
-                    "summary_for_user": "Designer đã sinh design draft, đang parse PlantUML thành graph.",
+                    "summary_for_user": "Designer đã sinh design draft, đang parse PlantUML và chạy traceability.",
                 }
             )
             self.store.write_state(state)
 
             parsed = parse_design_model(draft.design_model)
+            traceability = self.validator.construct_traceability(
+                requirement_packet=requirement_packet,
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+            )
             design_paths = write_phase2_design_artifacts(
                 store=self.store,
                 run_id=run_id,
                 designer_analysis=draft.analysis_report,
                 design_model=draft.design_model,
+                requirement_graph=traceability.requirement_graph,
                 class_graph=parsed.class_graph,
                 sequence_graph=parsed.sequence_graph,
+                class_trace=traceability.class_trace,
+                sequence_trace=traceability.sequence_trace,
+                missing_links=traceability.missing_links,
                 requirement_packet=requirement_packet,
                 formal_use_case=formal_use_case,
                 version=1,
@@ -149,19 +160,17 @@ class PhaseTwoWorkflow:
                 "quality_reports": {
                     **_dict_value(state.get("quality_reports")),
                     "design_traceability": {
-                        "ok": True,
-                        "mode": "parser_only_v1",
+                        "ok": traceability.ok,
+                        "mode": "traceability_v1",
                         "versions": ["v1"],
-                        "summary": (
-                            "Designer đã tạo PlantUML và parser đã đọc được class/sequence graph. "
-                            "Traceability LLM chưa chạy."
-                        ),
+                        "summary": _traceability_summary(traceability.missing_links),
                         "report": design_paths["design_quality_report"],
                     },
                 },
                 "summary_for_user": (
                     f"Đã duyệt requirement và tạo design checkpoint V1 cho run {run_id}. "
-                    f"Designer/parser đã chạy xong, traceability LLM chưa chạy, "
+                    f"Validator traceability đã chạy xong, "
+                    f"{_traceability_summary(traceability.missing_links)} "
                     f"sync status={last_sync.get('status')}. "
                     "Run đang chờ anh review design trước khi sang Phase 3."
                 ),
@@ -235,3 +244,12 @@ def _string_dict(value: object) -> dict[str, str]:
     if not isinstance(value, dict):
         return {}
     return {str(key): str(item) for key, item in value.items()}
+
+
+def _traceability_summary(missing_links: dict[str, list[dict[str, str]]]) -> str:
+    class_missing = len(missing_links.get("class_diagram", []))
+    sequence_missing = len(missing_links.get("sequence_diagram", []))
+    total = class_missing + sequence_missing
+    if total == 0:
+        return "không phát hiện missing link class/sequence."
+    return f"còn {total} missing link class/sequence cần review."

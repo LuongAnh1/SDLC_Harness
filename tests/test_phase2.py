@@ -11,11 +11,22 @@ import unittest
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import DesignerAgent, parse_design_model
+from sdlc_harness.agents.validator import ValidatorAgent, build_requirement_graph
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.client import LlmClient, fake_design_model
+from sdlc_harness.llm.client import LlmClient, fake_design_model, fake_refined_requirement
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
+
+
+class StaticLlmClient:
+    def __init__(self, responses: list[str]):
+        self.responses = list(responses)
+
+    def complete(self, *, system: str, prompt: str) -> str:
+        if not self.responses:
+            return "[]"
+        return self.responses.pop(0)
 
 
 class PhaseTwoTest(unittest.TestCase):
@@ -76,6 +87,84 @@ class OnlyClass {
 
         self.assertEqual(ctx.exception.error_code, "design_parser_failed")
 
+    def test_build_requirement_graph_creates_stable_requirement_ids(self) -> None:
+        graph = build_requirement_graph(fake_refined_requirement(""))
+
+        ids = [item["id"] for item in graph["requirements"]]
+        self.assertIn("REQ-PRE-001", ids)
+        self.assertIn("REQ-MAIN-001", ids)
+        self.assertIn("REQ-AC-001", ids)
+        self.assertIn("REQ-NFR-001", ids)
+        self.assertEqual(graph["count"], len(graph["requirements"]))
+
+    def test_validator_fake_mode_creates_traceability_without_missing_links(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        result = ValidatorAgent(LlmClient(self.settings)).construct_traceability(
+            requirement_packet=fake_refined_requirement(""),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.missing_links["class_diagram"], [])
+        self.assertEqual(result.missing_links["sequence_diagram"], [])
+        self.assertEqual(len(result.class_trace), result.requirement_graph["count"])
+        self.assertEqual(len(result.sequence_trace), result.requirement_graph["count"])
+
+    def test_validator_rejects_invalid_traceability_json(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+
+        with self.assertRaises(HarnessError) as ctx:
+            ValidatorAgent(StaticLlmClient(["not json"])).construct_traceability(
+                requirement_packet=fake_refined_requirement(""),
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+            )
+
+        self.assertEqual(ctx.exception.error_code, "validator_traceability_failed")
+
+    def test_validator_rejects_traceability_targets_not_in_graph(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        first_requirement = build_requirement_graph(fake_refined_requirement(""))["requirements"][0]
+        bad_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [{"target": "GhostClass.missingMethod", "reason": "bad"}],
+                }
+            ]
+        )
+
+        with self.assertRaises(HarnessError) as ctx:
+            ValidatorAgent(StaticLlmClient([bad_trace])).construct_traceability(
+                requirement_packet=fake_refined_requirement(""),
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+            )
+
+        self.assertEqual(ctx.exception.error_code, "validator_traceability_failed")
+
+    def test_validator_reports_missing_links_when_trace_links_are_empty(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        graph = build_requirement_graph(fake_refined_requirement(""))
+        empty_trace = json.dumps(
+            [
+                {"requirement": item["id"], "content": item["content"], "links": []}
+                for item in graph["requirements"]
+            ]
+        )
+
+        result = ValidatorAgent(StaticLlmClient([empty_trace, empty_trace])).construct_traceability(
+            requirement_packet=fake_refined_requirement(""),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(len(result.missing_links["class_diagram"]), graph["count"])
+        self.assertEqual(len(result.missing_links["sequence_diagram"]), graph["count"])
+
     def test_approve_checkpoint_creates_design_checkpoint(self) -> None:
         created = self._create_phase1_run()
         response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
@@ -88,14 +177,16 @@ class OnlyClass {
         self.assertEqual(response["last_sync"]["phase"], "design_checkpoint")
         self.assertEqual(response["last_sync"]["status"], "mock_synced")
         self.assertIn("design_artifact", response["latest_artifacts"])
+        self.assertIn("requirement_graph", response["latest_artifacts"])
         self.assertIn("requirement_design_trace", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
-        self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "parser_only_v1")
-        self.assertIn("Traceability LLM chưa chạy", response["quality_reports"]["design_traceability"]["summary"])
+        self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "traceability_v1")
+        self.assertIn("không phát hiện missing link", response["quality_reports"]["design_traceability"]["summary"])
 
         run_dir = self.runtime_root / "runs" / str(created["run_id"])
         self.assertTrue((run_dir / "artifacts" / "designer_analysis_v1.md").exists())
         self.assertTrue((run_dir / "artifacts" / "design_artifact_v1.md").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_graph_v1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "class_diagram_graph_v1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "sequence_diagram_graph_v1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "requirement_design_trace_v1.json").exists())
@@ -112,9 +203,12 @@ class OnlyClass {
             any(message["message"] == "requestDeletion(heritageId)" for message in first_sequence["messages"])
         )
         trace = json.loads((run_dir / "artifacts" / "requirement_design_trace_v1.json").read_text(encoding="utf-8"))
-        self.assertEqual(trace["mode"], "traceability_pending_v1")
+        self.assertEqual(trace["mode"], "traceability_v1")
+        self.assertIn("class_trace", trace)
+        self.assertIn("sequence_trace", trace)
         missing = json.loads((run_dir / "artifacts" / "missing_design_links_v1.json").read_text(encoding="utf-8"))
-        self.assertEqual(missing["mode"], "traceability_pending_v1")
+        self.assertEqual(missing["mode"], "traceability_v1")
+        self.assertEqual(missing["missing_count"], 0)
         self.assertIn("class_diagram", missing["missing_links"])
         report = json.loads((run_dir / "sync" / "tool_sync_report_v2.json").read_text(encoding="utf-8"))
         self.assertEqual(report["version"], "tool_sync_report_v2")

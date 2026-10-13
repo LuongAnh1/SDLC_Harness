@@ -108,6 +108,10 @@ def fake_completion(prompt: str) -> str:
         return fake_design_model()
     if "very concise architecture recommendation" in prompt:
         return fake_architecture_recommendation()
+    if "requirements-to-design traceability" in prompt and "Class diagram:" in prompt:
+        return fake_traceability_class(prompt)
+    if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
+        return fake_traceability_sequence(prompt)
     return fake_refined_requirement(prompt)
 
 
@@ -252,3 +256,92 @@ Repository --> Service: deletion saved
 Service --> Boundary: success
 Boundary --> AO: showResult(success message)
 @enduml""".strip()
+
+
+def fake_traceability_class(prompt: str) -> str:
+    """Trace class giả lập theo requirement JSON trong prompt."""
+
+    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="Class diagram:")
+    trace = []
+    for requirement in requirements:
+        content = str(requirement.get("content", ""))
+        trace.append(
+            {
+                "requirement": requirement.get("id"),
+                "content": content,
+                "links": _fake_class_links(content),
+            }
+        )
+    return json.dumps(trace, ensure_ascii=False, indent=2)
+
+
+def fake_traceability_sequence(prompt: str) -> str:
+    """Trace sequence giả lập theo requirement JSON trong prompt."""
+
+    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="sequence diagram:")
+    trace = []
+    for requirement in requirements:
+        content = str(requirement.get("content", ""))
+        trace.append(
+            {
+                "requirement": requirement.get("id"),
+                "content": content,
+                "links": _fake_sequence_links(content),
+            }
+        )
+    return json.dumps(trace, ensure_ascii=False, indent=2)
+
+
+def _extract_requirements_from_trace_prompt(prompt: str, *, next_marker: str) -> list[dict[str, object]]:
+    marker = "Requirements:"
+    start = prompt.find(marker)
+    if start < 0:
+        return []
+    start += len(marker)
+    end = prompt.find(next_marker, start)
+    if end < 0:
+        end = len(prompt)
+    raw = prompt[start:end].strip()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _fake_class_links(content: str) -> list[dict[str, str]]:
+    lowered = content.lower()
+    if any(term in lowered for term in ("cancel", "hủy", "huy")):
+        target = "DeleteCulturalHeritageService.cancelDeletion"
+    elif any(term in lowered for term in ("confirm", "xác nhận", "xac nhan", "confirmation")):
+        target = "DeleteCulturalHeritageBoundary.showConfirmation"
+    elif any(term in lowered for term in ("notify", "thông báo", "thong bao", "success")):
+        target = "DeleteCulturalHeritageBoundary.showResult"
+    elif any(term in lowered for term in ("delete", "xóa", "xoa", "elimination")):
+        target = "DeleteCulturalHeritageService.deleteHeritage"
+    elif any(term in lowered for term in ("logged", "đăng nhập", "dang nhap", "selected", "chọn", "chon")):
+        target = "DeleteCulturalHeritageBoundary.requestDeletion"
+    elif any(term in lowered for term in ("connection", "kết nối", "ket noi", "interruption")):
+        target = "DeleteCulturalHeritageService.validateDeletion"
+    else:
+        target = "DeleteCulturalHeritageService.validateDeletion"
+    return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]
+
+
+def _fake_sequence_links(content: str) -> list[dict[str, str]]:
+    lowered = content.lower()
+    if any(term in lowered for term in ("cancel", "hủy", "huy")):
+        target = "confirm deletion"
+    elif any(term in lowered for term in ("confirm", "xác nhận", "xac nhan", "confirmation")):
+        target = "showConfirmation()"
+    elif any(term in lowered for term in ("notify", "thông báo", "thong bao", "success")):
+        target = "showResult(success message)"
+    elif any(term in lowered for term in ("delete", "xóa", "xoa", "elimination")):
+        target = "delete(heritageId)"
+    elif any(term in lowered for term in ("logged", "đăng nhập", "dang nhap", "selected", "chọn", "chon")):
+        target = "requestDeletion(heritageId)"
+    elif any(term in lowered for term in ("connection", "kết nối", "ket noi", "interruption")):
+        target = "validateDeletion(heritageId)"
+    else:
+        target = "validateDeletion(heritageId)"
+    return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]

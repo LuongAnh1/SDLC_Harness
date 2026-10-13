@@ -28,7 +28,7 @@ design_drafting -> failed
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
 | `design_drafting` | Designer đang tạo analysis/design từ requirement đã duyệt. | Harness |
-| `design_validating` | Parser/Validator đang đọc graph, tạo trace links và missing-link report. Hiện tại V1 mới dừng ở parser graph. | Harness |
+| `design_validating` | Parser/Validator đang đọc graph, tạo trace links và missing-link report. Hiện tại V2 đã có traceability V1, chưa có repair loop. | Harness |
 | `design_repairing` | Designer đang sửa design theo quality report của Validator. | Harness |
 | `waiting_design_approval` | Design đã pass Validator và chờ người dùng duyệt. | Niko + human |
 | `blocked` | Không thể tự sửa, thường do requirement thiếu/mâu thuẫn hoặc design vẫn fail sau repair limit. | Niko + human |
@@ -165,8 +165,8 @@ Checkpoint design phải trả đủ thông tin để Niko nói ngắn gọn:
 
 ```text
 Design đã tạo xong.
-Parser đã đọc được class/sequence graph.
-Traceability LLM: pending hoặc missing links: 0/danh sách rút gọn khi Validator đã chạy.
+Validator đã đọc được class/sequence graph và chạy traceability V1.
+Missing links: 0 hoặc danh sách rút gọn.
 Artifact: design_artifact_vN.
 Đang chờ anh duyệt trước khi sang code.
 ```

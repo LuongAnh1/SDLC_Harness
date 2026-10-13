@@ -53,10 +53,10 @@ Mục đích: Validator có dữ liệu máy đọc để kiểm trace, không c
 
 Mục đích: kiểm tra requirement đã được design thể hiện đủ ở cả class và sequence.
 
-- [ ] Tạo requirement graph từ requirement packet đã duyệt.
-- [ ] Sinh trace requirement -> class/method.
-- [ ] Sinh trace requirement -> lifeline/message.
-- [x] Lưu `requirement_design_trace_v1.json` ở mức `traceability_pending_v1`.
+- [x] Tạo requirement graph từ requirement packet đã duyệt.
+- [x] Sinh trace requirement -> class/method.
+- [x] Sinh trace requirement -> lifeline/message.
+- [x] Lưu `requirement_design_trace_v1.json` ở mức `traceability_v1`.
 - [x] Lưu `missing_design_links_v1.json`.
 - [x] Missing link class và sequence được tách riêng.
 - [x] Trace placeholder không invent target không có trong graph.
@@ -65,7 +65,7 @@ Mục đích: kiểm tra requirement đã được design thể hiện đủ ở
 
 Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu thay vì sinh lại mù quáng.
 
-- [x] Parser/Validator placeholder tạo `design_quality_report_v1.md`.
+- [x] Validator traceability V1 tạo `design_quality_report_v1.md`.
 - [ ] Designer có bước `update_design(report)`.
 - [ ] Mỗi vòng repair tạo version mới `design_artifact_v{n}`.
 - [ ] Mỗi vòng repair tạo trace/missing/report version tương ứng.
@@ -124,7 +124,7 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test checkpoint mismatch/no pending checkpoint.
 - [x] Unit test Designer fake output tạo design artifact.
 - [x] Unit test parser class/sequence diagram.
-- [ ] Unit test Validator phát hiện missing links.
+- [x] Unit test Validator phát hiện missing links.
 - [ ] Unit test repair loop pass sau một vòng.
 - [ ] Unit test repair loop blocked sau giới hạn.
 - [x] Unit test sync mock design checkpoint.
