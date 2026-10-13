@@ -250,3 +250,62 @@ implementation plan, nhưng không mutate `.runtime` và không sync tool.
   và parse OK với 5 implementation steps, 4 proposed files, 5 mapping overrides,
   5 test intents.
 
+## 2026-10-13 - Slice 3.6: khóa Phase 3 reporting qua Niko
+
+Mục tiêu của lát này là để Niko đọc được checkpoint `implementation_plan_review`
+và trả lời ngắn gọn cho người dùng, thay vì chỉ hiển thị trạng thái kỹ thuật hoặc
+danh sách artifact quá dài.
+
+Đã hoàn thành:
+
+- Niko nhận diện `waiting_implementation_plan_review` là trạng thái chờ review
+  implementation plan trước khi sang code/PR.
+- Reply SDLC của Niko hiển thị link Confluence/Jira từ `last_sync.targets`, mã run,
+  checkpoint `implementation_plan_v3`, số vòng repair và số issue còn mở.
+- Artifact list trong reply Niko được gom theo priority để implementation plan,
+  implementation plan review, design artifact và requirement packet hiện trước;
+  phần còn lại được gộp bằng `+N artifact khác`.
+- Niko không hứa mở Phase 4 trong lát này. Với checkpoint implementation plan,
+  reply chỉ nhắc anh review plan và ghi rõ Phase 4 tạo code/PR chưa mở trong Niko.
+- Smoke CLI:
+  - `rtk proxy python -m sdlc_harness.cli get-status --run-id run_20261013_143231_8e1a39d4`
+  - Kết quả: `current_phase=implementation_planning`,
+    `status=waiting_implementation_plan_review`,
+    `last_sync.phase=implementation_plan_review`, sync Confluence/Jira đều `synced`.
+- Smoke qua NikoApp:
+  - Prompt: `run_20261013_143231_8e1a39d4 den dau roi em?`
+  - Route: `sdlc_get_status`.
+  - Reply có link implementation plan Confluence, Jira comment, repair iterations `2`,
+    open issues `0`, và checkpoint `implementation_plan_v3`.
+- Test pass:
+  - `rtk proxy python -m pytest tests/test_phase3.py -q` trong `SDLC_Harness`
+    -> 25 passed.
+  - `rtk proxy python -m pytest tests/test_niko_app.py tests/test_sdlc_client.py -q`
+    trong `Niko_Agent` -> 31 passed.
+
+Lưu ý:
+
+- Live Telegram chưa cần chạy lại ở lát này vì smoke đã đi qua `NikoApp.handle_message`
+  và gọi `SDLC_Harness` thật. Nếu muốn khóa tuyệt đối trước Phase 4, có thể nhắn bot
+  hỏi status run trên Telegram thêm một lần.
+- Artifact/comment có run id lạ trên Jira/Confluence trước đó nhiều khả năng là từ
+  một lần chạy thử cũ đã bắn request lên Atlassian nhưng local `.runtime` bị xóa sau đó.
+  Phase sau nên cân nhắc sync ledger/idempotency rõ hơn để live test dễ kiểm soát.
+
+## 2026-10-13 - Slice 3.7: live Telegram/Niko khóa implementation plan checkpoint
+
+Mục tiêu của lát này là khóa Phase 3 bằng một lượt live test từ Niko/Telegram thay vì chỉ smoke CLI: bắt đầu từ Jira issue, duyệt requirement, duyệt design, để SDLC_Harness sinh implementation plan và sync checkpoint review.
+
+Đã hoàn thành:
+
+- Run lỗi tham chiếu: `run_20261013_155407_9a45a4de` bị timeout khi Niko vẫn cấu hình `SDLC_HARNESS_TIMEOUT_SECONDS=120`. Run này kẹt ở `implementation_plan_repairing`, chưa mở checkpoint mới và chưa sync Phase 3.
+- Runtime config Niko đã tăng timeout SDLC lên `300s` để đủ thời gian cho approve design -> implementation plan khi Developer/Validator repair nhiều vòng.
+- Run pass: `run_20261013_160421_f661babf` đi tới `current_phase=implementation_planning`, `status=waiting_implementation_plan_review`.
+- Artifact cuối là `implementation_plan_v4`; `implementation_plan_review` pass với `repair_iterations=3`, `issue_count=0`, `last_error=null`.
+- Real sync Phase 3 pass với `last_sync.phase=implementation_plan_review`, `status=synced`, Confluence page `1048768` và Jira comment `10079`.
+- Niko runtime log ghi đủ route `sdlc_start_from_jira` và hai lần `sdlc_approve_checkpoint`; lệnh approve design hoàn tất trong timeout 300s.
+
+Kết luận:
+
+- Phase 3 hiện đã khóa ở mức implementation plan checkpoint live qua Niko.
+- Phase 4 code/test/Draft PR vẫn chưa mở; bước tiếp theo là approve implementation plan để bắt đầu code trong target repo.

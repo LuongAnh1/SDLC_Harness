@@ -92,7 +92,7 @@ Validator.review_plan.
 - [x] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [x] `latest_artifacts.implementation_plan` trỏ tới plan mới nhất.
 - [x] `quality_reports.implementation_plan_review` trỏ tới review mới nhất.
-- [ ] Niko hiển thị link plan và checkpoint approve plan ngắn gọn.
+- [x] Niko hiển thị link plan và checkpoint approve plan ngắn gọn.
 
 ## 8. Test Và Acceptance
 
@@ -110,8 +110,10 @@ Mục đích: Phase 3 phải chạy được từ terminal trước khi live qua
 - [x] Unit test sync implementation plan Jira/Confluence.
 - [x] Unit test blocked khi plan review fail quá giới hạn repair.
 - [x] Tạo private target repo GitHub `LuongAnh1/SDLC_Target_eTour` với Java skeleton tối thiểu.
-- [ ] Smoke test CLI từ run Phase 2 thật sang `waiting_implementation_plan_review`.
-- [ ] Smoke test qua Niko sau khi CLI pass.
+- [x] Smoke test CLI từ run Phase 2 thật sang `waiting_implementation_plan_review`.
+- [x] Smoke test qua Niko sau khi CLI pass.
+- [x] Live Telegram/Niko Phase 3 từ Jira tới `waiting_implementation_plan_review` pass với run `run_20261013_160421_f661babf`.
+- [x] Ghi nhận bài học timeout: approve design -> implementation plan cần timeout Niko đủ lớn, live pass với `SDLC_HARNESS_TIMEOUT_SECONDS=300`.
 
 ## 9. Smart Developer + CodeGraph Context
 
@@ -136,4 +138,3 @@ CodeGraph để lập plan có evidence, implementation steps và proposed files
 - [x] Unit test missing CodeGraph index.
 - [x] Unit test Phase 3 pass: `rtk python -m pytest tests/test_phase3.py`.
 - [ ] Về sau bổ sung redact/filter hoặc local model để tránh gửi source snippets nhạy cảm ra LLM ngoài.
-

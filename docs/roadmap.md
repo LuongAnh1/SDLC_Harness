@@ -1,4 +1,4 @@
-﻿# Roadmap SDLC Harness
+# Roadmap SDLC Harness
 
 Roadmap này đi theo hướng triển khai từng vertical slice. Mỗi phase phải tạo được một đoạn flow có thể chạy, có trạng thái và có nơi để Niko đọc lại.
 
@@ -248,3 +248,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Cập nhật 2026-10-13: Phase 4 được tách ra thành phase mới để khóa phần
 > code/test/Draft PR sau khi implementation plan được duyệt.
 
+> Cập nhật 2026-10-13: Phase 3 đã khóa bằng live Telegram/Niko run
+> `run_20261013_160421_f661babf`. Niko gọi SDLC_Harness từ Jira issue, duyệt
+> requirement, duyệt design, SDLC sinh `implementation_plan_v4`, Validator pass
+> sau 3 vòng repair và sync Jira/Confluence ở checkpoint
+> `waiting_implementation_plan_review`. Phase 4 code/test/Draft PR vẫn là bước
+> kế tiếp, chưa mở tự động từ Niko.
