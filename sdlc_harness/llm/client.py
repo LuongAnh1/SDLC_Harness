@@ -104,6 +104,10 @@ def fake_completion(prompt: str) -> str:
         return fake_formal_use_case()
     if "Repair Requirement Packet v1" in prompt or "Requirement Validation Report" in prompt:
         return fake_refined_requirement(prompt)
+    if "both a Class Diagram and Sequence Diagrams" in prompt:
+        return fake_design_model()
+    if "very concise architecture recommendation" in prompt:
+        return fake_architecture_recommendation()
     return fake_refined_requirement(prompt)
 
 
@@ -184,3 +188,67 @@ Cho phép Agency Operator xóa một cultural heritage object đã chọn trong 
 - "Operator Agency cancels the operation."
 - "Interruption of connection to the server ETOUR."
 """.strip()
+
+
+def fake_architecture_recommendation() -> str:
+    """Khuyến nghị kiến trúc giả lập cho Designer.analysis."""
+
+    return (
+        "Use a layered architecture with a boundary/controller, domain service, "
+        "and repository. This separates user interaction, business rules, and "
+        "persistence concerns while keeping the use case small enough for direct "
+        "traceability."
+    )
+
+
+def fake_design_model() -> str:
+    """Design PlantUML ổn định cho Designer.act trong fake mode."""
+
+    return """## Class Diagram
+@startuml
+class DeleteCulturalHeritageBoundary {
+  +requestDeletion(heritageId : String) : void
+  +showConfirmation() : void
+  +showResult(message : String) : void
+}
+
+class DeleteCulturalHeritageService {
+  +validateDeletion(heritageId : String) : boolean
+  +deleteHeritage(heritageId : String) : void
+  +cancelDeletion() : void
+}
+
+class CulturalHeritageRepository {
+  +findById(heritageId : String) : CulturalHeritage
+  +delete(heritageId : String) : void
+}
+
+class CulturalHeritage {
+  - id : String
+  - name : String
+}
+
+DeleteCulturalHeritageBoundary --> DeleteCulturalHeritageService
+DeleteCulturalHeritageService --> CulturalHeritageRepository
+CulturalHeritageRepository --> CulturalHeritage
+@enduml
+
+## Sequence Diagrams
+### Sequence Diagram for Use Case:
+@startuml
+actor "Agency Operator" as AO
+participant DeleteCulturalHeritageBoundary as Boundary
+participant DeleteCulturalHeritageService as Service
+database CulturalHeritageRepository as Repository
+
+AO -> Boundary: requestDeletion(heritageId)
+Boundary -> Boundary: showConfirmation()
+AO -> Boundary: confirm deletion
+Boundary -> Service: validateDeletion(heritageId)
+Service -> Repository: findById(heritageId)
+Repository --> Service: CulturalHeritage
+Service -> Repository: delete(heritageId)
+Repository --> Service: deletion saved
+Service --> Boundary: success
+Boundary --> AO: showResult(success message)
+@enduml""".strip()

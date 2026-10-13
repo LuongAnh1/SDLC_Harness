@@ -10,8 +10,10 @@ import tempfile
 import unittest
 
 from sdlc_harness.cli import main as cli_main
+from sdlc_harness.agents.designer import DesignerAgent, parse_design_model
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import LlmClient, fake_design_model
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 
@@ -37,6 +39,43 @@ class PhaseTwoTest(unittest.TestCase):
             requested_by="test",
         )
 
+    def test_designer_fake_mode_creates_analysis_and_design_model(self) -> None:
+        draft = DesignerAgent(LlmClient(self.settings)).draft(
+            requirement_packet="# Requirement Packet V1\n\n## Goal\nDelete cultural heritage.",
+            formal_use_case="UsecaseName: Delete Cultural Heritage",
+        )
+
+        self.assertIn("layered architecture", draft.analysis_report.lower())
+        self.assertIn("## Class Diagram", draft.design_model)
+        self.assertIn("## Sequence Diagrams", draft.design_model)
+        self.assertIn("@startuml", draft.design_model)
+
+    def test_parse_design_model_reads_class_and_sequence_graph(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+
+        class_names = {node["className"] for node in parsed.class_graph["nodes"]}
+        self.assertIn("DeleteCulturalHeritageBoundary", class_names)
+        self.assertIn("DeleteCulturalHeritageService", class_names)
+        self.assertGreaterEqual(len(parsed.class_graph["relationships"]), 2)
+
+        sequence_diagram = parsed.sequence_graph["sequenceDiagrams"][0]
+        messages = [message["message"] for message in sequence_diagram["messages"]]
+        self.assertIn("requestDeletion(heritageId)", messages)
+        self.assertIn("showResult(success message)", messages)
+
+    def test_parse_design_model_rejects_missing_sequence_diagram(self) -> None:
+        with self.assertRaises(HarnessError) as ctx:
+            parse_design_model(
+                """## Class Diagram
+@startuml
+class OnlyClass {
+  +run() : void
+}
+@enduml"""
+            )
+
+        self.assertEqual(ctx.exception.error_code, "design_parser_failed")
+
     def test_approve_checkpoint_creates_design_checkpoint(self) -> None:
         created = self._create_phase1_run()
         response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
@@ -51,6 +90,8 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertIn("design_artifact", response["latest_artifacts"])
         self.assertIn("requirement_design_trace", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
+        self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "parser_only_v1")
+        self.assertIn("Traceability LLM chưa chạy", response["quality_reports"]["design_traceability"]["summary"])
 
         run_dir = self.runtime_root / "runs" / str(created["run_id"])
         self.assertTrue((run_dir / "artifacts" / "designer_analysis_v1.md").exists())
@@ -62,6 +103,19 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertTrue((run_dir / "artifacts" / "design_quality_report_v1.md").exists())
         self.assertTrue((run_dir / "sync" / "design-jira-comment.md").exists())
         self.assertTrue((run_dir / "sync" / "design-confluence-page.md").exists())
+        class_graph = json.loads((run_dir / "artifacts" / "class_diagram_graph_v1.json").read_text(encoding="utf-8"))
+        class_names = {node["className"] for node in class_graph["nodes"]}
+        self.assertIn("DeleteCulturalHeritageBoundary", class_names)
+        sequence_graph = json.loads((run_dir / "artifacts" / "sequence_diagram_graph_v1.json").read_text(encoding="utf-8"))
+        first_sequence = sequence_graph["sequenceDiagrams"][0]
+        self.assertTrue(
+            any(message["message"] == "requestDeletion(heritageId)" for message in first_sequence["messages"])
+        )
+        trace = json.loads((run_dir / "artifacts" / "requirement_design_trace_v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(trace["mode"], "traceability_pending_v1")
+        missing = json.loads((run_dir / "artifacts" / "missing_design_links_v1.json").read_text(encoding="utf-8"))
+        self.assertEqual(missing["mode"], "traceability_pending_v1")
+        self.assertIn("class_diagram", missing["missing_links"])
         report = json.loads((run_dir / "sync" / "tool_sync_report_v2.json").read_text(encoding="utf-8"))
         self.assertEqual(report["version"], "tool_sync_report_v2")
         self.assertEqual(report["phase"], "design_checkpoint")

@@ -63,17 +63,20 @@ Mục đích: khóa điều kiện trước Phase 2 bằng sync thật, không c
 
 Mục đích: sau khi duyệt requirement, tạo thiết kế có trace và checkpoint.
 
-Checklist chi tiết nằm ở `docs/phase-2/phase-2-checklist.md`. Phase 2 đã có lát
-V0: CLI `approve-checkpoint`, fake/deterministic design artifact, mock
-`tool_sync_report_v2` và state `waiting_design_approval`. Designer/Validator
-thật theo TraceDev, repair loop và real sync Phase 2 vẫn là bước tiếp theo.
+Checklist chi tiết nằm ở `docs/phase-2/phase-2-checklist.md`. Phase 2 đã có CLI
+`approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML
+class/sequence graph, mock `tool_sync_report_v2` và state
+`waiting_design_approval`. Validator traceability thật theo TraceDev, repair
+loop và real sync Phase 2 vẫn là bước tiếp theo.
 
 - [x] Có `approve_checkpoint(run_id)`.
 - [x] Đọc approved `requirement_packet_v1`, không refine requirement lại trong Phase 2.
+- [x] Đọc kèm `formal_use_case_v1` khi có để Designer/Validator dùng input máy đọc.
 - [x] Sinh `design_artifact_v1`.
-- [x] Sinh trace requirement-design ở mức fake trace V0.
+- [x] Parse PlantUML thành `class_diagram_graph_v1` và `sequence_diagram_graph_v1`.
+- [x] Sinh trace requirement-design ở mức `traceability_pending_v1`.
 - [ ] Validator phát hiện thiếu/mâu thuẫn cơ bản.
-- [x] Validator V0 sinh missing-link report rỗng và quality report cho Designer.
+- [x] Parser/Validator placeholder sinh missing-link report rỗng và quality report cho Designer.
 - [ ] Designer repair design theo Validator report với giới hạn vòng lặp rõ.
 - [x] Sync Confluence/Jira mock theo `docs/phase-2/sync-design-checkpoint.md`.
 - [ ] Re-sync design checkpoint không tạo Jira comment/Confluence page trùng.

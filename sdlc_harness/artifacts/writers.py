@@ -161,152 +161,70 @@ def write_phase2_design_artifacts(
     *,
     store: RuntimeStore,
     run_id: str,
+    designer_analysis: str,
+    design_model: str,
+    class_graph: dict[str, object],
+    sequence_graph: dict[str, object],
     requirement_packet: str,
+    formal_use_case: str = "",
     version: int = 1,
 ) -> dict[str, str]:
-    """Sinh bộ artifact design V0 từ requirement đã duyệt.
+    """Ghi artifact design V1 từ Designer và parser PlantUML.
 
-    Đây là fake/deterministic writer cho lát đầu Phase 2. Nó cố tình tạo output
-    ổn định, có class/sequence diagram và trace JSON tối thiểu để test CLI/state
-    trước khi thay bằng Designer/Validator thật ở lát tiếp theo.
+    Lát này mới chứng minh Designer sinh được diagram và parser đọc được graph.
+    Traceability LLM/repair loop chưa chạy, nên các report phải ghi rõ
+    `traceability_pending_v1` thay vì báo pass giả.
     """
 
     artifact_dir = store.run_dir(run_id) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"v{version}"
-    goal = _section_preview(requirement_packet, "Goal", default="Thiết kế theo requirement packet đã duyệt.")
-    actors = _section_items(requirement_packet, "Actors") or ["Primary Actor"]
     main_flow = _section_items(requirement_packet, "Main Flow")
     acceptance = _section_items(requirement_packet, "Acceptance Criteria")
     requirement_count = max(1, len(main_flow) + len(acceptance))
 
     designer_analysis_path = artifact_dir / f"designer_analysis_{suffix}.md"
     designer_analysis_path.write_text(
-        f"""# Designer Analysis {suffix.upper()}
-
-## Goal
-{goal}
-
-## Design Direction
-- Tạo lớp boundary để nhận thao tác từ actor chính.
-- Tạo lớp service để xử lý nghiệp vụ chính.
-- Tạo repository để tách thao tác lưu/xóa dữ liệu khỏi service.
-- Giữ thiết kế ở mức checkpoint review, chưa sinh code.
-
-## Actors Considered
-{_markdown_list(actors)}
-
-## Notes
-- Artifact này được sinh bằng fake Designer V0 để khóa contract Phase 2.
-- Designer thật sẽ thay thế nội dung này ở lát triển khai sau.
-""",
+        _with_heading(f"Designer Analysis {suffix.upper()}", designer_analysis),
         encoding="utf-8",
     )
 
     design_artifact_path = artifact_dir / f"design_artifact_{suffix}.md"
     design_artifact_path.write_text(
-        f"""# Design Artifact {suffix.upper()}
-
-## Summary
-Thiết kế V0 cho requirement đã duyệt: {goal}
-
-## Class Diagram
-
-```plantuml
-@startuml
-class UserActionBoundary {{
-  +requestAction()
-  +showConfirmation()
-  +showResult()
-}}
-
-class DomainService {{
-  +validateRequest()
-  +executeAction()
-  +handleCancellation()
-}}
-
-class DomainRepository {{
-  +loadSelectedEntity()
-  +persistChange()
-}}
-
-UserActionBoundary --> DomainService
-DomainService --> DomainRepository
-@enduml
-```
-
-## Sequence Diagram
-
-```plantuml
-@startuml
-actor User
-participant UserActionBoundary as Boundary
-participant DomainService as Service
-participant DomainRepository as Repository
-
-User -> Boundary: request action
-Boundary -> Service: validate and execute
-Service -> Repository: load selected entity
-Repository --> Service: entity data
-Service -> Repository: persist change
-Service --> Boundary: result
-Boundary --> User: show result
-@enduml
-```
-
-## Requirement Coverage Draft
-- Requirement items considered: {requirement_count}
-- Missing links in V0 fake validator: 0
-""",
+        _with_heading(f"Design Artifact {suffix.upper()}", design_model),
         encoding="utf-8",
     )
 
     class_graph_path = artifact_dir / f"class_diagram_graph_{suffix}.json"
-    class_graph = {
+    class_graph_payload = {
+        **class_graph,
         "version": f"class_diagram_graph_{suffix}",
         "created_at": utc_now_iso(),
-        "nodes": [
-            {"id": "UserActionBoundary", "type": "class", "methods": ["requestAction", "showConfirmation", "showResult"]},
-            {"id": "DomainService", "type": "class", "methods": ["validateRequest", "executeAction", "handleCancellation"]},
-            {"id": "DomainRepository", "type": "class", "methods": ["loadSelectedEntity", "persistChange"]},
-        ],
-        "edges": [
-            {"from": "UserActionBoundary", "to": "DomainService", "relation": "uses"},
-            {"from": "DomainService", "to": "DomainRepository", "relation": "uses"},
-        ],
     }
-    class_graph_path.write_text(json.dumps(class_graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    class_graph_path.write_text(json.dumps(class_graph_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     sequence_graph_path = artifact_dir / f"sequence_diagram_graph_{suffix}.json"
-    sequence_graph = {
+    sequence_graph_payload = {
+        **sequence_graph,
         "version": f"sequence_diagram_graph_{suffix}",
         "created_at": utc_now_iso(),
-        "lifelines": ["User", "UserActionBoundary", "DomainService", "DomainRepository"],
-        "messages": [
-            {"from": "User", "to": "UserActionBoundary", "message": "request action"},
-            {"from": "UserActionBoundary", "to": "DomainService", "message": "validate and execute"},
-            {"from": "DomainService", "to": "DomainRepository", "message": "load selected entity"},
-            {"from": "DomainService", "to": "DomainRepository", "message": "persist change"},
-            {"from": "UserActionBoundary", "to": "User", "message": "show result"},
-        ],
     }
-    sequence_graph_path.write_text(json.dumps(sequence_graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    sequence_graph_path.write_text(json.dumps(sequence_graph_payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     trace_path = artifact_dir / f"requirement_design_trace_{suffix}.json"
     trace = {
         "version": f"requirement_design_trace_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "fake_validator_v0",
+        "mode": "traceability_pending_v1",
         "requirement_count": requirement_count,
-        "links": [
-            {
-                "requirement_ref": "requirement_packet_v1",
-                "class_targets": ["UserActionBoundary", "DomainService", "DomainRepository"],
-                "sequence_targets": ["UserActionBoundary", "DomainService", "DomainRepository"],
-                "status": "covered",
-            }
-        ],
+        "links": [],
+        "inputs": {
+            "requirement_packet": "requirement_packet_v1",
+            "formal_use_case_attached": bool(formal_use_case.strip()),
+            "class_diagram_graph": f"class_diagram_graph_{suffix}",
+            "sequence_diagram_graph": f"sequence_diagram_graph_{suffix}",
+        },
+        "note": "Traceability LLM has not run yet; this file only records parser-ready inputs.",
     }
     trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -314,8 +232,12 @@ Boundary --> User: show result
     missing = {
         "version": f"missing_design_links_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "fake_validator_v0",
-        "missing_links": [],
+        "mode": "traceability_pending_v1",
+        "missing_links": {
+            "class_diagram": [],
+            "sequence_diagram": [],
+        },
+        "note": "Traceability LLM has not run yet, so no coverage conclusion is recorded.",
     }
     missing_path.write_text(json.dumps(missing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -323,14 +245,17 @@ Boundary --> User: show result
     quality_path.write_text(
         f"""# Design Quality Report {suffix.upper()}
 
-- Validator mode: fake_validator_v0
-- Requirement items checked: {requirement_count}
-- Missing design links: 0
+- Validator mode: parser_only_v1
+- Requirement items prepared for traceability: {requirement_count}
+- Class graph parser: passed
+- Sequence graph parser: passed
+- Traceability LLM: pending
 - Repair iterations: 0
 
 ## Result
-Design V0 đủ điều kiện tạo checkpoint review. Báo cáo này chỉ khóa contract
-Phase 2; Validator traceability thật sẽ thay thế ở lát sau.
+Design V1 đủ điều kiện tạo checkpoint review ở mức parser graph. Báo cáo này
+chưa kết luận requirement đã được design cover đầy đủ; Validator traceability
+và repair loop sẽ chạy ở lát Phase 2 tiếp theo.
 """,
         encoding="utf-8",
     )
@@ -346,9 +271,13 @@ Phase 2; Validator traceability thật sẽ thay thế ở lát sau.
     }
 
 
-def _section_preview(markdown: str, heading: str, *, default: str) -> str:
-    items = _section_items(markdown, heading)
-    return items[0] if items else default
+def _with_heading(title: str, content: str) -> str:
+    """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
+
+    text = content.strip()
+    if text.startswith("#"):
+        return text + "\n"
+    return f"# {title}\n\n{text}\n"
 
 
 def _section_items(markdown: str, heading: str) -> list[str]:

@@ -38,3 +38,40 @@ Chưa làm trong lát này:
 - Chưa có repair loop Designer.update_design.
 - Chưa real sync Jira/Confluence cho design checkpoint.
 - Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.
+
+## 2026-10-13 - V1 Designer Agent Và PlantUML Parser
+
+Đã làm:
+
+- Thêm `DesignerAgent` cho Phase 2 với hai bước TraceDev-style:
+  `analysis(requirement/formal_use_case)` và `act(requirement/formal_use_case,
+  architecture_recommendation)`.
+- Dùng lại prompt Designer/Recommendation đã copy từ TraceDev; fake mode mô phỏng
+  output của hai bước này để test không tốn API.
+- Phase 2 đọc thêm `formal_use_case_v1.txt` nếu artifact này có trong
+  `latest_artifacts`, rồi ghi vào `approved_artifacts`.
+- Thêm parser PlantUML cho class diagram và sequence diagram:
+  `class_diagram_graph_v1.json`, `sequence_diagram_graph_v1.json`.
+- Sửa workflow để có state trung gian `design_validating`.
+- Nếu Designer/LLM/parser lỗi, state chuyển `failed` và ghi `last_error`.
+- Artifact trace/missing/report đổi sang mode `traceability_pending_v1` hoặc
+  `parser_only_v1`, không còn ghi giả `missing links=0`.
+- Phát hiện và sửa lỗi parser: alias `Boundary` từng bị nhận nhầm là keyword
+  `boundary`, khiến message bắt đầu từ `Boundary -> ...` bị bỏ qua.
+
+Đã kiểm thử:
+
+- `python -m unittest discover -s tests -p "test*.py" -v`: 37 test pass.
+- Smoke CLI runtime tạm:
+  `start-or-get-run --llm-mode fake` rồi
+  `approve-checkpoint --llm-mode fake` trả
+  `status=waiting_design_approval`, `current_phase=design_review`,
+  `quality_mode=parser_only_v1`, `sync_status=mock_synced`.
+
+Chưa làm trong lát này:
+
+- Chưa chạy Validator traceability LLM để nối requirement -> class/method và
+  requirement -> lifeline/message.
+- Chưa có repair loop `Designer.update_design`.
+- Chưa real sync idempotent cho design checkpoint.
+- Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.

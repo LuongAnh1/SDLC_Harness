@@ -55,8 +55,10 @@ Luồng:
 ```text
 approve_checkpoint(run_id)
 -> đọc approved requirement_packet_v1
+-> đọc formal_use_case_v1 nếu có
 -> Designer tạo design_artifact_v1
--> Validator tạo requirement/class/sequence graph và requirement-design trace
+-> Parser tạo class/sequence graph từ PlantUML
+-> Validator tạo requirement-design trace từ requirement/class/sequence graph
 -> nếu thiếu link: Validator tạo quality report, Designer update design, rồi kiểm lại
 -> sync design checkpoint theo `docs/phase-2/sync-design-checkpoint.md`
 -> status=waiting_design_approval
@@ -144,4 +146,10 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > artifact/trace/report, mock sync `tool_sync_report_v2` và chuyển state sang
 > `waiting_design_approval`. Designer/Validator thật, repair loop, real sync và
 > Niko approve route vẫn chưa triển khai.
+
+> Cập nhật 2026-10-13: Phase 2 đã có lát V1 cho Designer/parser: Designer Agent
+> dùng prompt TraceDev-style, fake mode sinh PlantUML ổn định, parser tạo
+> class/sequence graph thật và workflow ghi `parser_only_v1` /
+> `traceability_pending_v1`. Validator traceability LLM và repair loop vẫn là
+> bước tiếp theo.
 

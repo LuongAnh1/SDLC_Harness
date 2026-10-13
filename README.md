@@ -15,7 +15,7 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã có lát V0 cho `approve-checkpoint` bằng fake Designer/Validator và mock design sync để khóa contract trước khi nối Designer/Validator thật. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã có `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph và mock design sync để khóa contract design checkpoint. Validator traceability LLM, repair loop và real sync Phase 2 vẫn là bước tiếp theo. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
 
 ## Cấu Trúc Package
@@ -94,9 +94,10 @@ Ranh giới hiện tại:
   Atlassian đầy đủ.
 - Mock sync vẫn tồn tại cho unit/smoke test hoặc khi chưa cấu hình tool thật.
 - CLI phải giữ stdout chỉ có JSON vì Niko parse trực tiếp response đó.
-- Phase 2 hiện có contract `approve-checkpoint` V0: fake design artifact, fake
-  traceability report và mock design sync. Designer/Validator thật theo TraceDev
-  vẫn là bước tiếp theo.
+- Phase 2 hiện có contract `approve-checkpoint` V1: Designer tạo PlantUML,
+  parser sinh class/sequence graph thật, traceability đang ở
+  `traceability_pending_v1`, và mock design sync. Validator traceability thật
+  theo TraceDev vẫn là bước tiếp theo.
 
 <!-- SDLC_NIKO_SYNC_END -->
 

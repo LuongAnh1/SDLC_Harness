@@ -1,15 +1,17 @@
-"""Workflow Phase 2 V0: approved requirement -> design checkpoint.
+"""Workflow Phase 2: approved requirement -> design checkpoint.
 
-Lát đầu Phase 2 chỉ khóa contract CLI/state/artifact/sync. Designer và Validator
-ở đây là fake/deterministic để Niko có thể duyệt requirement rồi nhận checkpoint
-design; các bước LLM Designer, parser PlantUML và traceability thật sẽ thay sau.
+Phase 2 nhận requirement đã duyệt, gọi Designer để sinh PlantUML, parse class/
+sequence graph và tạo checkpoint design. Validator traceability/repair loop vẫn
+ở lát sau, nên workflow hiện chỉ kết luận parser pass chứ không kết luận coverage.
 """
 
 from __future__ import annotations
 
+from ..agents.designer import DesignerAgent, parse_design_model
 from ..artifacts.writers import write_phase2_design_artifacts
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..llm.client import LlmClient
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
 
@@ -22,14 +24,15 @@ ALLOWED_DESIGN_ACTIONS = [
 
 
 class PhaseTwoWorkflow:
-    """Điều phối lát Phase 2 V0 từ checkpoint requirement sang checkpoint design."""
+    """Điều phối Phase 2 từ checkpoint requirement sang checkpoint design."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+        self.designer = DesignerAgent(LlmClient(settings))
 
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
-        """Duyệt requirement checkpoint hiện tại và tạo design checkpoint V0."""
+        """Duyệt requirement checkpoint hiện tại và tạo design checkpoint."""
 
         state = self.store.read_state(run_id)
         self._require_requirement_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
@@ -59,18 +62,66 @@ class PhaseTwoWorkflow:
                     "requirement_packet": requirement_path,
                 },
                 "allowed_next_actions": ["get_status", "cancel_run"],
-                "summary_for_user": "Đã duyệt requirement checkpoint, đang tạo design checkpoint V0.",
+                "summary_for_user": "Đã duyệt requirement checkpoint, đang tạo design draft.",
             }
         )
         self.store.write_state(state)
 
         requirement_packet = requirement_abs_path.read_text(encoding="utf-8")
-        design_paths = write_phase2_design_artifacts(
-            store=self.store,
-            run_id=run_id,
-            requirement_packet=requirement_packet,
-            version=1,
-        )
+        formal_use_case_path = artifact_paths.get("formal_use_case", "")
+        formal_use_case = ""
+        if formal_use_case_path:
+            formal_use_case_abs_path = (self.store.repo_root / formal_use_case_path).resolve()
+            if formal_use_case_abs_path.exists():
+                formal_use_case = formal_use_case_abs_path.read_text(encoding="utf-8")
+                state["approved_artifacts"] = {
+                    **_string_dict(state.get("approved_artifacts")),
+                    "formal_use_case": formal_use_case_path,
+                }
+                self.store.write_state(state)
+
+        try:
+            draft = self.designer.draft(
+                requirement_packet=requirement_packet,
+                formal_use_case=formal_use_case,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_validating",
+                    "status": "design_validating",
+                    "summary_for_user": "Designer đã sinh design draft, đang parse PlantUML thành graph.",
+                }
+            )
+            self.store.write_state(state)
+
+            parsed = parse_design_model(draft.design_model)
+            design_paths = write_phase2_design_artifacts(
+                store=self.store,
+                run_id=run_id,
+                designer_analysis=draft.analysis_report,
+                design_model=draft.design_model,
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+                requirement_packet=requirement_packet,
+                formal_use_case=formal_use_case,
+                version=1,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_validating",
+                    "status": "failed",
+                    "last_error": exc.to_response(),
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "summary_for_user": f"Phase 2 lỗi khi tạo/parse design: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            if not exc.run_id:
+                raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
+            raise
         merged_artifacts = {**artifact_paths, **design_paths}
         last_sync = sync_design_checkpoint(
             store=self.store,
@@ -99,15 +150,19 @@ class PhaseTwoWorkflow:
                     **_dict_value(state.get("quality_reports")),
                     "design_traceability": {
                         "ok": True,
-                        "mode": "fake_validator_v0",
+                        "mode": "parser_only_v1",
                         "versions": ["v1"],
-                        "summary": "Design V0 đã có class diagram, sequence diagram và missing links = 0.",
+                        "summary": (
+                            "Designer đã tạo PlantUML và parser đã đọc được class/sequence graph. "
+                            "Traceability LLM chưa chạy."
+                        ),
                         "report": design_paths["design_quality_report"],
                     },
                 },
                 "summary_for_user": (
-                    f"Đã duyệt requirement và tạo design checkpoint V0 cho run {run_id}. "
-                    f"Fake Validator V0 ghi missing links=0 và sync status={last_sync.get('status')}. "
+                    f"Đã duyệt requirement và tạo design checkpoint V1 cho run {run_id}. "
+                    f"Designer/parser đã chạy xong, traceability LLM chưa chạy, "
+                    f"sync status={last_sync.get('status')}. "
                     "Run đang chờ anh review design trước khi sang Phase 3."
                 ),
             }

@@ -23,7 +23,7 @@ bằng contract JSON ổn định.
 Mục đích: Phase 2 dùng requirement đã duyệt, không tự kéo source hoặc refine lại.
 
 - [x] Đọc `requirement_packet_v1.md` từ `latest_artifacts`.
-- [ ] Đọc `formal_use_case_v1.txt` nếu cần input máy đọc cho Designer/Validator.
+- [x] Đọc `formal_use_case_v1.txt` nếu cần input máy đọc cho Designer/Validator.
 - [x] Ghi `approved_artifacts.requirement_packet`.
 - [x] Không gọi Requirement Refiner trong Phase 2.
 - [x] Nếu artifact requirement thiếu, trả lỗi `approved_requirement_not_found`.
@@ -32,22 +32,22 @@ Mục đích: Phase 2 dùng requirement đã duyệt, không tự kéo source ho
 
 Mục đích: sinh design có thể review và parse thành graph.
 
-- [ ] Tạo module/prompt Designer riêng cho Phase 2.
+- [x] Tạo module/prompt Designer riêng cho Phase 2.
 - [x] Có bước `analysis` tạo `designer_analysis_v1.md`.
 - [x] Có bước `act` tạo `design_artifact_v1.md`.
 - [x] Design artifact chứa class diagram và sequence diagram.
 - [x] Ưu tiên PlantUML để dễ parse class/sequence graph.
-- [ ] Nếu LLM lỗi hoặc output không có diagram, state ghi `failed` với `last_error`.
+- [x] Nếu LLM lỗi hoặc output không có diagram, state ghi `failed` với `last_error`.
 
 ## 4. Diagram Graph Parser
 
 Mục đích: Validator có dữ liệu máy đọc để kiểm trace, không chỉ đọc text diagram.
 
-- [ ] Parse class diagram thành `class_diagram_graph_v1.json`.
-- [ ] Parse sequence diagram thành `sequence_diagram_graph_v1.json`.
-- [ ] Parser trả lỗi rõ khi thiếu class diagram.
-- [ ] Parser trả lỗi rõ khi thiếu sequence diagram.
-- [x] Lưu graph JSON vào runtime artifacts ở mức fake graph V0.
+- [x] Parse class diagram thành `class_diagram_graph_v1.json`.
+- [x] Parse sequence diagram thành `sequence_diagram_graph_v1.json`.
+- [x] Parser trả lỗi rõ khi thiếu class diagram.
+- [x] Parser trả lỗi rõ khi thiếu sequence diagram.
+- [x] Lưu graph JSON vào runtime artifacts ở mức parser graph V1.
 
 ## 5. Validator Traceability
 
@@ -56,16 +56,16 @@ Mục đích: kiểm tra requirement đã được design thể hiện đủ ở
 - [ ] Tạo requirement graph từ requirement packet đã duyệt.
 - [ ] Sinh trace requirement -> class/method.
 - [ ] Sinh trace requirement -> lifeline/message.
-- [x] Lưu `requirement_design_trace_v1.json` ở mức fake trace V0.
+- [x] Lưu `requirement_design_trace_v1.json` ở mức `traceability_pending_v1`.
 - [x] Lưu `missing_design_links_v1.json`.
-- [ ] Missing link class và sequence được tách riêng.
-- [x] Trace link V0 không invent target không có trong graph.
+- [x] Missing link class và sequence được tách riêng.
+- [x] Trace placeholder không invent target không có trong graph.
 
 ## 6. Validator Quality Report Và Repair Loop
 
 Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu thay vì sinh lại mù quáng.
 
-- [x] Validator V0 tạo `design_quality_report_v1.md`.
+- [x] Parser/Validator placeholder tạo `design_quality_report_v1.md`.
 - [ ] Designer có bước `update_design(report)`.
 - [ ] Mỗi vòng repair tạo version mới `design_artifact_v{n}`.
 - [ ] Mỗi vòng repair tạo trace/missing/report version tương ứng.
@@ -79,7 +79,7 @@ Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu th
 Mục đích: Niko có thể đọc tiến độ, checkpoint và artifact mới nhất mà không hiểu nội bộ agent.
 
 - [x] Ghi state `design_drafting`.
-- [ ] Ghi state `design_validating`.
+- [x] Ghi state `design_validating`.
 - [ ] Ghi state `design_repairing` khi chạy repair.
 - [x] Ghi state cuối `waiting_design_approval` khi pass.
 - [x] `latest_artifacts` trỏ tới design/trace/missing/report mới nhất.
@@ -123,7 +123,7 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test approve checkpoint happy path.
 - [x] Unit test checkpoint mismatch/no pending checkpoint.
 - [x] Unit test Designer fake output tạo design artifact.
-- [ ] Unit test parser class/sequence diagram.
+- [x] Unit test parser class/sequence diagram.
 - [ ] Unit test Validator phát hiện missing links.
 - [ ] Unit test repair loop pass sau một vòng.
 - [ ] Unit test repair loop blocked sau giới hạn.
