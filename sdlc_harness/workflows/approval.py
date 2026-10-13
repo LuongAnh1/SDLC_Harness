@@ -7,6 +7,7 @@ from ..core.errors import HarnessError
 from ..storage.runtime import RuntimeStore
 from .phase2 import PhaseTwoWorkflow
 from .phase3 import PhaseThreeWorkflow
+from .phase4 import PhaseFourWorkflow
 
 
 class CheckpointApprovalWorkflow:
@@ -23,6 +24,11 @@ class CheckpointApprovalWorkflow:
             return PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id, checkpoint_id=checkpoint_id)
         if status == "waiting_design_approval":
             return PhaseThreeWorkflow(self.settings).approve_design_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
+        if status == "waiting_implementation_plan_review":
+            return PhaseFourWorkflow(self.settings).approve_implementation_plan_checkpoint(
                 run_id=run_id,
                 checkpoint_id=checkpoint_id,
             )

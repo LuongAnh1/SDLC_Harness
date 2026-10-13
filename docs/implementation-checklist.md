@@ -124,7 +124,9 @@ checkpoint code review.
 Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 
 - [x] Chốt target test repo GitHub: `LuongAnh1/SDLC_Target_eTour`.
-- [ ] Duyệt `implementation_plan_review` để mở Phase 4.
+- [x] Duyệt `implementation_plan_review` để mở Phase 4 Slice 4.1.
+- [x] Sinh `developer_work_packet_v1.json` từ implementation plan đã duyệt.
+- [x] State chuyển sang `implementation_ready` trước khi Developer.act sửa code.
 - [ ] Tạo branch trong target repo.
 - [ ] Developer.act đọc implementation plan + approved design graph.
 - [ ] Sinh code change thật trong target repo.

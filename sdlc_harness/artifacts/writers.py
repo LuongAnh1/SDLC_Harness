@@ -2,7 +2,8 @@
 
 Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 sinh formal
 use case và requirement packet; Phase 2 sinh design, graph, trace và quality
-report theo từng version; Phase 3 sinh implementation plan trước khi sửa code.
+report theo từng version; Phase 3 sinh implementation plan trước khi sửa code;
+Phase 4 bắt đầu bằng work packet để Developer dùng ở bước sinh code.
 """
 
 from __future__ import annotations
@@ -333,6 +334,28 @@ def write_phase3_plan_review_report(
         **review_report,
         "created_at": utc_now_iso(),
         "artifact_ref": f"implementation_plan_review_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
+def write_phase4_developer_work_packet(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    packet: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi DeveloperWorkPacket đã chuẩn bị từ implementation plan được duyệt."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"developer_work_packet_{suffix}.json"
+    payload = {
+        **packet,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"developer_work_packet_{suffix}",
     }
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return store.relative(path)

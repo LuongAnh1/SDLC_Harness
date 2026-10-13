@@ -8,27 +8,38 @@ test, trace và Draft PR. Không tick các mục này trong Phase 3.
 Mục đích: human/Niko có thể duyệt implementation plan checkpoint và kích hoạt
 Phase 4 bằng JSON contract ổn định.
 
-- [ ] `approve-checkpoint` chỉ mở Phase 4 khi run đang `waiting_implementation_plan_review`.
-- [ ] Nếu checkpoint không phải `implementation_plan_review`, trả `checkpoint_not_current`.
-- [ ] Success trả JSON stdout, không trộn log tự do.
-- [ ] Error trả JSON `ok=false`.
-- [ ] `get-status` đọc được state Phase 4 mới.
+- [x] `approve-checkpoint` chỉ mở Phase 4 khi run đang `waiting_implementation_plan_review`.
+- [x] Nếu checkpoint không phải `implementation_plan_review`, trả `checkpoint_not_current`.
+- [x] Success trả JSON stdout, không trộn log tự do.
+- [x] Error trả JSON `ok=false`.
+- [x] `get-status` đọc được state Phase 4 mới.
 
 ## 2. Approved Plan Input
 
 Mục đích: Phase 4 dùng plan đã duyệt, không tự lập kế hoạch lại.
 
-- [ ] Đọc approved `implementation_plan_v{n}`.
-- [ ] Đọc approved `design_artifact_v{n}`.
-- [ ] Đọc graph và requirement-design trace liên quan.
-- [ ] Nếu thiếu plan đã duyệt, trả lỗi rõ và không chạy Developer.act.
+- [x] Đọc approved `implementation_plan_v{n}`.
+- [x] Đọc approved `design_artifact_v{n}`.
+- [x] Đọc graph và requirement-design trace liên quan.
+- [x] Nếu thiếu plan đã duyệt, trả lỗi rõ và không chạy Developer.act.
+
+## 2.1 Developer Work Packet V1
+
+Mục đích: đóng gói implementation plan đã duyệt thành input máy đọc được cho
+Developer.act, tránh để bước code phải parse Markdown/Confluence.
+
+- [x] Sinh `developer_work_packet_v1.json`.
+- [x] Packet chứa `implementation_steps`, `proposed_files`, `design_mappings_by_file`, `test_intents` và `repo_evidence`.
+- [x] Packet snapshot nội dung hiện tại của file mục tiêu đã tồn tại.
+- [x] Packet có `output_contract` yêu cầu Developer trả changed/new files theo JSON.
+- [x] Sau Slice 4.1, state=`implementation_ready` và chưa tạo branch/code/PR.
 
 ## 3. Git Target Repo
 
 Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo harness.
 
 - [ ] Tạo branch theo issue/run.
-- [ ] Không thao tác khi target repo dirty.
+- [x] Không thao tác khi target repo dirty.
 - [ ] Commit có issue key.
 - [ ] Không tạo GitHub Issue.
 - [ ] Có Draft PR thật; mock/local report chỉ được đánh dấu là chưa khóa Phase 4.
@@ -93,8 +104,8 @@ Mục đích: Niko báo được Phase 4 đang ở đâu mà không hiểu nội
 
 Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua Niko.
 
-- [ ] Unit test approve implementation plan checkpoint happy path.
-- [ ] Unit test missing approved implementation plan.
+- [x] Unit test approve implementation plan checkpoint happy path.
+- [x] Unit test missing approved implementation plan.
 - [ ] Unit test branch/commit/PR payload formatting.
 - [ ] Unit test PR description chứa đủ link/context.
 - [ ] Unit test test report `passed/failed/skipped`.
@@ -102,6 +113,7 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test blocked khi trace fail.
 - [ ] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
+- [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 

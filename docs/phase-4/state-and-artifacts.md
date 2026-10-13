@@ -7,6 +7,7 @@ bắt đầu khi implementation plan đã được duyệt.
 
 ```text
 waiting_implementation_plan_review
+  -> implementation_ready
   -> implementation_writing
   -> implementation_testing
   -> code_review_ready
@@ -23,6 +24,7 @@ cancelled
 
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
+| `implementation_ready` | Implementation plan đã được duyệt và `developer_work_packet_v1.json` đã sẵn sàng; chưa sửa code. | Harness slice tiếp theo |
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
 | `implementation_testing` | Đang chạy compile/test/trace check. | Harness |
 | `code_review_ready` | Draft PR và report đã sẵn sàng để human review. | Niko + human |
@@ -33,6 +35,7 @@ cancelled
 
 | Artifact | Mục đích |
 | --- | --- |
+| `developer_work_packet_v1.json` | Gói đầu vào máy đọc được cho Developer.act, lấy từ implementation plan đã duyệt. |
 | `code_change_report_v1.md` | Tóm tắt branch, commit, file đổi và lý do đổi. |
 | `test_report_v1.md` | Compile/test/validation result, ghi rõ pass/fail/skipped. |
 | `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test. |
@@ -42,6 +45,19 @@ Artifact dùng version như các phase trước. Nếu repair/rerun code xảy r
 giới hạn Phase 4, tạo `v2`, `v3`; không ghi đè file cũ.
 
 ## State JSON Sau Khi Pass
+
+Sau Slice 4.1:
+
+```text
+current_phase=implementation_preparing
+status=implementation_ready
+latest_artifacts.developer_work_packet
+pending_checkpoint=null
+allowed_next_actions=[get_status, cancel_run]
+summary_for_user
+```
+
+Sau Phase 4 đầy đủ:
 
 ```text
 current_phase=code_review

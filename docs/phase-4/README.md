@@ -8,11 +8,30 @@ design -> code -> test, rồi mở Draft PR để human review.
 Phase 4 mới là nơi GitHub trở thành tool sync chính. Phase 3 chỉ chuẩn bị plan và
 kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
+## Slice 4.1 Đã Chốt
+
+Slice đầu của Phase 4 hiện chỉ làm bước chuyển tiếp an toàn:
+
+```text
+approve_checkpoint(run_id)
+-> kiểm tra run đang ở waiting_implementation_plan_review
+-> đọc implementation_plan_structured_v{n}
+-> kiểm target repo vẫn sạch và có CodeGraph index
+-> ghi developer_work_packet_v1.json
+-> status=implementation_ready
+```
+
+Slice này chưa tạo branch, chưa sửa code, chưa commit và chưa mở PR. Mục đích
+là biến implementation plan đã được duyệt thành input máy đọc được cho
+Developer.act ở slice tiếp theo, thay vì để Developer parse Markdown hoặc
+Confluence.
+
 ## Luồng Phase 4
 
 ```text
 approve_checkpoint(run_id)
 -> kiểm tra run đang ở waiting_implementation_plan_review
+-> chuẩn bị developer_work_packet_v1.json
 -> đọc approved implementation_plan_v1
 -> đọc approved design graph và requirement-design trace
 -> tạo branch trong target repo
@@ -65,6 +84,7 @@ hợp ở Phase 5, không tự sửa design trong Phase 4.
 ## Đầu Ra Bắt Buộc
 
 ```text
+.runtime/runs/<run_id>/artifacts/developer_work_packet_v1.json
 .runtime/runs/<run_id>/artifacts/code_change_report_v1.md
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json

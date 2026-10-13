@@ -120,6 +120,7 @@ Luồng:
 ```text
 approve_checkpoint(run_id)
 -> đọc approved implementation_plan_v1 + approved design graph
+-> sinh developer_work_packet_v1.json
 -> tạo branch trong target repo
 -> Developer.act tạo/sửa code dựa trên plan
 -> Tester chạy compile/test hoặc ghi skipped rõ ràng
@@ -131,6 +132,7 @@ approve_checkpoint(run_id)
 
 Kết quả mong muốn:
 
+- Có `developer_work_packet_v1.json` và state tạm `implementation_ready` sau Slice 4.1.
 - Có branch/commit/Draft PR thật trong target repo.
 - Có `code_change_report_v1.md`.
 - Có `test_report_v1.md`.
