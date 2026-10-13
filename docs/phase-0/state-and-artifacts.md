@@ -32,7 +32,7 @@ cancelled
 | `design_drafting` | Đang tạo design artifact từ requirement đã duyệt. | Harness |
 | `waiting_design_approval` | Design đã sẵn sàng, chờ người dùng duyệt/sửa. | Niko + human |
 | `coding` | Đang tạo implementation artifact / code report. | Harness |
-| `review_ready` | Có output code/test/trace để review. | Niko + human |
+| `review_ready` | State tổng quát ban đầu cho output code/test/trace đã sẵn sàng review. Phase 3 cụ thể hóa thành `code_review_ready`. | Niko + human |
 | `done` | Run đã hoàn thành. | Harness hoặc human |
 | `blocked` | Thiếu thông tin hoặc lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -110,7 +110,7 @@ source_use_case -> requirement_packet_v1 -> design_artifact_v1
 Phase 3 mở rộng:
 
 ```text
-source_use_case -> requirement_packet_v1 -> design_artifact_v1 -> implementation_artifact_v1 -> test_report_v1
+source_use_case -> requirement_packet_v1 -> design_artifact_v1 -> implementation_plan_v1 -> code_change_report_v1 -> test_report_v1
 ```
 
 Không cần KG phức tạp ở Phase 0-1. Chỉ cần trace đủ để giải thích artifact này dựa trên nguồn nào.

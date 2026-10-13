@@ -95,13 +95,24 @@ Atlassian Phase 2 và Niko route duyệt checkpoint đã chạy được tới
 
 ## Phase 3 - Design Đến Code/Test Report
 
-Mục đích: chạy được phần execution graph tới output có thể review.
+Mục đích: sau khi duyệt design, hoàn tất execution graph cơ bản theo tinh thần
+TraceDev rồi đưa context sang target repo GitHub dưới dạng branch/commit/Draft PR
+có test report và trace requirement-design-code-test.
 
-- [ ] Sinh implementation artifact hoặc code change plan.
+Checklist chi tiết nằm ở `docs/phase-3/phase-3-checklist.md`. Phase 3 chưa tạo
+GitHub Issue; Jira vẫn là issue nguồn, còn GitHub là code collaboration lane.
+
+- [x] Viết tài liệu triển khai Phase 3 trong `docs/phase-3/`.
+- [ ] Chốt target test repo GitHub.
+- [ ] Duyệt design checkpoint để mở Phase 3.
+- [ ] Sinh implementation plan.
+- [ ] Sinh code change report trong target repo.
 - [ ] Sinh test/validation report.
 - [ ] Sinh trace requirement-design-code-test.
-- [ ] Sync GitHub/GitLab mock hoặc local repo report.
-- [ ] State chuyển sang `review_ready`.
+- [ ] Tạo branch/commit/Draft PR.
+- [ ] Sync PR/test/trace summary về Jira và Confluence.
+- [ ] State chuyển sang `code_review_ready`.
+- [ ] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator -> Developer/Tester/Validator trong phạm vi một use case.
 
 ## Phase 4 - Sửa Tại Checkpoint
 

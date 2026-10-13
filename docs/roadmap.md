@@ -76,24 +76,38 @@ Kết quả mong muốn:
 
 ## Phase 3 - Design Đến Code/Test Report
 
-Mục đích: chạy phần execution graph tới code/test report, trước mắt có thể dùng local repo/mock GitHub.
+Mục đích: sau khi người dùng duyệt design checkpoint, hoàn tất execution graph
+cơ bản từ requirement tới code theo tinh thần TraceDev, rồi đẩy context sang code
+collaboration lane bằng branch, commit và Draft PR trên target test repo GitHub.
+Jira vẫn là issue nguồn; không tạo GitHub Issue mới.
+
+Tài liệu chi tiết: `docs/phase-3/README.md`. Phase này chỉ bắt đầu triển khai
+code sau khi đã chốt target repo policy, GitHub PR contract, Developer/Tester/
+Validator loop và checklist trong `docs/phase-3/phase-3-checklist.md`.
 
 Luồng:
 
 ```text
 approve_checkpoint(run_id)
--> Developer tạo code/change plan hoặc code artifact
--> Tester/Validator tạo test_report_v1
--> sync GitHub/GitLab mock hoặc local repo report
--> status=review_ready
+-> đọc approved design checkpoint
+-> Developer tạo implementation_plan_v1
+-> Developer tạo/sửa code trong target test repo
+-> Tester/Validator tạo test_report_v1 và requirement-design-code-test trace
+-> tạo hoặc cập nhật Draft PR trên GitHub
+-> sync PR/test/trace summary về Jira và Confluence
+-> status=code_review_ready
 ```
 
 Kết quả mong muốn:
 
-- Có implementation artifact.
-- Có test/validation report.
+- Có implementation plan và code change report.
+- Có test/validation report ghi rõ pass/fail/skipped.
 - Có trace requirement-design-code-test.
-- Có tool sync report.
+- Có Draft PR trên GitHub để human review.
+- Có tool sync report Phase 3 với GitHub/Jira/Confluence targets.
+- Có đủ vai trò Requirement Refiner, Designer, Validator, Developer và Tester
+  trong chuỗi end-to-end một use case; Phase 4+ mới là phần cải tiến request
+  change/context động/nhiều use case.
 
 ## Phase 4 - Sửa Tại Checkpoint
 
@@ -175,4 +189,14 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > dừng ở `waiting_design_approval`, PlantUML app macro là output diagram chính,
 > Mermaid để backlog, và regression test đã khóa trường hợp requirement không
 > traceable bằng `status=blocked` + `last_error` rõ.
+
+> Cập nhật 2026-10-13: đã viết tài liệu triển khai Phase 3 trong
+> `docs/phase-3/`. Hướng Phase 3 là target test repo GitHub, branch/commit/Draft
+> PR, test report và trace requirement-design-code-test. Không tạo GitHub Issue
+> vì Jira vẫn là issue nguồn.
+
+> Cập nhật 2026-10-13: làm rõ Phase 3 không phải bản thiếu multi-agent. Khi khóa
+> Phase 3, execution graph phải tương đương TraceDev trong phạm vi một use case;
+> Phase 4 trở đi là cải tiến harness cho change request, context động và impact
+> analysis.
 

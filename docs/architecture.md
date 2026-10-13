@@ -48,7 +48,8 @@ Artifact Store
   refined_requirement_v1
   design_artifact_v1
   trace_graph_v1
-  implementation_artifact_v1
+  implementation_plan_v1
+  code_change_report_v1
   test_report_v1
 
 Tool Sync Records
@@ -96,7 +97,7 @@ Niko -> báo trạng thái mới
 | --- | --- |
 | Jira | control plane cho issue, status, comment, approval |
 | Confluence | knowledge plane cho requirement/design/trace docs |
-| GitHub/GitLab | code plane cho branch, commit, PR/MR, CI |
+| GitHub/GitLab | code plane cho branch, commit, PR/MR, CI; không thay Jira issue nguồn |
 | Niko/Ops | conversation, dashboard, trace, human checkpoint |
 
 Ban đầu các tool này có thể được mô phỏng bằng fixture hoặc local Markdown để chứng minh flow trước.

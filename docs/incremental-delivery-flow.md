@@ -66,13 +66,22 @@ summary/comment checkpoint, Confluence nhận bản review đầy đủ hơn, c�
 ```text
 Input: approve design checkpoint
 Output:
-  implementation_artifact_v1
+  implementation_plan_v1
+  code_change_report_v1
   test_report_v1
-  trace_graph_v2(requirement-design-code-test)
-  status=review_ready
+  requirement_design_code_trace_v1
+  GitHub Draft PR
+  status=code_review_ready
 ```
 
-Ban đầu có thể chưa cần code compile thật. Nhưng report phải nói rõ mức độ đã làm: generated code, compile skipped, test skipped hoặc test passed.
+Slice này dùng target test repo GitHub tách khỏi `SDLC_Harness`. Jira vẫn là
+issue nguồn nên không tạo GitHub Issue mới. GitHub dùng cho branch, commit,
+Draft PR, code review và test/CI signal nếu có.
+
+Lát mở đường có thể ghi rõ compile/test skipped để không đánh tráo trạng thái.
+Nhưng điều kiện khóa Phase 3 là phải có code change thật, Draft PR thật và tối
+thiểu một lớp validation có thể chạy được trong target repo hoặc được ghi rõ là
+blocked nếu chưa đủ điều kiện kiểm chứng.
 
 ## Slice 4 - Sửa Tại Checkpoint
 
@@ -101,7 +110,9 @@ Confluence mock  -> .runtime/runs/<run_id>/sync/<phase>-confluence-page.md
 Git mock         -> .runtime/runs/<run_id>/sync/<phase>-git-report.md
 ```
 
-Khi flow ổn mới thay bằng API thật.
+Với Phase 3, mock/local git report chỉ dùng để mở đường cho test tự động. Điều
+kiện khóa Phase 3 là có target repo GitHub và Draft PR thật hoặc một quyết định
+rõ ràng thay GitHub bằng GitLab.
 
 ## Không Làm Trong Giai Đoạn Đầu
 
