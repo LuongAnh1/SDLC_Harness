@@ -9,9 +9,9 @@ thành.
 Mục đích: human/Niko có thể duyệt design checkpoint và kích hoạt Phase 3 bằng
 contract JSON ổn định.
 
-- [ ] `approve-checkpoint` chỉ mở Phase 3 khi run đang `waiting_design_approval`.
-- [ ] Nếu checkpoint không phải `design_approval`, trả `checkpoint_not_current`.
-- [ ] Success trả JSON stdout, không trộn log tự do.
+- [x] `approve-checkpoint` chỉ mở Phase 3 khi run đang `waiting_design_approval`.
+- [x] Nếu checkpoint không phải `design_approval`, trả `checkpoint_not_current`.
+- [x] Success trả JSON stdout, không trộn log tự do.
 - [ ] Error trả JSON `ok=false`.
 - [ ] `get-status` đọc được state Phase 3 mới.
 
@@ -20,19 +20,19 @@ contract JSON ổn định.
 Mục đích: Phase 3 dùng requirement/design đã duyệt, không tự refine hoặc design
 lại.
 
-- [ ] Đọc approved `requirement_packet_v1`.
-- [ ] Đọc approved `design_artifact_v{n}`.
-- [ ] Đọc `requirement_design_trace_v{n}` và graph liên quan.
-- [ ] Ghi `approved_artifacts.design_artifact`.
-- [ ] Nếu thiếu design đã duyệt, trả lỗi rõ và không chạy Developer.
+- [x] Đọc approved `requirement_packet_v1`.
+- [x] Đọc approved `design_artifact_v{n}`.
+- [x] Đọc `requirement_design_trace_v{n}` và graph liên quan.
+- [x] Ghi `approved_artifacts.design_artifact`.
+- [x] Nếu thiếu design đã duyệt, trả lỗi rõ và không chạy Developer.
 
 ## 3. Target Repo Và GitHub Policy
 
 Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo harness.
 
 - [x] Có target repo path/remote ban đầu: `D:\Dự án cá nhân\Do_an_II\SDLC_Target_eTour` / `LuongAnh1/SDLC_Target_eTour`.
-- [ ] Có config target repo path/remote trong SDLC Harness runtime/config.
-- [ ] Có guard không thao tác nhầm repo `SDLC_Harness`.
+- [x] Có config target repo path/remote trong SDLC Harness runtime/config.
+- [x] Có guard không thao tác nhầm repo `SDLC_Harness`.
 - [ ] Tạo branch theo issue/run.
 - [ ] Commit có issue key.
 - [ ] Không tạo GitHub Issue.
@@ -44,7 +44,7 @@ Mục đích: tạo implementation plan và code change có thể review, không
 mù.
 
 - [ ] Tạo prompt/module Developer riêng cho Phase 3.
-- [ ] Sinh `implementation_plan_v1.md`.
+- [x] Sinh `implementation_plan_v1.md`.
 - [ ] Developer đọc requirement/design/trace đã duyệt.
 - [ ] Developer tạo/sửa code trong target repo.
 - [ ] Sinh `code_change_report_v1.md`.
@@ -88,22 +88,23 @@ Confluence bởi SDLC Harness.
 
 Mục đích: Niko báo được Phase 3 đang ở đâu mà không hiểu nội bộ Developer/Tester.
 
-- [ ] Ghi state `implementation_planning`.
+- [x] Ghi state `implementation_planning`.
 - [ ] Ghi state `implementation_writing`.
 - [ ] Ghi state `implementation_testing`.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [ ] `latest_artifacts` trỏ tới plan/report/trace mới nhất.
 - [ ] `pending_checkpoint.type=code_review`.
-- [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
+- [x] `pending_checkpoint.type=implementation_plan_review` cho Slice 1 trước khi sửa code.
+- [x] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
 
 ## 9. Test Và Acceptance
 
 Mục đích: Phase 3 phải chạy được từ terminal trước khi live qua Niko.
 
-- [ ] Unit test approve design checkpoint happy path.
-- [ ] Unit test missing approved design.
-- [ ] Unit test target repo guard.
+- [x] Unit test approve design checkpoint happy path.
+- [x] Unit test missing approved design.
+- [x] Unit test target repo guard.
 - [ ] Unit test branch/commit/PR payload formatting.
 - [ ] Unit test PR description chứa đủ link/context.
 - [ ] Unit test test report `passed/failed/skipped`.

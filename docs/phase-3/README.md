@@ -29,6 +29,8 @@ approve_checkpoint(run_id)
 -> đọc requirement-design trace và graph liên quan
 -> state=implementation_planning
 -> Developer tạo implementation_plan_v1
+-> status=waiting_implementation_plan_review
+-> human/Niko duyệt implementation plan trước khi sửa repo
 -> state=implementation_writing
 -> Developer tạo/sửa code trong target test repo trên branch riêng
 -> ghi code_change_report_v1
@@ -105,6 +107,11 @@ pending_checkpoint.type=code_review
 allowed_next_actions=[approve_checkpoint, request_change, cancel_run, get_status]
 summary_for_user
 ```
+
+Slice hiện tại mới dừng ở checkpoint `waiting_implementation_plan_review`: đã có
+`implementation_plan_v1.md`, `approved_artifacts`, target repo guard và JSON
+status để Niko đọc. Những artifact code/test/trace/PR phía trên là tiêu chí khóa
+Phase 3 đầy đủ, chưa phải trạng thái đã xong của slice đầu.
 
 ## Sync Phase 3
 

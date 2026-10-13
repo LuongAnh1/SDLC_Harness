@@ -19,6 +19,7 @@ Khi người dùng duyệt design checkpoint:
 ```text
 waiting_design_approval
   -> implementation_planning
+  -> waiting_implementation_plan_review
   -> implementation_writing
   -> implementation_testing
   -> code_review_ready
@@ -36,6 +37,7 @@ cancelled
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
 | `implementation_planning` | Đang lập kế hoạch sửa/sinh code từ design đã duyệt. | Harness |
+| `waiting_implementation_plan_review` | Implementation plan đã sinh, chờ human/Niko duyệt trước khi sửa target repo. | Niko + human |
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
 | `implementation_testing` | Đang chạy compile/test/trace check. | Harness |
 | `code_review_ready` | Draft PR và report đã sẵn sàng để human review. | Niko + human |
@@ -57,6 +59,10 @@ cancelled
 
 Artifact dùng version như các phase trước. Nếu repair/rerun code xảy ra trong
 giới hạn Phase 3, tạo `v2`, `v3`; không ghi đè file cũ.
+
+Slice 1 hiện mới sinh `implementation_plan_v1.md` và ghi checkpoint
+`waiting_implementation_plan_review`. Các artifact code/test/trace/sync V3 là
+đích khóa Phase 3 đầy đủ ở các slice tiếp theo.
 
 ## State JSON Sau Khi Pass
 

@@ -13,8 +13,8 @@ import sys
 
 from ..core.config import load_settings, repo_root
 from ..core.errors import HarnessError
+from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
-from ..workflows.phase2 import PhaseTwoWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,7 +84,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         workflow = PhaseOneWorkflow(settings)
         return workflow.sync_run(run_id=args.run_id)
     if args.command == "approve-checkpoint":
-        workflow = PhaseTwoWorkflow(settings)
+        workflow = CheckpointApprovalWorkflow(settings)
         return workflow.approve_checkpoint(
             run_id=args.run_id,
             checkpoint_id=args.checkpoint_id,

@@ -101,11 +101,14 @@ có test report và trace requirement-design-code-test.
 
 Checklist chi tiết nằm ở `docs/phase-3/phase-3-checklist.md`. Phase 3 chưa tạo
 GitHub Issue; Jira vẫn là issue nguồn, còn GitHub là code collaboration lane.
+Slice 1 đã mở được Phase 3 từ design checkpoint, kiểm tra target repo và sinh
+`implementation_plan_v1`; workflow hiện dừng ở `waiting_implementation_plan_review`
+trước khi sửa code thật.
 
 - [x] Viết tài liệu triển khai Phase 3 trong `docs/phase-3/`.
 - [x] Chốt target test repo GitHub: `LuongAnh1/SDLC_Target_eTour`.
-- [ ] Duyệt design checkpoint để mở Phase 3.
-- [ ] Sinh implementation plan.
+- [x] Duyệt design checkpoint để mở Phase 3.
+- [x] Sinh implementation plan.
 - [ ] Sinh code change report trong target repo.
 - [ ] Sinh test/validation report.
 - [ ] Sinh trace requirement-design-code-test.

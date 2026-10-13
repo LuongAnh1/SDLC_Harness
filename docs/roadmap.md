@@ -91,6 +91,8 @@ Luồng:
 approve_checkpoint(run_id)
 -> đọc approved design checkpoint
 -> Developer tạo implementation_plan_v1
+-> status=waiting_implementation_plan_review
+-> human/Niko duyệt kế hoạch implement
 -> Developer tạo/sửa code trong target test repo
 -> Tester/Validator tạo test_report_v1 và requirement-design-code-test trace
 -> tạo hoặc cập nhật Draft PR trên GitHub
@@ -203,4 +205,10 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Cập nhật 2026-10-13: đã tạo target test repo private
 > `LuongAnh1/SDLC_Target_eTour` cùng cấp với `Niko_Agent` và `SDLC_Harness`.
 > Repo này là code collaboration lane ban đầu cho Phase 3.
+
+> Cập nhật 2026-10-13: Phase 3 đã có Slice 1 cho `approve-checkpoint` từ
+> `waiting_design_approval`: dispatcher chọn đúng workflow, guard target repo
+> kiểm tra path/remote/dirty worktree, sinh `implementation_plan_v1.md`, ghi
+> `approved_artifacts` và dừng ở `waiting_implementation_plan_review`. Chưa tạo
+> branch/code/commit/test report/Draft PR.
 

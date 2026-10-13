@@ -2,7 +2,7 @@
 
 Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 sinh formal
 use case và requirement packet; Phase 2 sinh design, graph, trace và quality
-report theo từng version.
+report theo từng version; Phase 3 sinh implementation plan trước khi sửa code.
 """
 
 from __future__ import annotations
@@ -285,6 +285,72 @@ def write_phase2_design_artifacts(
     }
 
 
+def write_phase3_implementation_plan(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    issue_key: str,
+    requirement_packet: str,
+    design_artifact: str,
+    target_repo_path: str,
+    target_repo_remote: str,
+    target_base_branch: str,
+    planned_branch: str,
+    target_files: list[str],
+    test_command: str,
+    version: int = 1,
+) -> str:
+    """Ghi implementation plan cho lát đầu Phase 3."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"implementation_plan_{suffix}.md"
+    target_file_lines = "\n".join(f"- `{item}`" for item in target_files) if target_files else "- none detected"
+    content = f"""# Implementation Plan {suffix.upper()}
+
+## Run Context
+
+- Run id: `{run_id}`
+- Source ref: `{source_ref}`
+- Issue key: `{issue_key}`
+
+## Target Repository
+
+- Local path: `{target_repo_path}`
+- Remote: `{target_repo_remote}`
+- Base branch: `{target_base_branch}`
+- Planned branch: `{planned_branch}`
+
+## Approved Requirement Summary
+
+{_excerpt(requirement_packet)}
+
+## Approved Design Summary
+
+{_excerpt(design_artifact)}
+
+## Expected Code Areas
+
+{target_file_lines}
+
+## Test Command
+
+```powershell
+{test_command}
+```
+
+## Phase 3 Slice 1 Notes
+
+- This artifact only plans implementation work.
+- No source code, branch, commit, test report, or pull request has been created in this slice.
+- The next slice must create a real code change and Draft PR before Phase 3 can be locked.
+"""
+    path.write_text(content, encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 
@@ -292,6 +358,15 @@ def _with_heading(title: str, content: str) -> str:
     if text.startswith("#"):
         return text + "\n"
     return f"# {title}\n\n{text}\n"
+
+
+def _excerpt(content: str, *, limit: int = 1400) -> str:
+    """Cắt artifact dài thành đoạn đủ đọc cho implementation plan."""
+
+    text = content.strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "\n\n... truncated for implementation planning ..."
 
 
 def _traceability_result_text(missing_count: int) -> str:

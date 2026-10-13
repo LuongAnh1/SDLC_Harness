@@ -35,6 +35,10 @@ Developer có hai bước:
 1. `plan`: tạo `implementation_plan_v1.md`.
 2. `act`: thao tác target repo và tạo `code_change_report_v1.md`.
 
+Slice 1 mới triển khai bước `plan` và dừng ở checkpoint
+`waiting_implementation_plan_review`. Bước `act`, Tester và Validator code-test
+sẽ được triển khai sau khi kế hoạch implement đã có thể review được.
+
 Implementation plan cần nói rõ:
 
 - target repo/branch;
