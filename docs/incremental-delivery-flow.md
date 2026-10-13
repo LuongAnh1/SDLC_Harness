@@ -61,12 +61,27 @@ Sync của slice này đi theo `docs/phase-2/sync-design-checkpoint.md`: Jira nh
 summary/comment checkpoint, Confluence nhận bản review đầy đủ hơn, còn Niko chỉ
 đọc `last_sync` và `pending_checkpoint` từ state.
 
-## Slice 3 - Design Đến Code/Test Report
+## Slice 3 - Design Đến Implementation Plan
 
 ```text
 Input: approve design checkpoint
 Output:
   implementation_plan_v1
+  implementation_plan_review_v1
+  tool_sync_report_v3
+  status=waiting_implementation_plan_review
+```
+
+Slice này là checkpoint riêng của harness. Developer.plan chỉ ánh xạ approved
+requirement/design/trace graph sang kế hoạch triển khai dự kiến. Validator.review_plan
+kiểm plan có cover design, có trace được, có đủ path/test intent và không bịa
+scope. GitHub target repo chỉ được kiểm tra, chưa tạo branch/commit/PR.
+
+## Slice 4 - Implementation Plan Đến Code/Test Report
+
+```text
+Input: approve implementation plan checkpoint
+Output:
   code_change_report_v1
   test_report_v1
   requirement_design_code_trace_v1
@@ -79,11 +94,11 @@ issue nguồn nên không tạo GitHub Issue mới. GitHub dùng cho branch, com
 Draft PR, code review và test/CI signal nếu có.
 
 Lát mở đường có thể ghi rõ compile/test skipped để không đánh tráo trạng thái.
-Nhưng điều kiện khóa Phase 3 là phải có code change thật, Draft PR thật và tối
+Nhưng điều kiện khóa Phase 4 là phải có code change thật, Draft PR thật và tối
 thiểu một lớp validation có thể chạy được trong target repo hoặc được ghi rõ là
 blocked nếu chưa đủ điều kiện kiểm chứng.
 
-## Slice 4 - Sửa Tại Checkpoint
+## Slice 5 - Sửa Tại Checkpoint
 
 ```text
 Input: request_change(run_id, message)
@@ -110,8 +125,8 @@ Confluence mock  -> .runtime/runs/<run_id>/sync/<phase>-confluence-page.md
 Git mock         -> .runtime/runs/<run_id>/sync/<phase>-git-report.md
 ```
 
-Với Phase 3, mock/local git report chỉ dùng để mở đường cho test tự động. Điều
-kiện khóa Phase 3 là có target repo GitHub và Draft PR thật hoặc một quyết định
+Với Phase 4, mock/local git report chỉ dùng để mở đường cho test tự động. Điều
+kiện khóa Phase 4 là có target repo GitHub và Draft PR thật hoặc một quyết định
 rõ ràng thay GitHub bằng GitLab.
 
 ## Không Làm Trong Giai Đoạn Đầu

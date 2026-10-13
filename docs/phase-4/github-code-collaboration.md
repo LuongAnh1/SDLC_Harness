@@ -1,24 +1,24 @@
-# GitHub Code Collaboration Lane Cho Phase 3
+# GitHub Code Collaboration Lane Cho Phase 4
 
-Phase 3 cần một target repo riêng để chứng minh context đi từ Jira/Confluence
+Phase 4 cần một target repo riêng để chứng minh context đi từ Jira/Confluence
 sang code collaboration lane. `SDLC_Harness` là repo workflow; target repo là nơi
 code sản phẩm được tạo/sửa và review.
 
 ## Ranh Giới Tool
 
-| Tool | Vai trò trong Phase 3 |
+| Tool | Vai trò trong Phase 4 |
 | --- | --- |
 | Jira | Issue nguồn, trạng thái công việc, comment tóm tắt PR. |
 | Confluence | Requirement/design/code-review checkpoint đầy đủ. |
 | GitHub | Branch, commit, Draft PR, code review và test/CI signal. |
 | Niko | Gọi action, đọc status, báo người dùng. |
 
-Không tạo GitHub Issue trong Phase 3. Jira `SDLC-1` đã là issue nguồn; tạo thêm
+Không tạo GitHub Issue trong Phase 4. Jira `SDLC-1` đã là issue nguồn; tạo thêm
 GitHub Issue sẽ làm phân tán source of truth.
 
 ## Target Repo
 
-Phase 3 dùng target test repo trên GitHub. Repo này tách khỏi `SDLC_Harness` để
+Phase 4 dùng target test repo trên GitHub. Repo này tách khỏi `SDLC_Harness` để
 không trộn code workflow với code sản phẩm.
 
 Yêu cầu tối thiểu với target repo:
@@ -28,7 +28,7 @@ Yêu cầu tối thiểu với target repo:
 - phù hợp Java/eTour ban đầu để bám TraceDev và dataset;
 - có thể xóa/reset branch demo khi cần chạy lại.
 
-Target repo đã chốt cho Phase 3:
+Target repo đã chốt cho Phase 4:
 
 ```text
 local: D:\Dự án cá nhân\Do_an_II\SDLC_Target_eTour
@@ -76,8 +76,8 @@ PR description phải có:
 - test/validation đã chạy;
 - known limitations hoặc skipped tests.
 
-Nếu GitHub API/CLI không tạo được PR, Phase 3 có thể ghi local git report ở lát
-mở đường nhưng không được coi là khóa Phase 3 thật. Điều kiện khóa Phase 3 là có
+Nếu GitHub API/CLI không tạo được PR, Phase 4 có thể ghi local git report ở lát
+mở đường nhưng không được coi là khóa Phase 4 thật. Điều kiện khóa Phase 4 là có
 Draft PR thật hoặc quyết định rõ ràng thay thế GitHub bằng GitLab.
 
 ## Sync Ngược Về Jira Và Confluence
@@ -87,7 +87,7 @@ Sau khi có PR:
 - Jira nhận comment ngắn gồm PR link, branch, test summary và trạng thái review.
 - Confluence nhận checkpoint đầy đủ gồm implementation plan, code change report,
   traceability summary và test report.
-- `tool_sync_report_v3.json` ghi target GitHub/Jira/Confluence và URL tương ứng.
+- `tool_sync_report_v4.json` ghi target GitHub/Jira/Confluence và URL tương ứng.
 
 Sync phải idempotent như Phase 1/2: nếu đã có external id do harness tạo, re-sync
 cập nhật artifact cũ thay vì tạo trùng comment/page.

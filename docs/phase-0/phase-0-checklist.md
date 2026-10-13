@@ -34,7 +34,7 @@ Mục đích: workflow có trạng thái rõ để Niko đọc và phản hồi.
 - [x] State `design_drafting` được định nghĩa.
 - [x] State `waiting_design_approval` được định nghĩa.
 - [x] State `coding` được định nghĩa.
-- [x] State `review_ready` được định nghĩa ở mức tổng quát; Phase 3 cụ thể hóa thành `code_review_ready`.
+- [x] State `review_ready` được định nghĩa ở mức tổng quát; Phase 4 cụ thể hóa thành `code_review_ready`.
 - [x] State `done`, `blocked`, `cancelled` được định nghĩa.
 
 ## 4. Artifact Và Versioning

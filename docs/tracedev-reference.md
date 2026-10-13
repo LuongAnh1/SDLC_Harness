@@ -32,6 +32,19 @@ TraceDev gốc chạy gần như batch:
 input use case -> chạy một lượt -> đọc log/output
 ```
 
+TraceDev cũng không có bước `implementation_plan` riêng trước khi code. Sau khi
+Designer/Validator tạo `final_design`, Developer sinh code trực tiếp từ design.
+Trong SDLC Harness, `implementation_plan` là lớp checkpoint/handoff được thêm
+vào để human kiểm soát trước khi target repo bị sửa:
+
+```text
+approved design graph
+  -> Developer.plan
+  -> Validator.review_plan
+  -> human approve
+  -> Developer.act
+```
+
 SDLC Harness cần thêm:
 
 - workflow state truy vấn được;

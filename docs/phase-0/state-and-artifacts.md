@@ -10,6 +10,8 @@ created
   -> waiting_requirement_approval
   -> design_drafting
   -> waiting_design_approval
+  -> implementation_planning
+  -> waiting_implementation_plan_review
   -> coding
   -> review_ready
   -> done
@@ -31,8 +33,10 @@ cancelled
 | `waiting_requirement_approval` | Requirement packet đã sẵn sàng, chờ người dùng duyệt/sửa. | Niko + human |
 | `design_drafting` | Đang tạo design artifact từ requirement đã duyệt. | Harness |
 | `waiting_design_approval` | Design đã sẵn sàng, chờ người dùng duyệt/sửa. | Niko + human |
+| `implementation_planning` | Đang tạo implementation plan từ design đã duyệt. | Harness |
+| `waiting_implementation_plan_review` | Implementation plan đã sẵn sàng, chờ người dùng duyệt/sửa trước khi code. | Niko + human |
 | `coding` | Đang tạo implementation artifact / code report. | Harness |
-| `review_ready` | State tổng quát ban đầu cho output code/test/trace đã sẵn sàng review. Phase 3 cụ thể hóa thành `code_review_ready`. | Niko + human |
+| `review_ready` | State tổng quát ban đầu cho output code/test/trace đã sẵn sàng review. Phase 4 cụ thể hóa thành `code_review_ready`. | Niko + human |
 | `done` | Run đã hoàn thành. | Harness hoặc human |
 | `blocked` | Thiếu thông tin hoặc lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -45,7 +49,8 @@ cancelled
 | `requirement_packet` | requirement_drafting | Yêu cầu đã được làm rõ, acceptance criteria, open questions. |
 | `design_artifact` | design_drafting | Thiết kế, diagram text/mermaid, component, decision. |
 | `trace_graph` | sau mỗi phase chính | Nối requirement -> design -> code/test. |
-| `implementation_artifact` | coding | Code plan, generated code summary hoặc diff summary. |
+| `implementation_plan` | implementation_planning | Kế hoạch triển khai ánh xạ từ design graph sang code target dự kiến. |
+| `implementation_artifact` | coding | Generated code summary hoặc diff summary. |
 | `test_report` | coding/review | Compile/test/validation result. |
 | `tool_sync_report` | sau mỗi sync | Ghi artifact nào đã đẩy lên tool/mock tool nào. |
 
@@ -108,6 +113,12 @@ source_use_case -> requirement_packet_v1 -> design_artifact_v1
 ```
 
 Phase 3 mở rộng:
+
+```text
+source_use_case -> requirement_packet_v1 -> design_artifact_v1 -> implementation_plan_v1
+```
+
+Phase 4 mở rộng:
 
 ```text
 source_use_case -> requirement_packet_v1 -> design_artifact_v1 -> implementation_plan_v1 -> code_change_report_v1 -> test_report_v1

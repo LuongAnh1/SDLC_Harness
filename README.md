@@ -15,13 +15,13 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 hiện là implementation planning checkpoint: đọc approved design/trace, kiểm target repo, sinh `implementation_plan_v1.md` và dừng ở `waiting_implementation_plan_review`; Phase 4 mới là code/test/Draft PR. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
 
 ## Cấu Trúc Package
 
 - `sdlc_harness/interfaces/`: CLI/entrypoint công khai để Niko gọi. `sdlc_harness/cli.py` chỉ là wrapper giữ compatibility cho `python -m sdlc_harness.cli`.
-- `sdlc_harness/workflows/`: workflow graph theo phase, hiện có Phase 1 `use case -> requirement checkpoint`.
+- `sdlc_harness/workflows/`: workflow graph theo phase, hiện có Phase 1/2 và Phase 3 planning checkpoint.
 - `sdlc_harness/agents/requirements/`: Requirement Refiner, formal use case Validator, requirement packet Validator và prompt templates copy/adapt từ TraceDev.
 - `sdlc_harness/sources/`: loader cho fixture/dataset/Jira source sau này.
 - `sdlc_harness/storage/`: runtime state store và active-run index.
@@ -39,6 +39,8 @@ Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/
 - `docs/phase-1/README.md`: tài liệu triển khai chi tiết cho lát cắt use case -> requirement packet.
 - `docs/phase-2/README.md`: tài liệu triển khai dự kiến cho lát cắt requirement packet -> design artifact.
 - `docs/phase-2/sync-design-checkpoint.md`: contract sync checkpoint thiết kế lên Jira/Confluence và cách Niko đọc `last_sync`.
+- `docs/phase-3/README.md`: implementation planning checkpoint sau khi design được duyệt.
+- `docs/phase-4/README.md`: code/test/Draft PR sau khi implementation plan được duyệt.
 
 ## Nguyên Tắc Hiện Tại
 
@@ -99,8 +101,9 @@ Ranh giới hiện tại:
   requirement graph/class trace/sequence trace/missing links ở mode
   `traceability_v1`, Designer repair design theo missing-link report,
   `SDLC_DESIGN_REPAIR_LIMIT` cấu hình số vòng repair, và mock/real design sync
-  khi design pass. Niko đọc JSON status để báo `waiting_design_approval`,
-  `blocked`, `last_sync` và checkpoint hiện tại.
+  khi design pass. Phase 3 sinh `implementation_plan_v1` và chờ
+  `waiting_implementation_plan_review`; Phase 4 mới tạo code/test/Draft PR. Niko
+  đọc JSON status để báo checkpoint hiện tại, `blocked` và `last_sync`.
 
 <!-- SDLC_NIKO_SYNC_END -->
 

@@ -5,8 +5,8 @@ giữa phần đã chạy được và phần vẫn nằm trong kế hoạch.
 
 ## 2026-10-13 - Slice 1: mở Phase 3 và sinh implementation plan
 
-Mục tiêu của lát này là nối design checkpoint đã duyệt sang Phase 3 mà chưa đụng
-vào code thật trong target repo.
+Mục tiêu của lát này là nối design checkpoint đã duyệt sang Phase 3, sinh
+implementation plan, và chưa đụng vào code thật trong target repo.
 
 Đã hoàn thành:
 
@@ -40,5 +40,7 @@ Chưa làm trong lát này:
 - Chưa tạo commit.
 - Chưa chạy Tester/code trace.
 - Chưa tạo Draft PR.
-- Chưa sync Phase 3 về Jira/Confluence/GitHub.
+- Chưa có Validator.review_plan thật cho implementation plan.
+- Chưa sync implementation plan lên Jira/Confluence.
+- GitHub thuộc Phase 4, nên Phase 3 chưa sync GitHub.
 

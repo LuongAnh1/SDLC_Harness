@@ -74,44 +74,70 @@ Kết quả mong muốn:
 - Có trạng thái chờ duyệt design.
 - Niko đọc được summary để báo lại.
 
-## Phase 3 - Design Đến Code/Test Report
+## Phase 3 - Design Đến Implementation Plan
 
-Mục đích: sau khi người dùng duyệt design checkpoint, hoàn tất execution graph
-cơ bản từ requirement tới code theo tinh thần TraceDev, rồi đẩy context sang code
-collaboration lane bằng branch, commit và Draft PR trên target test repo GitHub.
-Jira vẫn là issue nguồn; không tạo GitHub Issue mới.
+Mục đích: sau khi người dùng duyệt design checkpoint, tạo một bản kế hoạch triển
+khai trước khi agent được phép sửa target repo. Phase này là checkpoint riêng của
+harness, không phải bước có sẵn trong TraceDev.
 
-Tài liệu chi tiết: `docs/phase-3/README.md`. Phase này chỉ bắt đầu triển khai
-code sau khi đã chốt target repo policy, GitHub PR contract, Developer/Tester/
-Validator loop và checklist trong `docs/phase-3/phase-3-checklist.md`.
+Tài liệu chi tiết: `docs/phase-3/README.md`. Phase này chỉ sinh và kiểm
+`implementation_plan_v1`, chưa tạo branch/code/commit/Draft PR.
 
 Luồng:
 
 ```text
 approve_checkpoint(run_id)
--> đọc approved design checkpoint
--> Developer tạo implementation_plan_v1
+-> đọc approved requirement/design/trace graph
+-> Developer.plan tạo implementation_plan_v1
+-> Validator.review_plan kiểm coverage/traceability/executability/scope
+-> sync plan lên Confluence và comment trạng thái lên Jira
 -> status=waiting_implementation_plan_review
--> human/Niko duyệt kế hoạch implement
--> Developer tạo/sửa code trong target test repo
--> Tester/Validator tạo test_report_v1 và requirement-design-code-test trace
--> tạo hoặc cập nhật Draft PR trên GitHub
+```
+
+`implementation_plan_v1` chỉ ánh xạ từ graph hiện tại ra kế hoạch code dự kiến:
+target repo/branch, file/class/method dự kiến, test intent, assumptions và out of
+scope. Nó không tự sửa requirement/design graph. Nếu plan phát hiện design thiếu
+hoặc mâu thuẫn, workflow phải `blocked` hoặc quay về checkpoint phù hợp.
+
+Kết quả mong muốn:
+
+- Có `implementation_plan_v1.md`.
+- Có plan review report của Validator.
+- Có sync report Phase 3 cho Jira/Confluence.
+- State dừng ở `waiting_implementation_plan_review`.
+- Chưa tạo branch/code/commit/Draft PR.
+
+## Phase 4 - Implementation Plan Đến Code/Test/Draft PR
+
+Mục đích: sau khi implementation plan được duyệt, Developer triển khai code dựa
+trên plan và approved design, sau đó Tester/Validator kiểm chứng bằng graph.
+
+Tài liệu chi tiết: `docs/phase-4/README.md`.
+
+Luồng:
+
+```text
+approve_checkpoint(run_id)
+-> đọc approved implementation_plan_v1 + approved design graph
+-> tạo branch trong target repo
+-> Developer.act tạo/sửa code dựa trên plan
+-> Tester chạy compile/test hoặc ghi skipped rõ ràng
+-> Validator kiểm requirement -> design -> code -> test trace
+-> tạo Draft PR trên GitHub
 -> sync PR/test/trace summary về Jira và Confluence
 -> status=code_review_ready
 ```
 
 Kết quả mong muốn:
 
-- Có implementation plan và code change report.
-- Có test/validation report ghi rõ pass/fail/skipped.
-- Có trace requirement-design-code-test.
-- Có Draft PR trên GitHub để human review.
-- Có tool sync report Phase 3 với GitHub/Jira/Confluence targets.
-- Có đủ vai trò Requirement Refiner, Designer, Validator, Developer và Tester
-  trong chuỗi end-to-end một use case; Phase 4+ mới là phần cải tiến request
-  change/context động/nhiều use case.
+- Có branch/commit/Draft PR thật trong target repo.
+- Có `code_change_report_v1.md`.
+- Có `test_report_v1.md`.
+- Có `requirement_design_code_trace_v1.json`.
+- Có `tool_sync_report_v4.json`.
+- Niko báo được PR link, test summary và checkpoint code review.
 
-## Phase 4 - Sửa Tại Checkpoint
+## Phase 5 - Sửa Tại Checkpoint
 
 Mục đích: người dùng có thể yêu cầu sửa ngay tại checkpoint và hệ thống rerun đúng phase.
 
@@ -125,7 +151,7 @@ request_change(run_id, "đổi actor thành Admin")
 -> giữ status ở checkpoint tương ứng
 ```
 
-## Phase 5 - Context Động Từ Tool
+## Phase 6 - Context Động Từ Tool
 
 Mục đích: context thay đổi ngoài checkpoint cũng được phát hiện và invalidate đúng phần.
 
@@ -136,7 +162,7 @@ Nguồn thay đổi:
 - PR review mới.
 - Chat bổ sung acceptance criteria.
 
-## Phase 6 - Nhiều Use Case Và Impact Analysis
+## Phase 7 - Nhiều Use Case Và Impact Analysis
 
 Mục đích: xử lý quan hệ chéo giữa use case.
 
@@ -192,23 +218,20 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Mermaid để backlog, và regression test đã khóa trường hợp requirement không
 > traceable bằng `status=blocked` + `last_error` rõ.
 
-> Cập nhật 2026-10-13: đã viết tài liệu triển khai Phase 3 trong
-> `docs/phase-3/`. Hướng Phase 3 là target test repo GitHub, branch/commit/Draft
-> PR, test report và trace requirement-design-code-test. Không tạo GitHub Issue
-> vì Jira vẫn là issue nguồn.
-
-> Cập nhật 2026-10-13: làm rõ Phase 3 không phải bản thiếu multi-agent. Khi khóa
-> Phase 3, execution graph phải tương đương TraceDev trong phạm vi một use case;
-> Phase 4 trở đi là cải tiến harness cho change request, context động và impact
-> analysis.
+> Cập nhật 2026-10-13: đã viết lại ranh giới Phase 3 thành implementation
+> planning checkpoint. Phase 3 sinh và kiểm `implementation_plan_v1`; Phase 4
+> mới sở hữu branch/code/test/Draft PR.
 
 > Cập nhật 2026-10-13: đã tạo target test repo private
 > `LuongAnh1/SDLC_Target_eTour` cùng cấp với `Niko_Agent` và `SDLC_Harness`.
-> Repo này là code collaboration lane ban đầu cho Phase 3.
+> Repo này là code collaboration lane ban đầu cho Phase 4.
 
 > Cập nhật 2026-10-13: Phase 3 đã có Slice 1 cho `approve-checkpoint` từ
 > `waiting_design_approval`: dispatcher chọn đúng workflow, guard target repo
 > kiểm tra path/remote/dirty worktree, sinh `implementation_plan_v1.md`, ghi
 > `approved_artifacts` và dừng ở `waiting_implementation_plan_review`. Chưa tạo
 > branch/code/commit/test report/Draft PR.
+
+> Cập nhật 2026-10-13: Phase 4 được tách ra thành phase mới để khóa phần
+> code/test/Draft PR sau khi implementation plan được duyệt.
 

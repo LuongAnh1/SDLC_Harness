@@ -49,6 +49,7 @@ Artifact Store
   design_artifact_v1
   trace_graph_v1
   implementation_plan_v1
+  implementation_plan_review_v1
   code_change_report_v1
   test_report_v1
 
@@ -89,6 +90,16 @@ User: oke chạy tiếp
 Niko -> approve_checkpoint(run_id)
 Harness -> design_artifact_v1, waiting_design_approval
 Niko -> báo trạng thái mới
+
+User: duyệt design
+Niko -> approve_checkpoint(run_id)
+Harness -> implementation_plan_v1, waiting_implementation_plan_review
+Niko -> hỏi anh duyệt kế hoạch implement
+
+User: duyệt plan
+Niko -> approve_checkpoint(run_id)
+Harness -> code_change_report_v1, test_report_v1, Draft PR, code_review_ready
+Niko -> báo link PR và kết quả test/trace
 ```
 
 ## Tool Plane

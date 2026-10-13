@@ -61,6 +61,9 @@ structured use case
 - Validator/traceability checks luôn có mặt;
 - validate/repair loop;
 - dataset eTour/SMOS/iTrust cho requirement-to-code.
+- SDLC Harness thêm implementation plan checkpoint giữa design và code:
+  `Developer.plan -> Validator.review_plan -> human approve -> Developer.act`.
+  TraceDev gốc không có bước này vì chạy một mạch từ final design sang Developer.
 
 Điểm không copy nguyên xi:
 
@@ -93,6 +96,9 @@ Các file quan trọng:
 - `docs/datasets-and-context.md`
 - `docs/implementation-checklist.md`
 - `docs/phase-1/README.md`
+- `docs/phase-2/README.md`
+- `docs/phase-3/README.md`
+- `docs/phase-4/README.md`
 
 
 ## Package Layout
@@ -131,9 +137,12 @@ Niko không trực tiếp kéo use case/Jira/dataset cho workflow SDLC. Niko g�
 ## Niko Integration Boundary
 
 Niko_Agent là conversational/control harness. SDLC_Harness là nơi sở hữu pipeline
-SDLC Phase 1: source intake từ fixture/Jira, Requirement Refiner, validator,
-repair loop, runtime state, artifact và Jira/Confluence sync. Khi Niko gọi repo
-này, contract phải là CLI JSON ổn định; không in log tự do ra stdout.
+SDLC Phase 1/2/3: source intake từ fixture/Jira, Requirement Refiner, Designer,
+Validator, implementation planning checkpoint, runtime state, artifact và tool
+sync. Phase 3 chỉ sinh/kiểm `implementation_plan_v1` và dừng ở
+`waiting_implementation_plan_review`; Phase 4 mới tạo code/test/Draft PR. Khi
+Niko gọi repo này, contract phải là CLI JSON ổn định; không in log tự do ra
+stdout.
 
 Không chuyển logic đọc Jira, ghi artifact, sync Confluence/Jira hoặc validate
 requirement packet sang Niko. Nếu cần trả thêm dữ liệu cho Telegram, mở rộng

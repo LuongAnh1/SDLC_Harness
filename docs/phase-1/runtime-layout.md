@@ -85,7 +85,7 @@ trace_graph_v1.json
 tool_sync_report_v1.json
 ```
 
-Phase 1 chỉ tạo version `v1`. Version `v2` bắt đầu quan trọng ở Phase 4 khi có sửa tại checkpoint.
+Phase 1 chỉ tạo version `v1`. Version `v2` bắt đầu quan trọng ở Phase 5 khi có sửa tại checkpoint.
 
 ## Git Policy
 

@@ -20,9 +20,6 @@ Khi người dùng duyệt design checkpoint:
 waiting_design_approval
   -> implementation_planning
   -> waiting_implementation_plan_review
-  -> implementation_writing
-  -> implementation_testing
-  -> code_review_ready
 ```
 
 State phụ:
@@ -38,53 +35,44 @@ cancelled
 | --- | --- | --- |
 | `implementation_planning` | Đang lập kế hoạch sửa/sinh code từ design đã duyệt. | Harness |
 | `waiting_implementation_plan_review` | Implementation plan đã sinh, chờ human/Niko duyệt trước khi sửa target repo. | Niko + human |
-| `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
-| `implementation_testing` | Đang chạy compile/test/trace check. | Harness |
-| `code_review_ready` | Draft PR và report đã sẵn sàng để human review. | Niko + human |
-| `blocked` | Thiếu input, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
+| `blocked` | Thiếu input, plan thiếu trace, plan bịa scope hoặc target repo chưa an toàn. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
 
-`review_ready` trong tài liệu Phase 0 được cụ thể hóa ở Phase 3 thành
-`code_review_ready` để tránh nhập nhằng với design review.
+State `implementation_writing`, `implementation_testing` và `code_review_ready`
+thuộc Phase 4.
 
 ## Artifact Tối Thiểu
 
 | Artifact | Mục đích |
 | --- | --- |
 | `implementation_plan_v1.md` | Kế hoạch implement dựa trên requirement/design đã duyệt. |
-| `code_change_report_v1.md` | Tóm tắt branch, commit, file đổi và lý do đổi. |
-| `test_report_v1.md` | Compile/test/validation result, ghi rõ pass/fail/skipped. |
-| `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test. |
-| `tool_sync_report_v3.json` | Kết quả sync GitHub/Jira/Confluence của Phase 3. |
+| `implementation_plan_review_v1.json` | Kết quả Validator review plan: coverage, traceability, executability, scope. |
+| `tool_sync_report_v3.json` | Kết quả sync Confluence/Jira của Phase 3. |
 
-Artifact dùng version như các phase trước. Nếu repair/rerun code xảy ra trong
-giới hạn Phase 3, tạo `v2`, `v3`; không ghi đè file cũ.
+Artifact dùng version như các phase trước. Nếu Developer.plan rerun theo feedback
+của Validator, tạo `v2`, `v3`; không ghi đè file cũ.
 
-Slice 1 hiện mới sinh `implementation_plan_v1.md` và ghi checkpoint
-`waiting_implementation_plan_review`. Các artifact code/test/trace/sync V3 là
-đích khóa Phase 3 đầy đủ ở các slice tiếp theo.
+`implementation_plan_v1` không thay đổi requirement/design graph. Nó chỉ tham
+chiếu graph đã duyệt và ánh xạ sang kế hoạch code dự kiến.
 
 ## State JSON Sau Khi Pass
 
-Sau khi Phase 3 tạo được Draft PR và report:
+Sau khi Phase 3 pass:
 
 ```text
-current_phase=code_review
-status=code_review_ready
+current_phase=implementation_planning
+status=waiting_implementation_plan_review
 latest_artifacts.implementation_plan
-latest_artifacts.code_change_report
-latest_artifacts.test_report
-latest_artifacts.requirement_design_code_trace
-quality_reports.implementation_traceability
-pending_checkpoint.type=code_review
-pending_checkpoint.artifact_ref=code_change_report_v1
+quality_reports.implementation_plan_review
+pending_checkpoint.type=implementation_plan_review
+pending_checkpoint.artifact_ref=implementation_plan_v1
 allowed_next_actions=[approve_checkpoint, request_change, cancel_run, get_status]
-last_sync.phase=code_review
+last_sync.phase=implementation_plan_review
 summary_for_user
 ```
 
-Checkpoint `code_review` nghĩa là human cần review PR/code/test report. Nó không
-có nghĩa PR đã được merge.
+Checkpoint `implementation_plan_review` nghĩa là human cần review kế hoạch trước
+khi Phase 4 được phép sửa target repo.
 
 ## Last Sync Phase 3
 
@@ -92,18 +80,17 @@ có nghĩa PR đã được merge.
 
 ```text
 version=tool_sync_report_v3
-phase=code_review
+phase=implementation_plan_review
 status=synced | partial_failed | failed
 mode=mock | real
 targets=[
-  github,
   jira,
   confluence
 ]
 ```
 
-Target GitHub cần ghi branch, commit và PR URL nếu tạo được. Target Jira và
-Confluence ghi comment/page đã được cập nhật để trỏ về PR.
+Target Confluence lưu implementation plan đầy đủ. Target Jira ghi comment ngắn
+kèm link Confluence và `run_id`. GitHub chưa có branch/commit/PR ở Phase 3.
 
 ## Blocked State
 
@@ -111,10 +98,11 @@ Phase 3 phải `blocked` thay vì giả vờ pass trong các trường hợp:
 
 - thiếu approved design artifact;
 - không xác định được target repo;
-- không tạo được branch hoặc không ghi được code;
-- test/compile fail và không có repair path an toàn;
-- Validator không nối được requirement/design với code/test;
-- GitHub sync fail toàn bộ.
+- plan bỏ sót design element quan trọng;
+- plan không có mapping từ design sang planned code target;
+- plan bịa thêm scope ngoài requirement/design;
+- plan không có test intent hoặc target path đủ rõ;
+- Jira/Confluence sync fail toàn bộ.
 
 `last_error` phải đủ rõ để Niko nói lại cho anh biết đang kẹt ở đâu.
 
