@@ -15,7 +15,7 @@ from typing import Any
 
 from ..core.errors import HarnessError
 
-MAX_EVIDENCE_CHARS = 24000
+MAX_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 45
 
 

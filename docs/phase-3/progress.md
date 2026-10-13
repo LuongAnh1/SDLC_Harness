@@ -225,3 +225,28 @@ Lưu ý test live:
 - Run đã bị lỗi trước lát này cần chạy lại từ đầu hoặc được reset state thủ công
   về `waiting_design_approval` trước khi approve lại.
 
+## 2026-10-13 - Slice 3.5: probe DeepSeek raw output cho Developer.plan
+
+Mục tiêu của lát này là kiểm tra trực tiếp DeepSeek đang trả gì khi tạo
+implementation plan, nhưng không mutate `.runtime` và không sync tool.
+
+Đã hoàn thành:
+
+- Thêm script `scripts/probe_developer_plan_deepseek.py` để dựng đúng prompt
+  Developer.plan từ artifact của run hiện có, gọi DeepSeek thật và lưu
+  `.prompt.txt`, `.response.json`, `.content.txt`, `.parse.json` trong `.debug/`.
+- Thêm `.debug/` vào `.gitignore` để raw prompt/response không lọt vào git.
+- Probe live cho run `run_20261013_143231_8e1a39d4` cho thấy DeepSeek bắt đầu
+  trả JSON đúng, nhưng response bị cắt với `finish_reason=length` ở 8192
+  completion tokens.
+- Nguyên nhân chính không phải model thêm prose, mà là prompt yêu cầu trả quá
+  nhiều `design_mappings` và rule cũ bảo model preserve toàn bộ base mapping.
+- Chỉnh prompt Developer.plan: Python giữ base mapping đầy đủ, LLM chỉ trả phần
+  enrich/override ngắn; giới hạn repo evidence, implementation steps, proposed
+  files và test intents.
+- Giảm CodeGraph evidence gửi vào prompt từ 24000 xuống 12000 ký tự để giảm khả
+  năng output lan man và tiết kiệm token.
+- Probe live sau khi rút prompt trả `finish_reason=stop`, `completion_tokens=2649`
+  và parse OK với 5 implementation steps, 4 proposed files, 5 mapping overrides,
+  5 test intents.
+

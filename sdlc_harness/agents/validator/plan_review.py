@@ -412,7 +412,7 @@ Rule review JSON:
 
 def _parse_llm_review_payload(raw: str) -> dict[str, object]:
     try:
-        parsed = _parse_first_json_object(raw)
+        parsed = _parse_first_json_object(raw, expected_keys={"ok", "summary", "developer_feedback"})
     except json.JSONDecodeError as exc:
         raise HarnessError(
             "implementation_plan_llm_review_failed",
@@ -460,8 +460,8 @@ def _parse_llm_review_payload(raw: str) -> dict[str, object]:
     return payload
 
 
-def _parse_first_json_object(raw: str) -> dict[str, object]:
-    """Parse JSON object đầu tiên trong output LLM có thể lẫn prose."""
+def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, object]:
+    """Parse JSON object đúng schema mong muốn trong output LLM có thể lẫn prose."""
 
     text = strip_code_fence(raw).strip()
     decoder = json.JSONDecoder()
@@ -469,7 +469,7 @@ def _parse_first_json_object(raw: str) -> dict[str, object]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         parsed = None
-    if isinstance(parsed, dict):
+    if isinstance(parsed, dict) and _has_expected_keys(parsed, expected_keys):
         return parsed
 
     for index, char in enumerate(text):
@@ -479,9 +479,13 @@ def _parse_first_json_object(raw: str) -> dict[str, object]:
             candidate, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict):
+        if isinstance(candidate, dict) and _has_expected_keys(candidate, expected_keys):
             return candidate
-    raise json.JSONDecodeError("No JSON object found", text, 0)
+    raise json.JSONDecodeError("No matching top-level JSON object found", text, 0)
+
+
+def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
+    return bool(expected_keys.intersection(candidate.keys()))
 
 
 def _string_items(value: object) -> list[str]:

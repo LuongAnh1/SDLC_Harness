@@ -300,7 +300,7 @@ the approved requirement/design should be implemented in the target repository i
 Return JSON only with this shape:
 {{
   "summary": "short summary for human reviewer",
-  "repo_evidence": ["specific repo evidence from CodeGraph/context"],
+  "repo_evidence": ["specific repo evidence from CodeGraph/context, max 8 items"],
   "implementation_steps": [
     {{
       "order": 1,
@@ -336,7 +336,13 @@ Return JSON only with this shape:
 }}
 
 Rules:
-- Preserve every base mapping unless you can improve its file/method target using repo evidence.
+- Keep the whole response compact and below 3000 output tokens.
+- Do not repeat all base deterministic mappings. The harness already preserves
+  them in Python. In `design_mappings`, return only mappings you improve or
+  correct using repo evidence. Return [] when the base mappings are good enough.
+- `implementation_steps` must be 3-6 high-level steps, not one step per design element.
+- `proposed_files` must be max 12 files and grouped by file, not by method.
+- `test_intents` must be max 6 focused tests.
 - Do not add behavior outside the approved requirement/design.
 - Proposed files must stay under src/main/java or src/test/java.
 - Use CodeGraph evidence when naming existing classes/files.
@@ -389,7 +395,17 @@ Previous review:
 
 def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
     try:
-        parsed = _parse_first_json_object(raw)
+        parsed = _parse_first_json_object(
+            raw,
+            expected_keys={
+                "summary",
+                "repo_evidence",
+                "implementation_steps",
+                "proposed_files",
+                "design_mappings",
+                "test_intents",
+            },
+        )
     except json.JSONDecodeError as exc:
         raise HarnessError(
             "implementation_plan_developer_failed",
@@ -412,8 +428,8 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
     }
 
 
-def _parse_first_json_object(raw: str) -> dict[str, object]:
-    """Parse JSON object đầu tiên, bỏ qua prose hoặc object mẫu bị echo trước đó."""
+def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, object]:
+    """Parse JSON object top-level mong muốn, bỏ qua object con/prompt echo."""
 
     text = strip_code_fence(raw).strip()
     decoder = json.JSONDecoder()
@@ -421,7 +437,7 @@ def _parse_first_json_object(raw: str) -> dict[str, object]:
         parsed = json.loads(text)
     except json.JSONDecodeError:
         parsed = None
-    if isinstance(parsed, dict):
+    if isinstance(parsed, dict) and _has_expected_keys(parsed, expected_keys):
         return parsed
 
     for index, char in enumerate(text):
@@ -431,9 +447,13 @@ def _parse_first_json_object(raw: str) -> dict[str, object]:
             candidate, _ = decoder.raw_decode(text[index:])
         except json.JSONDecodeError:
             continue
-        if isinstance(candidate, dict):
+        if isinstance(candidate, dict) and _has_expected_keys(candidate, expected_keys):
             return candidate
-    raise json.JSONDecodeError("No JSON object found", text, 0)
+    raise json.JSONDecodeError("No matching top-level JSON object found", text, 0)
+
+
+def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
+    return bool(expected_keys.intersection(candidate.keys()))
 
 
 def _merge_mappings(base: list[dict[str, object]], llm_items: list[dict[str, object]]) -> list[dict[str, object]]:

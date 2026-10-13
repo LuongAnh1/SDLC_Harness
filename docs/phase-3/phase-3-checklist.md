@@ -127,6 +127,9 @@ CodeGraph để lập plan có evidence, implementation steps và proposed files
 - [x] Parser chấp nhận JSON object khi LLM bọc thêm prose/code fence quanh output.
 - [x] Nếu LLM vẫn trả invalid JSON, Developer.plan fallback về deterministic
   graph mapping và ghi cảnh báo parse trong structured plan.
+- [x] Có probe DeepSeek raw output không mutate runtime, lưu vào `.debug/`.
+- [x] Prompt Developer.plan không yêu cầu LLM lặp lại toàn bộ base mapping; Python
+  giữ mapping đầy đủ, LLM chỉ trả enrich/override ngắn để tránh JSON bị cắt.
 - [x] Nếu Developer.plan hoặc repair_plan fail, state chuyển `failed`, xóa
   checkpoint cũ và ghi `last_error` có `run_id`.
 - [x] Structured plan lưu `planning_mode=llm_developer_with_codegraph_context_v1`.
