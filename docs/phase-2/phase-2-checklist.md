@@ -75,7 +75,7 @@ Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu th
 - [x] Giới hạn vòng repair đọc từ config `SDLC_DESIGN_REPAIR_LIMIT` và có CLI override cho `approve-checkpoint`.
 - [x] Nếu pass trước giới hạn, dừng loop.
 - [x] Nếu fail sau giới hạn do design thiếu, state=`blocked`.
-- [ ] Nếu fail do requirement thiếu/mơ hồ, quay về `waiting_requirement_approval` hoặc state=`blocked` với lý do rõ.
+- [x] Nếu fail do requirement thiếu/mơ hồ, state=`blocked` với lý do rõ trong `last_error`.
 
 ## 7. Workflow State Và Artifact Store
 
@@ -106,7 +106,7 @@ Chi tiết policy nằm ở `docs/phase-2/sync-design-checkpoint.md`.
 - [x] Ghi rõ policy sync hiện tại: update bot-owned comment/page khi có `external_id`, không ghi đè nội dung người dùng.
 - [x] Nhúng PlantUML app macro trên Confluence bằng `guest-params.diagram-code` khi app đã được cài.
 - [x] Bỏ nhánh upload/nhúng SVG attachment khỏi Confluence design checkpoint sau khi app macro render ổn.
-- [ ] Khảo sát Mermaid macro/app và storage format nếu muốn chuyển diagram output từ PlantUML sang Mermaid.
+- [x] Chốt không chuyển Mermaid trong Phase 2; Mermaid macro/app là backlog không chặn Phase 3.
 - [x] `tool_sync_report_v2.json` ghi `phase=design_checkpoint`.
 - [x] `tool_sync_report_v2.json` ghi `mode`, `status`, `targets`, `artifact_refs`.
 - [x] `state.json` ghi `last_sync.phase=design_checkpoint`.
@@ -114,16 +114,16 @@ Chi tiết policy nằm ở `docs/phase-2/sync-design-checkpoint.md`.
 - [x] `sync-run` tự nhận biết checkpoint hiện tại là requirement hay design.
 - [x] Re-sync không tạo comment/page trùng nếu đã có external id.
 - [x] Partial failure không xóa artifact local.
-- [ ] Niko đọc `last_sync` để báo rõ sync thành công, lỗi một phần hoặc lỗi toàn bộ.
+- [x] Niko đọc `last_sync` để báo rõ sync thành công, lỗi một phần hoặc lỗi toàn bộ.
 
 ## 9. Niko Integration
 
 Mục đích: Niko có thể duyệt requirement và báo checkpoint design bằng JSON status.
 
-- [ ] Niko có route/prompt để gọi `approve-checkpoint`.
-- [ ] Niko hiển thị summary Phase 2 ngắn, không dump toàn bộ diagram.
-- [ ] Niko đọc `pending_checkpoint`, `allowed_next_actions`, `last_sync`.
-- [ ] Niko báo rõ khi workflow bị `blocked` vì requirement thiếu hoặc design fail.
+- [x] Niko có route/prompt để gọi `approve-checkpoint`.
+- [x] Niko hiển thị summary Phase 2 ngắn, không dump toàn bộ diagram.
+- [x] Niko đọc `pending_checkpoint`, `allowed_next_actions`, `last_sync`.
+- [x] Niko báo rõ khi workflow bị `blocked` vì requirement thiếu hoặc design fail.
 
 ## 10. Test Và Acceptance
 
@@ -138,6 +138,7 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test Validator chấp nhận sequence return arrow target.
 - [x] Unit test repair loop pass sau một vòng.
 - [x] Unit test repair loop blocked sau giới hạn.
+- [x] Unit test requirement không traceable chuyển `blocked` với `last_error` rõ.
 - [x] Unit test repair loop tôn trọng `SDLC_DESIGN_REPAIR_LIMIT=0`.
 - [x] Unit test sync mock design checkpoint.
 - [x] Unit test real sync design create/update Jira và Confluence.
@@ -146,5 +147,5 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test Confluence body không còn nhúng `<ac:image>` SVG fallback.
 - [x] Unit test partial failure real sync design.
 - [x] Smoke test CLI từ run Phase 1 thật sang `waiting_design_approval`.
-- [ ] Smoke test qua Niko sau khi CLI pass.
+- [x] Smoke test qua Niko sau khi CLI pass.
 

@@ -447,6 +447,27 @@ class OnlyClass {
         self.assertIn("Repair iterations: 2", quality_v3)
         self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
+    def test_requirement_graph_failure_blocks_with_clear_reason(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        state_path = self.runtime_root / "runs" / run_id / "state.json"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        requirement_path = self.repo_root / str(state["latest_artifacts"]["requirement_packet"])
+        requirement_path.write_text(
+            "# Requirement Packet V1\n\n## Notes\nThis packet has no traceable requirement sections.",
+            encoding="utf-8",
+        )
+
+        response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["current_phase"], "design_review")
+        self.assertIsNone(response["pending_checkpoint"])
+        self.assertEqual(response["last_error"]["error_code"], "requirement_traceability_blocked")
+        self.assertIn("traceable requirement", response["last_error"]["message"])
+        self.assertIn("requirement chưa đủ rõ", response["summary_for_user"])
+        self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
+
     def test_repair_loop_respects_configured_zero_limit(self) -> None:
         settings = load_settings(
             root=self.repo_root,

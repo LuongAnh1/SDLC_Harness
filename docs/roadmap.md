@@ -170,3 +170,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > theo `external_id`, và unit test đã khóa create/update/partial failure. Cần
 > smoke real Atlassian Phase 2 và nối Niko route duyệt checkpoint.
 
+> Cập nhật 2026-10-13: Phase 2 đã được khóa trước Phase 3 ở mức static
+> approve-only. `approve-checkpoint` chạy qua Niko, Design/Validator/repair loop
+> dừng ở `waiting_design_approval`, PlantUML app macro là output diagram chính,
+> Mermaid để backlog, và regression test đã khóa trường hợp requirement không
+> traceable bằng `status=blocked` + `last_error` rõ.
+

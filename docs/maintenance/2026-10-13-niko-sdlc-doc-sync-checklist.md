@@ -18,9 +18,10 @@ Mục đích: người đọc hiểu SDLC_Harness là nơi sở hữu pipeline S
 - [x] Ghi rõ response trả về Niko phải là JSON máy-máy, không in text tự do ra
   stdout.
 
-## 2. Phase 1 hiện tại
+## 2. Phase 1 và Phase 2 hiện tại
 
-Mục đích: khóa lại trạng thái Phase 1 để không nhầm với Phase 2 thiết kế/code.
+Mục đích: khóa lại trạng thái Phase 1/2 để không nhầm Niko là nơi chạy pipeline
+SDLC hoặc hiểu Phase 2 vẫn chỉ là tài liệu.
 
 - [x] Hỗ trợ nguồn fixture eTour.
 - [x] Hỗ trợ nguồn Jira issue thật qua Atlassian API.
@@ -30,7 +31,9 @@ Mục đích: khóa lại trạng thái Phase 1 để không nhầm với Phase 
   buộc.
 - [x] Sync Jira comment và Confluence page thật khi cấu hình Atlassian đầy đủ.
 - [x] Mock sync chỉ còn dùng cho test/fallback.
-- [ ] Chưa triển khai Phase 2 thiết kế/coding.
+- [x] Phase 2 thiết kế đã triển khai tới `waiting_design_approval`.
+- [x] Niko gọi được `approve-checkpoint` và format design checkpoint ngắn gọn.
+- [x] Phase 2 chưa mở coding/Phase 3, request_change hoặc dynamic context.
 
 ## 3. Chú thích đầu file source
 

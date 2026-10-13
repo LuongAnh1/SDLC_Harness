@@ -68,7 +68,8 @@ Checklist chi tiết nằm ở `docs/phase-2/phase-2-checklist.md`. Phase 2 đã
 class/sequence graph, Validator traceability V1, mock `tool_sync_report_v2` và
 repair loop Designer.update_design với artifact versioning. Real sync Phase 2 đã
 có unit test cho Jira/Confluence create/update/partial failure; live smoke
-Atlassian Phase 2 và Niko route duyệt checkpoint vẫn là bước tiếp theo.
+Atlassian Phase 2 và Niko route duyệt checkpoint đã chạy được tới
+`waiting_design_approval`.
 
 - [x] Có `approve_checkpoint(run_id)`.
 - [x] Đọc approved `requirement_packet_v1`, không refine requirement lại trong Phase 2.
@@ -88,8 +89,8 @@ Atlassian Phase 2 và Niko route duyệt checkpoint vẫn là bước tiếp the
 - [x] Chú thích rõ sync hiện tại là update artifact do harness sở hữu, không ghi đè nội dung người dùng.
 - [x] Nhúng PlantUML app macro trên Confluence cho Class/Sequence diagram.
 - [x] Bỏ SVG attachment/image fallback khỏi Phase 2 real sync sau khi PlantUML app macro chạy ổn.
-- [ ] Khảo sát Mermaid app/macro và storage format nếu muốn chuyển diagram output sang Mermaid.
-- [ ] Niko đọc `last_sync` để báo trạng thái sync Phase 2.
+- [x] Chốt Mermaid là backlog không chặn Phase 3; Phase 2 dùng PlantUML app macro.
+- [x] Niko đọc `last_sync` để báo trạng thái sync Phase 2, gồm cả partial/full failure.
 - [x] State chuyển sang `waiting_design_approval`.
 
 ## Phase 3 - Design Đến Code/Test Report

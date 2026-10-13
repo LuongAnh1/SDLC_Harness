@@ -406,3 +406,46 @@ Ghi chú hướng Mermaid:
 - Với dữ liệu hiện tại, nên sinh Mermaid từ graph đã parse thay vì yêu cầu LLM
   đổi prompt ngay từ đầu; như vậy Validator vẫn giữ được PlantUML/graph pipeline
   đã ổn định trong Phase 2.
+
+## 2026-10-13 - Phase 2 Lock Test Pass
+
+Mục tiêu:
+
+- Khóa Phase 2 chặt trước khi mở Phase 3, đặc biệt ở phần test và live smoke.
+- Phân loại rõ các mục còn hở trong checklist: blocker thật, đã làm bên Niko,
+  hoặc backlog không chặn Phase 3.
+
+Đã làm:
+
+- Thêm regression test cho requirement không traceable: nếu requirement packet
+  không tạo được requirement graph, Phase 2 chuyển `status=blocked`, không sync
+  design checkpoint và ghi `last_error.error_code=requirement_traceability_blocked`.
+- Bổ sung formatter/test bên Niko để đọc `last_error`, báo rõ trạng thái
+  `blocked`, và phân biệt `last_sync.status=partial_failed` thay vì trình bày
+  như sync thành công hoàn toàn.
+- Cập nhật checklist Phase 2: Niko route `approve-checkpoint`, summary ngắn,
+  đọc `pending_checkpoint/allowed_next_actions/last_sync`, báo blocked và smoke
+  qua Niko đã được đánh dấu xong.
+- Chốt Mermaid là backlog không chặn Phase 3; Phase 2 hiện khóa theo PlantUML
+  app macro + PlantUML source fallback.
+
+Đã kiểm thử:
+
+- `rtk proxy python -m pytest tests/test_phase2.py`: 26 test pass.
+- `rtk proxy python -m pytest tests/test_sdlc_client.py tests/test_niko_app.py`
+  bên `Niko_Agent`: 29 test pass.
+- Live smoke trước đó qua Niko: `start-from-jira` -> `approve-checkpoint` ->
+  `waiting_design_approval`, có `design_artifact_v2`, `repair iterations: 1`,
+  sync real Jira/Confluence `synced`.
+- Live smoke khóa Phase 2 sau khi xóa runtime: `run_20261013_085819_173b2d75`
+  đi từ Jira issue `SDLC-1` -> requirement checkpoint -> design checkpoint.
+  Kết quả cuối là `design_review / waiting_design_approval`, pending checkpoint
+  `design_artifact_v1`, Jira comment `10043`, Confluence page `131426`, sync
+  real Jira/Confluence `synced`, `last_error=null`, `missing design links=0`,
+  `repair iterations=0`.
+
+Kết luận:
+
+- Phase 2 đủ điều kiện khóa để chuẩn bị Phase 3 theo lát nhỏ.
+- Các việc chưa mở như `request_change`, dynamic context, Mermaid, approve
+  design để sang code vẫn thuộc Phase sau, không phải blocker của Phase 2.

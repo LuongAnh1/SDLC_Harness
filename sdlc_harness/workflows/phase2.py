@@ -184,6 +184,24 @@ class PhaseTwoWorkflow:
                     audit_report=audit_report,
                 )
         except HarnessError as exc:
+            requirement_error = _requirement_blocking_error(exc, run_id=run_id)
+            if requirement_error is not None:
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "current_phase": "design_review",
+                        "status": "blocked",
+                        "pending_checkpoint": None,
+                        "allowed_next_actions": ["get_status", "request_change", "cancel_run"],
+                        "last_error": requirement_error.to_response(),
+                        "summary_for_user": (
+                            "Phase 2 bị chặn vì requirement chưa đủ rõ để tạo traceability graph: "
+                            f"{exc.message}"
+                        ),
+                    }
+                )
+                self.store.write_state(state)
+                return self._status_response(state, created_new_run=False)
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -348,6 +366,19 @@ def _traceability_summary(missing_links: dict[str, list[dict[str, str]]]) -> str
     if total == 0:
         return "không phát hiện missing link class/sequence."
     return f"còn {total} missing link class/sequence cần review."
+
+
+def _requirement_blocking_error(exc: HarnessError, *, run_id: str) -> HarnessError | None:
+    """Phân loại lỗi requirement đầu vào để Phase 2 không bị hiểu nhầm là lỗi hệ thống."""
+
+    message = exc.message.lower()
+    if exc.error_code == "validator_traceability_failed" and "traceable requirement" in message:
+        return HarnessError(
+            "requirement_traceability_blocked",
+            exc.message,
+            run_id=run_id,
+        )
+    return None
 
 
 def _analysis_for_version(*, base_analysis: str, version: int, previous_quality_report: str) -> str:
