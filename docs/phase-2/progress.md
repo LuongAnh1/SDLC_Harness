@@ -294,3 +294,115 @@ Phản hồi khi review live Jira/Confluence:
 - `README.md`
 - `phase-2-checklist.md`
 - `docs/implementation-checklist.md`
+
+## 2026-10-13 - V4.4 Render SVG Diagram Và Embed Confluence
+
+Mục tiêu:
+
+- Thử hướng số 2: không phụ thuộc Confluence marketplace app, để
+  `SDLC_Harness` tự tạo hình và upload lên Confluence.
+
+Đã làm:
+
+- Thêm `sdlc_harness/artifacts/diagram_svg.py` để render SVG tối giản từ
+  `class_diagram_graph_vN.json` và `sequence_diagram_graph_vN.json`.
+- Real Confluence design sync tạo SVG trong `sync/diagrams/`.
+- Nếu sync dùng API thật, adapter upload SVG lên Confluence page bằng attachment
+  endpoint.
+- Sau khi upload thành công, Confluence page nhúng ảnh bằng `<ac:image>` và vẫn
+  giữ PlantUML code macro dưới ảnh làm fallback/evidence.
+- Với page mới, adapter tạo page trước, upload attachment, rồi update page lần
+  hai để nhúng ảnh.
+- Với page cũ, adapter upload attachment vào page cũ trước rồi update body.
+- Nếu uploader không có hoặc upload lỗi, page vẫn có code macro PlantUML để đọc
+  được.
+
+Giới hạn hiện tại:
+
+- SVG renderer là layout tối giản từ graph đã parse, chưa phải PlantUML renderer
+  đầy đủ.
+- Chưa live smoke với Atlassian thật sau khi thêm attachment upload.
+- Jira comment vẫn chỉ có PlantUML code block; ảnh SVG ưu tiên cho Confluence.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest tests/test_phase2.py`: 26 test pass.
+- `rtk python -m pytest`: 55 test pass.
+- Unit test kiểm tra uploader nhận file `.svg`, content bắt đầu bằng `<svg`, page
+  final có `<ac:image>` và report ghi `diagram_images.status=synced`.
+- Live re-sync Atlassian cho `run_20261013_041915_886e9158` pass:
+  `last_sync.status=synced`, Confluence target `external_id=98645`,
+  `diagram_images.status=synced`, upload 2 SVG attachment
+  `class-diagram-v1.svg` và `sequence-diagram-1-v1.svg`.
+
+## 2026-10-13 - V4.5 PlantUML App Macro Trên Confluence
+
+Mục tiêu:
+
+- Thử app `PlantUML Diagrams` đã cài trên Confluence thay vì chỉ dùng SVG tự vẽ.
+
+Đã làm:
+
+- Đọc storage format từ page test của anh và rút ra phần quan trọng:
+  `ac:adf-extension`, extension key `plantuml-confluence`, và
+  `guest-params.diagram-code`.
+- Thêm Forge macro PlantUML vào đầu mỗi Class/Sequence diagram section.
+- Giữ SVG attachment và PlantUML code block phía sau làm fallback/evidence.
+- Không hard-code `account-id`, `cloud-id`, page id test hoặc context id từ page
+  test; macro sinh `local-id` mới cho mỗi lần sync.
+- Sửa upload SVG idempotent hơn: nếu Confluence báo attachment cùng tên đã tồn
+  tại, adapter reuse attachment cũ thay vì ghi lỗi.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest`: 56 test pass.
+- Live re-sync Atlassian cho `run_20261013_041915_886e9158` pass.
+- Đọc storage page `98645` qua API xác nhận:
+  `has_plantuml_macro=True`, `adf_extensions=2`, `diagram_code_params=4`,
+  `has_svg_image=True`.
+- `tool_sync_report_v2.json` ghi `diagram_images.status=synced`, 2 SVG asset đều
+  `operation=reused_existing_attachment`, không còn lỗi duplicate attachment.
+
+Chưa chốt:
+
+- Cần anh nhìn trực tiếp Confluence page để xác nhận macro app render đẹp hơn SVG
+  fallback không. Nếu đẹp, có thể đổi policy sau này thành app macro primary và
+  ẩn/bỏ SVG fallback khỏi phần hiển thị.
+
+## 2026-10-13 - V4.6 Chốt PlantUML App Macro Và Bỏ SVG Fallback
+
+Quyết định sau khi anh xem Confluence:
+
+- PlantUML app macro render ổn hơn nhánh SVG tự vẽ, nên checkpoint design không
+  cần nhúng ảnh SVG nữa.
+- Confluence page nên gọn: mỗi diagram có macro app để xem hình và một code macro
+  PlantUML làm fallback/evidence.
+- SVG attachment/image fallback chỉ giữ như hướng đã thử trong lịch sử V4.4,
+  không còn là behavior hiện tại.
+
+Đã sửa:
+
+- Bỏ nhánh render/upload/embed SVG khỏi real Confluence design sync.
+- `tool_sync_report_v2.json` không còn target phụ `diagram_images`.
+- Xóa module render SVG thử nghiệm khỏi source.
+- Unit test real sync design kiểm tra body có PlantUML app macro và không còn
+  `<ac:image>`.
+- Cập nhật README/checklist/sync docs để policy hiện tại là PlantUML macro
+  primary + PlantUML code fallback.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest`: 54 test pass.
+- Live re-sync Atlassian cho `run_20261013_041915_886e9158` pass.
+- Đọc storage page Confluence `98645` sau re-sync xác nhận:
+  `has_plantuml_macro=True`, `adf_extensions=2`, `diagram_code_params=4`,
+  `fallback_svg_count=0`, `has_svg_image=False`.
+
+Ghi chú hướng Mermaid:
+
+- Có thể chuyển sang Mermaid, nhưng trước hết cần chọn/cài Mermaid app trên
+  Confluence và lấy storage format macro giống cách anh đã lấy storage format
+  của PlantUML app.
+- Với dữ liệu hiện tại, nên sinh Mermaid từ graph đã parse thay vì yêu cầu LLM
+  đổi prompt ngay từ đầu; như vậy Validator vẫn giữ được PlantUML/graph pipeline
+  đã ổn định trong Phase 2.

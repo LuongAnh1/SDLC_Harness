@@ -135,23 +135,27 @@ Lát V4.1 hiện tách diagram khỏi phần artifact text:
 - Confluence page có section `Design Diagrams`, mỗi class/sequence diagram nằm
   trong code macro PlantUML riêng để reviewer không phải đọc lẫn workflow
   context.
-- Đây vẫn là diagram source dạng PlantUML, chưa phải ảnh PNG/SVG. Nếu cần hình
-  render thật, bước kế tiếp là tạo SVG/PNG từ `class_diagram_graph_vN.json` và
-  `sequence_diagram_graph_vN.json`, upload attachment rồi embed vào Confluence.
+- Lát V4.4 đã thử hướng render ảnh thật cho Confluence bằng SVG attachment.
+  Hướng này chạy được nhưng layout do harness tự vẽ còn tối giản.
+- Lát V4.5 thêm thử nghiệm app `PlantUML Diagrams`: Confluence page nhúng
+  Forge macro `plantuml-confluence` bằng `guest-params.diagram-code`.
+- Lát V4.6 chốt policy hiện tại: dùng PlantUML app macro làm hiển thị chính,
+  giữ PlantUML code macro làm fallback/evidence, bỏ nhánh upload/nhúng SVG
+  attachment khỏi design checkpoint.
 
 Ghi chú về Confluence Cloud: code macro/code snippet mặc định chỉ hiển thị source
 code có syntax highlight, không tự render PlantUML thành hình. Muốn reviewer thấy
-hình thật có ba hướng:
+hình thật có các hướng:
 
 - cài app/macro diagram trên Confluence, ví dụ PlantUML/Mermaid/draw.io tùy môi
   trường;
-- để `SDLC_Harness` render SVG/PNG từ PlantUML/graph, upload attachment lên page,
-  rồi embed bằng image attachment;
 - giữ code block PlantUML như hiện tại làm fallback/evidence để người đọc vẫn có
   nguồn diagram gốc.
 
-Hướng ưu tiên cho harness là render và upload ảnh ở phía `SDLC_Harness`, vì không
-phụ thuộc marketplace app và phù hợp với mục tiêu kiểm soát artifact/version.
+Hướng đang dùng cho harness là ưu tiên PlantUML app macro nếu app đã được cài,
+đồng thời giữ code macro PlantUML làm fallback đọc được nếu macro app lỗi. Không
+upload thêm image attachment trong policy hiện tại để trang Confluence gọn và
+tránh sinh asset phụ.
 
 ## `tool_sync_report_v2.json`
 

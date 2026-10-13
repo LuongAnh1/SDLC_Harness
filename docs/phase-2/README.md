@@ -108,10 +108,12 @@ update Jira comment/Confluence page cũ, nếu chưa có thì tạo mới. Đây
 một bản checkpoint mới nhất để review, tránh tạo trùng khi repair hoặc re-sync;
 không phải cơ chế ghi đè nội dung người dùng viết tay.
 
-Diagram trên Confluence hiện được đưa lên dưới dạng PlantUML trong code macro.
-Confluence Cloud không tự biến code block PlantUML thành hình vẽ nếu không có
-app/macro hỗ trợ. Nếu cần hình thật, lát sau sẽ render SVG/PNG ở phía
-`SDLC_Harness`, upload attachment và embed vào page.
+Diagram trên Confluence hiện có hai lớp: PlantUML app macro nếu site đã cài
+`PlantUML Diagrams`, và PlantUML source trong code macro làm fallback/evidence.
+Harness không còn upload/nhúng SVG attachment trong checkpoint design vì macro app
+đã đủ tốt cho luồng review hiện tại. Nếu muốn chuyển sang Mermaid, cần chọn app
+Mermaid trên Confluence và lấy storage format macro tương tự cách đã làm với
+PlantUML.
 
 ## Tiến Độ Hiện Tại
 
@@ -123,9 +125,10 @@ trace và missing-link report. Nếu còn missing link, workflow gọi
 `Designer.update_design` theo `SDLC_DESIGN_REPAIR_LIMIT`, ghi artifact version
 mới và chỉ tạo checkpoint khi traceability pass. Khi pass, Phase 2 có thể mock
 sync hoặc real sync Jira/Confluence theo `SDLC_SYNC_MODE`, trong đó real sync
-update lại bot-owned comment/page cũ khi có `external_id`. Nếu hết vòng repair
-mà vẫn thiếu link thì state chuyển `blocked`. Chưa nối Niko route duyệt
-checkpoint.
+update lại bot-owned comment/page cũ khi có `external_id`. Confluence real sync
+nhúng PlantUML app macro và giữ PlantUML source fallback, không còn nhúng ảnh SVG.
+Nếu hết vòng repair mà vẫn thiếu link thì state chuyển `blocked`. Chưa nối
+Niko route duyệt checkpoint.
 
 ## Không Làm Trong Phase 2
 

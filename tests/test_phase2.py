@@ -545,7 +545,11 @@ class OnlyClass {
         self.assertIn("<h2>Design Diagrams</h2>", confluence_body)
         self.assertIn("<h3>Class Diagram</h3>", confluence_body)
         self.assertIn("<h3>Sequence Diagram</h3>", confluence_body)
+        self.assertIn("<ac:adf-extension>", confluence_body)
+        self.assertIn("plantuml-confluence", confluence_body)
+        self.assertIn('key="diagram-code"', confluence_body)
         self.assertIn('ac:name="code"', confluence_body)
+        self.assertNotIn("<ac:image", confluence_body)
         self.assertIn("@startuml", confluence_body)
         self.assertIn("<h2>Quality Report</h2>", confluence_body)
         report = json.loads((self.repo_root / str(result["report"])).read_text(encoding="utf-8"))
@@ -554,6 +558,7 @@ class OnlyClass {
         self.assertEqual(report["mode"], "real")
         self.assertEqual(report["targets"][0]["operation"], "created")
         self.assertEqual(report["targets"][1]["operation"], "created")
+        self.assertNotIn("diagram_images", report["targets"][1])
 
     def test_real_sync_design_updates_existing_phase1_targets(self) -> None:
         settings = load_settings(

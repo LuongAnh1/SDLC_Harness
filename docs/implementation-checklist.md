@@ -86,7 +86,9 @@ Atlassian Phase 2 và Niko route duyệt checkpoint vẫn là bước tiếp the
 - [x] Tách Class/Sequence PlantUML thành section diagram riêng khi sync Phase 2.
 - [x] Re-sync design checkpoint không tạo Jira comment/Confluence page trùng khi có `external_id`.
 - [x] Chú thích rõ sync hiện tại là update artifact do harness sở hữu, không ghi đè nội dung người dùng.
-- [ ] Render diagram thành ảnh thật trên Confluence nếu cần review trực quan hơn PlantUML source.
+- [x] Nhúng PlantUML app macro trên Confluence cho Class/Sequence diagram.
+- [x] Bỏ SVG attachment/image fallback khỏi Phase 2 real sync sau khi PlantUML app macro chạy ổn.
+- [ ] Khảo sát Mermaid app/macro và storage format nếu muốn chuyển diagram output sang Mermaid.
 - [ ] Niko đọc `last_sync` để báo trạng thái sync Phase 2.
 - [x] State chuyển sang `waiting_design_approval`.
 

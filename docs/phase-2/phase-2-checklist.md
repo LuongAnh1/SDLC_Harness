@@ -104,7 +104,9 @@ Chi tiết policy nằm ở `docs/phase-2/sync-design-checkpoint.md`.
 - [x] Real sync tạo Confluence page mới dưới parent page nếu chưa có `external_id`.
 - [x] Real sync tách Class/Sequence PlantUML thành section diagram riêng trên Jira/Confluence.
 - [x] Ghi rõ policy sync hiện tại: update bot-owned comment/page khi có `external_id`, không ghi đè nội dung người dùng.
-- [ ] Render PlantUML thành SVG/PNG thật, upload attachment và embed vào Confluence nếu cần reviewer xem hình thay vì source code.
+- [x] Nhúng PlantUML app macro trên Confluence bằng `guest-params.diagram-code` khi app đã được cài.
+- [x] Bỏ nhánh upload/nhúng SVG attachment khỏi Confluence design checkpoint sau khi app macro render ổn.
+- [ ] Khảo sát Mermaid macro/app và storage format nếu muốn chuyển diagram output từ PlantUML sang Mermaid.
 - [x] `tool_sync_report_v2.json` ghi `phase=design_checkpoint`.
 - [x] `tool_sync_report_v2.json` ghi `mode`, `status`, `targets`, `artifact_refs`.
 - [x] `state.json` ghi `last_sync.phase=design_checkpoint`.
@@ -140,6 +142,8 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test sync mock design checkpoint.
 - [x] Unit test real sync design create/update Jira và Confluence.
 - [x] Unit test real sync design format diagram thành code block/Confluence code macro.
+- [x] Unit test Confluence body có PlantUML app macro.
+- [x] Unit test Confluence body không còn nhúng `<ac:image>` SVG fallback.
 - [x] Unit test partial failure real sync design.
 - [x] Smoke test CLI từ run Phase 1 thật sang `waiting_design_approval`.
 - [ ] Smoke test qua Niko sau khi CLI pass.

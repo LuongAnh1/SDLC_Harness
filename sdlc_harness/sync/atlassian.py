@@ -16,6 +16,7 @@ import re
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from ..agents.designer.plantuml import extract_class_sequence_diagrams
 from ..core.config import Settings
@@ -33,6 +34,9 @@ _DESIGN_ARTIFACT_KEYS = {
     "missing_design_links",
     "design_quality_report",
 }
+_PLANTUML_APP_EXTENSION_KEY = "f0d9b32e-808f-4e58-9330-0346bc051ed9/32a28da1-3e65-4244-a865-3244636e10c6/static/plantuml-confluence"
+_PLANTUML_APP_EXTENSION_ID = f"ari:cloud:ecosystem::extension/{_PLANTUML_APP_EXTENSION_KEY}"
+_PLANTUML_APP_TITLE = "PlantUML Diagrams"
 
 
 def real_sync_requirement_checkpoint(
@@ -689,7 +693,11 @@ def _confluence_design_storage_body(
 <h2>Designer Analysis</h2>
 {_markdown_to_confluence_storage(analysis_text)}
 <h2>Design Diagrams</h2>
-{_confluence_design_diagram_sections(class_diagram, sequence_diagrams, fallback_markdown=design_text)}
+{_confluence_design_diagram_sections(
+    class_diagram,
+    sequence_diagrams,
+    fallback_markdown=design_text,
+)}
 <h2>Quality Report</h2>
 {_markdown_to_confluence_storage(quality_text)}
 """.strip()
@@ -798,19 +806,50 @@ def _confluence_design_diagram_sections(
     *,
     fallback_markdown: str,
 ) -> str:
-    """Render section diagram riêng trên Confluence bằng code macro PlantUML."""
+    """Render diagram bằng PlantUML app macro, giữ code source làm fallback."""
 
     sections: list[str] = []
     if class_diagram:
         sections.append("<h3>Class Diagram</h3>")
+        sections.append(_confluence_plantuml_app_macro(class_diagram))
+        sections.append("<h4>Fallback PlantUML Source</h4>")
         sections.append(_confluence_code_macro(class_diagram, language="plantuml"))
     for index, sequence_diagram in enumerate(sequence_diagrams, start=1):
         title = "Sequence Diagram" if len(sequence_diagrams) == 1 else f"Sequence Diagram {index}"
         sections.append(f"<h3>{escape(title)}</h3>")
+        sections.append(_confluence_plantuml_app_macro(sequence_diagram))
+        sections.append("<h4>Fallback PlantUML Source</h4>")
         sections.append(_confluence_code_macro(sequence_diagram, language="plantuml"))
     if sections:
         return "\n".join(sections)
     return _markdown_to_confluence_storage(fallback_markdown)
+
+
+def _confluence_plantuml_app_macro(diagram_code: str) -> str:
+    """Tạo Forge PlantUML macro từ storage format app PlantUML Confluence Cloud."""
+
+    local_id = str(uuid4())
+    safe_code = escape(diagram_code)
+    node = (
+        '<ac:adf-node type="extension">'
+        f'<ac:adf-attribute key="extension-key">{_PLANTUML_APP_EXTENSION_KEY}</ac:adf-attribute>'
+        '<ac:adf-attribute key="extension-type">com.atlassian.ecosystem</ac:adf-attribute>'
+        '<ac:adf-attribute key="parameters">'
+        f'<ac:adf-parameter key="local-id">{local_id}</ac:adf-parameter>'
+        f'<ac:adf-parameter key="extension-id">{_PLANTUML_APP_EXTENSION_ID}</ac:adf-parameter>'
+        f'<ac:adf-parameter key="extension-title">{_PLANTUML_APP_TITLE}</ac:adf-parameter>'
+        '<ac:adf-parameter key="layout">extension</ac:adf-parameter>'
+        '<ac:adf-parameter key="forge-environment">PRODUCTION</ac:adf-parameter>'
+        '<ac:adf-parameter key="guest-params">'
+        f'<ac:adf-parameter key="diagram-code">{safe_code}</ac:adf-parameter>'
+        '</ac:adf-parameter>'
+        '</ac:adf-attribute>'
+        f'<ac:adf-attribute key="text">{_PLANTUML_APP_TITLE}</ac:adf-attribute>'
+        '<ac:adf-attribute key="layout">default</ac:adf-attribute>'
+        f'<ac:adf-attribute key="local-id">{local_id}</ac:adf-attribute>'
+        '</ac:adf-node>'
+    )
+    return f"<ac:adf-extension>{node}<ac:adf-fallback>{node}</ac:adf-fallback></ac:adf-extension>"
 
 
 def _confluence_code_macro(code: str, *, language: str) -> str:
