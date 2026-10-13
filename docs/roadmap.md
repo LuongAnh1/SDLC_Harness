@@ -46,14 +46,19 @@ Kết quả mong muốn:
 
 Mục đích: sau khi người dùng duyệt requirement, tạo design artifact và checkpoint tiếp theo.
 
+Tài liệu chi tiết: `docs/phase-2/README.md`. Phase này chỉ bắt đầu triển khai
+code sau khi đã chốt vòng Designer/Validator, state/artifact versioning và
+checklist trong `docs/phase-2/phase-2-checklist.md`.
+
 Luồng:
 
 ```text
 approve_checkpoint(run_id)
 -> đọc approved requirement_packet_v1
 -> Designer tạo design_artifact_v1
--> Validator kiểm tra requirement-design trace
--> sync Confluence/Jira mock
+-> Validator tạo requirement/class/sequence graph và requirement-design trace
+-> nếu thiếu link: Validator tạo quality report, Designer update design, rồi kiểm lại
+-> sync design checkpoint theo `docs/phase-2/sync-design-checkpoint.md`
 -> status=waiting_design_approval
 ```
 
@@ -63,6 +68,7 @@ Kết quả mong muốn:
 
 - Có design artifact dễ đọc.
 - Có trace requirement-design.
+- Có missing-link report và quality report của Validator.
 - Có trạng thái chờ duyệt design.
 - Niko đọc được summary để báo lại.
 
@@ -128,4 +134,14 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Requirement Refiner, validator/repair loop và sync Jira/Confluence. Niko gọi
 > SDLC_Harness qua CLI JSON và chỉ format kết quả cho Telegram. Phase 2
 > thiết kế/coding vẫn chưa bắt đầu.
+
+> Cập nhật 2026-10-13: đã viết tài liệu triển khai Phase 2 trong
+> `docs/phase-2/`, tập trung vào vòng Designer/Validator, traceability graph,
+> missing-link feedback và state/artifact versioning. Chưa triển khai code Phase 2.
+
+> Cập nhật 2026-10-13: Phase 2 đã có lát code V0 cho
+> `approve-checkpoint`: đọc requirement packet đã duyệt, sinh fake design
+> artifact/trace/report, mock sync `tool_sync_report_v2` và chuyển state sang
+> `waiting_design_approval`. Designer/Validator thật, repair loop, real sync và
+> Niko approve route vẫn chưa triển khai.
 

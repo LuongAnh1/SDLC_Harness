@@ -15,7 +15,7 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã có lát V0 cho `approve-checkpoint` bằng fake Designer/Validator và mock design sync để khóa contract trước khi nối Designer/Validator thật. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
 
 ## Cấu Trúc Package
@@ -37,6 +37,8 @@ Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/
 - `docs/datasets-and-context.md`: cách dùng eTour/SMOS/iTrust và vai trò lớp context động.
 - `docs/implementation-checklist.md`: checklist theo phase để tick khi triển khai.
 - `docs/phase-1/README.md`: tài liệu triển khai chi tiết cho lát cắt use case -> requirement packet.
+- `docs/phase-2/README.md`: tài liệu triển khai dự kiến cho lát cắt requirement packet -> design artifact.
+- `docs/phase-2/sync-design-checkpoint.md`: contract sync checkpoint thiết kế lên Jira/Confluence và cách Niko đọc `last_sync`.
 
 ## Nguyên Tắc Hiện Tại
 
@@ -92,7 +94,9 @@ Ranh giới hiện tại:
   Atlassian đầy đủ.
 - Mock sync vẫn tồn tại cho unit/smoke test hoặc khi chưa cấu hình tool thật.
 - CLI phải giữ stdout chỉ có JSON vì Niko parse trực tiếp response đó.
-- Phase 2 thiết kế/coding chưa được triển khai trong baseline này.
+- Phase 2 hiện có contract `approve-checkpoint` V0: fake design artifact, fake
+  traceability report và mock design sync. Designer/Validator thật theo TraceDev
+  vẫn là bước tiếp theo.
 
 <!-- SDLC_NIKO_SYNC_END -->
 

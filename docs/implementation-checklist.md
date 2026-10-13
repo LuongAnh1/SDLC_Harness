@@ -63,13 +63,22 @@ Mục đích: khóa điều kiện trước Phase 2 bằng sync thật, không c
 
 Mục đích: sau khi duyệt requirement, tạo thiết kế có trace và checkpoint.
 
-- [ ] Có `approve_checkpoint(run_id)`.
-- [ ] Đọc approved `requirement_packet_v1`, không refine requirement lại trong Phase 2.
-- [ ] Sinh `design_artifact_v1`.
-- [ ] Sinh trace requirement-design.
+Checklist chi tiết nằm ở `docs/phase-2/phase-2-checklist.md`. Phase 2 đã có lát
+V0: CLI `approve-checkpoint`, fake/deterministic design artifact, mock
+`tool_sync_report_v2` và state `waiting_design_approval`. Designer/Validator
+thật theo TraceDev, repair loop và real sync Phase 2 vẫn là bước tiếp theo.
+
+- [x] Có `approve_checkpoint(run_id)`.
+- [x] Đọc approved `requirement_packet_v1`, không refine requirement lại trong Phase 2.
+- [x] Sinh `design_artifact_v1`.
+- [x] Sinh trace requirement-design ở mức fake trace V0.
 - [ ] Validator phát hiện thiếu/mâu thuẫn cơ bản.
-- [ ] Sync Confluence/Jira mock.
-- [ ] State chuyển sang `waiting_design_approval`.
+- [x] Validator V0 sinh missing-link report rỗng và quality report cho Designer.
+- [ ] Designer repair design theo Validator report với giới hạn vòng lặp rõ.
+- [x] Sync Confluence/Jira mock theo `docs/phase-2/sync-design-checkpoint.md`.
+- [ ] Re-sync design checkpoint không tạo Jira comment/Confluence page trùng.
+- [ ] Niko đọc `last_sync` để báo trạng thái sync Phase 2.
+- [x] State chuyển sang `waiting_design_approval`.
 
 ## Phase 3 - Design Đến Code/Test Report
 

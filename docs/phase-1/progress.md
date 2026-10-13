@@ -160,3 +160,15 @@ Phase 1 đã được đồng bộ lại với Niko_Agent:
 - Telegram reply bên Niko chỉ hiển thị tóm tắt dễ đọc, còn artifact/state vẫn
   nằm trong runtime của SDLC_Harness.
 
+## Chuẩn Bị Tài Liệu Phase 2
+
+Cập nhật 2026-10-13: đã viết tài liệu triển khai Phase 2 trong `docs/phase-2/`.
+Tài liệu này chưa có nghĩa là Phase 2 đã bắt đầu code. Nó dùng để chốt trước
+vòng Designer/Validator theo tinh thần TraceDev:
+
+- Designer sinh analysis report và design artifact.
+- Validator tạo requirement graph, class diagram graph, sequence diagram graph.
+- Validator sinh traceability links và missing-link report.
+- Designer update design theo quality report khi còn missing links.
+- SDLC_Harness lưu artifact/state/checkpoint sau từng vòng để Niko đọc status.
+

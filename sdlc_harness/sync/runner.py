@@ -5,7 +5,7 @@ from __future__ import annotations
 from ..core.config import Settings
 from ..storage.runtime import RuntimeStore
 from .atlassian import real_sync_requirement_checkpoint
-from .mock import mock_sync_requirement_checkpoint
+from .mock import mock_sync_design_checkpoint, mock_sync_requirement_checkpoint
 
 
 def sync_requirement_checkpoint(
@@ -35,6 +35,28 @@ def sync_requirement_checkpoint(
     return real_sync_requirement_checkpoint(
         store=store,
         settings=settings,
+        run_id=run_id,
+        source_ref=source_ref,
+        artifact_paths=artifact_paths,
+    )
+
+
+def sync_design_checkpoint(
+    *,
+    store: RuntimeStore,
+    settings: Settings,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, object]:
+    """Sync design checkpoint Phase 2 V0.
+
+    Lát đầu Phase 2 chỉ hỗ trợ mock sync để khóa contract `tool_sync_report_v2`.
+    Real Jira/Confluence update sẽ được nối ở lát sau.
+    """
+
+    return mock_sync_design_checkpoint(
+        store=store,
         run_id=run_id,
         source_ref=source_ref,
         artifact_paths=artifact_paths,

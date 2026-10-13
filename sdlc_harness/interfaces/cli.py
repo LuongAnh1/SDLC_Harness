@@ -14,6 +14,7 @@ import sys
 from ..core.config import load_settings, repo_root
 from ..core.errors import HarnessError
 from ..workflows.phase1 import PhaseOneWorkflow
+from ..workflows.phase2 import PhaseTwoWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +42,12 @@ def build_parser() -> argparse.ArgumentParser:
     sync = subparsers.add_parser("sync-run")
     sync.add_argument("--run-id", required=True)
     sync.add_argument("--runtime-root", default=None)
+
+    approve = subparsers.add_parser("approve-checkpoint")
+    approve.add_argument("--run-id", required=True)
+    approve.add_argument("--checkpoint-id", default=None)
+    approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    approve.add_argument("--runtime-root", default=None)
     return parser
 
 
@@ -54,22 +61,31 @@ def _settings_from_args(args: argparse.Namespace):
 
 def run(args: argparse.Namespace) -> dict[str, object]:
     settings = _settings_from_args(args)
-    workflow = PhaseOneWorkflow(settings)
     if args.command == "start-or-get-run":
+        workflow = PhaseOneWorkflow(settings)
         return workflow.start_or_get_run(
             dataset=args.dataset,
             use_case=args.use_case,
             requested_by=args.requested_by,
         )
     if args.command == "start-from-jira":
+        workflow = PhaseOneWorkflow(settings)
         return workflow.start_from_jira(
             issue_key=args.issue_key,
             requested_by=args.requested_by,
         )
     if args.command == "get-status":
+        workflow = PhaseOneWorkflow(settings)
         return workflow.get_status(run_id=args.run_id)
     if args.command == "sync-run":
+        workflow = PhaseOneWorkflow(settings)
         return workflow.sync_run(run_id=args.run_id)
+    if args.command == "approve-checkpoint":
+        workflow = PhaseTwoWorkflow(settings)
+        return workflow.approve_checkpoint(
+            run_id=args.run_id,
+            checkpoint_id=args.checkpoint_id,
+        )
     raise HarnessError("unknown_command", f"Unknown command: {args.command}")
 
 

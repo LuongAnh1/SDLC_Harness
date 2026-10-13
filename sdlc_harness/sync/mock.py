@@ -80,3 +80,120 @@ Artifacts:
     }
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return {"status": "mock_synced", "report": store.relative(report_path)}
+
+
+def mock_sync_design_checkpoint(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, object]:
+    """Tạo mock Jira/Confluence checkpoint cho Phase 2 design review."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+
+    jira_comment_path = sync_dir / "design-jira-comment.md"
+    confluence_page_path = sync_dir / "design-confluence-page.md"
+    report_path = sync_dir / "tool_sync_report_v2.json"
+    design_artifact = artifact_paths["design_artifact"]
+    trace_artifact = artifact_paths["requirement_design_trace"]
+    quality_report = artifact_paths["design_quality_report"]
+
+    jira_comment_path.write_text(
+        f"""# Mock Jira Comment - Design Checkpoint
+
+Run: `{run_id}`
+Source: `{source_ref}`
+Status: `waiting_design_approval`
+
+Design checkpoint V0 đã được tạo và đang chờ duyệt.
+
+Artifacts:
+- Design artifact: `{design_artifact}`
+- Requirement-design trace: `{trace_artifact}`
+- Quality report: `{quality_report}`
+
+Next action: approve design hoặc request change.
+""",
+        encoding="utf-8",
+    )
+    confluence_page_path.write_text(
+        f"""# Mock Confluence Page - Design Checkpoint
+
+Source: `{source_ref}`
+Run: `{run_id}`
+
+Trang này giả lập bản review thiết kế sau khi requirement checkpoint đã được duyệt.
+
+## Design Artifacts
+
+- Designer analysis: `{artifact_paths['designer_analysis']}`
+- Design artifact: `{design_artifact}`
+- Class diagram graph: `{artifact_paths['class_diagram_graph']}`
+- Sequence diagram graph: `{artifact_paths['sequence_diagram_graph']}`
+- Requirement-design trace: `{trace_artifact}`
+- Missing design links: `{artifact_paths['missing_design_links']}`
+- Quality report: `{quality_report}`
+
+## Human Checkpoint
+
+Review design trước khi cho phép Phase 3 sinh code/test.
+""",
+        encoding="utf-8",
+    )
+
+    targets = [
+        {
+            "tool": "jira",
+            "operation": "mock_file",
+            "external_id": "",
+            "url": "",
+            "status": "synced",
+            "path": store.relative(jira_comment_path),
+            "artifact_refs": ["design_artifact_v1", "requirement_design_trace_v1", "design_quality_report_v1"],
+            "error": None,
+        },
+        {
+            "tool": "confluence",
+            "operation": "mock_file",
+            "external_id": "",
+            "url": "",
+            "status": "synced",
+            "path": store.relative(confluence_page_path),
+            "artifact_refs": ["designer_analysis_v1", "design_artifact_v1", "missing_design_links_v1"],
+            "error": None,
+        },
+    ]
+    report = {
+        "version": "tool_sync_report_v2",
+        "phase": "design_checkpoint",
+        "status": "mock_synced",
+        "mode": "mock",
+        "targets": targets,
+        "checkpoint": {
+            "type": "design_approval",
+            "artifact_ref": "design_artifact_v1",
+            "artifact_path": design_artifact,
+        },
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "phase": "design_checkpoint",
+        "status": "mock_synced",
+        "mode": "mock",
+        "report": store.relative(report_path),
+        "targets": [
+            {
+                "tool": target["tool"],
+                "status": target["status"],
+                "path": target["path"],
+                "url": "",
+                "external_id": "",
+            }
+            for target in targets
+        ],
+    }

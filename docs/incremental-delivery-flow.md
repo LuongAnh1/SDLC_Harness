@@ -46,7 +46,7 @@ Input: approve requirement checkpoint
 Output:
   design_artifact_v1
   trace_graph_v1(requirement-design)
-  sync_report_v2
+  tool_sync_report_v2
   status=waiting_design_approval
 ```
 
@@ -56,6 +56,10 @@ Niko cần trả lời được:
 - Đã sync lên tool/mock tool nào?
 - Có thiếu trace hoặc câu hỏi mở không?
 - Có thể chạy tiếp chưa?
+
+Sync của slice này đi theo `docs/phase-2/sync-design-checkpoint.md`: Jira nhận
+summary/comment checkpoint, Confluence nhận bản review đầy đủ hơn, còn Niko chỉ
+đọc `last_sync` và `pending_checkpoint` từ state.
 
 ## Slice 3 - Design Đến Code/Test Report
 
@@ -92,9 +96,9 @@ Quy tắc:
 Ban đầu đồng bộ tool có thể là mock/local:
 
 ```text
-Jira mock        -> .runtime/runs/<run_id>/jira-comment.md
-Confluence mock  -> .runtime/runs/<run_id>/confluence-page.md
-Git mock         -> .runtime/runs/<run_id>/git-report.md
+Jira mock        -> .runtime/runs/<run_id>/sync/<phase>-jira-comment.md
+Confluence mock  -> .runtime/runs/<run_id>/sync/<phase>-confluence-page.md
+Git mock         -> .runtime/runs/<run_id>/sync/<phase>-git-report.md
 ```
 
 Khi flow ổn mới thay bằng API thật.
@@ -107,9 +111,11 @@ Khi flow ổn mới thay bằng API thật.
 - Không bắt buộc Jira/Confluence/GitHub thật ở slice đầu.
 - Không để Niko lưu workflow state chính.
 
-## Trước Khi Sang Phase 2
+## Trước Khi Sang Code Phase 2
 
-Mock sync chỉ dùng để mở đường cho thử nghiệm đầu. Trước khi chuyển sang Phase 2, cần có một adapter sync thật tối thiểu và Niko phải gọi được SDLC Harness qua CLI.
+Mock sync chỉ dùng để mở đường cho thử nghiệm đầu. Trước khi triển khai code
+Phase 2, cần có một adapter sync thật tối thiểu, Niko phải gọi được SDLC Harness
+qua CLI, và tài liệu Phase 2 phải chốt rõ vòng Designer/Validator.
 
 Điều kiện tối thiểu:
 
@@ -118,4 +124,6 @@ Mock sync chỉ dùng để mở đường cho thử nghiệm đầu. Trước k
 - Sync thuộc SDLC Harness; Niko chỉ đọc kết quả sync để báo người dùng.
 - Có tool thật hoặc API thật được chứng minh. Theo lựa chọn hiện tại để khóa Phase 1, triển khai cả Jira comment và Confluence page.
 - Runtime/provider cho workflow mới được cấu hình rõ, ưu tiên DeepSeek thay vì phụ thuộc FCC.
+- `docs/phase-2/` mô tả rõ state/artifact/checkpoint và sync design checkpoint
+  cho design loop trước khi viết code.
 
