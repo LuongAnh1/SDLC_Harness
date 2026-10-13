@@ -60,18 +60,19 @@ Mục đích: kiểm tra requirement đã được design thể hiện đủ ở
 - [x] Lưu `missing_design_links_v1.json`.
 - [x] Missing link class và sequence được tách riêng.
 - [x] Trace placeholder không invent target không có trong graph.
+- [x] Sequence trace chấp nhận return message target dùng arrow `-->`.
 
 ## 6. Validator Quality Report Và Repair Loop
 
 Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu thay vì sinh lại mù quáng.
 
 - [x] Validator traceability V1 tạo `design_quality_report_v1.md`.
-- [ ] Designer có bước `update_design(report)`.
-- [ ] Mỗi vòng repair tạo version mới `design_artifact_v{n}`.
-- [ ] Mỗi vòng repair tạo trace/missing/report version tương ứng.
-- [ ] Có giới hạn vòng repair cấu hình được, mặc định 2 vòng.
-- [ ] Nếu pass trước giới hạn, dừng loop.
-- [ ] Nếu fail sau giới hạn do design thiếu, state=`blocked`.
+- [x] Designer có bước `update_design(report)`.
+- [x] Mỗi vòng repair tạo version mới `design_artifact_v{n}`.
+- [x] Mỗi vòng repair tạo trace/missing/report version tương ứng.
+- [x] Có giới hạn vòng repair rõ, mặc định 2 vòng.
+- [x] Nếu pass trước giới hạn, dừng loop.
+- [x] Nếu fail sau giới hạn do design thiếu, state=`blocked`.
 - [ ] Nếu fail do requirement thiếu/mơ hồ, quay về `waiting_requirement_approval` hoặc state=`blocked` với lý do rõ.
 
 ## 7. Workflow State Và Artifact Store
@@ -80,7 +81,7 @@ Mục đích: Niko có thể đọc tiến độ, checkpoint và artifact mới 
 
 - [x] Ghi state `design_drafting`.
 - [x] Ghi state `design_validating`.
-- [ ] Ghi state `design_repairing` khi chạy repair.
+- [x] Ghi state `design_repairing` khi chạy repair.
 - [x] Ghi state cuối `waiting_design_approval` khi pass.
 - [x] `latest_artifacts` trỏ tới design/trace/missing/report mới nhất.
 - [x] `quality_reports.design_traceability` có summary và danh sách versions.
@@ -125,8 +126,9 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test Designer fake output tạo design artifact.
 - [x] Unit test parser class/sequence diagram.
 - [x] Unit test Validator phát hiện missing links.
-- [ ] Unit test repair loop pass sau một vòng.
-- [ ] Unit test repair loop blocked sau giới hạn.
+- [x] Unit test Validator chấp nhận sequence return arrow target.
+- [x] Unit test repair loop pass sau một vòng.
+- [x] Unit test repair loop blocked sau giới hạn.
 - [x] Unit test sync mock design checkpoint.
 - [x] Smoke test CLI từ run Phase 1 thật sang `waiting_design_approval`.
 - [ ] Smoke test qua Niko sau khi CLI pass.

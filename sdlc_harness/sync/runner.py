@@ -49,9 +49,9 @@ def sync_design_checkpoint(
     source_ref: str,
     artifact_paths: dict[str, str],
 ) -> dict[str, object]:
-    """Sync design checkpoint Phase 2 V0.
+    """Sync design checkpoint Phase 2.
 
-    Lát đầu Phase 2 chỉ hỗ trợ mock sync để khóa contract `tool_sync_report_v2`.
+    Phase 2 hiện vẫn dùng mock sync để khóa contract `tool_sync_report_v2`.
     Real Jira/Confluence update sẽ được nối ở lát sau.
     """
 

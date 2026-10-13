@@ -106,3 +106,67 @@ Chưa làm trong lát này:
 - Chưa chuyển state `design_repairing`.
 - Chưa real sync idempotent cho design checkpoint.
 - Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.
+
+## 2026-10-13 - V3 Designer Repair Loop
+
+Đã làm:
+
+- Nối `Designer.update_design(...)` vào prompt `update_designer.txt` đã có.
+- Khi Validator báo missing link, workflow chuyển state sang
+  `design_repairing` và đưa `design_quality_report_v{n}.md` ngược lại cho
+  Designer.
+- Mỗi vòng validate/repair ghi artifact version riêng:
+  `design_artifact_v{n}.md`, `class_diagram_graph_v{n}.json`,
+  `sequence_diagram_graph_v{n}.json`, `requirement_design_trace_v{n}.json`,
+  `missing_design_links_v{n}.json`, `design_quality_report_v{n}.md`.
+- Giới hạn repair mặc định là 2 vòng.
+- Nếu traceability pass sau repair, workflow mở `design_approval` checkpoint ở
+  version mới nhất.
+- Nếu vẫn còn missing sau giới hạn, workflow chuyển `status=blocked`, không mở
+  pending checkpoint design và giữ latest artifacts ở version cuối.
+- Mock sync design checkpoint đã dùng artifact ref theo version mới nhất thay vì
+  hard-code `v1`.
+
+Đã kiểm thử:
+
+- `python -m unittest discover -s tests -p "test*.py" -v`: 45 test pass.
+- Unit test Designer `update_design` fake mode trả design parse được.
+- Unit test repair loop pass sau một vòng và latest artifacts trỏ `v2`.
+- Unit test repair loop blocked sau giới hạn và latest artifacts trỏ `v3`.
+
+Chưa làm trong lát này:
+
+- Chưa real sync idempotent cho design checkpoint.
+- Chưa nối Niko route duyệt checkpoint sang CLI `approve-checkpoint`.
+- Chưa xử lý nhánh requirement thiếu/mơ hồ để quay về requirement checkpoint.
+
+## 2026-10-13 - Live DeepSeek Sequence Target Fix
+
+Phát hiện khi anh chạy live DeepSeek:
+
+```text
+Validator sequence diagram trace invented target:
+Repository --> Controller: List<CulturalHeritage>
+```
+
+Nguyên nhân:
+
+- Parser sequence diagram đã lưu arrow thật của message, gồm cả return arrow
+  `-->`.
+- Validator target whitelist chỉ có dạng text thuần và một số dạng `->`, nên
+  trace target dùng đúng return arrow của diagram bị hiểu nhầm là target bịa.
+
+Đã sửa:
+
+- `_sequence_targets(...)` bổ sung target theo `arrow` thật của message:
+  `Source-->Target: message` và `Source --> Target: message`.
+- Thêm unit test `test_validator_accepts_sequence_return_arrow_target`.
+
+Đã kiểm thử:
+
+- `python -m unittest discover -s tests -p "test_phase2.py" -v`: 18 test pass.
+
+Ghi chú vận hành:
+
+- Run live bị lỗi đã vào `status=failed`; cần tạo run mới bằng
+  `start-or-get-run` rồi approve lại, không approve lại trực tiếp run cũ.

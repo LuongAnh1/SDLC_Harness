@@ -10,8 +10,8 @@ import tempfile
 import unittest
 
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.designer import DesignerAgent, parse_design_model
-from sdlc_harness.agents.validator import ValidatorAgent, build_requirement_graph
+from sdlc_harness.agents.designer import DesignDraft, DesignerAgent, parse_design_model
+from sdlc_harness.agents.validator import TraceabilityResult, ValidatorAgent, build_requirement_graph
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmClient, fake_design_model, fake_refined_requirement
@@ -27,6 +27,81 @@ class StaticLlmClient:
         if not self.responses:
             return "[]"
         return self.responses.pop(0)
+
+
+class RepairingDesigner:
+    def __init__(self) -> None:
+        self.update_calls = 0
+        self.last_audit_report = ""
+
+    def draft(self, *, requirement_packet: str, formal_use_case: str = "") -> DesignDraft:
+        return DesignDraft(analysis_report="test architecture", design_model=fake_design_model())
+
+    def update_design(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str,
+        current_design: str,
+        audit_report: str,
+    ) -> str:
+        self.update_calls += 1
+        self.last_audit_report = audit_report
+        return fake_design_model()
+
+
+class SequencedTraceabilityValidator:
+    def __init__(self, missing_by_call: list[bool]):
+        self.missing_by_call = missing_by_call
+        self.calls = 0
+
+    def construct_traceability(
+        self,
+        *,
+        requirement_packet: str,
+        class_graph: dict[str, object],
+        sequence_graph: dict[str, object],
+    ) -> TraceabilityResult:
+        graph = build_requirement_graph(requirement_packet)
+        requirements = graph["requirements"]
+        has_missing = self.missing_by_call[min(self.calls, len(self.missing_by_call) - 1)]
+        self.calls += 1
+
+        class_trace = []
+        sequence_trace = []
+        for index, requirement in enumerate(requirements):
+            class_links = [] if has_missing and index == 0 else [{"target": "TestTarget", "reason": "test"}]
+            sequence_links = [{"target": "TestMessage", "reason": "test"}]
+            class_trace.append(
+                {
+                    "requirement": requirement["id"],
+                    "content": requirement["content"],
+                    "links": class_links,
+                }
+            )
+            sequence_trace.append(
+                {
+                    "requirement": requirement["id"],
+                    "content": requirement["content"],
+                    "links": sequence_links,
+                }
+            )
+
+        missing_links = {"class_diagram": [], "sequence_diagram": []}
+        if has_missing:
+            missing_requirement = requirements[0]
+            missing_links["class_diagram"] = [
+                {
+                    "requirement": missing_requirement["id"],
+                    "content": missing_requirement["content"],
+                }
+            ]
+        return TraceabilityResult(
+            requirement_graph=graph,
+            class_trace=class_trace,
+            sequence_trace=sequence_trace,
+            missing_links=missing_links,
+        )
 
 
 class PhaseTwoTest(unittest.TestCase):
@@ -60,6 +135,18 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertIn("## Class Diagram", draft.design_model)
         self.assertIn("## Sequence Diagrams", draft.design_model)
         self.assertIn("@startuml", draft.design_model)
+
+    def test_designer_update_design_fake_mode_returns_parseable_design(self) -> None:
+        updated_design = DesignerAgent(LlmClient(self.settings)).update_design(
+            requirement_packet=fake_refined_requirement(""),
+            formal_use_case="UsecaseName: Delete Cultural Heritage",
+            current_design=fake_design_model(),
+            audit_report="# Design Quality Report\n\n- Missing design links: 1",
+        )
+
+        parsed = parse_design_model(updated_design)
+        self.assertTrue(parsed.class_graph["nodes"])
+        self.assertTrue(parsed.sequence_graph["sequenceDiagrams"])
 
     def test_parse_design_model_reads_class_and_sequence_graph(self) -> None:
         parsed = parse_design_model(fake_design_model())
@@ -145,6 +232,46 @@ class OnlyClass {
 
         self.assertEqual(ctx.exception.error_code, "validator_traceability_failed")
 
+    def test_validator_accepts_sequence_return_arrow_target(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        first_requirement = build_requirement_graph(fake_refined_requirement(""))["requirements"][0]
+        class_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "DeleteCulturalHeritageService.deleteHeritage",
+                            "reason": "valid class target",
+                        }
+                    ],
+                }
+            ]
+        )
+        sequence_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "Repository --> Service: CulturalHeritage",
+                            "reason": "valid return message target",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = ValidatorAgent(StaticLlmClient([class_trace, sequence_trace])).construct_traceability(
+            requirement_packet=fake_refined_requirement(""),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+        )
+
+        self.assertEqual(result.sequence_trace[0]["links"][0]["target"], "Repository --> Service: CulturalHeritage")
+
     def test_validator_reports_missing_links_when_trace_links_are_empty(self) -> None:
         parsed = parse_design_model(fake_design_model())
         graph = build_requirement_graph(fake_refined_requirement(""))
@@ -214,6 +341,60 @@ class OnlyClass {
         self.assertEqual(report["version"], "tool_sync_report_v2")
         self.assertEqual(report["phase"], "design_checkpoint")
         self.assertEqual(report["checkpoint"]["type"], "design_approval")
+
+    def test_repair_loop_passes_after_one_repair(self) -> None:
+        created = self._create_phase1_run()
+        workflow = PhaseTwoWorkflow(self.settings)
+        designer = RepairingDesigner()
+        validator = SequencedTraceabilityValidator([True, False])
+        workflow.designer = designer
+        workflow.validator = validator
+
+        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertEqual(response["current_phase"], "design_review")
+        self.assertEqual(designer.update_calls, 1)
+        self.assertEqual(validator.calls, 2)
+        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
+        self.assertEqual(response["pending_checkpoint"]["artifact_ref"], "design_artifact_v2")
+        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
+        self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
+        self.assertIn("Missing design links: 1", designer.last_audit_report)
+
+        run_dir = self.runtime_root / "runs" / str(created["run_id"])
+        self.assertTrue((run_dir / "artifacts" / "design_artifact_v1.md").exists())
+        self.assertTrue((run_dir / "artifacts" / "design_artifact_v2.md").exists())
+        quality_v2 = (run_dir / "artifacts" / "design_quality_report_v2.md").read_text(encoding="utf-8")
+        self.assertIn("Repair iterations: 1", quality_v2)
+        sync_report = json.loads((run_dir / "sync" / "tool_sync_report_v2.json").read_text(encoding="utf-8"))
+        self.assertEqual(sync_report["checkpoint"]["artifact_ref"], "design_artifact_v2")
+
+    def test_repair_loop_blocks_after_limit(self) -> None:
+        created = self._create_phase1_run()
+        workflow = PhaseTwoWorkflow(self.settings)
+        designer = RepairingDesigner()
+        validator = SequencedTraceabilityValidator([True, True, True])
+        workflow.designer = designer
+        workflow.validator = validator
+
+        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["current_phase"], "design_review")
+        self.assertIsNone(response["pending_checkpoint"])
+        self.assertEqual(response["last_error"]["error_code"], "design_traceability_blocked")
+        self.assertEqual(designer.update_calls, 2)
+        self.assertEqual(validator.calls, 3)
+        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v3.md"))
+        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2", "v3"])
+        self.assertFalse(response["quality_reports"]["design_traceability"]["ok"])
+
+        run_dir = self.runtime_root / "runs" / str(created["run_id"])
+        self.assertTrue((run_dir / "artifacts" / "design_artifact_v3.md").exists())
+        quality_v3 = (run_dir / "artifacts" / "design_quality_report_v3.md").read_text(encoding="utf-8")
+        self.assertIn("Repair iterations: 2", quality_v3)
+        self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
     def test_approve_checkpoint_rejects_wrong_checkpoint_id(self) -> None:
         created = self._create_phase1_run()

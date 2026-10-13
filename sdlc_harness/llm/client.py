@@ -104,6 +104,8 @@ def fake_completion(prompt: str) -> str:
         return fake_formal_use_case()
     if "Repair Requirement Packet v1" in prompt or "Requirement Validation Report" in prompt:
         return fake_refined_requirement(prompt)
+    if "UML Audit / Report" in prompt and "updated Class Diagram" in prompt:
+        return fake_design_model()
     if "both a Class Diagram and Sequence Diagrams" in prompt:
         return fake_design_model()
     if "very concise architecture recommendation" in prompt:

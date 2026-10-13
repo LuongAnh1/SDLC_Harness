@@ -1,8 +1,9 @@
 """Workflow Phase 2: approved requirement -> design checkpoint.
 
 Phase 2 nhận requirement đã duyệt, gọi Designer để sinh PlantUML, parse class/
-sequence graph và tạo checkpoint design. Validator traceability/repair loop vẫn
-ở lát sau, nên workflow hiện chỉ kết luận parser pass chứ không kết luận coverage.
+sequence graph, chạy Validator traceability và repair design khi còn missing
+link. Workflow chỉ mở checkpoint design khi traceability pass hoặc chuyển
+`blocked` nếu hết vòng repair mà vẫn thiếu link.
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ ALLOWED_DESIGN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
+DESIGN_REPAIR_LIMIT = 2
 
 
 class PhaseTwoWorkflow:
@@ -87,42 +89,105 @@ class PhaseTwoWorkflow:
                 requirement_packet=requirement_packet,
                 formal_use_case=formal_use_case,
             )
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "design_validating",
-                    "status": "design_validating",
-                    "summary_for_user": "Designer đã sinh design draft, đang parse PlantUML và chạy traceability.",
-                }
-            )
-            self.store.write_state(state)
+            design_model = draft.design_model
+            versions: list[str] = []
+            design_paths: dict[str, str] = {}
+            merged_artifacts = dict(artifact_paths)
+            traceability = None
+            previous_quality_report = ""
 
-            parsed = parse_design_model(draft.design_model)
-            traceability = self.validator.construct_traceability(
-                requirement_packet=requirement_packet,
-                class_graph=parsed.class_graph,
-                sequence_graph=parsed.sequence_graph,
-            )
-            design_paths = write_phase2_design_artifacts(
-                store=self.store,
-                run_id=run_id,
-                designer_analysis=draft.analysis_report,
-                design_model=draft.design_model,
-                requirement_graph=traceability.requirement_graph,
-                class_graph=parsed.class_graph,
-                sequence_graph=parsed.sequence_graph,
-                class_trace=traceability.class_trace,
-                sequence_trace=traceability.sequence_trace,
-                missing_links=traceability.missing_links,
-                requirement_packet=requirement_packet,
-                formal_use_case=formal_use_case,
-                version=1,
-            )
+            for repair_iteration in range(DESIGN_REPAIR_LIMIT + 1):
+                version = repair_iteration + 1
+                if repair_iteration == 0:
+                    state.update(
+                        {
+                            "updated_at": utc_now_iso(),
+                            "current_phase": "design_validating",
+                            "status": "design_validating",
+                            "summary_for_user": (
+                                "Designer đã sinh design draft, đang parse PlantUML "
+                                "và chạy traceability."
+                            ),
+                        }
+                    )
+                else:
+                    state.update(
+                        {
+                            "updated_at": utc_now_iso(),
+                            "current_phase": "design_repairing",
+                            "status": "design_repairing",
+                            "summary_for_user": (
+                                f"Validator còn missing link, Designer đang repair design "
+                                f"lần {repair_iteration}/{DESIGN_REPAIR_LIMIT}."
+                            ),
+                        }
+                    )
+                self.store.write_state(state)
+
+                parsed = parse_design_model(design_model)
+                traceability = self.validator.construct_traceability(
+                    requirement_packet=requirement_packet,
+                    class_graph=parsed.class_graph,
+                    sequence_graph=parsed.sequence_graph,
+                )
+                design_paths = write_phase2_design_artifacts(
+                    store=self.store,
+                    run_id=run_id,
+                    designer_analysis=_analysis_for_version(
+                        base_analysis=draft.analysis_report,
+                        version=version,
+                        previous_quality_report=previous_quality_report,
+                    ),
+                    design_model=design_model,
+                    requirement_graph=traceability.requirement_graph,
+                    class_graph=parsed.class_graph,
+                    sequence_graph=parsed.sequence_graph,
+                    class_trace=traceability.class_trace,
+                    sequence_trace=traceability.sequence_trace,
+                    missing_links=traceability.missing_links,
+                    requirement_packet=requirement_packet,
+                    formal_use_case=formal_use_case,
+                    version=version,
+                    repair_iterations=repair_iteration,
+                )
+                versions.append(f"v{version}")
+                merged_artifacts = {**artifact_paths, **design_paths}
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "latest_artifacts": merged_artifacts,
+                        "quality_reports": {
+                            **_dict_value(state.get("quality_reports")),
+                            "design_traceability": {
+                                "ok": traceability.ok,
+                                "mode": "traceability_v1",
+                                "versions": versions,
+                                "summary": _traceability_summary(traceability.missing_links),
+                                "report": design_paths["design_quality_report"],
+                            },
+                        },
+                    }
+                )
+                self.store.write_state(state)
+                if traceability.ok:
+                    break
+                if repair_iteration >= DESIGN_REPAIR_LIMIT:
+                    break
+
+                previous_quality_report = design_paths["design_quality_report"]
+                audit_report_path = (self.store.repo_root / previous_quality_report).resolve()
+                audit_report = audit_report_path.read_text(encoding="utf-8")
+                design_model = self.designer.update_design(
+                    requirement_packet=requirement_packet,
+                    formal_use_case=formal_use_case,
+                    current_design=design_model,
+                    audit_report=audit_report,
+                )
         except HarnessError as exc:
             state.update(
                 {
                     "updated_at": utc_now_iso(),
-                    "current_phase": "design_validating",
+                    "current_phase": str(state.get("current_phase") or "design_validating"),
                     "status": "failed",
                     "last_error": exc.to_response(),
                     "allowed_next_actions": ["get_status", "cancel_run"],
@@ -133,7 +198,36 @@ class PhaseTwoWorkflow:
             if not exc.run_id:
                 raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
             raise
-        merged_artifacts = {**artifact_paths, **design_paths}
+
+        if traceability is None:
+            raise HarnessError("designer_failed", "Phase 2 did not produce a design traceability result.", run_id=run_id)
+
+        if not traceability.ok:
+            blocked_error = HarnessError(
+                "design_traceability_blocked",
+                (
+                    f"Design still has missing requirement links after "
+                    f"{DESIGN_REPAIR_LIMIT} repair iteration(s)."
+                ),
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_review",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": blocked_error.to_response(),
+                    "summary_for_user": (
+                        f"Phase 2 bị chặn sau {DESIGN_REPAIR_LIMIT} vòng repair. "
+                        f"Validator vẫn {_traceability_summary(traceability.missing_links)}"
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
         last_sync = sync_design_checkpoint(
             store=self.store,
             settings=self.settings,
@@ -152,7 +246,7 @@ class PhaseTwoWorkflow:
                 "pending_checkpoint": {
                     "checkpoint_id": checkpoint_id,
                     "type": "design_approval",
-                    "artifact_ref": "design_artifact_v1",
+                    "artifact_ref": _artifact_ref(design_paths["design_artifact"]),
                     "artifact_path": design_paths["design_artifact"],
                 },
                 "allowed_next_actions": ALLOWED_DESIGN_ACTIONS,
@@ -162,13 +256,13 @@ class PhaseTwoWorkflow:
                     "design_traceability": {
                         "ok": traceability.ok,
                         "mode": "traceability_v1",
-                        "versions": ["v1"],
+                        "versions": versions,
                         "summary": _traceability_summary(traceability.missing_links),
                         "report": design_paths["design_quality_report"],
                     },
                 },
                 "summary_for_user": (
-                    f"Đã duyệt requirement và tạo design checkpoint V1 cho run {run_id}. "
+                    f"Đã duyệt requirement và tạo design checkpoint {versions[-1].upper()} cho run {run_id}. "
                     f"Validator traceability đã chạy xong, "
                     f"{_traceability_summary(traceability.missing_links)} "
                     f"sync status={last_sync.get('status')}. "
@@ -253,3 +347,23 @@ def _traceability_summary(missing_links: dict[str, list[dict[str, str]]]) -> str
     if total == 0:
         return "không phát hiện missing link class/sequence."
     return f"còn {total} missing link class/sequence cần review."
+
+
+def _analysis_for_version(*, base_analysis: str, version: int, previous_quality_report: str) -> str:
+    """Gắn ngữ cảnh repair vào analysis artifact của version mới."""
+
+    if version == 1:
+        return base_analysis
+    return (
+        f"{base_analysis.rstrip()}\n\n"
+        "## Repair Context\n\n"
+        f"- Design version: v{version}\n"
+        f"- Previous quality report: `{previous_quality_report}`\n"
+    )
+
+
+def _artifact_ref(path: str) -> str:
+    """Lấy artifact ref từ relative path trong runtime."""
+
+    name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return name.rsplit(".", 1)[0]

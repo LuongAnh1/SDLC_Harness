@@ -355,9 +355,13 @@ def _sequence_targets(sequence_graph: dict[str, object]) -> set[str]:
                 source = str(message.get("from", "")).strip()
                 target = str(message.get("to", "")).strip()
                 text = str(message.get("message", "")).strip()
+                arrow = str(message.get("arrow", "")).strip()
                 if text:
                     targets.add(text)
                 if source and target and text:
                     targets.add(f"{source}->{target}: {text}")
                     targets.add(f"{source} -> {target}: {text}")
+                    if arrow:
+                        targets.add(f"{source}{arrow}{target}: {text}")
+                        targets.add(f"{source} {arrow} {target}: {text}")
     return targets

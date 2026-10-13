@@ -172,12 +172,9 @@ def write_phase2_design_artifacts(
     requirement_packet: str,
     formal_use_case: str = "",
     version: int = 1,
+    repair_iterations: int = 0,
 ) -> dict[str, str]:
-    """Ghi artifact design V1 từ Designer, parser PlantUML và Validator.
-
-    Validator traceability V1 tạo trace class/sequence thật nhưng chưa tự chạy
-    repair loop. Nếu còn missing links, report ghi rõ để checkpoint human review.
-    """
+    """Ghi artifact design theo version từ Designer, parser PlantUML và Validator."""
 
     artifact_dir = store.run_dir(run_id) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -264,7 +261,7 @@ def write_phase2_design_artifacts(
 - Sequence graph parser: passed
 - Traceability LLM: passed
 - Missing design links: {missing_count}
-- Repair iterations: 0
+- Repair iterations: {repair_iterations}
 
 ## Result
 {_traceability_result_text(missing_count)}
@@ -299,10 +296,7 @@ def _with_heading(title: str, content: str) -> str:
 def _traceability_result_text(missing_count: int) -> str:
     if missing_count == 0:
         return "Validator traceability V1 không phát hiện missing link ở class hoặc sequence diagram."
-    return (
-        "Validator traceability V1 còn phát hiện missing link. Lát này chưa chạy "
-        "repair loop, nên design vẫn được đưa ra checkpoint để human review."
-    )
+    return "Validator traceability V1 còn phát hiện missing link cần Designer repair hoặc human review."
 
 
 def _missing_links_markdown(missing_links: dict[str, list[dict[str, str]]]) -> str:

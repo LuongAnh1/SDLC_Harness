@@ -66,8 +66,8 @@ Mục đích: sau khi duyệt requirement, tạo thiết kế có trace và chec
 Checklist chi tiết nằm ở `docs/phase-2/phase-2-checklist.md`. Phase 2 đã có CLI
 `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML
 class/sequence graph, Validator traceability V1, mock `tool_sync_report_v2` và
-state `waiting_design_approval`. Repair loop, real sync Phase 2 và Niko route
-duyệt checkpoint vẫn là bước tiếp theo.
+repair loop Designer.update_design với artifact versioning. Real sync Phase 2 và
+Niko route duyệt checkpoint vẫn là bước tiếp theo.
 
 - [x] Có `approve_checkpoint(run_id)`.
 - [x] Đọc approved `requirement_packet_v1`, không refine requirement lại trong Phase 2.
@@ -77,7 +77,7 @@ duyệt checkpoint vẫn là bước tiếp theo.
 - [x] Sinh trace requirement-design ở mức `traceability_v1`.
 - [x] Validator phát hiện missing links cơ bản.
 - [x] Validator traceability V1 sinh missing-link report và quality report cho Designer/human.
-- [ ] Designer repair design theo Validator report với giới hạn vòng lặp rõ.
+- [x] Designer repair design theo Validator report với giới hạn vòng lặp rõ.
 - [x] Sync Confluence/Jira mock theo `docs/phase-2/sync-design-checkpoint.md`.
 - [ ] Re-sync design checkpoint không tạo Jira comment/Confluence page trùng.
 - [ ] Niko đọc `last_sync` để báo trạng thái sync Phase 2.

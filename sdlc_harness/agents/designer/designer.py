@@ -17,6 +17,7 @@ from ...llm.client import LlmClient
 _PROMPT_DIR = Path(__file__).with_name("prompts")
 _RECOMMENDATION_PROMPT_PATH = _PROMPT_DIR / "recommendation.txt"
 _DESIGNER_PROMPT_PATH = _PROMPT_DIR / "designer.txt"
+_UPDATE_DESIGNER_PROMPT_PATH = _PROMPT_DIR / "update_designer.txt"
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,36 @@ class DesignerAgent:
             analysis_report=analysis_report,
         )
         return DesignDraft(analysis_report=analysis_report, design_model=design_model)
+
+    def update_design(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str,
+        current_design: str,
+        audit_report: str,
+    ) -> str:
+        """Sửa design hiện tại dựa trên report thiếu link của Validator."""
+
+        requirement_context = _combined_requirement_input(
+            requirement_packet=requirement_packet,
+            formal_use_case=formal_use_case,
+        )
+        prompt = _UPDATE_DESIGNER_PROMPT_PATH.read_text(encoding="utf-8")
+        prompt = prompt.replace("{diagram}", current_design.strip())
+        prompt = prompt.replace(
+            "{audit_report}",
+            f"{audit_report.strip()}\n\n## Requirement Context\n{requirement_context}",
+        )
+        try:
+            return self.llm_client.complete(
+                system="You are Designer.update_design. Return only the updated PlantUML design artifact.",
+                prompt=prompt,
+            ).strip()
+        except HarnessError as exc:
+            raise HarnessError("designer_failed", exc.message) from exc
+        except Exception as exc:
+            raise HarnessError("designer_failed", str(exc)) from exc
 
 
 def _combined_requirement_input(*, requirement_packet: str, formal_use_case: str) -> str:

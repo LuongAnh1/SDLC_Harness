@@ -100,6 +100,11 @@ def mock_sync_design_checkpoint(
     design_artifact = artifact_paths["design_artifact"]
     trace_artifact = artifact_paths["requirement_design_trace"]
     quality_report = artifact_paths["design_quality_report"]
+    design_ref = _artifact_ref(design_artifact)
+    trace_ref = _artifact_ref(trace_artifact)
+    quality_ref = _artifact_ref(quality_report)
+    analysis_ref = _artifact_ref(artifact_paths["designer_analysis"])
+    missing_ref = _artifact_ref(artifact_paths["missing_design_links"])
 
     jira_comment_path.write_text(
         f"""# Mock Jira Comment - Design Checkpoint
@@ -152,7 +157,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": "",
             "status": "synced",
             "path": store.relative(jira_comment_path),
-            "artifact_refs": ["design_artifact_v1", "requirement_design_trace_v1", "design_quality_report_v1"],
+            "artifact_refs": [design_ref, trace_ref, quality_ref],
             "error": None,
         },
         {
@@ -162,7 +167,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": "",
             "status": "synced",
             "path": store.relative(confluence_page_path),
-            "artifact_refs": ["designer_analysis_v1", "design_artifact_v1", "missing_design_links_v1"],
+            "artifact_refs": [analysis_ref, design_ref, missing_ref],
             "error": None,
         },
     ]
@@ -174,7 +179,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
         "targets": targets,
         "checkpoint": {
             "type": "design_approval",
-            "artifact_ref": "design_artifact_v1",
+            "artifact_ref": design_ref,
             "artifact_path": design_artifact,
         },
         "created_at": utc_now_iso(),
@@ -197,3 +202,10 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             for target in targets
         ],
     }
+
+
+def _artifact_ref(path: str) -> str:
+    """Lấy artifact ref từ đường dẫn runtime, ví dụ `.../design_artifact_v2.md`."""
+
+    name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return name.rsplit(".", 1)[0]

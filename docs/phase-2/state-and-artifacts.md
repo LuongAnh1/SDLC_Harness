@@ -19,7 +19,7 @@ Các nhánh lỗi:
 
 ```text
 design_validating -> blocked
-design_validating -> waiting_requirement_approval
+design_repairing -> blocked
 design_drafting -> failed
 ```
 
@@ -28,7 +28,7 @@ design_drafting -> failed
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
 | `design_drafting` | Designer đang tạo analysis/design từ requirement đã duyệt. | Harness |
-| `design_validating` | Parser/Validator đang đọc graph, tạo trace links và missing-link report. Hiện tại V2 đã có traceability V1, chưa có repair loop. | Harness |
+| `design_validating` | Parser/Validator đang đọc graph, tạo trace links và missing-link report. | Harness |
 | `design_repairing` | Designer đang sửa design theo quality report của Validator. | Harness |
 | `waiting_design_approval` | Design đã pass Validator và chờ người dùng duyệt. | Niko + human |
 | `blocked` | Không thể tự sửa, thường do requirement thiếu/mâu thuẫn hoặc design vẫn fail sau repair limit. | Niko + human |
@@ -69,7 +69,9 @@ Quy tắc:
 - `latest_artifacts` trỏ tới version mới nhất.
 - `quality_reports.design_traceability` lưu report mới nhất và danh sách version đã chạy.
 - Nếu design pass, `pending_checkpoint.artifact_path` trỏ tới `design_artifact_v{latest}`.
-- Nếu requirement phải sửa lại, toàn bộ design artifacts hiện tại bị coi là stale.
+- Nếu hết repair limit mà vẫn còn missing link, `status=blocked`, không mở
+  pending checkpoint design và `latest_artifacts` vẫn trỏ tới version cuối để
+  human/operator đọc lại.
 
 ## State JSON Bổ Sung
 
@@ -83,7 +85,6 @@ Khi Phase 2 bắt đầu:
     "requirement_packet": "artifacts/requirement_packet_v1.md",
     "formal_use_case": "artifacts/formal_use_case_v1.txt"
   },
-  "design_iteration": 1,
   "summary_for_user": "Đang tạo design từ requirement đã duyệt."
 }
 ```
@@ -175,7 +176,7 @@ Nếu còn missing links nhưng đã hết repair vòng:
 
 ```text
 status=blocked
-summary_for_user nêu requirement nào chưa trace được
-allowed_next_actions=[request_change, cancel_run, get_status]
+summary_for_user nêu số missing link; report cuối liệt kê requirement cụ thể
+allowed_next_actions=[cancel_run, get_status]
 ```
 

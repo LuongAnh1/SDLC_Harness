@@ -2,8 +2,9 @@
 
 Phase 2 bắt đầu sau khi người dùng duyệt checkpoint requirement của Phase 1.
 Mục tiêu của phase này là biến `requirement_packet_v1` đã duyệt thành
-`design_artifact_v1`, kiểm tra traceability bằng Validator, đồng bộ checkpoint
-design lên tool và trả state để Niko báo lại cho người dùng.
+`design_artifact_v{n}`, kiểm tra traceability bằng Validator, repair design nếu
+còn missing link, đồng bộ checkpoint design lên tool và trả state để Niko báo lại
+cho người dùng.
 
 Điểm khác biệt quan trọng so với TraceDev: TraceDev chạy thẳng trong một script,
 còn SDLC_Harness phải lưu state, artifact version, trace report và checkpoint
@@ -29,7 +30,7 @@ approve_checkpoint(run_id)
 -> nếu pass: sync design checkpoint theo policy Jira/Confluence
 -> state=waiting_design_approval
 -> nếu fail vì design chưa đủ: state=blocked
--> nếu fail vì requirement thiếu/nhập nhằng: quay về waiting_requirement_approval
+-> nếu fail vì requirement thiếu/nhập nhằng: state=blocked để human xử lý lại requirement
 ```
 
 ## Ba Vai Trò AI Trong Phase 2
@@ -67,7 +68,9 @@ và missing-link report để quyết định workflow:
 
 ## Đầu Ra Bắt Buộc
 
-Sau khi Phase 2 pass, một run phải có thêm:
+Sau khi Phase 2 pass, một run phải có thêm. Nếu repair xảy ra, các file này sẽ
+dùng version mới nhất, ví dụ `v2` hoặc `v3`, và bản `v1` vẫn được giữ lại để
+truy vết:
 
 ```text
 .runtime/runs/<run_id>/artifacts/designer_analysis_v1.md
@@ -102,13 +105,15 @@ và quality report. Chi tiết contract nằm ở `sync-design-checkpoint.md`.
 
 ## Tiến Độ Hiện Tại
 
-Cập nhật 2026-10-13: đã triển khai lát Phase 2 V2 cho `approve-checkpoint`.
+Cập nhật 2026-10-13: đã triển khai lát Phase 2 V3 cho `approve-checkpoint`.
 Lát này đọc requirement packet đã duyệt, đọc thêm formal use case nếu có, gọi
 Designer Agent fake/LLM-ready để sinh PlantUML, parse class/sequence graph thật,
 chạy Validator traceability V1 để tạo requirement graph, class trace, sequence
-trace và missing-link report, rồi tạo `tool_sync_report_v2.json` bằng mock sync
-và chuyển state sang `waiting_design_approval`. Chưa có repair loop, chưa real
-sync Jira/Confluence cho Phase 2 và chưa nối Niko route duyệt checkpoint.
+trace và missing-link report. Nếu còn missing link, workflow gọi
+`Designer.update_design` tối đa 2 vòng, ghi artifact version mới và chỉ tạo
+`tool_sync_report_v2.json` bằng mock sync khi traceability pass. Nếu hết vòng
+repair mà vẫn thiếu link thì state chuyển `blocked`. Chưa real sync
+Jira/Confluence cho Phase 2 và chưa nối Niko route duyệt checkpoint.
 
 ## Không Làm Trong Phase 2
 

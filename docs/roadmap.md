@@ -158,3 +158,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > ở mode `traceability_v1`. Repair loop `Designer.update_design`, real sync
 > idempotent và Niko approve route vẫn là bước tiếp theo.
 
+> Cập nhật 2026-10-13: Phase 2 đã có lát V3 cho Designer repair loop:
+> Validator missing-link report được đưa ngược lại cho Designer, artifact sinh
+> theo version `v1/v2/v3`, pass thì mở `design_approval`, hết 2 vòng repair vẫn
+> thiếu link thì `status=blocked`. Real sync idempotent và Niko approve route
+> vẫn là bước tiếp theo.
+
