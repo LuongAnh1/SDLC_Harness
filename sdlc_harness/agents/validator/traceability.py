@@ -224,10 +224,18 @@ def _normalize_trace(
                 if not target:
                     continue
                 if target not in allowed_targets:
-                    raise HarnessError(
-                        "validator_traceability_failed",
-                        f"Validator {diagram_name} trace invented target: {target}",
+                    coerced_target = _coerce_sequence_target(
+                        target=target,
+                        allowed_targets=allowed_targets,
+                        diagram_name=diagram_name,
                     )
+                    if coerced_target:
+                        target = coerced_target
+                    else:
+                        raise HarnessError(
+                            "validator_traceability_failed",
+                            f"Validator {diagram_name} trace invented target: {target}",
+                        )
                 links.append(
                     {
                         "target": target,
@@ -373,4 +381,60 @@ def _sequence_targets(sequence_graph: dict[str, object]) -> set[str]:
                     if arrow:
                         targets.add(f"{source}{arrow}{target}: {text}")
                         targets.add(f"{source} {arrow} {target}: {text}")
+        control_flows = diagram.get("controlFlows", [])
+        if isinstance(control_flows, list):
+            for flow in control_flows:
+                if not isinstance(flow, dict):
+                    continue
+                flow_type = str(flow.get("type", "")).strip().lower()
+                condition = str(flow.get("condition", "")).strip()
+                if condition:
+                    targets.add(condition)
+                    if flow_type:
+                        targets.add(f"{flow_type} {condition}")
+                    if flow_type == "note" and ":" in condition:
+                        note_text = condition.split(":", 1)[1].strip()
+                        if note_text:
+                            targets.add(note_text)
     return targets
+
+
+def _coerce_sequence_target(*, target: str, allowed_targets: set[str], diagram_name: str) -> str:
+    """Cho phép LLM trace tới control-flow/note có thật trong sequence graph.
+
+    DeepSeek đôi khi trả target là toàn bộ note nhiều dòng hoặc phần text ngắn
+    của một nhánh `alt/else/opt`. Nếu phần đó đã nằm trong control-flow parser
+    đọc được, normalize về target đã parse thay vì fail cứng.
+    """
+
+    if diagram_name != "sequence diagram":
+        return ""
+    normalized = target.strip()
+    normalized_compact = _compact_text(normalized)
+    first_line = normalized.splitlines()[0].strip().lower()
+    if normalized.lower().startswith("note "):
+        for candidate in allowed_targets:
+            candidate_text = candidate.strip()
+            candidate_lower = candidate_text.lower()
+            if candidate_lower.startswith("note ") and (
+                candidate_lower == first_line
+                or candidate_lower.startswith(first_line)
+                or first_line.startswith(candidate_lower)
+            ):
+                return candidate_text
+    for candidate in allowed_targets:
+        candidate_text = candidate.strip()
+        candidate_lower = candidate_text.lower()
+        candidate_compact = _compact_text(candidate_text)
+        if len(normalized_compact) >= 12 and (
+            normalized_compact in candidate_compact
+            or candidate_compact in normalized_compact
+        ):
+            return candidate_text
+    return ""
+
+
+def _compact_text(text: str) -> str:
+    """Chuẩn hóa text để so khớp mềm các condition ngắn của PlantUML."""
+
+    return " ".join(text.lower().split())

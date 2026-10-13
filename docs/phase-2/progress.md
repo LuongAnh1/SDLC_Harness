@@ -182,10 +182,8 @@ Ghi chú vận hành:
 - Phase 2 dùng `settings.design_repair_limit` thay cho hằng số hard-code.
 - `sync_design_checkpoint(...)` đã hỗ trợ `SDLC_SYNC_MODE=mock|real|both`.
 - Thêm `real_sync_design_checkpoint(...)` cho Jira/Confluence:
-  - Jira tạo comment mới hoặc update comment cũ nếu report v2/v1 có
-    `external_id`;
-  - Confluence tạo page mới hoặc update page cũ nếu report v2/v1 có
-    `external_id`;
+  - Jira tạo comment mới hoặc update comment cũ nếu report v2 có `external_id`;
+  - Confluence tạo page mới hoặc update page cũ nếu report v2 có `external_id`;
   - ghi `tool_sync_report_v2.json` với `phase=design_checkpoint`,
     `operation=created|updated`, `artifact_refs`, `url`, `external_id`.
 - `sync-run` đọc `pending_checkpoint.type` để tự chọn re-sync requirement hoặc
@@ -449,3 +447,63 @@ Kết luận:
 - Phase 2 đủ điều kiện khóa để chuẩn bị Phase 3 theo lát nhỏ.
 - Các việc chưa mở như `request_change`, dynamic context, Mermaid, approve
   design để sang code vẫn thuộc Phase sau, không phải blocker của Phase 2.
+## 2026-10-13 - Patch: sequence note trace target và checkpoint fail-state
+
+Khi live test từ Jira thật, DeepSeek có thể trace requirement NFR vào PlantUML
+note dạng `note right of Controller: ...`. Parser sequence đã lưu note trong
+`controlFlows`, nhưng Validator chưa coi note là target hợp lệ nên workflow fail
+cứng với `validator_traceability_failed`.
+
+Đã sửa:
+
+- `ValidatorAgent` cho phép sequence trace target trỏ tới note đã có trong
+  `controlFlows`.
+- Nếu LLM trả note nhiều dòng, normalize về dòng note đã parse thay vì coi là
+  invented target.
+- Khi Phase 2 bắt đầu chạy sau khi requirement được duyệt, checkpoint requirement
+  cũ được clear ngay để nếu design fail thì không còn pending checkpoint lỗi thời.
+- `sync-run` chỉ sync checkpoint hiện tại theo `pending_checkpoint.type`, tránh
+  failed/blocked run rơi ngược về requirement sync và tạo comment lặp.
+
+Test:
+
+- `rtk python -m pytest tests/test_phase2.py -q` -> 28 passed.
+- `rtk python -m pytest -q` -> 78 passed.
+
+## 2026-10-13 - Patch: sequence control-flow target và sync guard
+
+Live test `run_20261013_140739_d59c2be5` fail ở bước approve requirement sang
+design với lỗi:
+
+```text
+Validator sequence diagram trace invented target: Duplicate submission detected
+```
+
+Nguyên nhân:
+
+- DeepSeek trace requirement vào condition của nhánh sequence `alt/else/opt`.
+- Parser PlantUML đã lưu condition này trong `sequence_graph.controlFlows`,
+  nhưng Validator mới chỉ coi message/lifeline/note là sequence target hợp lệ.
+- Run lỗi không tạo `tool_sync_report_v2`, nên bản thân run này chưa sync design
+  checkpoint. Các comment Design review thấy trên Jira là comment còn lại từ
+  những lần live test/re-sync trước trên cùng issue `SDLC-1`.
+
+Đã sửa:
+
+- `_sequence_targets()` cho phép mọi `controlFlows[].condition` làm target hợp lệ,
+  không chỉ riêng note.
+- Với note, thêm cả phần text sau dấu `:` làm alias để LLM có thể trace vào nội
+  dung note thay vì nguyên dòng PlantUML.
+- `_coerce_sequence_target()` hỗ trợ normalize mềm các target control-flow ngắn
+  khi LLM trả một phần text thật có trong graph.
+- Regression test xác nhận target `Duplicate submission detected` được chấp nhận
+  khi nó là condition của control flow.
+- Regression test xác nhận run fail không còn pending checkpoint và `sync-run`
+  trên failed run trả `sync_not_ready`, không tạo report/comment design v2.
+
+Test:
+
+- `rtk python -m pytest tests/test_phase2.py -q` -> 29 passed.
+- `rtk python -m pytest -q` -> 79 passed.
+
+

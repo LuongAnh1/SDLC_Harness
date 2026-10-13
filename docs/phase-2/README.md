@@ -103,10 +103,12 @@ nhiệm này sang Niko. Jira chỉ nên nhận comment/tóm tắt dễ đọc; C
 lưu bản review đầy đủ hơn gồm designer analysis, diagram, traceability summary
 và quality report. Chi tiết contract nằm ở `sync-design-checkpoint.md`.
 
-Sync hiện tại là sync artifact do harness sở hữu: nếu đã có `external_id` thì
-update Jira comment/Confluence page cũ, nếu chưa có thì tạo mới. Đây là cách giữ
-một bản checkpoint mới nhất để review, tránh tạo trùng khi repair hoặc re-sync;
-không phải cơ chế ghi đè nội dung người dùng viết tay.
+Sync hiện tại là sync artifact do harness sở hữu theo từng checkpoint phase:
+Phase 2 chỉ update Jira comment/Confluence page đã ghi trong
+`tool_sync_report_v2.json`; không reuse target của requirement checkpoint Phase
+1. Nếu chưa có `external_id` trong report v2 thì tạo target mới. Đây là cách giữ
+mỗi checkpoint có bề mặt review riêng, trong khi re-sync cùng phase vẫn không
+tạo trùng; không phải cơ chế ghi đè nội dung người dùng viết tay.
 
 Diagram trên Confluence hiện có hai lớp: PlantUML app macro nếu site đã cài
 `PlantUML Diagrams`, và PlantUML source trong code macro làm fallback/evidence.
@@ -125,8 +127,9 @@ trace và missing-link report. Nếu còn missing link, workflow gọi
 `Designer.update_design` theo `SDLC_DESIGN_REPAIR_LIMIT`, ghi artifact version
 mới và chỉ tạo checkpoint khi traceability pass. Khi pass, Phase 2 có thể mock
 sync hoặc real sync Jira/Confluence theo `SDLC_SYNC_MODE`, trong đó real sync
-update lại bot-owned comment/page cũ khi có `external_id`. Confluence real sync
-nhúng PlantUML app macro và giữ PlantUML source fallback, không còn nhúng ảnh SVG.
+update lại bot-owned comment/page Phase 2 khi report v2 có `external_id`.
+Confluence real sync nhúng PlantUML app macro và giữ PlantUML source fallback,
+không còn nhúng ảnh SVG.
 Nếu hết vòng repair mà vẫn thiếu link thì state chuyển `blocked`. Chưa nối
 Niko route duyệt checkpoint.
 

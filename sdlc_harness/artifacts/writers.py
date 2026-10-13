@@ -289,65 +289,52 @@ def write_phase3_implementation_plan(
     *,
     store: RuntimeStore,
     run_id: str,
-    source_ref: str,
-    issue_key: str,
-    requirement_packet: str,
-    design_artifact: str,
-    target_repo_path: str,
-    target_repo_remote: str,
-    target_base_branch: str,
-    planned_branch: str,
-    target_files: list[str],
-    test_command: str,
+    markdown: str,
+    structured_plan: dict[str, object],
     version: int = 1,
-) -> str:
-    """Ghi implementation plan cho lát đầu Phase 3."""
+) -> dict[str, str]:
+    """Ghi implementation plan Markdown và JSON sidecar cho Phase 3."""
 
     artifact_dir = store.run_dir(run_id) / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"v{version}"
-    path = artifact_dir / f"implementation_plan_{suffix}.md"
-    target_file_lines = "\n".join(f"- `{item}`" for item in target_files) if target_files else "- none detected"
-    content = f"""# Implementation Plan {suffix.upper()}
+    markdown_path = artifact_dir / f"implementation_plan_{suffix}.md"
+    structured_path = artifact_dir / f"implementation_plan_structured_{suffix}.json"
+    markdown_path.write_text(markdown.rstrip() + "\n", encoding="utf-8")
+    structured_payload = {
+        **structured_plan,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"implementation_plan_{suffix}",
+    }
+    structured_path.write_text(
+        json.dumps(structured_payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "implementation_plan": store.relative(markdown_path),
+        "implementation_plan_structured": store.relative(structured_path),
+    }
 
-## Run Context
 
-- Run id: `{run_id}`
-- Source ref: `{source_ref}`
-- Issue key: `{issue_key}`
+def write_phase3_plan_review_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    review_report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi quality report của Validator.review_plan."""
 
-## Target Repository
-
-- Local path: `{target_repo_path}`
-- Remote: `{target_repo_remote}`
-- Base branch: `{target_base_branch}`
-- Planned branch: `{planned_branch}`
-
-## Approved Requirement Summary
-
-{_excerpt(requirement_packet)}
-
-## Approved Design Summary
-
-{_excerpt(design_artifact)}
-
-## Expected Code Areas
-
-{target_file_lines}
-
-## Test Command
-
-```powershell
-{test_command}
-```
-
-## Phase 3 Slice 1 Notes
-
-- This artifact only plans implementation work.
-- No source code, branch, commit, test report, or pull request has been created in this slice.
-- The next slice must create a real code change and Draft PR before Phase 3 can be locked.
-"""
-    path.write_text(content, encoding="utf-8")
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"implementation_plan_review_{suffix}.json"
+    payload = {
+        **review_report,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"implementation_plan_review_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     return store.relative(path)
 
 

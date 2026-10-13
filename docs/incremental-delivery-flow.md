@@ -66,16 +66,18 @@ summary/comment checkpoint, Confluence nhận bản review đầy đủ hơn, c�
 ```text
 Input: approve design checkpoint
 Output:
-  implementation_plan_v1
-  implementation_plan_review_v1
+  implementation_plan_v{n}
+  implementation_plan_review_v{n}
   tool_sync_report_v3
   status=waiting_implementation_plan_review
 ```
 
 Slice này là checkpoint riêng của harness. Developer.plan chỉ ánh xạ approved
 requirement/design/trace graph sang kế hoạch triển khai dự kiến. Validator.review_plan
-kiểm plan có cover design, có trace được, có đủ path/test intent và không bịa
-scope. GitHub target repo chỉ được kiểm tra, chưa tạo branch/commit/PR.
+chạy hybrid: rule hard gate kiểm coverage/traceability/executability/scope, LLM
+review kiểm semantic gap giữa requirement/design/trace và plan. Nếu fail và còn
+lượt theo `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`, Developer.repair_plan tạo
+version kế tiếp. GitHub target repo chỉ được kiểm tra, chưa tạo branch/commit/PR.
 
 ## Slice 4 - Implementation Plan Đến Code/Test Report
 

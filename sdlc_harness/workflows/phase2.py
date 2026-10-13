@@ -64,7 +64,9 @@ class PhaseTwoWorkflow:
                 "approved_artifacts": {
                     "requirement_packet": requirement_path,
                 },
+                "pending_checkpoint": None,
                 "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": None,
                 "summary_for_user": "Đã duyệt requirement checkpoint, đang tạo design draft.",
             }
         )
@@ -207,6 +209,7 @@ class PhaseTwoWorkflow:
                     "updated_at": utc_now_iso(),
                     "current_phase": str(state.get("current_phase") or "design_validating"),
                     "status": "failed",
+                    "pending_checkpoint": None,
                     "last_error": exc.to_response(),
                     "allowed_next_actions": ["get_status", "cancel_run"],
                     "summary_for_user": f"Phase 2 lỗi khi tạo/parse design: {exc.message}",

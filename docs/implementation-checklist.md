@@ -107,11 +107,14 @@ graph sang kế hoạch triển khai dự kiến để human/Niko duyệt.
 - [x] Đọc approved requirement/design/trace graph.
 - [x] Kiểm tra target repo path/remote/dirty worktree.
 - [x] Sinh `implementation_plan_v1.md`.
-- [ ] Developer.plan sinh plan có bảng mapping design -> code target.
-- [ ] Validator.review_plan kiểm coverage/traceability/executability/scope.
-- [ ] Sinh plan review report hoặc quality report cho implementation plan.
-- [ ] Sync implementation plan lên Confluence và comment trạng thái lên Jira.
-- [ ] State dừng ở `waiting_implementation_plan_review`.
+- [x] Developer.plan sinh plan có bảng mapping design -> code target.
+- [x] Validator.review_plan kiểm coverage/traceability/executability/scope.
+- [x] Validator.review_plan chạy hybrid: rule hard gate + LLM semantic/content review.
+- [x] `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT` cấu hình số vòng repair implementation plan.
+- [x] Developer.repair_plan tạo artifact version mới khi Validator yêu cầu sửa.
+- [x] Sinh plan review report hoặc quality report cho implementation plan.
+- [x] Sync implementation plan lên Confluence và comment trạng thái lên Jira.
+- [x] State dừng ở `waiting_implementation_plan_review`.
 
 ## Phase 4 - Implementation Plan Đến Code/Test/Draft PR
 

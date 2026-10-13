@@ -62,8 +62,10 @@ structured use case
 - validate/repair loop;
 - dataset eTour/SMOS/iTrust cho requirement-to-code.
 - SDLC Harness thêm implementation plan checkpoint giữa design và code:
-  `Developer.plan -> Validator.review_plan -> human approve -> Developer.act`.
+  `Developer.plan -> Validator.review_plan hybrid -> human approve -> Developer.act`.
   TraceDev gốc không có bước này vì chạy một mạch từ final design sang Developer.
+  Phase 3 review dùng rule hard gate trước, LLM content review sau, và repair
+  theo `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`.
 
 Điểm không copy nguyên xi:
 

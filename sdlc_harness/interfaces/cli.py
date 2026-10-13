@@ -15,6 +15,7 @@ from ..core.config import load_settings, repo_root
 from ..core.errors import HarnessError
 from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
+from ..workflows.target_repo import TargetRepoPreparationWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -48,7 +49,14 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--checkpoint-id", default=None)
     approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     approve.add_argument("--design-repair-limit", default=None)
+    approve.add_argument("--implementation-plan-repair-limit", default=None)
     approve.add_argument("--runtime-root", default=None)
+
+    prepare_target = subparsers.add_parser("prepare-target-repo")
+    prepare_target.add_argument("--init-codegraph", action="store_true")
+    prepare_target.add_argument("--target-repo", default=None)
+    prepare_target.add_argument("--target-remote", default=None)
+    prepare_target.add_argument("--runtime-root", default=None)
     return parser
 
 
@@ -59,6 +67,12 @@ def _settings_from_args(args: argparse.Namespace):
         overrides["SDLC_LLM_MODE"] = args.llm_mode
     if getattr(args, "design_repair_limit", None) is not None:
         overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
+    if getattr(args, "implementation_plan_repair_limit", None) is not None:
+        overrides["SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"] = str(args.implementation_plan_repair_limit)
+    if getattr(args, "target_repo", None):
+        overrides["SDLC_TARGET_REPO_PATH"] = str(args.target_repo)
+    if getattr(args, "target_remote", None):
+        overrides["SDLC_TARGET_REPO_REMOTE"] = str(args.target_remote)
     return load_settings(root=repo_root(), runtime_root=runtime_root, overrides=overrides)
 
 
@@ -89,6 +103,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             run_id=args.run_id,
             checkpoint_id=args.checkpoint_id,
         )
+    if args.command == "prepare-target-repo":
+        workflow = TargetRepoPreparationWorkflow(settings)
+        return workflow.prepare(init_codegraph=bool(args.init_codegraph))
     raise HarnessError("unknown_command", f"Unknown command: {args.command}")
 
 

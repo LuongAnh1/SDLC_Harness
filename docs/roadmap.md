@@ -89,7 +89,8 @@ Luồng:
 approve_checkpoint(run_id)
 -> đọc approved requirement/design/trace graph
 -> Developer.plan tạo implementation_plan_v1
--> Validator.review_plan kiểm coverage/traceability/executability/scope
+-> Validator.review_plan hybrid: rule hard gate + LLM content review
+-> nếu fail và còn lượt repair: Developer.repair_plan tạo implementation_plan_v2/v3
 -> sync plan lên Confluence và comment trạng thái lên Jira
 -> status=waiting_implementation_plan_review
 ```
@@ -231,6 +232,18 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > kiểm tra path/remote/dirty worktree, sinh `implementation_plan_v1.md`, ghi
 > `approved_artifacts` và dừng ở `waiting_implementation_plan_review`. Chưa tạo
 > branch/code/commit/test report/Draft PR.
+
+> Cập nhật 2026-10-13: Phase 3 đã có Slice 2/3 cho Developer.plan có cấu trúc,
+> Validator.review_plan và sync Jira/Confluence. Run Phase 3 hiện sinh
+> `implementation_plan_v1.md`, `implementation_plan_structured_v1.json`,
+> `implementation_plan_review_v1.json`, `tool_sync_report_v3.json` và ghi
+> `last_sync.phase=implementation_plan_review`.
+
+> Cập nhật 2026-10-13: Phase 3 đã chuyển `Validator.review_plan` sang hybrid
+> rule + LLM. Rule gate kiểm graph/schema trước, LLM review kiểm semantic gap
+> giữa requirement/design/trace và implementation plan. `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`
+> điều khiển số vòng `Developer.repair_plan`; mỗi vòng ghi artifact version
+> riêng và chỉ version cuối pass mới sync Jira/Confluence.
 
 > Cập nhật 2026-10-13: Phase 4 được tách ra thành phase mới để khóa phần
 > code/test/Draft PR sau khi implementation plan được duyệt.

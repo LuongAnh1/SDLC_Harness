@@ -5,8 +5,11 @@ from .traceability import (
     build_requirement_graph,
     compute_missing_links,
 )
+from .plan_review import ImplementationPlanReview, ImplementationPlanValidator
 
 __all__ = [
+    "ImplementationPlanReview",
+    "ImplementationPlanValidator",
     "TraceabilityResult",
     "ValidatorAgent",
     "build_requirement_graph",

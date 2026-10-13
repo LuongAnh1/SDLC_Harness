@@ -48,8 +48,8 @@ Artifact Store
   refined_requirement_v1
   design_artifact_v1
   trace_graph_v1
-  implementation_plan_v1
-  implementation_plan_review_v1
+  implementation_plan_v{n}
+  implementation_plan_review_v{n}
   code_change_report_v1
   test_report_v1
 
@@ -93,7 +93,7 @@ Niko -> báo trạng thái mới
 
 User: duyệt design
 Niko -> approve_checkpoint(run_id)
-Harness -> implementation_plan_v1, waiting_implementation_plan_review
+Harness -> implementation_plan_v{n}, waiting_implementation_plan_review
 Niko -> hỏi anh duyệt kế hoạch implement
 
 User: duyệt plan
@@ -101,6 +101,11 @@ Niko -> approve_checkpoint(run_id)
 Harness -> code_change_report_v1, test_report_v1, Draft PR, code_review_ready
 Niko -> báo link PR và kết quả test/trace
 ```
+
+Trong Phase 3, `implementation_plan_v{n}` có thể tăng version nếu Validator hybrid
+phát hiện semantic gap và `Developer.repair_plan` còn lượt sửa theo
+`SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`. Chỉ version pass rule + LLM review mới
+được sync lên Jira/Confluence.
 
 ## Tool Plane
 

@@ -114,6 +114,10 @@ def fake_completion(prompt: str) -> str:
         return fake_traceability_class(prompt)
     if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
         return fake_traceability_sequence(prompt)
+    if "Implementation Plan LLM Review v1" in prompt:
+        return fake_implementation_plan_review()
+    if "Developer Implementation Plan v1" in prompt:
+        return fake_developer_implementation_plan()
     return fake_refined_requirement(prompt)
 
 
@@ -292,6 +296,95 @@ def fake_traceability_sequence(prompt: str) -> str:
             }
         )
     return json.dumps(trace, ensure_ascii=False, indent=2)
+
+
+def fake_implementation_plan_review() -> str:
+    """LLM review giả lập cho Phase 3 implementation plan."""
+
+    return json.dumps(
+        {
+            "ok": True,
+            "summary": (
+                "Implementation plan covers the approved requirement/design graph, "
+                "keeps Phase 3 read-only, and gives Phase 4 enough code/test targets."
+            ),
+            "coverage_issues": [],
+            "traceability_issues": [],
+            "implementation_quality_issues": [],
+            "test_issues": [],
+            "scope_issues": [],
+            "developer_feedback": "",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_developer_implementation_plan() -> str:
+    """Developer.plan giả lập để test Smart Developer không gọi API thật."""
+
+    return json.dumps(
+        {
+            "summary": "Plan uses CodeGraph context to map the approved delete heritage design into service, boundary, repository, and tests.",
+            "repo_evidence": [
+                "CodeGraph context found existing CulturalHeritageRepository in src/main/java.",
+                "Target repo already has a test folder under src/test/java/com/sdlc/etour/heritage.",
+            ],
+            "implementation_steps": [
+                {
+                    "order": 1,
+                    "title": "Add delete flow application service",
+                    "description": "Implement the approved validation, confirmation, delete, cancel, and result behavior.",
+                    "files": [
+                        "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
+                        "src/main/java/com/sdlc/etour/heritage/CulturalHeritageRepository.java",
+                    ],
+                    "design_refs": [
+                        "class:DeleteCulturalHeritageService",
+                        "method:DeleteCulturalHeritageService.deleteHeritage",
+                    ],
+                },
+                {
+                    "order": 2,
+                    "title": "Verify delete flow",
+                    "description": "Cover success, cancellation, interruption, and duplicate-submit prevention.",
+                    "files": ["src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java"],
+                    "design_refs": ["sequence:delete_cultural_heritage_main:1"],
+                },
+            ],
+            "proposed_files": [
+                {
+                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
+                    "action": "create",
+                    "reason": "Holds the approved delete use-case behavior.",
+                    "related_design_elements": ["class:DeleteCulturalHeritageService"],
+                },
+                {
+                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
+                    "action": "create",
+                    "reason": "Verifies the approved sequence and exception flows.",
+                    "related_design_elements": ["sequence:delete_cultural_heritage_main:1"],
+                },
+            ],
+            "design_mappings": [],
+            "test_intents": [
+                {
+                    "scope": "unit_or_service",
+                    "intent": "Validate delete success, cancel, connection interruption, and duplicate submission prevention.",
+                    "command": "powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                },
+                {
+                    "scope": "regression",
+                    "intent": "Run the target repo regression test command after Phase 4 code changes.",
+                    "command": "powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                },
+            ],
+            "assumptions": ["Repository can expose a delete operation or be extended in Phase 4."],
+            "open_questions": [],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def _extract_requirements_from_trace_prompt(prompt: str, *, next_marker: str) -> list[dict[str, object]]:

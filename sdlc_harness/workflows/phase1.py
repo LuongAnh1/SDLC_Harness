@@ -20,7 +20,7 @@ from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..agents.requirements import RequirementRefiner, RequirementValidator
 from ..storage.runtime import RuntimeStore, utc_now_iso
-from ..sync import sync_design_checkpoint, sync_requirement_checkpoint
+from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
@@ -198,7 +198,16 @@ class PhaseOneWorkflow:
         normalized_artifacts = {str(key): str(value) for key, value in artifact_paths.items()}
         checkpoint = state.get("pending_checkpoint")
         checkpoint_type = checkpoint.get("type") if isinstance(checkpoint, dict) else ""
-        if checkpoint_type == "design_approval" and "design_artifact" in normalized_artifacts:
+        if checkpoint_type == "implementation_plan_review" and "implementation_plan" in normalized_artifacts:
+            last_sync = sync_implementation_plan_checkpoint(
+                store=self.store,
+                settings=self.settings,
+                run_id=run_id,
+                source_ref=source_ref,
+                artifact_paths=normalized_artifacts,
+            )
+            waiting_text = "Run vẫn đang chờ anh review implementation plan trước khi sang Phase 4."
+        elif checkpoint_type == "design_approval" and "design_artifact" in normalized_artifacts:
             last_sync = sync_design_checkpoint(
                 store=self.store,
                 settings=self.settings,
@@ -207,7 +216,7 @@ class PhaseOneWorkflow:
                 artifact_paths=normalized_artifacts,
             )
             waiting_text = "Run vẫn đang chờ anh review design trước khi sang Phase 3."
-        elif "requirement_packet" in normalized_artifacts:
+        elif checkpoint_type == "requirement_approval" and "requirement_packet" in normalized_artifacts:
             last_sync = sync_requirement_checkpoint(
                 store=self.store,
                 settings=self.settings,

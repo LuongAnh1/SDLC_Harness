@@ -12,8 +12,8 @@ contract JSON ổn định.
 - [x] `approve-checkpoint` chỉ mở Phase 3 khi run đang `waiting_design_approval`.
 - [x] Nếu checkpoint không phải `design_approval`, trả `checkpoint_not_current`.
 - [x] Success trả JSON stdout, không trộn log tự do.
-- [ ] Error trả JSON `ok=false`.
-- [ ] `get-status` đọc được state Phase 3 mới.
+- [x] Error trả JSON `ok=false`.
+- [x] `get-status` đọc được state Phase 3 mới.
 
 ## 2. Approved Design Input
 
@@ -35,43 +35,52 @@ plan, chưa tạo branch/commit/PR.
 - [x] Có config target repo path/remote trong SDLC Harness runtime/config.
 - [x] Có guard không thao tác nhầm repo `SDLC_Harness`.
 - [x] Có guard worktree dirty trước khi mở plan checkpoint.
-- [ ] Plan ghi rõ target repo/base branch/planned branch.
+- [x] Plan ghi rõ target repo/base branch/planned branch.
 
 ## 4. Developer.plan
 
 Mục đích: tạo implementation plan có cấu trúc từ graph đã duyệt, không sinh code
 mù và không tự sửa graph.
 
-- [ ] Tạo prompt/module Developer riêng cho Phase 3.
+- [x] Tạo prompt/module Developer riêng cho Phase 3.
 - [x] Sinh `implementation_plan_v1.md`.
-- [ ] Developer đọc requirement/design/trace đã duyệt.
-- [ ] Plan có bảng mapping design element -> planned code target.
-- [ ] Plan có test intent hoặc test command dự kiến.
-- [ ] Plan có assumptions/open questions và out-of-scope.
-- [ ] Plan không tạo branch, commit hoặc sửa file trong target repo.
+- [x] Developer đọc requirement/design/trace đã duyệt.
+- [x] Plan có bảng mapping design element -> planned code target.
+- [x] Plan có test intent hoặc test command dự kiến.
+- [x] Plan có assumptions/open questions và out-of-scope.
+- [x] Plan không tạo branch, commit hoặc sửa file trong target repo.
 
 ## 5. Validator.review_plan
 
 Mục đích: kiểm plan đủ thông tin trước khi human duyệt và trước khi Phase 4 sửa
 code.
 
-- [ ] Validator kiểm coverage: design class/method/message quan trọng có planned code target.
-- [ ] Validator kiểm traceability: requirement-design trace được phản ánh vào plan.
-- [ ] Validator kiểm executability: repo/branch/path/test intent đủ rõ.
-- [ ] Validator kiểm scope: plan không bịa thêm ngoài requirement/design.
-- [ ] Sinh `implementation_plan_review_v1.json` hoặc quality report tương đương.
-- [ ] Nếu plan fail, workflow repair plan hoặc `blocked`, không mở checkpoint duyệt.
+- [x] Validator kiểm coverage: design class/method/message quan trọng có planned code target.
+- [x] Validator kiểm traceability: requirement-design trace được phản ánh vào plan.
+- [x] Validator kiểm executability: repo/branch/path/test intent đủ rõ.
+- [x] Validator kiểm scope: plan không bịa thêm ngoài requirement/design.
+- [x] Validator chạy hybrid: rule hard gate trước, LLM review semantic/content sau.
+- [x] LLM review đối chiếu requirement packet, design artifact, trace graph và structured plan.
+- [x] Validator LLM review chịu được JSON bọc prose/fence; invalid JSON còn lại
+  trở thành review fail có report thay vì làm workflow vỡ state.
+- [x] Có config `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT` để giới hạn số vòng repair plan.
+- [x] Mỗi vòng repair ghi artifact version riêng `implementation_plan_v{n}` và review report tương ứng.
+- [x] Sinh `implementation_plan_review_v1.json` hoặc quality report tương đương.
+- [x] Nếu plan fail, workflow repair plan hoặc `blocked`, không mở checkpoint duyệt.
 
 ## 6. Tool Sync Phase 3
 
 Mục đích: plan được đẩy sang đúng tool review, còn GitHub để Phase 4.
 
-- [ ] Tạo/cập nhật Confluence page cho implementation plan.
-- [ ] Jira comment ngắn có link Confluence, run id và trạng thái chờ duyệt.
-- [ ] Ghi `tool_sync_report_v3.json` với `phase=implementation_plan_review`.
-- [ ] Re-sync không tạo comment/page trùng nếu đã có external id.
-- [ ] Partial failure không xóa artifact local.
-- [ ] Không tạo GitHub branch/commit/PR trong Phase 3.
+- [x] Tạo/cập nhật Confluence page cho implementation plan.
+- [x] Jira comment ngắn có link Confluence, run id và trạng thái chờ duyệt.
+- [x] Ghi `tool_sync_report_v3.json` với `phase=implementation_plan_review`.
+- [x] Confluence render bảng review thật từ structured plan, không hiển thị bảng Markdown thô như paragraph.
+- [x] Phase 3 không reuse target Phase 2; chỉ re-sync target trong report v3.
+- [x] Re-sync không tạo comment/page trùng nếu report v3 đã có external id.
+- [x] Nếu Jira comment v3 bị xóa thủ công, re-sync tự tạo comment mới.
+- [x] Partial failure không xóa artifact local.
+- [x] Không tạo GitHub branch/commit/PR trong Phase 3.
 
 ## 7. Workflow State Và Niko Reporting
 
@@ -81,8 +90,8 @@ Validator.review_plan.
 - [x] Ghi state `implementation_planning`.
 - [x] `pending_checkpoint.type=implementation_plan_review` cho Slice 1 trước khi sửa code.
 - [x] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
-- [ ] `latest_artifacts.implementation_plan` trỏ tới plan mới nhất.
-- [ ] `quality_reports.implementation_plan_review` trỏ tới review mới nhất.
+- [x] `latest_artifacts.implementation_plan` trỏ tới plan mới nhất.
+- [x] `quality_reports.implementation_plan_review` trỏ tới review mới nhất.
 - [ ] Niko hiển thị link plan và checkpoint approve plan ngắn gọn.
 
 ## 8. Test Và Acceptance
@@ -92,12 +101,36 @@ Mục đích: Phase 3 phải chạy được từ terminal trước khi live qua
 - [x] Unit test approve design checkpoint happy path.
 - [x] Unit test missing approved design.
 - [x] Unit test target repo guard.
-- [ ] Unit test Developer.plan mapping format.
-- [ ] Unit test Validator.review_plan missing design element.
-- [ ] Unit test Validator.review_plan scope violation.
-- [ ] Unit test sync implementation plan Jira/Confluence.
-- [ ] Unit test blocked khi plan review fail quá giới hạn repair.
+- [x] Unit test Developer.plan mapping format.
+- [x] Unit test Validator.review_plan missing design element.
+- [x] Unit test Validator.review_plan scope violation.
+- [x] Unit test LLM/hybrid review happy path.
+- [x] Unit test repair loop pass sau một vòng repair.
+- [x] Unit test repair loop tôn trọng `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT=0`.
+- [x] Unit test sync implementation plan Jira/Confluence.
+- [x] Unit test blocked khi plan review fail quá giới hạn repair.
 - [x] Tạo private target repo GitHub `LuongAnh1/SDLC_Target_eTour` với Java skeleton tối thiểu.
 - [ ] Smoke test CLI từ run Phase 2 thật sang `waiting_implementation_plan_review`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
+
+## 9. Smart Developer + CodeGraph Context
+
+Mục đích: Developer.plan không chỉ đoán file từ graph, mà đọc target repo bằng
+CodeGraph để lập plan có evidence, implementation steps và proposed files rõ hơn.
+
+- [x] Phase 3 yêu cầu target repo có `.codegraph/`.
+- [x] Thiếu `.codegraph/` thì block bằng `target_repo_codegraph_missing`.
+- [x] Có lệnh setup riêng `prepare-target-repo --init-codegraph`; `approve-checkpoint` không tự init.
+- [x] Dirty guard bỏ qua state `.codegraph/` nhưng vẫn chặn thay đổi source/test/docs.
+- [x] Developer.plan nhận `repo_context` từ CodeGraph.
+- [x] Developer LLM sinh `repo_evidence`, `implementation_steps`, `proposed_files`.
+- [x] Parser chấp nhận JSON object khi LLM bọc thêm prose/code fence quanh output.
+- [x] Nếu LLM vẫn trả invalid JSON, Developer.plan fallback về deterministic
+  graph mapping và ghi cảnh báo parse trong structured plan.
+- [x] Nếu Developer.plan hoặc repair_plan fail, state chuyển `failed`, xóa
+  checkpoint cũ và ghi `last_error` có `run_id`.
+- [x] Structured plan lưu `planning_mode=llm_developer_with_codegraph_context_v1`.
+- [x] Unit test missing CodeGraph index.
+- [x] Unit test Phase 3 pass: `rtk python -m pytest tests/test_phase3.py`.
+- [ ] Về sau bổ sung redact/filter hoặc local model để tránh gửi source snippets nhạy cảm ra LLM ngoài.
 

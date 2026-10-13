@@ -63,6 +63,40 @@ có đủ thông tin để sang Phase 4 hay không:
 - Executability: repo, branch, file path, test intent có đủ rõ không?
 - Scope control: plan có bịa thêm ngoài requirement/design không?
 
+### Validator Hybrid V1
+
+Validator Phase 3 hiện chạy theo thứ tự:
+
+```text
+ImplementationPlanValidator.review_rules
+  -> hard gate coverage/traceability/executability/scope bằng graph
+ImplementationPlanValidator.review_llm
+  -> đọc requirement packet + design artifact + trace graph + structured plan
+  -> đánh giá semantic gap, chất lượng kế hoạch triển khai và test intent
+DeveloperPlanAgent.repair_plan
+  -> nếu review fail và còn lượt repair, tạo version plan kế tiếp
+```
+
+Rule review là cửa chặn cứng. Nếu plan thiếu mapping cơ bản hoặc tham chiếu design
+element ngoài graph đã duyệt thì LLM review bị skip và workflow đi vào repair/block.
+LLM review chỉ chạy khi rule đã pass, để kiểm phần rule khó thấy: plan có giải
+thích đủ cách biến design thành code không, có bỏ sót hành vi quan trọng không,
+test intent có đủ rõ để Phase 4 chạy không.
+
+Số vòng repair đọc từ `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`, mặc định `2`.
+Mỗi vòng ghi artifact version riêng:
+
+```text
+implementation_plan_v1.md
+implementation_plan_review_v1.json
+implementation_plan_v2.md
+implementation_plan_review_v2.json
+...
+```
+
+Chỉ version cuối đã pass mới được sync lên Jira/Confluence và mở checkpoint
+`waiting_implementation_plan_review`.
+
 ## Tool Sync Phase 3
 
 Phase 3 sync plan, không sync code:
@@ -71,6 +105,16 @@ Phase 3 sync plan, không sync code:
 - Jira nhận comment ngắn: plan đã tạo/chờ duyệt, kèm link Confluence và `run_id`.
 - GitHub target repo chỉ được kiểm tra/nhắc trong plan; chưa tạo branch, commit
   hoặc PR.
+- Confluence page render các phần review chính từ
+  `implementation_plan_structured_v1.json`: decision needed, execution steps,
+  code targets, test plan, validator summary và assumptions/open questions.
+  Markdown gốc chỉ nằm ở phụ lục audit để tránh bảng Markdown bị hiển thị như
+  text thường.
+- Phase 3 dùng target riêng của `tool_sync_report_v3.json`; không reuse Jira
+  comment/Confluence page của requirement hoặc design checkpoint. Re-sync cùng
+  Phase 3 mới update target v3 cũ.
+- Nếu Jira comment v3 từng được tạo nhưng đã bị xóa thủ công, re-sync sẽ tạo
+  comment mới và cập nhật `external_id` trong report v3.
 
 ## Đầu Ra Bắt Buộc
 
@@ -78,9 +122,18 @@ Sau khi Phase 3 pass, một run phải có thêm:
 
 ```text
 .runtime/runs/<run_id>/artifacts/implementation_plan_v1.md
+.runtime/runs/<run_id>/artifacts/implementation_plan_structured_v1.json
 .runtime/runs/<run_id>/artifacts/implementation_plan_review_v1.json
 .runtime/runs/<run_id>/sync/tool_sync_report_v3.json
 ```
+
+Nếu Validator yêu cầu repair, hậu tố có thể là `v2`, `v3`, ... và
+`latest_artifacts` luôn trỏ tới version mới nhất. Các version cũ được giữ lại để
+audit quá trình Developer sửa plan theo feedback của Validator.
+
+Trong slice hiện tại, cả plan artifacts, review report và `tool_sync_report_v3.json`
+đã được sinh. Sync thật/mock đều thuộc SDLC_Harness; Niko chỉ đọc trạng thái và
+link từ JSON response.
 
 Và `state.json` phải có:
 
@@ -88,6 +141,7 @@ Và `state.json` phải có:
 current_phase=implementation_planning
 status=waiting_implementation_plan_review
 latest_artifacts.implementation_plan
+latest_artifacts.implementation_plan_structured
 quality_reports.implementation_plan_review
 last_sync.phase=implementation_plan_review
 pending_checkpoint.type=implementation_plan_review
@@ -129,4 +183,28 @@ Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi 
 - `developer-plan-validator-loop.md`: cách Developer.plan và Validator.review_plan
   phối hợp trước khi code.
 - `phase-3-checklist.md`: checklist triển khai implementation planning checkpoint.
+
+## Smart Developer V1: CodeGraph Preflight Và Data Boundary
+
+Smart Developer V1 dùng CodeGraph làm nguồn hiểu target repo chính. Target repo
+phải có `.codegraph/` trước khi duyệt design checkpoint sang Phase 3. Lệnh
+`approve-checkpoint` không tự chạy `codegraph init`, vì init là thao tác tạo
+state trong target repo và có thể làm dirty worktree. Nếu thiếu `.codegraph/`,
+workflow sẽ block với `target_repo_codegraph_missing`.
+
+Lệnh chuẩn bị riêng:
+
+```bash
+rtk python -m sdlc_harness.cli prepare-target-repo --init-codegraph
+```
+
+Dirty guard của Phase 3 được phép bỏ qua state sinh bởi `.codegraph/`, nhưng vẫn
+chặn mọi thay đổi source/test/docs khác. Phase 3 vì vậy vẫn chỉ đọc repo, sinh
+implementation plan và sync checkpoint; chưa tạo branch, chưa sửa code, chưa PR.
+
+Lưu ý bảo mật V1: để Developer LLM lập plan thông minh, SDLC Harness tạm thời gửi
+CodeGraph evidence/source snippets của target repo vào prompt DeepSeek. Đây là
+thỏa thuận tạm cho demo hiện tại. Các phase sau cần thêm cơ chế lọc/redact
+context, cấu hình bật/tắt gửi source, hoặc chuyển Developer planning sang local
+model nếu repo chứa dữ liệu nhạy cảm.
 

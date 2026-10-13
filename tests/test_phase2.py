@@ -113,7 +113,11 @@ class PhaseTwoTest(unittest.TestCase):
         self.settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
-            overrides={"SDLC_LLM_MODE": "fake", "SDLC_SYNC_MODE": "mock"},
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGN_REPAIR_LIMIT": "2",
+            },
         )
 
     def tearDown(self) -> None:
@@ -323,6 +327,101 @@ class OnlyClass {
 
         self.assertEqual(result.sequence_trace[0]["links"][0]["target"], "Repository --> Service: CulturalHeritage")
 
+    def test_validator_accepts_sequence_note_target_from_control_flow(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        parsed.sequence_graph["sequenceDiagrams"][0].setdefault("controlFlows", []).append(
+            {
+                "type": "note",
+                "condition": "note right of Controller: Duplicate submissions are blocked",
+            }
+        )
+        first_requirement = build_requirement_graph(fake_refined_requirement(""))["requirements"][0]
+        class_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "DeleteCulturalHeritageService.deleteHeritage",
+                            "reason": "valid class target",
+                        }
+                    ],
+                }
+            ]
+        )
+        sequence_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "note right of Controller: Duplicate submissions are blocked\nwhile confirmation is pending",
+                            "reason": "valid note target from sequence control flow",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = ValidatorAgent(StaticLlmClient([class_trace, sequence_trace])).construct_traceability(
+            requirement_packet=fake_refined_requirement(""),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+        )
+
+        self.assertEqual(
+            result.sequence_trace[0]["links"][0]["target"],
+            "note right of Controller: Duplicate submissions are blocked",
+        )
+
+    def test_validator_accepts_sequence_alt_condition_target_from_control_flow(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        parsed.sequence_graph["sequenceDiagrams"][0].setdefault("controlFlows", []).append(
+            {
+                "type": "alt",
+                "condition": "Duplicate submission detected",
+            }
+        )
+        first_requirement = build_requirement_graph(fake_refined_requirement(""))["requirements"][0]
+        class_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "DeleteCulturalHeritageService.deleteHeritage",
+                            "reason": "valid class target",
+                        }
+                    ],
+                }
+            ]
+        )
+        sequence_trace = json.dumps(
+            [
+                {
+                    "requirement": first_requirement["id"],
+                    "content": first_requirement["content"],
+                    "links": [
+                        {
+                            "target": "Duplicate submission detected",
+                            "reason": "valid alt/else condition from sequence control flow",
+                        }
+                    ],
+                }
+            ]
+        )
+
+        result = ValidatorAgent(StaticLlmClient([class_trace, sequence_trace])).construct_traceability(
+            requirement_packet=fake_refined_requirement(""),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+        )
+
+        self.assertEqual(result.sequence_trace[0]["links"][0]["target"], "Duplicate submission detected")
+
     def test_validator_reports_missing_links_when_trace_links_are_empty(self) -> None:
         parsed = parse_design_model(fake_design_model())
         graph = build_requirement_graph(fake_refined_requirement(""))
@@ -468,6 +567,25 @@ class OnlyClass {
         self.assertIn("requirement chưa đủ rõ", response["summary_for_user"])
         self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
 
+    def test_design_failure_clears_old_requirement_checkpoint(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        workflow = PhaseTwoWorkflow(self.settings)
+        workflow.validator = ValidatorAgent(StaticLlmClient(["not json"]))
+
+        with self.assertRaises(HarnessError):
+            workflow.approve_checkpoint(run_id=run_id)
+
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["status"], "failed")
+        self.assertIsNone(state["pending_checkpoint"])
+        self.assertEqual(state["last_error"]["error_code"], "validator_traceability_failed")
+
+        with self.assertRaises(HarnessError) as sync_ctx:
+            PhaseOneWorkflow(self.settings).sync_run(run_id=run_id)
+        self.assertEqual(sync_ctx.exception.error_code, "sync_not_ready")
+        self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
+
     def test_repair_loop_respects_configured_zero_limit(self) -> None:
         settings = load_settings(
             root=self.repo_root,
@@ -581,7 +699,7 @@ class OnlyClass {
         self.assertEqual(report["targets"][1]["operation"], "created")
         self.assertNotIn("diagram_images", report["targets"][1])
 
-    def test_real_sync_design_updates_existing_phase1_targets(self) -> None:
+    def test_real_sync_design_creates_targets_even_when_phase1_report_exists(self) -> None:
         settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
@@ -618,12 +736,10 @@ class OnlyClass {
 
         def fake_request(method: str, url: str, payload: dict[str, object] | None):
             calls.append((method, url, payload))
-            if method == "PUT" and "/comment/10001" in url:
-                return {"id": "10001"}
-            if method == "GET" and url.endswith("/wiki/api/v2/pages/20001"):
-                return {"id": "20001", "version": {"number": 2}}
-            if method == "PUT" and url.endswith("/wiki/api/v2/pages/20001"):
-                return {"id": "20001", "_links": {"webui": "/spaces/SDLC/pages/20001/Design"}}
+            if method == "POST" and "/comment" in url:
+                return {"id": "10002"}
+            if method == "POST" and url.endswith("/wiki/api/v2/pages"):
+                return {"id": "20002", "_links": {"webui": "/spaces/SDLC/pages/20002/Design"}}
             self.fail(f"Unexpected request: {method} {url}")
 
         result = real_sync_design_checkpoint(
@@ -636,11 +752,10 @@ class OnlyClass {
         )
 
         self.assertEqual(result["status"], "synced")
-        self.assertEqual([call[0] for call in calls], ["PUT", "GET", "PUT"])
+        self.assertEqual([call[0] for call in calls], ["POST", "POST"])
         report = json.loads((self.repo_root / str(result["report"])).read_text(encoding="utf-8"))
-        self.assertEqual(report["targets"][0]["operation"], "updated")
-        self.assertEqual(report["targets"][1]["operation"], "updated")
-        self.assertEqual(calls[2][2]["version"]["number"], 3)
+        self.assertEqual(report["targets"][0]["operation"], "created")
+        self.assertEqual(report["targets"][1]["operation"], "created")
 
     def test_real_sync_design_records_partial_failure(self) -> None:
         settings = load_settings(

@@ -19,6 +19,8 @@ Khi người dùng duyệt design checkpoint:
 ```text
 waiting_design_approval
   -> implementation_planning
+  -> implementation_plan_validating
+  -> implementation_plan_repairing (nếu Validator fail và còn lượt repair)
   -> waiting_implementation_plan_review
 ```
 
@@ -34,6 +36,8 @@ cancelled
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
 | `implementation_planning` | Đang lập kế hoạch sửa/sinh code từ design đã duyệt. | Harness |
+| `implementation_plan_validating` | Validator đang kiểm rule hard gate và LLM content review cho plan hiện tại. | Harness |
+| `implementation_plan_repairing` | Developer đang tạo plan version kế tiếp theo feedback của Validator. | Harness |
 | `waiting_implementation_plan_review` | Implementation plan đã sinh, chờ human/Niko duyệt trước khi sửa target repo. | Niko + human |
 | `blocked` | Thiếu input, plan thiếu trace, plan bịa scope hoặc target repo chưa an toàn. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -46,11 +50,13 @@ thuộc Phase 4.
 | Artifact | Mục đích |
 | --- | --- |
 | `implementation_plan_v1.md` | Kế hoạch implement dựa trên requirement/design đã duyệt. |
-| `implementation_plan_review_v1.json` | Kết quả Validator review plan: coverage, traceability, executability, scope. |
+| `implementation_plan_structured_v1.json` | Sidecar máy đọc được để Validator/Niko không phải parse Markdown. |
+| `implementation_plan_review_v1.json` | Kết quả Validator review plan hybrid: rule gate, LLM content review, issue lists và repair iteration. |
 | `tool_sync_report_v3.json` | Kết quả sync Confluence/Jira của Phase 3. |
 
 Artifact dùng version như các phase trước. Nếu Developer.plan rerun theo feedback
-của Validator, tạo `v2`, `v3`; không ghi đè file cũ.
+của Validator, tạo `v2`, `v3`; không ghi đè file cũ. `latest_artifacts` luôn trỏ
+tới version mới nhất và chỉ version đã pass mới được sync lên tool.
 
 `implementation_plan_v1` không thay đổi requirement/design graph. Nó chỉ tham
 chiếu graph đã duyệt và ánh xạ sang kế hoạch code dự kiến.
@@ -63,6 +69,7 @@ Sau khi Phase 3 pass:
 current_phase=implementation_planning
 status=waiting_implementation_plan_review
 latest_artifacts.implementation_plan
+latest_artifacts.implementation_plan_structured
 quality_reports.implementation_plan_review
 pending_checkpoint.type=implementation_plan_review
 pending_checkpoint.artifact_ref=implementation_plan_v1

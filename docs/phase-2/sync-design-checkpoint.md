@@ -52,29 +52,32 @@ review đầy đủ hơn vì đó là nơi đọc tài liệu thiết kế.
 
 ## Chính Sách Sync Hiện Tại
 
-Sync hiện tại dùng chính sách idempotent theo artifact do `SDLC_Harness` tạo:
+Sync hiện tại dùng chính sách idempotent theo checkpoint phase do
+`SDLC_Harness` tạo:
 
-- Nếu report cũ đã có `external_id`, adapter cập nhật lại đúng Jira comment hoặc
+- Phase 2 chỉ đọc `external_id` từ `tool_sync_report_v2.json`.
+- Không fallback sang `tool_sync_report_v1.json`, để design checkpoint không
+  ghi đè requirement checkpoint.
+- Nếu report v2 đã có `external_id`, adapter cập nhật lại đúng Jira comment hoặc
   Confluence page đó.
-- Nếu chưa có `external_id`, adapter tạo comment/page mới và lưu id vào
-  `tool_sync_report_v2.json`.
+- Nếu chưa có `external_id`, adapter tạo comment/page mới và lưu id vào report
+  v2.
 - Harness không chỉnh sửa comment/page do người dùng viết tay; chỉ cập nhật
   artifact mà chính nó đã tạo và theo dõi bằng report.
 - Jira/Confluence được xem là bề mặt review/checkpoint mới nhất, không phải nơi
   lưu toàn bộ lịch sử runtime. Lịch sử chi tiết vẫn nằm trong `.runtime/runs`
   theo các version artifact; Confluence cũng có page history ở phía tool.
 
-Cách này tránh spam comment/page mỗi khi chạy `sync-run`, repair design hoặc
-retry sau lỗi mạng. Khi cần audit timeline rõ hơn, có thể mở rộng thành policy
-lai: giữ một comment/page summary được update in-place, đồng thời tạo thêm Jira
-event comment cho các mốc lớn như requirement ready, design ready, sync failed
-hoặc cần human approval.
+Cách này tránh spam comment/page khi re-sync cùng checkpoint, nhưng vẫn giữ
+requirement/design/implementation plan thành các bề mặt review riêng. Khi cần
+audit timeline rõ hơn, có thể mở rộng thêm Jira event comment cho các mốc lớn
+như requirement ready, design ready, sync failed hoặc cần human approval.
 
 ## Jira Sync
 
-Ưu tiên cập nhật cùng comment/run thread đã tạo trước đó. Adapter tìm
-`external_id` trong `tool_sync_report_v2.json` trước, rồi fallback sang
-`tool_sync_report_v1.json`. Nếu chưa có `external_id`, adapter tạo comment mới.
+Ưu tiên cập nhật comment Phase 2 đã tạo trước đó. Adapter chỉ tìm
+`external_id` trong `tool_sync_report_v2.json`. Nếu chưa có `external_id`,
+adapter tạo comment mới.
 
 Comment nên có cấu trúc:
 
@@ -109,11 +112,11 @@ trùng.
 
 ## Confluence Sync
 
-Ưu tiên cập nhật page của run đã tạo trước đó. Adapter tìm `external_id` trong
-`tool_sync_report_v2.json` trước, rồi fallback sang `tool_sync_report_v1.json`.
-Nếu chưa có page, adapter tạo page mới dưới parent page đã cấu hình. Lát hiện
-tại update toàn bộ page checkpoint bằng nội dung design review; việc append
-section mịn hơn có thể làm sau khi cần format Confluence đẹp hơn.
+Ưu tiên cập nhật page Phase 2 đã tạo trước đó. Adapter chỉ tìm `external_id`
+trong `tool_sync_report_v2.json`. Nếu chưa có page, adapter tạo page mới dưới
+parent page đã cấu hình. Lát hiện tại update toàn bộ page checkpoint bằng nội
+dung design review; việc append section mịn hơn có thể làm sau khi cần format
+Confluence đẹp hơn.
 
 Page nên có các section:
 
@@ -239,8 +242,8 @@ Quy tắc re-sync:
 - Đọc `state.json` để xác định checkpoint hiện tại.
 - Nếu checkpoint hiện tại là `requirement_approval`, dùng report Phase 1.
 - Nếu checkpoint hiện tại là `design_approval`, dùng `tool_sync_report_v2.json`.
-- Nếu report cũ có `external_id`, update target cũ thay vì tạo target mới.
-- Nếu report cũ thiếu một target, chỉ tạo target còn thiếu.
+- Nếu report v2 có `external_id`, update target cũ thay vì tạo target mới.
+- Nếu report v2 thiếu một target, chỉ tạo target còn thiếu.
 - Không xóa artifact local khi sync lỗi.
 
 Config liên quan:
@@ -275,6 +278,7 @@ hoặc Confluence để sửa lỗi sync.
 - Mock sync tạo đủ 3 file trong thư mục `sync/`.
 - Real Jira sync tạo hoặc update đúng comment.
 - Real Confluence sync tạo hoặc update đúng page/section.
-- Re-sync không tạo comment/page trùng khi đã có `external_id`.
+- Re-sync cùng Phase 2 không tạo comment/page trùng khi report v2 đã có
+  `external_id`.
 - Khi Jira lỗi nhưng Confluence pass, report là `partial_failed`.
 - Khi sync fail toàn bộ, state vẫn giữ artifact và có thể chạy lại `sync-run`.

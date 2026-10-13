@@ -1,4 +1,4 @@
-﻿"""Mock sync adapter cho checkpoint requirement và design.
+﻿"""Mock sync adapter cho checkpoint requirement, design và implementation plan.
 
 Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact giả lập để unit
 test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật; ownership vẫn
@@ -207,6 +207,128 @@ Review design trước khi cho phép Phase 3 sinh code/test.
     }
 
 
+def mock_sync_implementation_plan_checkpoint(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, object]:
+    """Tạo mock Jira/Confluence checkpoint cho Phase 3 implementation plan."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+
+    jira_comment_path = sync_dir / "implementation-plan-jira-comment.md"
+    confluence_page_path = sync_dir / "implementation-plan-confluence-page.md"
+    report_path = sync_dir / "tool_sync_report_v3.json"
+    implementation_plan = artifact_paths["implementation_plan"]
+    structured_plan = artifact_paths["implementation_plan_structured"]
+    review_report = artifact_paths["implementation_plan_review"]
+    plan_ref = _artifact_ref(implementation_plan)
+    structured_ref = _artifact_ref(structured_plan)
+    review_ref = _artifact_ref(review_report)
+    previous_targets = _previous_targets(report_path)
+    previous_jira = previous_targets.get("jira", {})
+    previous_confluence = previous_targets.get("confluence", {})
+
+    jira_comment_path.write_text(
+        f"""# Mock Jira Comment - Implementation Plan Checkpoint
+
+Run: `{run_id}`
+Source: `{source_ref}`
+Status: `waiting_implementation_plan_review`
+
+Implementation plan đã được tạo, Validator.review_plan đã pass và đang chờ duyệt trước khi Phase 4 sửa target repo.
+
+Artifacts:
+- Implementation plan: `{implementation_plan}`
+- Structured plan: `{structured_plan}`
+- Plan review: `{review_report}`
+
+Confluence review page: `{store.relative(confluence_page_path)}`
+Next action: approve implementation plan hoặc request change.
+""",
+        encoding="utf-8",
+    )
+    confluence_page_path.write_text(
+        f"""# Mock Confluence Page - Implementation Plan Checkpoint
+
+Source: `{source_ref}`
+Run: `{run_id}`
+
+Trang này giả lập bản review implementation plan sau khi design checkpoint đã được duyệt.
+
+## Implementation Plan Artifacts
+
+- Implementation plan: `{implementation_plan}`
+- Structured plan: `{structured_plan}`
+- Plan review: `{review_report}`
+- Design artifact: `{artifact_paths.get('design_artifact', '')}`
+- Requirement-design trace: `{artifact_paths.get('requirement_design_trace', '')}`
+
+## Human Checkpoint
+
+Review implementation plan trước khi cho phép Phase 4 tạo branch, code, test và Draft PR.
+""",
+        encoding="utf-8",
+    )
+
+    targets = [
+        {
+            "tool": "jira",
+            "operation": "mock_file",
+            "external_id": previous_jira.get("external_id", ""),
+            "url": previous_jira.get("url", ""),
+            "status": "synced",
+            "path": store.relative(jira_comment_path),
+            "artifact_refs": [plan_ref, structured_ref, review_ref],
+            "error": None,
+        },
+        {
+            "tool": "confluence",
+            "operation": "mock_file",
+            "external_id": previous_confluence.get("external_id", ""),
+            "url": previous_confluence.get("url", ""),
+            "status": "synced",
+            "path": store.relative(confluence_page_path),
+            "artifact_refs": [plan_ref, structured_ref, review_ref],
+            "error": None,
+        },
+    ]
+    report = {
+        "version": "tool_sync_report_v3",
+        "phase": "implementation_plan_review",
+        "status": "mock_synced",
+        "mode": "mock",
+        "targets": targets,
+        "checkpoint": {
+            "type": "implementation_plan_review",
+            "artifact_ref": plan_ref,
+            "artifact_path": implementation_plan,
+        },
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "phase": "implementation_plan_review",
+        "status": "mock_synced",
+        "mode": "mock",
+        "report": store.relative(report_path),
+        "targets": [
+            {
+                "tool": target["tool"],
+                "status": target["status"],
+                "path": target["path"],
+                "url": target["url"],
+                "external_id": target["external_id"],
+            }
+            for target in targets
+        ],
+    }
+
+
 def _previous_targets(report_path) -> dict[str, dict[str, str]]:
     """Giữ lại external id/url cũ khi mock sync chạy trước real sync trong mode both."""
 
@@ -236,3 +358,4 @@ def _artifact_ref(path: str) -> str:
 
     name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return name.rsplit(".", 1)[0]
+
