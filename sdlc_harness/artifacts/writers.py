@@ -1,7 +1,8 @@
-﻿"""Ghi artifact của Phase 1.
+﻿"""Ghi artifact runtime cho các phase của SDLC Harness.
 
-Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 hiện sinh cả
-formal use case cho execution graph và requirement packet cho người duyệt.
+Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 sinh formal
+use case và requirement packet; Phase 2 sinh design, graph, trace và quality
+report theo từng version.
 """
 
 from __future__ import annotations

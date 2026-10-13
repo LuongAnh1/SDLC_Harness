@@ -1,4 +1,4 @@
-﻿"""Mock sync adapter cho Phase 1.
+﻿"""Mock sync adapter cho checkpoint requirement và design.
 
 Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact giả lập để unit
 test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật; ownership vẫn
@@ -105,6 +105,9 @@ def mock_sync_design_checkpoint(
     quality_ref = _artifact_ref(quality_report)
     analysis_ref = _artifact_ref(artifact_paths["designer_analysis"])
     missing_ref = _artifact_ref(artifact_paths["missing_design_links"])
+    previous_targets = _previous_targets(report_path)
+    previous_jira = previous_targets.get("jira", {})
+    previous_confluence = previous_targets.get("confluence", {})
 
     jira_comment_path.write_text(
         f"""# Mock Jira Comment - Design Checkpoint
@@ -153,8 +156,8 @@ Review design trước khi cho phép Phase 3 sinh code/test.
         {
             "tool": "jira",
             "operation": "mock_file",
-            "external_id": "",
-            "url": "",
+            "external_id": previous_jira.get("external_id", ""),
+            "url": previous_jira.get("url", ""),
             "status": "synced",
             "path": store.relative(jira_comment_path),
             "artifact_refs": [design_ref, trace_ref, quality_ref],
@@ -163,8 +166,8 @@ Review design trước khi cho phép Phase 3 sinh code/test.
         {
             "tool": "confluence",
             "operation": "mock_file",
-            "external_id": "",
-            "url": "",
+            "external_id": previous_confluence.get("external_id", ""),
+            "url": previous_confluence.get("url", ""),
             "status": "synced",
             "path": store.relative(confluence_page_path),
             "artifact_refs": [analysis_ref, design_ref, missing_ref],
@@ -196,12 +199,36 @@ Review design trước khi cho phép Phase 3 sinh code/test.
                 "tool": target["tool"],
                 "status": target["status"],
                 "path": target["path"],
-                "url": "",
-                "external_id": "",
+                "url": target["url"],
+                "external_id": target["external_id"],
             }
             for target in targets
         ],
     }
+
+
+def _previous_targets(report_path) -> dict[str, dict[str, str]]:
+    """Giữ lại external id/url cũ khi mock sync chạy trước real sync trong mode both."""
+
+    if not report_path.exists():
+        return {}
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    result: dict[str, dict[str, str]] = {}
+    for target in report.get("targets", []):
+        if not isinstance(target, dict):
+            continue
+        tool = str(target.get("tool", ""))
+        external_id = str(target.get("external_id", ""))
+        if not tool or not external_id:
+            continue
+        result[tool] = {
+            "external_id": external_id,
+            "url": str(target.get("url", "")),
+        }
+    return result
 
 
 def _artifact_ref(path: str) -> str:

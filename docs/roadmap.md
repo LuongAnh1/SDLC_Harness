@@ -164,3 +164,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > thiếu link thì `status=blocked`. Real sync idempotent và Niko approve route
 > vẫn là bước tiếp theo.
 
+> Cập nhật 2026-10-13: Phase 2 đã có lát V4 cho cấu hình và real sync:
+> `SDLC_DESIGN_REPAIR_LIMIT` điều khiển số vòng repair, `sync-run` tự chọn
+> requirement/design checkpoint, real Jira/Confluence sync tạo hoặc update target
+> theo `external_id`, và unit test đã khóa create/update/partial failure. Cần
+> smoke real Atlassian Phase 2 và nối Niko route duyệt checkpoint.
+

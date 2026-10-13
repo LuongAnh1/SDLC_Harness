@@ -20,7 +20,7 @@ from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..agents.requirements import RequirementRefiner, RequirementValidator
 from ..storage.runtime import RuntimeStore, utc_now_iso
-from ..sync import sync_requirement_checkpoint
+from ..sync import sync_design_checkpoint, sync_requirement_checkpoint
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
@@ -186,29 +186,47 @@ class PhaseOneWorkflow:
         return self._status_response(state, created_new_run=False)
 
     def sync_run(self, *, run_id: str) -> dict[str, object]:
-        """Sync lại artifact requirement hiện có của run lên tool theo config hiện tại."""
+        """Sync lại checkpoint hiện tại của run lên tool theo config hiện tại."""
 
         state = self.store.read_state(run_id)
         artifact_paths = state.get("latest_artifacts")
-        if not isinstance(artifact_paths, dict) or "requirement_packet" not in artifact_paths:
+        if not isinstance(artifact_paths, dict):
             from ..core.errors import HarnessError
 
             raise HarnessError("sync_not_ready", f"Run is not ready for sync: {run_id}", run_id=run_id)
         source_ref = str(state.get("source_ref", ""))
-        last_sync = sync_requirement_checkpoint(
-            store=self.store,
-            settings=self.settings,
-            run_id=run_id,
-            source_ref=source_ref,
-            artifact_paths={str(key): str(value) for key, value in artifact_paths.items()},
-        )
+        normalized_artifacts = {str(key): str(value) for key, value in artifact_paths.items()}
+        checkpoint = state.get("pending_checkpoint")
+        checkpoint_type = checkpoint.get("type") if isinstance(checkpoint, dict) else ""
+        if checkpoint_type == "design_approval" and "design_artifact" in normalized_artifacts:
+            last_sync = sync_design_checkpoint(
+                store=self.store,
+                settings=self.settings,
+                run_id=run_id,
+                source_ref=source_ref,
+                artifact_paths=normalized_artifacts,
+            )
+            waiting_text = "Run vẫn đang chờ anh review design trước khi sang Phase 3."
+        elif "requirement_packet" in normalized_artifacts:
+            last_sync = sync_requirement_checkpoint(
+                store=self.store,
+                settings=self.settings,
+                run_id=run_id,
+                source_ref=source_ref,
+                artifact_paths=normalized_artifacts,
+            )
+            waiting_text = "Run vẫn đang chờ anh duyệt requirement trước khi chuyển sang design."
+        else:
+            from ..core.errors import HarnessError
+
+            raise HarnessError("sync_not_ready", f"Run is not ready for sync: {run_id}", run_id=run_id)
         state.update(
             {
                 "updated_at": utc_now_iso(),
                 "last_sync": last_sync,
                 "summary_for_user": (
                     f"Đã chạy sync cho run {run_id}; sync status={last_sync.get('status')}. "
-                    "Run vẫn đang chờ anh duyệt requirement trước khi chuyển sang design."
+                    f"{waiting_text}"
                 ),
             }
         )

@@ -149,6 +149,35 @@ thêm các điểm kiểm soát:
 - trả JSON status để Niko nói chuyện với người dùng;
 - không tiếp tục sang code cho tới khi human approve design checkpoint.
 
+## Rà Soát Prompt Và Graph So Với TraceDev
+
+Trạng thái 2026-10-13:
+
+- `designer/prompts/recommendation.txt`, `designer/prompts/designer.txt` và
+  `designer/prompts/update_designer.txt` giữ đúng vai trò TraceDev: phân tích
+  kiến trúc, sinh class/sequence diagram, rồi sửa design theo audit report.
+- `validator/prompts/traceability_class.txt` và
+  `validator/prompts/traceability_sequence.txt` giữ đúng ý tưởng TraceDev:
+  Requirement -> class/method và Requirement -> lifeline/message bằng JSON
+  traceability.
+- SDLC_Harness thêm ràng buộc PlantUML/parser vào prompt Designer vì workflow
+  của mình cần parse graph máy đọc được trước khi Validator traceability chạy.
+  Đây là điều chỉnh có chủ đích, không phải lệch khỏi TraceDev.
+- Graph hiện tại bám flow TraceDev ở tầng dưới:
+
+```text
+requirement_packet_v1 + formal_use_case_v1
+  -> Designer.analysis / Designer.act
+  -> parse PlantUML thành class_graph + sequence_graph
+  -> Validator.construct_traceability
+  -> nếu missing_links: Validator quality report -> Designer.update_design
+  -> nếu pass: sync design checkpoint -> waiting_design_approval
+```
+
+Khác biệt quan trọng so với TraceDev: mỗi vòng validate/repair được ghi ra
+artifact version và state checkpoint để Niko/human có thể xem, dừng, re-sync và
+duyệt trước khi sang Phase 3.
+
 ## Quy Tắc Khi Validator Nghi Ngờ Requirement
 
 Nếu missing link đến từ design thiếu, Designer được sửa design. Nếu missing link

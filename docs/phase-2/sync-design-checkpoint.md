@@ -5,6 +5,11 @@ Mục tiêu không phải tạo thêm một luồng sync riêng cho Niko, mà l�
 `SDLC_Harness` sở hữu toàn bộ việc ghi artifact ra tool, còn Niko chỉ đọc
 `state.json` và `tool_sync_report_v2.json` để báo lại cho người dùng.
 
+Trạng thái triển khai 2026-10-13: mock sync và real Atlassian sync cho Phase 2
+đã có unit test. `sync-run` hiện tự chọn sync requirement/design dựa trên
+`pending_checkpoint.type`. Live smoke với Atlassian thật vẫn cần chạy riêng để
+khóa vận hành.
+
 ## Ranh Giới
 
 Phase 2 chỉ được sync sau khi Validator đã kiểm tra design và workflow có đủ dữ
@@ -45,11 +50,31 @@ Nội dung sync không nên dump toàn bộ JSON trace lên Jira comment. Jira c
 chỉ cần summary, link artifact và trạng thái. Confluence page có thể chứa bản
 review đầy đủ hơn vì đó là nơi đọc tài liệu thiết kế.
 
+## Chính Sách Sync Hiện Tại
+
+Sync hiện tại dùng chính sách idempotent theo artifact do `SDLC_Harness` tạo:
+
+- Nếu report cũ đã có `external_id`, adapter cập nhật lại đúng Jira comment hoặc
+  Confluence page đó.
+- Nếu chưa có `external_id`, adapter tạo comment/page mới và lưu id vào
+  `tool_sync_report_v2.json`.
+- Harness không chỉnh sửa comment/page do người dùng viết tay; chỉ cập nhật
+  artifact mà chính nó đã tạo và theo dõi bằng report.
+- Jira/Confluence được xem là bề mặt review/checkpoint mới nhất, không phải nơi
+  lưu toàn bộ lịch sử runtime. Lịch sử chi tiết vẫn nằm trong `.runtime/runs`
+  theo các version artifact; Confluence cũng có page history ở phía tool.
+
+Cách này tránh spam comment/page mỗi khi chạy `sync-run`, repair design hoặc
+retry sau lỗi mạng. Khi cần audit timeline rõ hơn, có thể mở rộng thành policy
+lai: giữ một comment/page summary được update in-place, đồng thời tạo thêm Jira
+event comment cho các mốc lớn như requirement ready, design ready, sync failed
+hoặc cần human approval.
+
 ## Jira Sync
 
-Ưu tiên cập nhật cùng comment/run thread đã tạo từ Phase 1 nếu
-`tool_sync_report_v1.json` hoặc `tool_sync_report_v2.json` cũ có `external_id`.
-Nếu chưa có `external_id`, adapter được phép tạo comment mới.
+Ưu tiên cập nhật cùng comment/run thread đã tạo trước đó. Adapter tìm
+`external_id` trong `tool_sync_report_v2.json` trước, rồi fallback sang
+`tool_sync_report_v1.json`. Nếu chưa có `external_id`, adapter tạo comment mới.
 
 Comment nên có cấu trúc:
 
@@ -84,9 +109,11 @@ trùng.
 
 ## Confluence Sync
 
-Ưu tiên cập nhật page của run đã tạo từ Phase 1. Page này nên có thêm section
-`Design Checkpoint` thay vì tạo nhiều page rời cho cùng một run. Nếu chưa có page,
-adapter được phép tạo page mới dưới parent page đã cấu hình.
+Ưu tiên cập nhật page của run đã tạo trước đó. Adapter tìm `external_id` trong
+`tool_sync_report_v2.json` trước, rồi fallback sang `tool_sync_report_v1.json`.
+Nếu chưa có page, adapter tạo page mới dưới parent page đã cấu hình. Lát hiện
+tại update toàn bộ page checkpoint bằng nội dung design review; việc append
+section mịn hơn có thể làm sau khi cần format Confluence đẹp hơn.
 
 Page nên có các section:
 
@@ -100,6 +127,31 @@ Page nên có các section:
 
 Confluence là nơi có thể chứa bản đầy đủ hơn Jira, nhưng vẫn phải tránh ghi raw
 runtime/private config hoặc API key.
+
+Lát V4.1 hiện tách diagram khỏi phần artifact text:
+
+- Jira comment có section `Diagrams` và đính kèm các block PlantUML cho class /
+  sequence diagram.
+- Confluence page có section `Design Diagrams`, mỗi class/sequence diagram nằm
+  trong code macro PlantUML riêng để reviewer không phải đọc lẫn workflow
+  context.
+- Đây vẫn là diagram source dạng PlantUML, chưa phải ảnh PNG/SVG. Nếu cần hình
+  render thật, bước kế tiếp là tạo SVG/PNG từ `class_diagram_graph_vN.json` và
+  `sequence_diagram_graph_vN.json`, upload attachment rồi embed vào Confluence.
+
+Ghi chú về Confluence Cloud: code macro/code snippet mặc định chỉ hiển thị source
+code có syntax highlight, không tự render PlantUML thành hình. Muốn reviewer thấy
+hình thật có ba hướng:
+
+- cài app/macro diagram trên Confluence, ví dụ PlantUML/Mermaid/draw.io tùy môi
+  trường;
+- để `SDLC_Harness` render SVG/PNG từ PlantUML/graph, upload attachment lên page,
+  rồi embed bằng image attachment;
+- giữ code block PlantUML như hiện tại làm fallback/evidence để người đọc vẫn có
+  nguồn diagram gốc.
+
+Hướng ưu tiên cho harness là render và upload ảnh ở phía `SDLC_Harness`, vì không
+phụ thuộc marketplace app và phù hợp với mục tiêu kiểm soát artifact/version.
 
 ## `tool_sync_report_v2.json`
 
@@ -186,6 +238,14 @@ Quy tắc re-sync:
 - Nếu report cũ có `external_id`, update target cũ thay vì tạo target mới.
 - Nếu report cũ thiếu một target, chỉ tạo target còn thiếu.
 - Không xóa artifact local khi sync lỗi.
+
+Config liên quan:
+
+```text
+SDLC_SYNC_MODE=mock|real|both
+JIRA_SYNC_ENABLED=0|1
+CONFLUENCE_SYNC_ENABLED=0|1
+```
 
 ## Niko Đọc Gì
 

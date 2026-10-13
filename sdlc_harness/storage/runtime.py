@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from ..core.errors import HarnessError
 
-TERMINAL_STATUSES = {"done", "cancelled"}
+TERMINAL_STATUSES = {"done", "cancelled", "failed"}
 
 
 class RuntimeStore:

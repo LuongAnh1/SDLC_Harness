@@ -23,7 +23,6 @@ ALLOWED_DESIGN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
-DESIGN_REPAIR_LIMIT = 2
 
 
 class PhaseTwoWorkflow:
@@ -95,8 +94,9 @@ class PhaseTwoWorkflow:
             merged_artifacts = dict(artifact_paths)
             traceability = None
             previous_quality_report = ""
+            repair_limit = self.settings.design_repair_limit
 
-            for repair_iteration in range(DESIGN_REPAIR_LIMIT + 1):
+            for repair_iteration in range(repair_limit + 1):
                 version = repair_iteration + 1
                 if repair_iteration == 0:
                     state.update(
@@ -118,7 +118,7 @@ class PhaseTwoWorkflow:
                             "status": "design_repairing",
                             "summary_for_user": (
                                 f"Validator còn missing link, Designer đang repair design "
-                                f"lần {repair_iteration}/{DESIGN_REPAIR_LIMIT}."
+                                f"lần {repair_iteration}/{repair_limit}."
                             ),
                         }
                     )
@@ -171,7 +171,7 @@ class PhaseTwoWorkflow:
                 self.store.write_state(state)
                 if traceability.ok:
                     break
-                if repair_iteration >= DESIGN_REPAIR_LIMIT:
+                if repair_iteration >= repair_limit:
                     break
 
                 previous_quality_report = design_paths["design_quality_report"]
@@ -203,11 +203,12 @@ class PhaseTwoWorkflow:
             raise HarnessError("designer_failed", "Phase 2 did not produce a design traceability result.", run_id=run_id)
 
         if not traceability.ok:
+            repair_limit = self.settings.design_repair_limit
             blocked_error = HarnessError(
                 "design_traceability_blocked",
                 (
                     f"Design still has missing requirement links after "
-                    f"{DESIGN_REPAIR_LIMIT} repair iteration(s)."
+                    f"{repair_limit} repair iteration(s)."
                 ),
                 run_id=run_id,
             )
@@ -220,7 +221,7 @@ class PhaseTwoWorkflow:
                     "allowed_next_actions": ["get_status", "cancel_run"],
                     "last_error": blocked_error.to_response(),
                     "summary_for_user": (
-                        f"Phase 2 bị chặn sau {DESIGN_REPAIR_LIMIT} vòng repair. "
+                        f"Phase 2 bị chặn sau {repair_limit} vòng repair. "
                         f"Validator vẫn {_traceability_summary(traceability.missing_links)}"
                     ),
                 }

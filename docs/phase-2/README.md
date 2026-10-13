@@ -103,17 +103,29 @@ nhiệm này sang Niko. Jira chỉ nên nhận comment/tóm tắt dễ đọc; C
 lưu bản review đầy đủ hơn gồm designer analysis, diagram, traceability summary
 và quality report. Chi tiết contract nằm ở `sync-design-checkpoint.md`.
 
+Sync hiện tại là sync artifact do harness sở hữu: nếu đã có `external_id` thì
+update Jira comment/Confluence page cũ, nếu chưa có thì tạo mới. Đây là cách giữ
+một bản checkpoint mới nhất để review, tránh tạo trùng khi repair hoặc re-sync;
+không phải cơ chế ghi đè nội dung người dùng viết tay.
+
+Diagram trên Confluence hiện được đưa lên dưới dạng PlantUML trong code macro.
+Confluence Cloud không tự biến code block PlantUML thành hình vẽ nếu không có
+app/macro hỗ trợ. Nếu cần hình thật, lát sau sẽ render SVG/PNG ở phía
+`SDLC_Harness`, upload attachment và embed vào page.
+
 ## Tiến Độ Hiện Tại
 
-Cập nhật 2026-10-13: đã triển khai lát Phase 2 V3 cho `approve-checkpoint`.
+Cập nhật 2026-10-13: đã triển khai lát Phase 2 V4 cho `approve-checkpoint`.
 Lát này đọc requirement packet đã duyệt, đọc thêm formal use case nếu có, gọi
 Designer Agent fake/LLM-ready để sinh PlantUML, parse class/sequence graph thật,
 chạy Validator traceability V1 để tạo requirement graph, class trace, sequence
 trace và missing-link report. Nếu còn missing link, workflow gọi
-`Designer.update_design` tối đa 2 vòng, ghi artifact version mới và chỉ tạo
-`tool_sync_report_v2.json` bằng mock sync khi traceability pass. Nếu hết vòng
-repair mà vẫn thiếu link thì state chuyển `blocked`. Chưa real sync
-Jira/Confluence cho Phase 2 và chưa nối Niko route duyệt checkpoint.
+`Designer.update_design` theo `SDLC_DESIGN_REPAIR_LIMIT`, ghi artifact version
+mới và chỉ tạo checkpoint khi traceability pass. Khi pass, Phase 2 có thể mock
+sync hoặc real sync Jira/Confluence theo `SDLC_SYNC_MODE`, trong đó real sync
+update lại bot-owned comment/page cũ khi có `external_id`. Nếu hết vòng repair
+mà vẫn thiếu link thì state chuyển `blocked`. Chưa nối Niko route duyệt
+checkpoint.
 
 ## Không Làm Trong Phase 2
 

@@ -326,6 +326,15 @@ def _class_targets(class_graph: dict[str, object]) -> set[str]:
                     method_name = str(method).strip()
                 if method_name:
                     targets.add(f"{class_name}.{method_name}")
+        attributes = node.get("attributes", [])
+        if isinstance(attributes, list):
+            for attribute in attributes:
+                if isinstance(attribute, dict):
+                    attribute_name = str(attribute.get("name", "")).strip()
+                else:
+                    attribute_name = str(attribute).strip()
+                if attribute_name:
+                    targets.add(f"{class_name}.{attribute_name}")
     return targets
 
 

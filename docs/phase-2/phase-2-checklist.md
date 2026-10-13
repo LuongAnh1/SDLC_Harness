@@ -60,6 +60,7 @@ Mục đích: kiểm tra requirement đã được design thể hiện đủ ở
 - [x] Lưu `missing_design_links_v1.json`.
 - [x] Missing link class và sequence được tách riêng.
 - [x] Trace placeholder không invent target không có trong graph.
+- [x] Class trace chấp nhận `ClassName.attributeName` nếu attribute tồn tại trong class graph.
 - [x] Sequence trace chấp nhận return message target dùng arrow `-->`.
 
 ## 6. Validator Quality Report Và Repair Loop
@@ -71,6 +72,7 @@ Mục đích: nếu design thiếu link, Designer sửa đúng phần thiếu th
 - [x] Mỗi vòng repair tạo version mới `design_artifact_v{n}`.
 - [x] Mỗi vòng repair tạo trace/missing/report version tương ứng.
 - [x] Có giới hạn vòng repair rõ, mặc định 2 vòng.
+- [x] Giới hạn vòng repair đọc từ config `SDLC_DESIGN_REPAIR_LIMIT` và có CLI override cho `approve-checkpoint`.
 - [x] Nếu pass trước giới hạn, dừng loop.
 - [x] Nếu fail sau giới hạn do design thiếu, state=`blocked`.
 - [ ] Nếu fail do requirement thiếu/mơ hồ, quay về `waiting_requirement_approval` hoặc state=`blocked` với lý do rõ.
@@ -96,16 +98,20 @@ Chi tiết policy nằm ở `docs/phase-2/sync-design-checkpoint.md`.
 - [x] Mock sync design checkpoint tạo file local cho test.
 - [x] Mock sync tạo `design-jira-comment.md`.
 - [x] Mock sync tạo `design-confluence-page.md`.
-- [ ] Real sync cập nhật Jira comment cũ nếu có `external_id`.
-- [ ] Real sync tạo Jira comment mới nếu chưa có `external_id`.
-- [ ] Real sync cập nhật Confluence page/section của run nếu có `external_id`.
-- [ ] Real sync tạo Confluence page mới dưới parent page nếu chưa có `external_id`.
+- [x] Real sync cập nhật Jira comment cũ nếu có `external_id`.
+- [x] Real sync tạo Jira comment mới nếu chưa có `external_id`.
+- [x] Real sync cập nhật Confluence page của run nếu có `external_id`.
+- [x] Real sync tạo Confluence page mới dưới parent page nếu chưa có `external_id`.
+- [x] Real sync tách Class/Sequence PlantUML thành section diagram riêng trên Jira/Confluence.
+- [x] Ghi rõ policy sync hiện tại: update bot-owned comment/page khi có `external_id`, không ghi đè nội dung người dùng.
+- [ ] Render PlantUML thành SVG/PNG thật, upload attachment và embed vào Confluence nếu cần reviewer xem hình thay vì source code.
 - [x] `tool_sync_report_v2.json` ghi `phase=design_checkpoint`.
 - [x] `tool_sync_report_v2.json` ghi `mode`, `status`, `targets`, `artifact_refs`.
 - [x] `state.json` ghi `last_sync.phase=design_checkpoint`.
 - [x] `state.json` ghi `last_sync.status`.
-- [ ] Re-sync không tạo comment/page trùng nếu đã có external id.
-- [ ] Partial failure không xóa artifact local.
+- [x] `sync-run` tự nhận biết checkpoint hiện tại là requirement hay design.
+- [x] Re-sync không tạo comment/page trùng nếu đã có external id.
+- [x] Partial failure không xóa artifact local.
 - [ ] Niko đọc `last_sync` để báo rõ sync thành công, lỗi một phần hoặc lỗi toàn bộ.
 
 ## 9. Niko Integration
@@ -126,10 +132,15 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test Designer fake output tạo design artifact.
 - [x] Unit test parser class/sequence diagram.
 - [x] Unit test Validator phát hiện missing links.
+- [x] Unit test Validator chấp nhận class attribute target.
 - [x] Unit test Validator chấp nhận sequence return arrow target.
 - [x] Unit test repair loop pass sau một vòng.
 - [x] Unit test repair loop blocked sau giới hạn.
+- [x] Unit test repair loop tôn trọng `SDLC_DESIGN_REPAIR_LIMIT=0`.
 - [x] Unit test sync mock design checkpoint.
+- [x] Unit test real sync design create/update Jira và Confluence.
+- [x] Unit test real sync design format diagram thành code block/Confluence code macro.
+- [x] Unit test partial failure real sync design.
 - [x] Smoke test CLI từ run Phase 1 thật sang `waiting_design_approval`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 

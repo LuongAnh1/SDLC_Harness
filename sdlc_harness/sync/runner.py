@@ -1,10 +1,10 @@
-"""Chọn adapter sync Phase 1 theo runtime config."""
+"""Chọn adapter sync theo runtime config."""
 
 from __future__ import annotations
 
 from ..core.config import Settings
 from ..storage.runtime import RuntimeStore
-from .atlassian import real_sync_requirement_checkpoint
+from .atlassian import real_sync_design_checkpoint, real_sync_requirement_checkpoint
 from .mock import mock_sync_design_checkpoint, mock_sync_requirement_checkpoint
 
 
@@ -49,14 +49,25 @@ def sync_design_checkpoint(
     source_ref: str,
     artifact_paths: dict[str, str],
 ) -> dict[str, object]:
-    """Sync design checkpoint Phase 2.
+    """Sync design checkpoint Phase 2 bằng mock, real hoặc cả hai."""
 
-    Phase 2 hiện vẫn dùng mock sync để khóa contract `tool_sync_report_v2`.
-    Real Jira/Confluence update sẽ được nối ở lát sau.
-    """
-
-    return mock_sync_design_checkpoint(
+    if settings.sync_mode == "mock":
+        return mock_sync_design_checkpoint(
+            store=store,
+            run_id=run_id,
+            source_ref=source_ref,
+            artifact_paths=artifact_paths,
+        )
+    if settings.sync_mode == "both":
+        mock_sync_design_checkpoint(
+            store=store,
+            run_id=run_id,
+            source_ref=source_ref,
+            artifact_paths=artifact_paths,
+        )
+    return real_sync_design_checkpoint(
         store=store,
+        settings=settings,
         run_id=run_id,
         source_ref=source_ref,
         artifact_paths=artifact_paths,

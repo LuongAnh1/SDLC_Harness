@@ -47,6 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--run-id", required=True)
     approve.add_argument("--checkpoint-id", default=None)
     approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    approve.add_argument("--design-repair-limit", default=None)
     approve.add_argument("--runtime-root", default=None)
     return parser
 
@@ -56,6 +57,8 @@ def _settings_from_args(args: argparse.Namespace):
     overrides = {}
     if getattr(args, "llm_mode", None):
         overrides["SDLC_LLM_MODE"] = args.llm_mode
+    if getattr(args, "design_repair_limit", None) is not None:
+        overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
     return load_settings(root=repo_root(), runtime_root=runtime_root, overrides=overrides)
 
 

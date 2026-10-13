@@ -170,3 +170,127 @@ Ghi chú vận hành:
 
 - Run live bị lỗi đã vào `status=failed`; cần tạo run mới bằng
   `start-or-get-run` rồi approve lại, không approve lại trực tiếp run cũ.
+
+## 2026-10-13 - V4 Configurable Repair Limit Và Real Design Sync
+
+Đã làm:
+
+- Thêm config `SDLC_DESIGN_REPAIR_LIMIT`, mặc định `2`, cho phép đặt `0` để chỉ
+  validate draft đầu tiên mà không gọi `Designer.update_design`.
+- Thêm CLI override `approve-checkpoint --design-repair-limit <n>` để smoke test
+  nhanh các giới hạn khác nhau mà không sửa `.env`.
+- Phase 2 dùng `settings.design_repair_limit` thay cho hằng số hard-code.
+- `sync_design_checkpoint(...)` đã hỗ trợ `SDLC_SYNC_MODE=mock|real|both`.
+- Thêm `real_sync_design_checkpoint(...)` cho Jira/Confluence:
+  - Jira tạo comment mới hoặc update comment cũ nếu report v2/v1 có
+    `external_id`;
+  - Confluence tạo page mới hoặc update page cũ nếu report v2/v1 có
+    `external_id`;
+  - ghi `tool_sync_report_v2.json` với `phase=design_checkpoint`,
+    `operation=created|updated`, `artifact_refs`, `url`, `external_id`.
+- `sync-run` đọc `pending_checkpoint.type` để tự chọn re-sync requirement hoặc
+  design checkpoint hiện tại.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest`: 52 test pass.
+- Unit test repair loop tôn trọng `SDLC_DESIGN_REPAIR_LIMIT=0`.
+- Unit test real sync design tạo Jira comment/Confluence page mới.
+- Unit test real sync design update lại target Phase 1 đã có `external_id`.
+- Unit test partial failure: Jira pass, Confluence lỗi thì report
+  `partial_failed` và artifact local vẫn giữ nguyên.
+
+Chưa làm trong lát này:
+
+- Chưa chạy smoke real sync Phase 2 bằng Atlassian thật.
+- Chưa nối Niko route duyệt checkpoint design/Phase 2 UI conversation.
+- Chưa xử lý nhánh requirement thiếu/mơ hồ để quay lại requirement checkpoint.
+
+## 2026-10-13 - V4.1 Tách Diagram Trong Sync Output
+
+Phát hiện khi live test:
+
+- Jira/Confluence đã có comment/page design, nhưng phần design artifact bị đưa
+  lên gần như text workflow/context.
+- Class diagram và sequence diagram không nổi bật, reviewer khó thấy đây là
+  checkpoint thiết kế.
+
+Đã sửa:
+
+- Tách PlantUML class/sequence từ `design_artifact_vN.md` bằng parser hiện có.
+- Jira comment thêm section `Diagrams` và `codeBlock` PlantUML riêng.
+- Confluence page đổi từ `Design Artifact` nguyên khối sang `Design Diagrams`
+  với từng code macro PlantUML cho Class Diagram và Sequence Diagram.
+- Unit test real sync design kiểm tra Jira có `codeBlock` và Confluence có
+  `Design Diagrams`, `Class Diagram`, `Sequence Diagram`, `ac:name="code"`.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest`: 52 test pass.
+
+Chưa làm:
+
+- Chưa render diagram thành ảnh SVG/PNG và upload attachment lên Confluence.
+  Đây là bước riêng nếu cần reviewer thấy hình thật thay vì PlantUML source.
+
+## 2026-10-13 - V4.2 Class Attribute Trace Target Và Failed Run Retry
+
+Phát hiện khi anh live test Phase 2:
+
+```text
+Validator class diagram trace invented target:
+DeleteCulturalHeritageController.deleteInProgress
+```
+
+Nguyên nhân:
+
+- Class trace validator chỉ whitelist `ClassName` và `ClassName.methodName`.
+- DeepSeek có thể link requirement quality/state tới attribute tồn tại trong
+  class diagram, ví dụ flag `deleteInProgress`.
+- Nếu attribute này thật sự có trong `class_diagram_graph`, không nên coi đó là
+  target bịa.
+
+Đã sửa:
+
+- `_class_targets(...)` chấp nhận thêm `ClassName.attributeName` khi attribute
+  có trong class graph.
+- Prompt `traceability_class.txt` nói rõ target hợp lệ có thể là class, method
+  hoặc attribute, nhưng không được invent ngoài JSON graph.
+- `RuntimeStore` coi `status=failed` là terminal để lần `start-from-jira` sau tự
+  tạo run mới, tránh kẹt active run lỗi.
+
+Đã kiểm thử:
+
+- `rtk python -m pytest`: 54 test pass.
+- Unit test class trace chấp nhận target attribute thật.
+- Unit test start lại source sau run failed tạo run mới.
+
+## 2026-10-13 - V4.3 Ghi Rõ Policy Sync Và Giới Hạn Diagram Render
+
+Phản hồi khi review live Jira/Confluence:
+
+- Cơ chế sync hiện tại tạo cảm giác như "thay thế" comment/page thay vì thêm mới
+  mỗi lần sync.
+- Diagram trên Confluence đã được tách ra nhưng vẫn là PlantUML source trong
+  code macro, chưa phải hình vẽ render thật.
+
+Đã chốt lại trong docs:
+
+- Sync hiện tại là idempotent theo artifact do `SDLC_Harness` sở hữu: có
+  `external_id` thì update Jira comment/Confluence page cũ, chưa có thì tạo mới.
+- Harness không ghi đè nội dung người dùng viết tay; chỉ cập nhật comment/page
+  mà chính nó tạo và lưu id trong `tool_sync_report_v2.json`.
+- Jira/Confluence là bề mặt review checkpoint mới nhất; lịch sử chi tiết nằm ở
+  `.runtime/runs` theo version artifact, Confluence có thêm page history.
+- Nếu cần audit timeline, hướng sau là policy lai: một summary comment/page được
+  update in-place, cộng thêm event comment cho mốc lớn.
+- Confluence Cloud code macro không tự render PlantUML thành hình; muốn có hình
+  thật thì cần app/macro diagram hoặc để harness render SVG/PNG rồi upload
+  attachment và embed vào page.
+
+Đã cập nhật:
+
+- `sync-design-checkpoint.md`
+- `README.md`
+- `phase-2-checklist.md`
+- `docs/implementation-checklist.md`

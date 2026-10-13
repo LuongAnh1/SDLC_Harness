@@ -1,7 +1,8 @@
 ﻿"""Cấu hình runtime cho SDLC Harness.
 
-Phase 1 ưu tiên CLI chạy local nên cấu hình được đọc từ `.env` ở repo root và
-OS environment. `.env` chỉ chứa thông tin máy cá nhân/API key, không commit.
+Giai đoạn hiện tại ưu tiên CLI chạy local nên cấu hình được đọc từ `.env` ở repo
+root và OS environment. `.env` chỉ chứa thông tin máy cá nhân/API key, không
+commit.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class Settings:
-    """Cấu hình chung cho LLM, runtime state và tool sync Phase 1."""
+    """Cấu hình chung cho LLM, runtime state và tool sync."""
 
     repo_root: Path
     runtime_root: Path
@@ -22,6 +23,7 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_timeout_seconds: int
+    design_repair_limit: int
     sync_mode: str
     atlassian_base_url: str
     atlassian_email: str
@@ -62,6 +64,18 @@ def _bool_value(raw: str | None, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _int_value(raw: str | None, *, default: int, minimum: int = 0) -> int:
+    """Đọc số nguyên từ env/CLI và chặn giá trị âm cho cấu hình vòng lặp."""
+
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
 def load_settings(
     *,
     root: Path | None = None,
@@ -82,6 +96,7 @@ def load_settings(
         "SDLC_LLM_BASE_URL",
         "SDLC_LLM_MODEL",
         "SDLC_LLM_TIMEOUT_SECONDS",
+        "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_SYNC_MODE",
         "ATLASSIAN_BASE_URL",
         "ATLASSIAN_EMAIL",
@@ -97,12 +112,6 @@ def load_settings(
     if overrides:
         merged.update({key: value for key, value in overrides.items() if value is not None})
 
-    timeout_raw = merged.get("SDLC_LLM_TIMEOUT_SECONDS", "90")
-    try:
-        timeout_seconds = int(timeout_raw)
-    except ValueError:
-        timeout_seconds = 90
-
     runtime_path = (runtime_root or root_path / ".runtime").resolve()
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
@@ -114,7 +123,8 @@ def load_settings(
         llm_api_key=merged.get("SDLC_LLM_API_KEY", ""),
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
         llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-chat"),
-        llm_timeout_seconds=timeout_seconds,
+        llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
+        design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
         sync_mode=sync_mode,
         atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),
         atlassian_email=merged.get("ATLASSIAN_EMAIL", ""),

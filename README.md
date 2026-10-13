@@ -15,7 +15,7 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã có `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop và mock design sync để khóa contract design checkpoint. Real sync Phase 2 vẫn là bước tiếp theo. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã có `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock design sync và real Jira/Confluence sync cho checkpoint thiết kế. Mock sync vẫn tồn tại cho test/fallback. Các phase sau tiếp tục mở rộng theo từng lát cắt chạy được.
 
 
 ## Cấu Trúc Package
@@ -94,11 +94,12 @@ Ranh giới hiện tại:
   Atlassian đầy đủ.
 - Mock sync vẫn tồn tại cho unit/smoke test hoặc khi chưa cấu hình tool thật.
 - CLI phải giữ stdout chỉ có JSON vì Niko parse trực tiếp response đó.
-- Phase 2 hiện có contract `approve-checkpoint` V3: Designer tạo PlantUML,
+- Phase 2 hiện có contract `approve-checkpoint` V4: Designer tạo PlantUML,
   parser sinh class/sequence graph thật, Validator traceability tạo
   requirement graph/class trace/sequence trace/missing links ở mode
-  `traceability_v1`, Designer repair design theo missing-link report, và mock
-  design sync khi design pass.
+  `traceability_v1`, Designer repair design theo missing-link report,
+  `SDLC_DESIGN_REPAIR_LIMIT` cấu hình số vòng repair, và mock/real design sync
+  khi design pass.
 
 <!-- SDLC_NIKO_SYNC_END -->
 

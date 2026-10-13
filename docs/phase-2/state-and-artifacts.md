@@ -69,6 +69,8 @@ Quy tắc:
 - `latest_artifacts` trỏ tới version mới nhất.
 - `quality_reports.design_traceability` lưu report mới nhất và danh sách version đã chạy.
 - Nếu design pass, `pending_checkpoint.artifact_path` trỏ tới `design_artifact_v{latest}`.
+- Repair limit đọc từ `SDLC_DESIGN_REPAIR_LIMIT`, mặc định `2`; đặt `0` để chỉ
+  validate draft đầu tiên.
 - Nếu hết repair limit mà vẫn còn missing link, `status=blocked`, không mở
   pending checkpoint design và `latest_artifacts` vẫn trỏ tới version cuối để
   human/operator đọc lại.

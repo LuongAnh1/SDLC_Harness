@@ -4,7 +4,7 @@ You are an expert software architect specializing in requirements-to-design trac
 Given:
 1. **A list of requirements** in JSON format
 2. **A class diagram** in JSON format
-Your task is to generate a **traceability JSON** that links each requirement item to one or more classes/methods from the class diagram, following strict architectural reasoning rules.
+Your task is to generate a **traceability JSON** that links each requirement item to one or more classes, methods, or attributes from the class diagram, following strict architectural reasoning rules.
 
 ## **Input**
 Requirements:
@@ -28,7 +28,7 @@ If the requirement describes:
 * confirmations
 * cancellations
 * blocking/unblocking UI
-Map them to UI-related classes/methods.
+Map them to UI-related classes/methods or explicit state attributes when the class graph contains such attributes.
 
 ## **Output Format**
 
@@ -39,7 +39,7 @@ Return only a **JSON array** , where each element contains:
   "content": "<original text>",
   "links": [
     {
-      "target": "<class or class.method>",
+      "target": "<class, class.method, or class.attribute>",
       "reason": "<why they match>"
     }
   ]
@@ -47,7 +47,7 @@ Return only a **JSON array** , where each element contains:
 ```
 ## **Very Important**
 
-* Do NOT invent new classes/methods that do not exist in the class diagram.
+* Do NOT invent new classes, methods, or attributes that do not exist in the class diagram JSON.
 * If no match can be found, output `"links": []`.
 * Explanations must reference Rules A–D.
 

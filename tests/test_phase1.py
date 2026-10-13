@@ -314,6 +314,18 @@ class PhaseOneTest(unittest.TestCase):
         self.assertFalse(second["created_new_run"])
         self.assertEqual(first["run_id"], second["run_id"])
 
+    def test_start_or_get_run_ignores_failed_active_run(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        first = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        state = workflow.store.read_state(str(first["run_id"]))
+        state["status"] = "failed"
+        workflow.store.write_state(state)
+
+        second = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertTrue(second["created_new_run"])
+        self.assertNotEqual(first["run_id"], second["run_id"])
+
     def test_get_status_reads_existing_run(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
         created = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
