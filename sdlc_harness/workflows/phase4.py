@@ -11,11 +11,17 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..agents.developer import DeveloperActAgent, DeveloperActResult, build_developer_work_packet
+from ..agents.developer import (
+    DeveloperActAgent,
+    DeveloperActResult,
+    build_developer_work_packet,
+    refresh_developer_work_packet,
+)
 from ..agents.validator import CodeTraceValidator
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
+    write_phase4_developer_raw_response,
     write_phase4_developer_work_packet,
     write_phase4_repair_feedback,
     write_phase4_test_report,
@@ -42,6 +48,7 @@ ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_
 ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
 
 
 class PhaseFourWorkflow:
@@ -181,16 +188,28 @@ class PhaseFourWorkflow:
         if status == "implementation_tested":
             return self._continue_code_trace(state=state, run_id=run_id)
         if status == "implementation_repair_needed":
-            raise HarnessError(
-                "implementation_repair_not_implemented",
-                f"Run needs Developer repair feedback handling before it can continue: {run_id}",
-                run_id=run_id,
-            )
+            return self._continue_implementation_repair(state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
             run_id=run_id,
         )
+
+    def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
+        """Re-run Verification Runner and Validator for repair-limit blocked runs."""
+
+        state = self.store.read_state(run_id)
+        last_error = _dict_value(state.get("last_error"))
+        if str(state.get("status")) != "blocked" or last_error.get("error_code") != "implementation_repair_limit_exceeded":
+            raise HarnessError(
+                "implementation_revalidate_not_allowed",
+                (
+                    "Implementation revalidate is only allowed when a Phase 4 run is blocked by "
+                    f"implementation_repair_limit_exceeded: {run_id}"
+                ),
+                run_id=run_id,
+            )
+        return self._revalidate_current_implementation(state=state, run_id=run_id)
 
     def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
@@ -424,6 +443,8 @@ class PhaseFourWorkflow:
                 trace_path=trace_path,
                 target_repo=str(target_info.path),
                 branch=target_info.current_branch,
+                feedback_version=1,
+                repair_iteration=0,
             )
             feedback_path = write_phase4_repair_feedback(
                 store=self.store,
@@ -441,6 +462,7 @@ class PhaseFourWorkflow:
                     "needed": True,
                     "feedback_artifact": feedback_path,
                     "missing_count": len(trace_result.missing_links),
+                        "repair_iterations": 0,
                     "summary": trace_result.summary,
                 },
             }
@@ -454,14 +476,16 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
                     "last_error": None,
+                    "implementation_repair_iterations": 0,
                     "summary_for_user": (
                         f"Validator code trace còn thiếu link có thể sửa ở code/test cho run {run_id}: "
-                        f"{trace_result.summary} Đã ghi implementation_repair_feedback_v1.json để slice sau "
-                        "giao Developer repair; workflow chưa tự sửa code ở slice 4.5."
+                        f"{trace_result.summary} Đã ghi implementation_repair_feedback_v1.json. "
+                        "Lần continue-run tiếp theo sẽ giao Developer.repair xử lý feedback này."
                     ),
                 }
             )
         else:
+            error_code = _nonrepairable_code_trace_error_code(trace_result)
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -472,13 +496,579 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": ["get_status", "cancel_run"],
                     "last_error": HarnessError(
-                        "implementation_traceability_failed",
+                        error_code,
                         trace_result.summary,
                         run_id=run_id,
                     ).to_response(),
                     "summary_for_user": (
                         f"Validator code trace còn thiếu link cho run {run_id}: {trace_result.summary} "
                         "Workflow chưa được phép mở PR."
+                    ),
+                }
+            )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _revalidate_current_implementation(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Re-run Verification Runner and Validator without editing code."""
+
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        latest_artifacts = dict(artifact_paths)
+        previous_iterations = _int_value(state.get("implementation_repair_iterations"))
+        artifact_version = _next_phase4_artifact_version(self.store, run_id)
+        try:
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
+            _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
+            for key in (
+                "design_artifact",
+                "requirement_design_trace",
+                "class_diagram_graph",
+                "sequence_diagram_graph",
+            ):
+                _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            target_info = self._validate_target_repo(allow_dirty=True)
+            work_packet = refresh_developer_work_packet(
+                packet=work_packet,
+                target_repo_path=target_info.path,
+                version=artifact_version,
+                run_id=run_id,
+            )
+            refreshed_packet_path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=work_packet,
+                version=artifact_version,
+            )
+            latest_artifacts = {
+                **latest_artifacts,
+                "developer_work_packet": refreshed_packet_path,
+            }
+            verification_result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            test_report = {
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                "repair_iteration": previous_iterations,
+                "revalidated_from": "implementation_repair_limit_exceeded",
+                "developer_work_packet": refreshed_packet_path,
+                **verification_result.to_dict(),
+            }
+            test_report_path = write_phase4_test_report(
+                store=self.store,
+                run_id=run_id,
+                report=test_report,
+                version=artifact_version,
+            )
+            latest_artifacts = {
+                **latest_artifacts,
+                "test_report": test_report_path,
+            }
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bi chan khi revalidate implementation: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        if verification_result.status != "passed":
+            error_code = "test_skipped" if verification_result.status == "skipped" else "test_failed"
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": HarnessError(error_code, verification_result.reason, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        f"Revalidate implementation cho run {run_id} khong pass Verification Runner "
+                        f"status={verification_result.status}: {verification_result.reason}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        try:
+            trace_result = self.code_trace_validator.validate(
+                target_path=target_info.path,
+                work_packet=work_packet,
+            )
+            trace_payload = {
+                **trace_result.to_dict(),
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                "repair_iteration": previous_iterations,
+                "revalidated_from": "implementation_repair_limit_exceeded",
+            }
+            trace_path = write_phase4_code_trace_report(
+                store=self.store,
+                run_id=run_id,
+                report=trace_payload,
+                version=artifact_version,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bi chan khi Validator revalidate implementation: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **latest_artifacts,
+            "requirement_design_code_trace": trace_path,
+        }
+        quality_reports = {
+            **_dict_value(state.get("quality_reports")),
+            "implementation_traceability": trace_result.to_quality_report(),
+        }
+        if trace_result.ok:
+            quality_reports["implementation_repair"] = {
+                "needed": False,
+                "repair_iterations": previous_iterations,
+                "revalidated": True,
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "implementation_traced",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_TRACED_ACTIONS,
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Revalidate implementation da pass test va Validator code trace cho run {run_id}: "
+                        f"{trace_result.summary} Workflow chua chay QA/Tester Agent, chua commit va chua mo PR."
+                    ),
+                }
+            )
+        elif _is_repairable_code_trace_failure(trace_result) and previous_iterations < self.settings.implementation_repair_limit:
+            feedback = _implementation_repair_feedback(
+                run_id=run_id,
+                state=state,
+                work_packet=work_packet,
+                trace_result=trace_result,
+                trace_path=trace_path,
+                target_repo=str(target_info.path),
+                branch=target_info.current_branch,
+                feedback_version=artifact_version,
+                repair_iteration=previous_iterations,
+            )
+            feedback_path = write_phase4_repair_feedback(
+                store=self.store,
+                run_id=run_id,
+                feedback=feedback,
+                version=artifact_version,
+            )
+            latest_artifacts = {
+                **latest_artifacts,
+                "implementation_repair_feedback": feedback_path,
+            }
+            quality_reports["implementation_repair"] = {
+                "needed": True,
+                "feedback_artifact": feedback_path,
+                "missing_count": len(trace_result.missing_links),
+                "repair_iterations": previous_iterations,
+                "revalidated": True,
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "implementation_repair_needed",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Revalidate implementation cho run {run_id} da tao feedback moi v{artifact_version}: "
+                        f"{trace_result.summary} Co the chay continue-run de Developer.repair tiep."
+                    ),
+                }
+            )
+        else:
+            if _is_repairable_code_trace_failure(trace_result):
+                error_code = "implementation_repair_limit_exceeded"
+                message = (
+                    f"Implementation repair limit is still reached after revalidation: "
+                    f"iterations={previous_iterations}, limit={self.settings.implementation_repair_limit}. "
+                    f"{trace_result.summary}"
+                )
+                allowed_actions = ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
+            else:
+                error_code = _nonrepairable_code_trace_error_code(trace_result)
+                message = trace_result.summary
+                allowed_actions = ["get_status", "cancel_run"]
+            quality_reports["implementation_repair"] = {
+                "needed": True,
+                "feedback_artifact": latest_artifacts.get("implementation_repair_feedback"),
+                "missing_count": len(trace_result.missing_links),
+                "repair_iterations": previous_iterations,
+                "limit_exceeded": error_code == "implementation_repair_limit_exceeded",
+                "revalidated": True,
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": allowed_actions,
+                    "implementation_repair_iterations": previous_iterations,
+                    "last_error": HarnessError(error_code, message, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        f"Revalidate implementation van chua pass cho run {run_id}: {message} "
+                        "Workflow chua duoc phep mo PR."
+                    ),
+                }
+            )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _continue_implementation_repair(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Chạy một vòng Developer.repair rồi test và trace lại."""
+
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        latest_artifacts = dict(artifact_paths)
+        try:
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            feedback_path = _required_phase4_artifact(
+                artifact_paths,
+                "implementation_repair_feedback",
+                run_id=run_id,
+            )
+            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            repair_feedback = _read_json_artifact(
+                self._existing_artifact_path(feedback_path, run_id=run_id),
+                run_id=run_id,
+            )
+            previous_iterations = _int_value(state.get("implementation_repair_iterations"))
+            repair_iteration = previous_iterations + 1
+            if repair_iteration > self.settings.implementation_repair_limit:
+                raise HarnessError(
+                    "implementation_repair_limit_exceeded",
+                    (
+                        f"Implementation repair limit exceeded for run {run_id}: "
+                        f"limit={self.settings.implementation_repair_limit}."
+                    ),
+                    run_id=run_id,
+                )
+            artifact_version = _next_phase4_artifact_version(self.store, run_id)
+            target_info = self._validate_target_repo(allow_dirty=True)
+            work_packet = refresh_developer_work_packet(
+                packet=work_packet,
+                target_repo_path=target_info.path,
+                version=artifact_version,
+                run_id=run_id,
+            )
+            refreshed_packet_path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=work_packet,
+                version=artifact_version,
+            )
+            latest_artifacts = {
+                **artifact_paths,
+                "developer_work_packet": refreshed_packet_path,
+            }
+            result = self.developer.repair(
+                work_packet=work_packet,
+                repair_feedback=repair_feedback,
+                repair_iteration=repair_iteration,
+            )
+            if result.raw_response:
+                raw_response_path = write_phase4_developer_raw_response(
+                    store=self.store,
+                    run_id=run_id,
+                    action="repair",
+                    raw_response=result.raw_response,
+                    version=artifact_version,
+                )
+                latest_artifacts = {
+                    **latest_artifacts,
+                    "developer_repair_raw_response": raw_response_path,
+                }
+            applied_files = _apply_developer_changes(
+                result=result,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                run_id=run_id,
+            )
+            change_report = {
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                "summary": result.summary,
+                "files": applied_files,
+                "repair_iteration": repair_iteration,
+                "repair_feedback": feedback_path,
+                "developer_work_packet": refreshed_packet_path,
+                "developer_raw_response": latest_artifacts.get("developer_repair_raw_response"),
+            }
+            change_report_path = write_phase4_code_change_report(
+                store=self.store,
+                run_id=run_id,
+                report=change_report,
+                version=artifact_version,
+            )
+            verification_result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            test_report = {
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                "repair_iteration": repair_iteration,
+                "repair_feedback": feedback_path,
+                "developer_work_packet": refreshed_packet_path,
+                **verification_result.to_dict(),
+            }
+            test_report_path = write_phase4_test_report(
+                store=self.store,
+                run_id=run_id,
+                report=test_report,
+                version=artifact_version,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": (
+                        ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
+                        if exc.error_code == "implementation_repair_limit_exceeded"
+                        else ["get_status", "cancel_run"]
+                    ),
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bị chặn khi Developer.repair xử lý feedback: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **latest_artifacts,
+            "code_change_report": change_report_path,
+            "test_report": test_report_path,
+        }
+        if verification_result.status != "passed":
+            error_code = "test_skipped" if verification_result.status == "skipped" else "test_failed"
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": (
+                        ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
+                        if error_code == "implementation_repair_limit_exceeded"
+                        else ["get_status", "cancel_run"]
+                    ),
+                    "implementation_repair_iterations": repair_iteration,
+                    "last_error": HarnessError(error_code, verification_result.reason, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        f"Developer.repair iteration {repair_iteration} đã apply code/test nhưng Verification Runner "
+                        f"status={verification_result.status}: {verification_result.reason}. Workflow chưa được phép mở PR."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        try:
+            trace_result = self.code_trace_validator.validate(
+                target_path=target_info.path,
+                work_packet=work_packet,
+            )
+            trace_payload = {
+                **trace_result.to_dict(),
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                "repair_iteration": repair_iteration,
+                "repaired_from": feedback_path,
+            }
+            trace_path = write_phase4_code_trace_report(
+                store=self.store,
+                run_id=run_id,
+                report=trace_payload,
+                version=artifact_version,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "implementation_repair_iterations": repair_iteration,
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bị chặn khi Validator trace lại sau Developer.repair: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **latest_artifacts,
+            "requirement_design_code_trace": trace_path,
+        }
+        quality_reports = {
+            **_dict_value(state.get("quality_reports")),
+            "implementation_traceability": trace_result.to_quality_report(),
+        }
+        if trace_result.ok:
+            quality_reports["implementation_repair"] = {
+                "needed": False,
+                "repair_iterations": repair_iteration,
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "implementation_traced",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_TRACED_ACTIONS,
+                    "implementation_repair_iterations": repair_iteration,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Developer.repair iteration {repair_iteration} đã pass test và Validator code trace "
+                        f"cho run {run_id}: {trace_result.summary} Slice 4.6 chưa chạy QA/Tester Agent, "
+                        "chưa commit và chưa mở PR."
+                    ),
+                }
+            )
+        elif _is_repairable_code_trace_failure(trace_result) and repair_iteration < self.settings.implementation_repair_limit:
+            feedback = _implementation_repair_feedback(
+                run_id=run_id,
+                state=state,
+                work_packet=work_packet,
+                trace_result=trace_result,
+                trace_path=trace_path,
+                target_repo=str(target_info.path),
+                branch=target_info.current_branch,
+                feedback_version=artifact_version,
+                repair_iteration=repair_iteration,
+            )
+            next_feedback_path = write_phase4_repair_feedback(
+                store=self.store,
+                run_id=run_id,
+                feedback=feedback,
+                version=artifact_version,
+            )
+            latest_artifacts = {
+                **latest_artifacts,
+                "implementation_repair_feedback": next_feedback_path,
+            }
+            quality_reports["implementation_repair"] = {
+                "needed": True,
+                "feedback_artifact": next_feedback_path,
+                "missing_count": len(trace_result.missing_links),
+                "repair_iterations": repair_iteration,
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "implementation_repair_needed",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
+                    "implementation_repair_iterations": repair_iteration,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Developer.repair iteration {repair_iteration} đã chạy xong nhưng Validator vẫn còn "
+                        f"missing link có thể sửa: {trace_result.summary} Đã ghi feedback v{artifact_version} "
+                        "để chạy tiếp một vòng repair khác."
+                    ),
+                }
+            )
+        else:
+            if _is_repairable_code_trace_failure(trace_result):
+                error_code = "implementation_repair_limit_exceeded"
+                message = (
+                    f"Implementation repair limit reached after {repair_iteration} iteration(s): "
+                    f"{trace_result.summary}"
+                )
+            else:
+                error_code = _nonrepairable_code_trace_error_code(trace_result)
+                message = trace_result.summary
+            quality_reports["implementation_repair"] = {
+                "needed": True,
+                "feedback_artifact": latest_artifacts.get("implementation_repair_feedback"),
+                "missing_count": len(trace_result.missing_links),
+                "repair_iterations": repair_iteration,
+                "limit_exceeded": error_code == "implementation_repair_limit_exceeded",
+                "summary": trace_result.summary,
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "implementation_repair_iterations": repair_iteration,
+                    "last_error": HarnessError(error_code, message, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        f"Validator code trace vẫn chưa pass sau Developer.repair iteration {repair_iteration}: "
+                        f"{message} Workflow chưa được phép mở PR."
                     ),
                 }
             )
@@ -589,6 +1179,7 @@ class PhaseFourWorkflow:
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
+            "implementation_repair_iterations": state.get("implementation_repair_iterations", 0),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
         }
@@ -696,6 +1287,46 @@ def _string_items(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _int_value(value: object, *, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _next_phase4_artifact_version(store: RuntimeStore, run_id: str) -> int:
+    """Chon version Phase 4 ke tiep ma khong ghi de artifact cu."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    prefixes = (
+        "developer_work_packet_",
+        "code_change_report_",
+        "test_report_",
+        "requirement_design_code_trace_",
+        "implementation_repair_feedback_",
+        "developer_repair_raw_response_",
+    )
+    max_version = 0
+    if not artifact_dir.exists():
+        return 1
+    for path in artifact_dir.iterdir():
+        name = path.name
+        for prefix in prefixes:
+            if not name.startswith(prefix):
+                continue
+            tail = name[len(prefix) :]
+            if not tail.startswith("v"):
+                continue
+            digits = []
+            for char in tail[1:]:
+                if not char.isdigit():
+                    break
+                digits.append(char)
+            if digits:
+                max_version = max(max_version, int("".join(digits)))
+    return max_version + 1
+
+
 def _is_repairable_code_trace_failure(trace_result: object) -> bool:
     """Chỉ chuyển sang repair-needed khi thiếu link nằm ở code/test, không phải input graph."""
 
@@ -712,6 +1343,19 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
     return True
 
 
+def _nonrepairable_code_trace_error_code(trace_result: object) -> str:
+    missing_links = getattr(trace_result, "missing_links", [])
+    if not isinstance(missing_links, list):
+        return "implementation_traceability_failed"
+    for item in missing_links:
+        if not isinstance(item, dict):
+            continue
+        link_type = str(item.get("type") or "").strip()
+        if link_type in {"trace_mapping_issue", "evidence_incomplete"}:
+            return "validator_evidence_or_mapping_issue"
+    return "implementation_traceability_failed"
+
+
 def _implementation_repair_feedback(
     *,
     run_id: str,
@@ -721,6 +1365,8 @@ def _implementation_repair_feedback(
     trace_path: str,
     target_repo: str,
     branch: str,
+    feedback_version: int,
+    repair_iteration: int,
 ) -> dict[str, object]:
     """Đóng gói feedback Validator theo schema ổn định cho Developer repair slice sau."""
 
@@ -732,11 +1378,12 @@ def _implementation_repair_feedback(
         missing_links = []
     output_contract = _dict_value(work_packet.get("output_contract"))
     return {
-        "version": "implementation_repair_feedback_v1",
+        "version": f"implementation_repair_feedback_v{feedback_version}",
         "run_id": run_id,
         "source_ref": state.get("source_ref"),
         "issue_key": work_packet.get("issue_key"),
         "status": "implementation_repair_needed",
+        "repair_iteration": repair_iteration,
         "repair_scope": "code_or_test",
         "severity": "repair_required",
         "summary": getattr(trace_result, "summary", ""),

@@ -118,6 +118,8 @@ def fake_completion(prompt: str) -> str:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan()
+    if "Developer Repair v1" in prompt:
+        return fake_developer_act()
     if "Developer Act v1" in prompt:
         return fake_developer_act()
     if "Code Trace LLM Review v1" in prompt:

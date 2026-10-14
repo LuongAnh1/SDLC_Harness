@@ -2,7 +2,8 @@
 
 Phase 3 tạo implementation plan để human review; Phase 4 cần chuyển plan đó
 thành gói đầu vào ổn định cho Developer. Module này chỉ gom dữ liệu đã duyệt,
-snapshot file đích và output contract. Nó chưa sửa target repo.
+snapshot file đích và output contract. Khi repair, helper refresh snapshot từ
+target repo thật để Developer không sửa dựa trên code cũ.
 """
 
 from __future__ import annotations
@@ -76,6 +77,73 @@ def build_developer_work_packet(
             "Khi đọc/ghi/compile source hoặc chạy test, dùng UTF-8 rõ ràng nếu toolchain hỗ trợ.",
             "Nếu thiếu ngữ cảnh để code an toàn, Developer phải trả lỗi thay vì đoán.",
         ],
+    }
+
+
+def refresh_developer_work_packet(
+    *,
+    packet: dict[str, object],
+    target_repo_path: Path,
+    version: int,
+    run_id: str,
+) -> dict[str, object]:
+    """Làm mới snapshot code/test trong packet trước mỗi vòng Developer.repair."""
+
+    output_contract = _dict_value(packet.get("output_contract"))
+    allowed_paths = [
+        _clean_repo_path(str(item), run_id=run_id)
+        for item in output_contract.get("allowed_paths", [])
+        if str(item).strip()
+    ]
+    if not allowed_paths:
+        raise HarnessError(
+            "developer_work_packet_allowed_paths_missing",
+            "DeveloperWorkPacket has no allowed paths to refresh.",
+            run_id=run_id,
+        )
+
+    refreshed_by_path = {
+        path: _enrich_proposed_file(
+            target_repo_path=target_repo_path,
+            file_item={"path": path},
+            run_id=run_id,
+        )
+        for path in allowed_paths
+    }
+    proposed_files = []
+    seen: set[str] = set()
+    for item in _dict_items(packet.get("proposed_files")):
+        path = _clean_repo_path(str(item.get("path") or ""), run_id=run_id)
+        refreshed = refreshed_by_path.get(path)
+        if not refreshed:
+            continue
+        proposed_files.append({**item, **refreshed})
+        seen.add(path)
+    for path in allowed_paths:
+        if path in seen:
+            continue
+        proposed_files.append(refreshed_by_path[path])
+
+    return {
+        **packet,
+        "version": f"developer_work_packet_v{version}",
+        "mode": "approved_implementation_plan_to_developer_repair_v1",
+        "refreshed_at": utc_now_iso(),
+        "refreshed_from": str(packet.get("artifact_ref") or packet.get("version") or ""),
+        "proposed_files": proposed_files,
+        "current_files": [
+            {
+                "path": item["path"],
+                "exists": item["exists"],
+                "content": item["current_content"],
+                "content_truncated": item["current_content_truncated"],
+            }
+            for item in proposed_files
+        ],
+        "output_contract": {
+            **output_contract,
+            "allowed_paths": allowed_paths,
+        },
     }
 
 

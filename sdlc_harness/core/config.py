@@ -25,6 +25,7 @@ class Settings:
     llm_timeout_seconds: int
     design_repair_limit: int
     implementation_plan_repair_limit: int
+    implementation_repair_limit: int
     sync_mode: str
     atlassian_base_url: str
     atlassian_email: str
@@ -103,6 +104,7 @@ def load_settings(
         "SDLC_LLM_TIMEOUT_SECONDS",
         "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
+        "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
         "SDLC_SYNC_MODE",
         "ATLASSIAN_BASE_URL",
         "ATLASSIAN_EMAIL",
@@ -140,6 +142,11 @@ def load_settings(
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_plan_repair_limit=_int_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"),
+            default=2,
+            minimum=0,
+        ),
+        implementation_repair_limit=_int_value(
+            merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"),
             default=2,
             minimum=0,
         ),

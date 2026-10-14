@@ -9,7 +9,9 @@ nhất, chạy trong target repo và trả kết quả có cấu trúc để wor
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import time
 from typing import Any
@@ -17,6 +19,7 @@ from typing import Any
 DEFAULT_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
+JAVA_HOME_ENV_KEYS = ("SDLC_JAVA_HOME", "JAVA_HOME")
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,7 @@ class VerificationRunner:
             completed = subprocess.run(
                 command,
                 cwd=str(target_path),
+                env=_verification_env(),
                 shell=True,
                 capture_output=True,
                 text=True,
@@ -120,6 +124,75 @@ def _test_command_from_work_packet(work_packet: dict[str, object]) -> str:
             if command:
                 return command
     return DEFAULT_TEST_COMMAND
+
+
+def _verification_env() -> dict[str, str]:
+    """Tạo env cho test command, tự thêm JDK vào PATH nếu máy đã cài nhưng shell chưa nhận."""
+
+    env = os.environ.copy()
+    java_bin = _resolve_java_bin(env)
+    if not java_bin:
+        return env
+
+    java_bin_text = str(java_bin)
+    path_parts = [part for part in env.get("PATH", "").split(os.pathsep) if part]
+    if java_bin_text.lower() not in {part.lower() for part in path_parts}:
+        env["PATH"] = os.pathsep.join([java_bin_text, *path_parts])
+    env.setdefault("JAVA_HOME", str(java_bin.parent))
+    return env
+
+
+def _resolve_java_bin(env: dict[str, str]) -> Path | None:
+    existing = shutil.which("javac", path=env.get("PATH"))
+    if existing:
+        return Path(existing).resolve().parent
+
+    for key in JAVA_HOME_ENV_KEYS:
+        java_bin = _java_bin_from_home(env.get(key))
+        if java_bin:
+            return java_bin
+
+    for home in _common_java_home_candidates():
+        java_bin = _java_bin_from_home(str(home))
+        if java_bin:
+            return java_bin
+    return None
+
+
+def _java_bin_from_home(home: str | None) -> Path | None:
+    if not home:
+        return None
+    javac = Path(home) / "bin" / _javac_executable_name()
+    if javac.exists():
+        return javac.parent
+    return None
+
+
+def _javac_executable_name() -> str:
+    return "javac.exe" if os.name == "nt" else "javac"
+
+
+def _common_java_home_candidates() -> list[Path]:
+    if os.name != "nt":
+        return []
+
+    roots = [
+        Path("C:/Program Files/Eclipse Adoptium"),
+        Path("C:/Program Files/Java"),
+        Path("C:/Program Files/Microsoft"),
+        Path("C:/Program Files/BellSoft"),
+        Path("C:/Program Files/Zulu"),
+        Path("C:/Program Files/Amazon Corretto"),
+        Path("C:/Program Files (x86)/Java"),
+    ]
+    candidates: list[Path] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for child in root.iterdir():
+            if child.is_dir() and ("jdk" in child.name.lower() or "corretto" in child.name.lower()):
+                candidates.append(child)
+    return sorted(candidates, key=lambda path: path.name.lower(), reverse=True)
 
 
 def _classify_result(*, exit_code: int, stdout: str, stderr: str) -> tuple[str, str]:

@@ -55,6 +55,39 @@ class DeveloperActAgent:
             raw_response=raw,
         )
 
+    def repair(
+        self,
+        *,
+        work_packet: dict[str, object],
+        repair_feedback: dict[str, object],
+        repair_iteration: int,
+    ) -> DeveloperActResult:
+        """Sửa code/test theo feedback traceability mà không đổi requirement/design."""
+
+        if not self.llm_client:
+            result = _deterministic_developer_act(work_packet)
+            return DeveloperActResult(
+                summary=f"Fake Developer.repair iteration {repair_iteration} regenerated allowed files.",
+                files=result.files,
+            )
+        raw = self.llm_client.complete(
+            system=(
+                "You are Developer.update in a TraceDev-style SDLC harness. "
+                "Repair only code/test files and return JSON only."
+            ),
+            prompt=_developer_repair_prompt(
+                work_packet=work_packet,
+                repair_feedback=repair_feedback,
+                repair_iteration=repair_iteration,
+            ),
+        )
+        payload = _parse_developer_act_payload(raw)
+        return DeveloperActResult(
+            summary=str(payload.get("summary") or "").strip(),
+            files=_dict_items(payload.get("files")),
+            raw_response=raw,
+        )
+
 
 def _developer_act_prompt(work_packet: dict[str, object]) -> str:
     return f"""Developer Act v1
@@ -88,6 +121,50 @@ Rules:
 
 DeveloperWorkPacket:
 {json.dumps(work_packet, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def _developer_repair_prompt(
+    *,
+    work_packet: dict[str, object],
+    repair_feedback: dict[str, object],
+    repair_iteration: int,
+) -> str:
+    return f"""Developer Repair v1
+
+You are repairing an implementation that failed Validator code trace.
+Return JSON only with the same shape as Developer Act v1:
+{{
+  "summary": "short repair summary",
+  "files": [
+    {{
+      "path": "src/main/java/... or src/test/java/...",
+      "operation": "create|update|create_or_update",
+      "content": "complete final file content",
+      "reason": "which Validator feedback item this fixes",
+      "covered_design_elements": ["class:...", "method:...", "sequence:..."]
+    }}
+  ]
+}}
+
+Rules:
+- Repair iteration: {repair_iteration}.
+- Only return files listed in output_contract.allowed_paths.
+- Return complete file content, not patches.
+- Do not change requirements, approved design, implementation plan, branch, or tool-sync records.
+- Fix the missing_links and weak trace evidence in ImplementationRepairFeedback.
+- Preserve package names and existing code style from current_files.
+- Generated code and tests must work when the repository path contains spaces or Unicode characters.
+- Use repository-relative paths; do not hard-code absolute paths from a developer machine.
+- Use explicit UTF-8 for source/test/build-script handling when the language or toolchain supports it.
+- If feedback cannot be repaired in allowed_paths, return an empty files list with a summary explaining why.
+- Do not run tests, create commits, or mention PRs.
+
+DeveloperWorkPacket:
+{json.dumps(work_packet, ensure_ascii=False, indent=2)}
+
+ImplementationRepairFeedback:
+{json.dumps(repair_feedback, ensure_ascii=False, indent=2)}
 """.strip()
 
 

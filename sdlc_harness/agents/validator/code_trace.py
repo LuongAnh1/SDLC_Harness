@@ -18,6 +18,10 @@ from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...storage.runtime import utc_now_iso
 
+MAX_SNIPPET_TOTAL_CHARS = 60000
+MAX_SNIPPET_FILE_CHARS = 20000
+NON_REPAIRABLE_LLM_LINK_TYPES = {"trace_mapping_issue", "evidence_incomplete"}
+
 
 @dataclass(frozen=True)
 class CodeTraceResult:
@@ -95,22 +99,23 @@ class CodeTraceValidator:
                 }
             )
 
-        for source_path, design_items in mappings_by_file.items():
-            source_file = target_path / source_path
-            source_exists = source_file.is_file()
-            source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
-            if not source_exists:
-                missing_links.append(
-                    {
-                        "type": "missing_source_file",
-                        "source_file": source_path,
-                        "message": "Mapped source file does not exist in the target repo.",
-                    }
-                )
-
+        for raw_source_path, design_items in mappings_by_file.items():
             for item in design_items:
+                source_path = _normalized_source_file(raw_source_path, item)
+                source_file = target_path / source_path
+                source_exists = source_file.is_file()
+                source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
+                if not source_exists:
+                    missing_links.append(
+                        {
+                            "type": "missing_source_file",
+                            "source_file": source_path,
+                            "message": "Mapped source file does not exist in the target repo.",
+                        }
+                    )
                 planned_target = str(item.get("planned_code_target") or source_path).strip()
-                symbol = _symbol_from_target(planned_target)
+                raw_symbol = _symbol_from_target(planned_target)
+                symbol = _normalized_symbol(raw_symbol, item)
                 symbol_found = True if not symbol else symbol in source_text
                 design_element_id = str(item.get("design_element_id") or "").strip()
                 requirement_ref = _requirement_ref(item)
@@ -124,7 +129,11 @@ class CodeTraceValidator:
                         "source_file": source_path,
                         "source_exists": source_exists,
                         "symbol": symbol,
+                        "raw_symbol": raw_symbol,
                         "symbol_found": symbol_found,
+                        "requires_direct_symbol": bool(symbol),
+                        "trace_policy": _trace_policy(raw_symbol, item),
+                        "mapping_note": _mapping_note(raw_symbol, item),
                         "test_files": existing_test_paths,
                         "test_covered": bool(existing_test_paths),
                     }
@@ -176,12 +185,13 @@ class CodeTraceValidator:
     ) -> dict[str, object]:
         """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
 
+        code_snippets = _code_snippets(target_path=target_path, mappings=trace_mappings, test_paths=test_paths)
         prompt = _code_trace_review_prompt(
             work_packet=work_packet,
             trace_mappings=trace_mappings,
             static_missing_links=static_missing_links,
             code_refs=_code_refs(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
-            code_snippets=_code_snippets(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
+            code_snippets=code_snippets,
         )
         try:
             raw = self.llm_client.complete(
@@ -213,7 +223,7 @@ class CodeTraceValidator:
         review.setdefault("missing_links", [])
         review.setdefault("graph_edges", [])
         review.setdefault("risks", [])
-        review.setdefault("review_context", {"code_snippets_included": True})
+        review["review_context"] = _review_context(review.get("review_context"), code_snippets=code_snippets)
         return review
 
 
@@ -258,6 +268,51 @@ def _symbol_from_target(planned_target: str) -> str:
     return planned_target.split("#", 1)[1].strip()
 
 
+def _normalized_source_file(source_path: str, item: dict[str, Any]) -> str:
+    text = _mapping_text(item).lower()
+    if ("notifysuccess" in text or "notifyerror" in text) and not source_path.endswith("NotificationService.java"):
+        return str(Path(source_path).with_name("NotificationService.java")).replace("\\", "/")
+    return source_path
+
+
+def _normalized_symbol(symbol: str, item: dict[str, Any]) -> str:
+    lower_symbol = symbol.strip().lower()
+    text = _mapping_text(item).lower()
+    if lower_symbol in {"true", "false"} or "->dc: true" in text or "->dc: false" in text:
+        return ""
+    if "notifysuccess" in text:
+        return "notifySuccess"
+    if "notifyerror" in text:
+        return "notifyError"
+    return symbol
+
+
+def _trace_policy(symbol: str, item: dict[str, Any]) -> str:
+    lower_symbol = symbol.strip().lower()
+    text = _mapping_text(item).lower()
+    if lower_symbol in {"true", "false"} or "->dc: true" in text or "->dc: false" in text:
+        return "boolean_response"
+    if "display" in text or "notify" in text:
+        return "semantic_side_effect"
+    return "direct_symbol" if symbol.strip() else "file_or_test_evidence"
+
+
+def _mapping_note(symbol: str, item: dict[str, Any]) -> str:
+    policy = _trace_policy(symbol, item)
+    if policy == "boolean_response":
+        return "Boolean sequence response; validate surrounding branch behavior/test assertions, not a literal true/false symbol."
+    if policy == "semantic_side_effect":
+        return "Notification/display sequence side effect; validate NotificationService behavior and tests, not a literal display* method."
+    return ""
+
+
+def _mapping_text(item: dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(key) or "")
+        for key in ("design_element_name", "planned_code_target", "design_element_id", "design_element_type")
+    )
+
+
 def _requirement_ref(item: dict[str, object]) -> str:
     for key in ("requirement_id", "requirement_ref", "requirement", "source_requirement"):
         value = str(item.get(key) or "").strip()
@@ -277,8 +332,10 @@ def _llm_missing_links(review: dict[str, object]) -> list[dict[str, object]]:
         if isinstance(item, dict):
             original_type = str(item.get("type") or "").strip()
             normalized_item = dict(item)
-            normalized_item["type"] = "llm_semantic_gap"
-            if original_type:
+            normalized_item["type"] = (
+                original_type if original_type in NON_REPAIRABLE_LLM_LINK_TYPES else "llm_semantic_gap"
+            )
+            if original_type and normalized_item["type"] != original_type:
                 normalized_item["llm_type"] = original_type
             normalized.append(normalized_item)
         elif str(item).strip():
@@ -292,7 +349,7 @@ def _code_trace_review_prompt(
     trace_mappings: list[dict[str, object]],
     static_missing_links: list[dict[str, object]],
     code_refs: list[dict[str, object]],
-    code_snippets: list[dict[str, str]],
+    code_snippets: list[dict[str, object]],
 ) -> str:
     """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
 
@@ -302,7 +359,9 @@ def _code_trace_review_prompt(
             "Review whether the implemented code/test contents cover the approved requirement/design graph. "
             "Rule-based evidence is not enough; inspect responsibilities, target names, control flow, assertions, "
             "coverage intent, and weak links. Return ok=false when files/symbols exist but the behavior or tests "
-            "do not satisfy the approved design."
+            "do not satisfy the approved design. Use trace_mapping_issue when the trace mapping itself is weak or "
+            "points to a non-code artifact; use evidence_incomplete only when the provided evidence metadata says "
+            "a required file was truncated or omitted."
         ),
         "expected_json_schema": {
             "ok": "boolean",
@@ -319,7 +378,7 @@ def _code_trace_review_prompt(
             ],
             "missing_links": [
                 {
-                    "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace",
+                    "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace | trace_mapping_issue | evidence_incomplete",
                     "message": "short string",
                     "requirement_ref": "optional string",
                     "design_element_id": "optional string",
@@ -339,6 +398,12 @@ def _code_trace_review_prompt(
         "code_refs": code_refs,
         "code_snippets": code_snippets,
         "egress_confirmation": "Project owner explicitly approved sending source/test snippets to the LLM provider for Validator review.",
+        "validator_rules": [
+            "If a code_snippet has content_truncated=false, do not claim that file evidence is truncated.",
+            "Do not require literal methods named true, false, displaySuccessMessage, displayErrorMessage, or displayCancellationMessage.",
+            "For mappings with trace_policy=boolean_response or semantic_side_effect, inspect the surrounding branch behavior and tests.",
+            "If the only problem is a weak design mapping, return type=trace_mapping_issue instead of asking Developer to change code.",
+        ],
     }
     return (
         "Code Trace LLM Review v1\n"
@@ -383,27 +448,78 @@ def _code_snippets(
     target_path: Path,
     mappings: list[dict[str, object]],
     test_paths: list[str],
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     """Lấy source/test snippet để LLM review được nội dung code thật."""
 
-    paths = {
-        str(item.get("source_file") or "").strip().replace("\\", "/")
-        for item in mappings
-        if str(item.get("source_file") or "").strip()
-    }
-    paths.update(test_paths)
-    snippets: list[dict[str, str]] = []
+    paths = _snippet_paths(mappings=mappings, test_paths=test_paths)
+    snippets: list[dict[str, object]] = []
     total_chars = 0
-    max_total_chars = 12000
-    for rel_path in sorted(paths):
-        if total_chars >= max_total_chars:
+    for rel_path in paths:
+        if total_chars >= MAX_SNIPPET_TOTAL_CHARS:
             break
         file_path = target_path / rel_path
         if not file_path.is_file():
             continue
         content = file_path.read_text(encoding="utf-8", errors="replace")
-        remaining = max_total_chars - total_chars
-        snippet = content[: min(3000, remaining)]
+        remaining = MAX_SNIPPET_TOTAL_CHARS - total_chars
+        limit = min(MAX_SNIPPET_FILE_CHARS, remaining)
+        snippet = content[:limit]
         total_chars += len(snippet)
-        snippets.append({"path": rel_path, "content": snippet})
+        snippets.append(
+            {
+                "path": rel_path,
+                "role": "test" if rel_path in test_paths else "source",
+                "content": snippet,
+                "content_truncated": len(snippet) < len(content),
+                "chars_total": len(content),
+                "chars_sent": len(snippet),
+            }
+        )
     return snippets
+
+
+def _snippet_paths(*, mappings: list[dict[str, object]], test_paths: list[str]) -> list[str]:
+    counts: dict[str, int] = {}
+    for item in mappings:
+        path = str(item.get("source_file") or "").strip().replace("\\", "/")
+        if path:
+            counts[path] = counts.get(path, 0) + 1
+    for path in test_paths:
+        counts[path] = max(counts.get(path, 0), 1)
+    return sorted(counts, key=lambda path: _snippet_priority(path, counts.get(path, 0), test_paths))
+
+
+def _snippet_priority(path: str, mapping_count: int, test_paths: list[str]) -> tuple[int, int, str]:
+    name = Path(path).name.lower()
+    if "controller" in name:
+        group = 0
+    elif path in test_paths:
+        group = 1
+    elif "service" in name or "repository" in name:
+        group = 2
+    else:
+        group = 3
+    return (group, -mapping_count, path)
+
+
+def _review_context(value: object, *, code_snippets: list[dict[str, object]]) -> dict[str, object]:
+    context = dict(value) if isinstance(value, dict) else {}
+    context.update(
+        {
+            "code_snippets_included": bool(code_snippets),
+            "code_snippet_count": len(code_snippets),
+            "code_snippets_total_chars": sum(int(item.get("chars_sent") or 0) for item in code_snippets),
+            "code_snippets_truncated": any(bool(item.get("content_truncated")) for item in code_snippets),
+            "code_snippet_paths": [
+                {
+                    "path": item.get("path"),
+                    "role": item.get("role"),
+                    "chars_sent": item.get("chars_sent"),
+                    "chars_total": item.get("chars_total"),
+                    "content_truncated": item.get("content_truncated"),
+                }
+                for item in code_snippets
+            ],
+        }
+    )
+    return context

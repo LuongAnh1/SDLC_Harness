@@ -374,7 +374,10 @@ def write_phase4_code_change_report(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"v{version}"
     path = artifact_dir / f"code_change_report_{suffix}.md"
-    path.write_text(_code_change_report_markdown(report).rstrip() + "\n", encoding="utf-8")
+    path.write_text(
+        _code_change_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
+        encoding="utf-8",
+    )
     return store.relative(path)
 
 
@@ -391,7 +394,10 @@ def write_phase4_test_report(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     suffix = f"v{version}"
     path = artifact_dir / f"test_report_{suffix}.md"
-    path.write_text(_test_report_markdown(report).rstrip() + "\n", encoding="utf-8")
+    path.write_text(
+        _test_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
+        encoding="utf-8",
+    )
     return store.relative(path)
 
 
@@ -434,6 +440,25 @@ def write_phase4_repair_feedback(
     return store.relative(path)
 
 
+def write_phase4_developer_raw_response(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    action: str,
+    raw_response: str,
+    version: int = 1,
+) -> str:
+    """Lưu raw LLM response của Developer để debug khi parse/repair khó hội tụ."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    safe_action = action.strip().replace(" ", "_") or "developer"
+    path = artifact_dir / f"developer_{safe_action}_raw_response_{suffix}.txt"
+    path.write_text(raw_response.rstrip() + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 
@@ -446,7 +471,7 @@ def _with_heading(title: str, content: str) -> str:
 def _code_change_report_markdown(report: dict[str, object]) -> str:
     files = _dict_items(report.get("files"))
     lines = [
-        "# Code Change Report V1",
+        f"# Code Change Report {report.get('artifact_version', 'V1')}",
         "",
         "## Run Context",
         "",
@@ -455,16 +480,29 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
         f"- Issue key: `{report.get('issue_key', '')}`",
         f"- Target repo: `{report.get('target_repo', '')}`",
         f"- Branch: `{report.get('branch', '')}`",
-        "",
-        "## Developer Summary",
-        "",
-        str(report.get("summary") or "").strip() or "Developer.act did not provide a summary.",
-        "",
-        "## Files Applied",
-        "",
-        "| File | Operation | Reason | Covered design elements |",
-        "| --- | --- | --- | --- |",
     ]
+    if report.get("repair_iteration"):
+        lines.extend(
+            [
+                f"- Repair iteration: `{report.get('repair_iteration')}`",
+                f"- Repair feedback: `{report.get('repair_feedback', '')}`",
+                f"- Developer work packet: `{report.get('developer_work_packet', '')}`",
+                f"- Developer raw response: `{report.get('developer_raw_response', '')}`",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "## Developer Summary",
+            "",
+            str(report.get("summary") or "").strip() or "Developer.act did not provide a summary.",
+            "",
+            "## Files Applied",
+            "",
+            "| File | Operation | Reason | Covered design elements |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
     for item in files:
         covered = ", ".join(str(value) for value in item.get("covered_design_elements", []) if str(value).strip())
         lines.append(
@@ -479,23 +517,36 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
             )
             + " |"
         )
-    lines.extend(
-        [
-            "",
-            "## Verification Status",
-            "",
-            "- Tests: not run in Slice 4.2.",
-            "- Commit: not created in Slice 4.2.",
-            "- Draft PR: not created in Slice 4.2.",
-            "",
-        ]
-    )
+    if report.get("repair_iteration"):
+        lines.extend(
+            [
+                "",
+                "## Verification Status",
+                "",
+                "- Tests: rerun immediately after this repair by Phase 4 workflow.",
+                "- Commit: not created in Slice 4.6.",
+                "- Draft PR: not created in Slice 4.6.",
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "## Verification Status",
+                "",
+                "- Tests: not run in Slice 4.2.",
+                "- Commit: not created in Slice 4.2.",
+                "- Draft PR: not created in Slice 4.2.",
+                "",
+            ]
+        )
     return "\n".join(lines)
 
 
 def _test_report_markdown(report: dict[str, object]) -> str:
     lines = [
-        "# Test Report V1",
+        f"# Test Report {report.get('artifact_version', 'V1')}",
         "",
         "## Run Context",
         "",
@@ -504,35 +555,58 @@ def _test_report_markdown(report: dict[str, object]) -> str:
         f"- Issue key: `{report.get('issue_key', '')}`",
         f"- Target repo: `{report.get('target_repo', '')}`",
         f"- Branch: `{report.get('branch', '')}`",
-        "",
-        "## Verification Result",
-        "",
-        f"- Status: `{report.get('status', '')}`",
-        f"- Command: `{report.get('command', '')}`",
-        f"- Exit code: `{report.get('exit_code', '')}`",
-        f"- Duration: `{report.get('duration_seconds', '')}` seconds",
-        f"- Reason: {report.get('reason', '')}",
-        "",
-        "## Stdout",
-        "",
-        "```text",
-        str(report.get("stdout") or "").rstrip(),
-        "```",
-        "",
-        "## Stderr",
-        "",
-        "```text",
-        str(report.get("stderr") or "").rstrip(),
-        "```",
-        "",
-        "## Scope",
-        "",
-        "- Runner: Verification Runner.",
-        "- QA/Tester Agent: not run in Slice 4.3.",
-        "- Code traceability Validator: not run in Slice 4.3.",
-        "- Commit/Draft PR: not created in Slice 4.3.",
-        "",
     ]
+    if report.get("repair_iteration"):
+        lines.extend(
+            [
+                f"- Repair iteration: `{report.get('repair_iteration')}`",
+                f"- Repair feedback: `{report.get('repair_feedback', '')}`",
+                f"- Developer work packet: `{report.get('developer_work_packet', '')}`",
+            ]
+        )
+    if report.get("repair_iteration"):
+        scope_lines = [
+            "- Runner: Verification Runner after Developer.repair.",
+            "- QA/Tester Agent: not run in Slice 4.6.",
+            "- Code traceability Validator: runs after this test report if status passed.",
+            "- Commit/Draft PR: not created in Slice 4.6.",
+        ]
+    else:
+        scope_lines = [
+            "- Runner: Verification Runner.",
+            "- QA/Tester Agent: not run in Slice 4.3.",
+            "- Code traceability Validator: not run in Slice 4.3.",
+            "- Commit/Draft PR: not created in Slice 4.3.",
+        ]
+    lines.extend(
+        [
+            "",
+            "## Verification Result",
+            "",
+            f"- Status: `{report.get('status', '')}`",
+            f"- Command: `{report.get('command', '')}`",
+            f"- Exit code: `{report.get('exit_code', '')}`",
+            f"- Duration: `{report.get('duration_seconds', '')}` seconds",
+            f"- Reason: {report.get('reason', '')}",
+            "",
+            "## Stdout",
+            "",
+            "```text",
+            str(report.get("stdout") or "").rstrip(),
+            "```",
+            "",
+            "## Stderr",
+            "",
+            "```text",
+            str(report.get("stderr") or "").rstrip(),
+            "```",
+            "",
+            "## Scope",
+            "",
+            *scope_lines,
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 

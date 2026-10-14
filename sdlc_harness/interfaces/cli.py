@@ -48,7 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run = subparsers.add_parser("continue-run")
     continue_run.add_argument("--run-id", required=True)
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    continue_run.add_argument("--implementation-repair-limit", default=None)
     continue_run.add_argument("--runtime-root", default=None)
+
+    revalidate = subparsers.add_parser("revalidate-implementation")
+    revalidate.add_argument("--run-id", required=True)
+    revalidate.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    revalidate.add_argument("--implementation-repair-limit", default=None)
+    revalidate.add_argument("--runtime-root", default=None)
 
     approve = subparsers.add_parser("approve-checkpoint")
     approve.add_argument("--run-id", required=True)
@@ -56,6 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     approve.add_argument("--design-repair-limit", default=None)
     approve.add_argument("--implementation-plan-repair-limit", default=None)
+    approve.add_argument("--implementation-repair-limit", default=None)
     approve.add_argument("--runtime-root", default=None)
 
     prepare_target = subparsers.add_parser("prepare-target-repo")
@@ -75,6 +83,8 @@ def _settings_from_args(args: argparse.Namespace):
         overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
     if getattr(args, "implementation_plan_repair_limit", None) is not None:
         overrides["SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"] = str(args.implementation_plan_repair_limit)
+    if getattr(args, "implementation_repair_limit", None) is not None:
+        overrides["SDLC_IMPLEMENTATION_REPAIR_LIMIT"] = str(args.implementation_repair_limit)
     if getattr(args, "target_repo", None):
         overrides["SDLC_TARGET_REPO_PATH"] = str(args.target_repo)
     if getattr(args, "target_remote", None):
@@ -106,6 +116,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "continue-run":
         workflow = PhaseFourWorkflow(settings)
         return workflow.continue_run(run_id=args.run_id)
+    if args.command == "revalidate-implementation":
+        workflow = PhaseFourWorkflow(settings)
+        return workflow.revalidate_implementation(run_id=args.run_id)
     if args.command == "approve-checkpoint":
         workflow = CheckpointApprovalWorkflow(settings)
         return workflow.approve_checkpoint(
