@@ -250,8 +250,8 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
   chuyển sang repo-relative paths trong `SDLC_Target_eTour/scripts/test.ps1`.
 - [x] Live compact QA packet với DeepSeek thật trên runtime copy: happy path từ
   `implementation_traced` sang `qa_tested`, runtime thật không bị mutate.
-- [ ] Live QA fail/skipped với DeepSeek thật trên runtime copy có lỗi hành vi rõ
-  hoặc thiếu evidence rõ.
+- [x] Live QA fail với DeepSeek thật trên runtime copy có lỗi hành vi rõ; run `run_live_qa_repair_20261014_03` chuyển `implementation_traced -> qa_repair_needed -> qa_tested` sau một vòng Developer repair.
+- [ ] Live QA `skipped` trên runtime copy có môi trường kiểm thử thiếu dependency/compiler rõ ràng.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 
@@ -285,3 +285,5 @@ without opening GitHub PR/sync yet.
 - [x] `continue-run` from `qa_repair_needed` calls Developer.repair, then reruns Verification Runner, Validator code trace, and QA tests.
 - [x] QA skipped and invalid QA JSON still block; they do not enter Developer repair.
 - [x] QA fail after the repair limit blocks with `qa_repair_limit_exceeded`.
+- [x] Verification Runner executes every Java class listed in the newly applied QA test files; a baseline script that only compiles them cannot produce a false pass.
+- [x] Live DeepSeek repair evidence: the required QA class failed on cancel deleting the item, Developer repaired production/test code, Validator passed, and the regenerated QA class passed.

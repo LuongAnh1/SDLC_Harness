@@ -113,29 +113,21 @@ allowed_next_actions=[get_status, cancel_run]
 `qa_tested` là trạng thái trung gian đề xuất cho lát QA V1. Lát GitHub sync sau đó
 mới chuyển sang `code_review_ready` khi commit, Draft PR và sync Phase 4 hoàn tất.
 
-## Behavior V1 Đã Triển Khai Trong Slice 4.7A
+## Behavior V1 Đã Triển Khai Trong Slice 4.7A/4.7B
 
-Slice 4.7A hiện triển khai QA gate trước, chưa triển khai vòng repair lớn. Khi
-QA fail hoặc skipped, workflow ghi report rồi `blocked` để người duyệt xem
-evidence. `qa_repair_needed`, `SDLC_QA_REPAIR_LIMIT` và Developer repair theo
-QA feedback là lát tiếp theo.
+QA nhận compact packet theo hướng TraceDev: accepted requirement/use case, code
+hiện tại theo `allowed_paths`, Verification Runner report và traceability summary.
+Design/plan/full trace chỉ giữ reference path để tránh cắt JSON.
 
-Để tránh lỗi output quá dài/không sạch từ LLM, QA nhận compact packet theo
-hướng TraceDev: accepted requirement/use case, code hiện tại trong target repo
-theo `allowed_paths`, Verification Runner report và traceability summary.
-Design artifact, implementation plan và code trace full chỉ được đưa vào dạng
-reference path, không copy nguyên nội dung vào prompt QA. Packet vẫn ghi
-`content_truncated`, `chars_sent`, `chars_total`, `packet_mode` và danh sách
-artifact full bị lược bỏ. Nếu LLM trả JSON lỗi hoặc bị cắt, workflow block bằng
-`qa_tester_llm_failed` và ghi
-`qa_tester_raw_response_v1.txt`.
+Sau khi apply test dưới `src/test/java/`, workflow không chỉ gọi command baseline.
+Nó truyền danh sách file QA bắt buộc cho Verification Runner; runner suy ra fully
+qualified Java class và execute từng class. QA chỉ pass khi cả baseline command và
+tất cả required QA classes cùng pass.
 
-Lưu ý: `content_truncated=true` không mặc định là lỗi QA. Sau khi bỏ full
-design/implementation plan/code trace khỏi prompt, phần còn có thể bị cắt chủ
-yếu là source/test code hiện tại. Đây là cơ chế bảo vệ prompt khi target repo
-lớn hơn budget. Hướng tiếp theo nên là selective fetch: QA đọc packet gọn trước,
-nếu thiếu evidence thì yêu cầu thêm đúng file/hàm cần soi, thay vì tăng context
-hoặc nhét lại artifact dài vào prompt.
+Nếu test fail và còn `SDLC_QA_REPAIR_LIMIT`, workflow ghi
+`qa_repair_feedback_v{n}.json`, chuyển `qa_repair_needed`, rồi vòng tiếp theo chạy
+Developer.repair -> Verification Runner -> Validator -> QA. JSON lỗi và `skipped`
+vẫn block thay vì tự sửa code.
 
 ## Behavior V1 Nền Tảng
 
@@ -227,83 +219,32 @@ qa_tested
 
 ## Test Và Acceptance Cho Lát QA
 
-Unit test tối thiểu:
+- Unit tests cover QA pass/fail, invalid JSON, repair pass, repair-limit block và
+  required QA class execution.
+- Baseline command exit `0` không đủ: required QA class fail phải trả `failed`.
+- QA `skipped` không được chuyển `code_review_ready`.
+- Live DeepSeek run `run_live_qa_repair_20261014_03` đã chứng minh nhánh fail ->
+  `qa_repair_needed` -> Developer repair -> Validator -> QA pass trong một vòng.
+- Live `skipped` case vẫn chưa chạy; đây là hardening case riêng, không phủ nhận
+  repair loop đã được kiểm chứng.
 
-- `continue-run` từ `implementation_traced` sinh `qa_test_report_v1.md`.
-- QA pass ghi `quality_reports.qa_acceptance.ok=true` và state `qa_tested`.
-- QA fail ở Slice 4.7A ghi `qa_test_report_v1.md` rồi `blocked`, chưa repair.
-- QA LLM output bị cắt/JSON lỗi ghi `qa_tester_raw_response_v1.txt` rồi `blocked`.
-- QA skipped không chuyển `code_review_ready`.
-- Slice sau: QA failed do code/test chuyển `qa_repair_needed` và sinh feedback cho Developer.
-- Slice sau: QA failed do requirement/design nền chuyển `blocked`.
-- Vòng repair QA chạy lại Developer.repair -> Verification Runner -> Validator -> QA.
-- Hết `SDLC_QA_REPAIR_LIMIT` thì block với `last_error` rõ.
-
-Smoke test tối thiểu:
-
-- chạy từ một run đã đạt `implementation_traced`;
-- gọi `continue-run --run-id <run_id> --llm-mode fake`;
-- xác nhận artifact QA xuất hiện và state không mở Draft PR.
-
-Live test hiện tại:
-
-- DeepSeek thật đã pass nhánh QA happy path trên runtime copy từ
-  `implementation_traced` sang `qa_tested`.
-- Nhánh QA fail/skipped đã có unit test bằng fake/invalid LLM, nhưng chưa có live
-  DeepSeek case chứng minh model tự phát hiện acceptance không đạt. Trước khi mở
-  QA repair loop, cần tạo một runtime copy có lỗi hành vi rõ hoặc thiếu test rõ,
-  chạy DeepSeek thật và xác nhận state `blocked` với `qa_test_failed` hoặc
-  `qa_test_skipped`.
-
-
-## Current Slice 4.7A Contract - 2026-10-14
-
-Current code no longer treats QA as review-only. The implemented path is:
+## Current Slice 4.7A/4.7B Contract - 2026-10-14
 
 ```text
-status=implementation_traced
+implementation_traced
 -> build compact QA packet
--> QA/Tester LLM generates Java acceptance/system tests as JSON
--> workflow validates paths under src/test/java/
--> workflow writes qa_generated_tests_v{n}.json
--> workflow applies generated tests into target repo
--> Verification Runner runs again with the generated QA tests present
--> workflow writes qa_test_execution_v{n}.md
--> workflow derives qa_test_report_v{n}.md from execution status
+-> QA generates Java acceptance/system tests as JSON
+-> validate/apply paths under src/test/java/
+-> baseline Verification Runner command
+-> execute every required QA-generated Java class
+-> pass: qa_tested
+-> fail: qa_repair_needed -> Developer.repair -> Runner -> Validator -> QA
+-> limit exhausted: blocked/qa_repair_limit_exceeded
 ```
 
-Pass/fail/skipped is based on the Verification Runner result after QA tests are
-applied, not on a free-form QA judgement. If QA-generated tests fail or are
-skipped, Slice 4.7A blocks with `qa_test_failed` or `qa_test_skipped`. The big
-QA repair loop back to Developer is now implemented for QA execution failures.
+Artifacts gồm `qa_generated_tests_v{n}.json`, `qa_test_execution_v{n}.md`,
+`qa_test_report_v{n}.md` và khi fail có `qa_repair_feedback_v{n}.json`.
 
-Implemented artifacts:
-
-- `qa_generated_tests_v{n}.json`: machine-readable tests produced by QA.
-- `qa_test_execution_v{n}.md`: runner output after those tests are applied.
-- `qa_test_report_v{n}.md`: acceptance summary derived from the execution.
-
-Implemented tests:
-
-- Phase 4 unit tests cover QA pass, QA fail by runner, and invalid QA JSON raw
-  response capture.
-- Full live DeepSeek generated-test QA ran on `run_20261013_160421_f661babf`: QA generated `DeleteCulturalHeritageAcceptanceTest.java`, the workflow applied it to the target repo, Verification Runner ran `scripts/test.ps1`, and the run passed with `All tests passed`.
-
-
-## Slice 4.7B QA Repair Loop - 2026-10-14
-
-Implemented behavior:
-
-```text
-qa_repair_needed
--> Developer.repair using qa_repair_feedback_v{n}.json
--> Verification Runner
--> Validator code trace
--> QA-generated tests again
--> qa_tested or blocked
-```
-
-`SDLC_QA_REPAIR_LIMIT` defaults to `1` and can be overridden with
-`continue-run --qa-repair-limit <n>`. QA skipped and invalid QA JSON are not
-repairable in this slice. QA execution fail is repairable only while the limit
-still has capacity; after that the run blocks with `qa_repair_limit_exceeded`.
+Live evidence `run_live_qa_repair_20261014_03` xác nhận class QA fail thật với
+assertion cancel không được delete; Developer sửa trong một vòng, Validator pass,
+class QA tái sinh được execute và pass. Commit/Draft PR không thuộc slice này.

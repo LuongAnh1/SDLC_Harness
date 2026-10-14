@@ -1,4 +1,4 @@
-﻿"""Test Phase 4 slice 4.1: implementation plan review -> DeveloperWorkPacket."""
+"""Test Phase 4 slice 4.1: implementation plan review -> DeveloperWorkPacket."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -226,7 +227,13 @@ class SequenceVerificationRunner:
         self.statuses = list(statuses)
         self.calls: list[str] = []
 
-    def run(self, *, target_path: Path, work_packet: dict[str, object]) -> VerificationResult:
+    def run(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        required_test_files: list[str] | None = None,
+    ) -> VerificationResult:
         status = self.statuses.pop(0) if self.statuses else "passed"
         self.calls.append(status)
         reason_by_status = {
@@ -579,6 +586,7 @@ class PhaseFourTest(unittest.TestCase):
         workflow = PhaseFourWorkflow(self.settings)
         recorder = RecordingQaTester()
         workflow.qa_tester = recorder
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
 
         response = workflow.continue_run(run_id=str(traced["run_id"]))
 
@@ -1338,6 +1346,46 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(result.status, "passed")
         self.assertIn("javac visible", result.stdout)
+
+    def test_verification_runner_executes_required_qa_test_class(self) -> None:
+        if not shutil.which("javac") or not shutil.which("java"):
+            self.skipTest("JDK is required for the QA generated-test execution regression test.")
+        qa_path = "src/test/java/com/sdlc/etour/heritage/RequiredQaAcceptanceTest.java"
+        qa_file = self.target_repo / qa_path
+        qa_file.write_text(
+            (
+                "package com.sdlc.etour.heritage;\n"
+                "public final class RequiredQaAcceptanceTest {\n"
+                "  public static void main(String[] args) {\n"
+                "    throw new IllegalStateException(\"qa generated failure\");\n"
+                "  }\n"
+                "}\n"
+            ),
+            encoding="utf-8",
+        )
+        (self.target_repo / "scripts" / "test.ps1").write_text(
+            (
+                "$ErrorActionPreference = \"Stop\"\n"
+                "$sources = Get-ChildItem -LiteralPath \"src\" -Filter *.java -Recurse | "
+                "ForEach-Object { Resolve-Path -Relative -LiteralPath $_.FullName }\n"
+                "New-Item -ItemType Directory -Force -Path build | Out-Null\n"
+                "javac -encoding UTF-8 -d build @sources\n"
+                "Write-Host 'baseline compile passed'\n"
+            ),
+            encoding="utf-8",
+        )
+        work_packet = {"test_intents": [{"command": "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"}]}
+
+        result = VerificationRunner(timeout_seconds=30).run(
+            target_path=self.target_repo,
+            work_packet=work_packet,
+            required_test_files=[qa_path],
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("RequiredQaAcceptanceTest", result.reason)
+        self.assertIn("qa generated failure", result.stderr)
 
     def test_continue_run_rejects_non_ready_state(self) -> None:
         phase3 = self._create_phase3_run()

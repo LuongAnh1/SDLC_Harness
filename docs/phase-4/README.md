@@ -10,17 +10,20 @@ kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
 ## Trạng Thái Hiện Tại
 
-Tính đến bản hiện tại, Phase 4 đã khóa tới mốc `qa_tested` ở Slice 4.7A:
-harness tạo `developer_work_packet_v1`, checkout branch target repo,
-Developer.act sinh/apply code thật, Verification Runner chạy compile/unit test,
-Validator code trace chạy hybrid rule + LLM, Developer.repair có thể sửa
-code/test rồi chạy lại runner + Validator trong giới hạn
-`SDLC_IMPLEMENTATION_REPAIR_LIMIT`, và QA/Tester Agent V1 có thể review
-acceptance sau khi `implementation_traced`.
+Phase 4 đã khóa tới Slice 4.7B và trạng thái trung gian `qa_tested`: Developer.act
+sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
+rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có giới hạn:
 
-Mốc này chưa phải `code_review_ready`. QA repair loop, commit, Draft PR thật và
-sync Phase 4 về Jira/Confluence/GitHub vẫn là các lát kế tiếp. Vì vậy tài liệu
-này tách rõ “đầu ra hiện tại” và “đầu ra đầy đủ của Phase 4”.
+- vòng nhỏ Validator -> Developer qua `SDLC_IMPLEMENTATION_REPAIR_LIMIT`;
+- vòng lớn QA -> Developer -> Runner -> Validator -> QA qua `SDLC_QA_REPAIR_LIMIT`.
+
+Verification Runner hiện bắt buộc execute từng Java class do QA vừa sinh sau
+command baseline. Việc chỉ compile file QA hoặc chạy một unit-test class cũ không
+còn được tính là QA pass.
+
+Mốc này vẫn chưa phải `code_review_ready`. Công việc còn lại của happy path là
+commit target repo, tạo/cập nhật Draft PR và sync code-review checkpoint về
+GitHub/Jira/Confluence.
 
 ## Slice 4.1 Đã Chốt
 
@@ -188,28 +191,26 @@ rồi:
 - nếu vẫn hết lượt hoặc lỗi không repair được ở code/test: giữ `blocked` với
   `last_error` rõ.
 
-## Slice 4.7A Đã Chốt
+## Slice 4.7A Và 4.7B Đã Chốt
 
-Slice 4.7A chạy tiếp từ `implementation_traced`:
+Luồng QA hiện tại:
 
 ```text
-continue-run(run_id)
--> đọc accepted requirement, code hiện tại trong target repo, test report và trace summary
--> đóng gói QA packet gọn, có content_truncated/chars_sent/chars_total/packet_mode
--> QA/Tester Agent review acceptance/system behavior
--> ghi qa_test_report_v1.md
--> nếu pass: status=qa_tested
--> nếu fail/skipped hoặc LLM output lỗi: status=blocked với last_error rõ
+implementation_traced
+-> compact QA packet
+-> QA/Tester sinh Java acceptance/system tests
+-> workflow apply test dưới src/test/java/
+-> Verification Runner chạy command baseline
+-> Verification Runner chạy trực tiếp từng QA-generated Java class
+-> pass: qa_tested
+-> fail còn lượt: qa_repair_needed
+-> Developer.repair -> Runner -> Validator -> QA
+-> hết lượt: blocked/qa_repair_limit_exceeded
 ```
 
-Slice này cố tình chưa triển khai vòng repair lớn từ QA về Developer. Nếu QA fail
-hoặc skipped, workflow block để người duyệt xem report trước; slice sau mới mở
-`qa_repair_needed`. Để tránh lỗi LLM output quá dài/không sạch từng gặp ở design
-và Validator, QA prompt chỉ nhận packet kiểu TraceDev: requirement/use case,
-current code, Verification Runner report và trace summary. Design artifact,
-implementation plan và code trace full chỉ còn là reference path. Parser lấy JSON
-object đầu tiên có schema mong đợi, và raw response được lưu vào
-`qa_tester_raw_response_v1.txt` khi parse lỗi.
+QA LLM output lỗi hoặc bị cắt vẫn block và lưu raw response. QA `skipped` cũng
+block, không tự đi vào Developer repair vì thiếu môi trường chạy không chứng minh
+được lỗi nằm ở code.
 
 ## Luồng Phase 4
 
@@ -383,56 +384,28 @@ pass/được block rõ ràng, workflow chưa được coi là `code_review_read
 - `github-code-collaboration.md`: policy dùng GitHub branch/commit/Draft PR.
 
 
-## QA Slice 4.7A Update - 2026-10-14
+## QA Slice 4.7A/4.7B Live Update - 2026-10-14
 
-QA/Tester Agent is now execution-based in code:
+Lần live test đầu cho thấy một false positive quan trọng: `scripts/test.ps1`
+compile toàn bộ Java nhưng chỉ execute `CulturalHeritageRepositoryTest`, nên file
+`DeleteCulturalHeritageAcceptanceTest.java` do QA sinh chưa từng chạy. Harness đã
+được sửa để truyền `required_test_files` cho Verification Runner và execute từng
+class bằng `java -cp build <fully-qualified-class>` sau baseline command.
 
-```text
-implementation_traced
--> compact QA packet
--> QA generates Java test files
--> workflow applies tests under src/test/java/
--> Verification Runner runs again
--> qa_tested only if the QA execution passed
-```
+Regression test mới khóa hành vi: baseline exit `0` nhưng QA class ném exception
+thì kết quả bắt buộc là `failed`.
 
-Current artifacts:
+Live DeepSeek run `run_live_qa_repair_20261014_03` trên runtime/target repo copy:
 
-```text
-qa_generated_tests_v{n}.json
-qa_test_execution_v{n}.md
-qa_test_report_v{n}.md
-```
+- Seed lỗi: cancel xóa cultural-heritage item dù use case yêu cầu giữ nguyên.
+- QA sinh `DeleteCulturalHeritageAcceptanceTest.java`; class được execute thật và
+  fail tại assertion `cancel must not delete the item`.
+- State chuyển `implementation_traced -> qa_repair_needed` và ghi
+  `qa_repair_feedback_v2.json`.
+- Developer sửa `DeleteCulturalHeritageController.java` cùng flow test trong
+  `allowed_paths`.
+- Baseline verification pass, Validator rule + LLM pass, QA sinh/chạy lại class.
+- State cuối `qa_tested`, `qa_repair_iterations=1`, `last_error=null`.
 
-The QA repair loop is not implemented yet. A failing or skipped QA execution
-blocks the run and leaves Developer repair for the next slice.
-## Live QA Generated-Test Check - 2026-10-14
-
-Live DeepSeek run `run_20261013_160421_f661babf` verified Slice 4.7A on a real runtime:
-
-- State moved from `implementation_traced` to `qa_tested`.
-- QA/Tester wrote `qa_generated_tests_v1.json` and one acceptance test file:
-  `src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageAcceptanceTest.java`.
-- Workflow applied the generated test into the target repo and reran Verification Runner through `scripts/test.ps1`.
-- Runner passed with exit code 0 and stdout `All tests passed`.
-- `quality_reports.qa_acceptance` recorded `ok=true`, 8 scenarios, and 5 risk notes.
-
-Remaining note: the QA packet still records `any_truncated=true` because full design and implementation-plan artifacts are referenced by path instead of copied into the QA prompt. This does not block the happy path, but selective fetch remains a good follow-up before the large QA repair loop.
-
-
-## Slice 4.7B QA Repair Loop
-
-The next implemented QA slice adds the large repair loop:
-
-```text
-QA fail
--> qa_repair_feedback_v{n}.json
--> qa_repair_needed
--> Developer.repair
--> Verification Runner
--> Validator code trace
--> QA tests again
-```
-
-The loop is controlled by `SDLC_QA_REPAIR_LIMIT` / `continue-run --qa-repair-limit`.
-It still does not commit, open a PR, or sync the code-review checkpoint.
+Slice 4.7B vẫn không commit hoặc mở PR. Lát tiếp theo là GitHub commit/Draft PR và
+sync code-review checkpoint để chuyển sang `code_review_ready`.

@@ -509,5 +509,31 @@ Da lam:
 Chua lam:
 
 - Chua commit/Draft PR/sync Phase 4.
-- Chua live DeepSeek case QA fail roi Developer sua pass; hien moi co unit test
-  state machine cho vong repair.
+- Live DeepSeek fail -> Developer repair -> Validator -> QA pass đã được xác nhận
+  ở mục ngay bên dưới bằng runtime copy `run_live_qa_repair_20261014_03`.
+
+## 2026-10-14 - Live DeepSeek QA Repair Và Required-Test Execution
+
+Mục tiêu: khóa Slice 4.7B bằng một lỗi acceptance thật trên runtime copy và xác
+nhận vòng lớn QA -> Developer -> Runner -> Validator -> QA hội tụ.
+
+Phát hiện trong lần chuẩn bị:
+
+- `scripts/test.ps1` compile tất cả source/test nhưng chỉ execute
+  `CulturalHeritageRepositoryTest`.
+- Vì vậy QA-generated acceptance file có thể chưa chạy mà workflow vẫn báo pass.
+- Verification Runner đã được sửa để execute trực tiếp mọi class trong
+  `required_test_files` sau baseline command; regression test khóa false positive.
+
+Live run `run_live_qa_repair_20261014_03`:
+
+- runtime và target repo được copy cô lập; run/repo gốc không nhận defect seed;
+- seed lỗi `cancelDeletion` xóa item;
+- QA-generated class fail với `cancel must not delete the item`;
+- state chuyển `qa_repair_needed`, ghi `qa_repair_feedback_v2.json`;
+- DeepSeek Developer repair iteration 1, Verification Runner pass, Validator pass;
+- QA sinh/chạy lại required class và pass;
+- state cuối `qa_tested`, `qa_repair_iterations=1`, `last_error=null`.
+
+Việc tiếp theo: commit/Draft PR thật và sync checkpoint code review để mở
+`code_review_ready`. Live `skipped` case còn là hardening test riêng.

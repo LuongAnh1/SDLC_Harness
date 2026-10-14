@@ -1,4 +1,4 @@
-﻿"""Workflow Phase 4: implementation plan -> code/test/trace/QA repair.
+"""Workflow Phase 4: implementation plan -> code/test/trace/QA repair.
 
 Module này điều phối Phase 4 sau khi implementation plan đã được human duyệt:
 đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target repo, chạy
@@ -833,7 +833,7 @@ class PhaseFourWorkflow:
         qa_version: int,
         repaired_from: str | None = None,
     ) -> dict[str, object]:
-        """Generate QA tests, apply them, run the target verifier, and write QA artifacts."""
+        """Sinh/apply QA tests, chạy baseline và từng QA class bắt buộc, rồi ghi artifacts."""
 
         context = _qa_review_context(
             store=self.store,
@@ -871,7 +871,11 @@ class PhaseFourWorkflow:
             target_path=target_info.path,
             run_id=str(state.get("run_id") or ""),
         )
-        execution = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+        execution = self.verification_runner.run(
+            target_path=target_info.path,
+            work_packet=work_packet,
+            required_test_files=[str(item.get("path") or "") for item in applied_tests],
+        )
         execution_payload = {
             "run_id": state.get("run_id"),
             "source_ref": state.get("source_ref"),
