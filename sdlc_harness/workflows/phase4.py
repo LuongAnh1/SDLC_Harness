@@ -1,9 +1,10 @@
-"""Workflow Phase 4 slice 4.1: approve implementation plan -> work packet.
+"""Workflow Phase 4: implementation plan -> code/test/trace.
 
-Phase 4 đầy đủ sẽ sinh code, chạy test, kiểm trace và mở Draft PR. Slice 4.1
-chỉ khóa phần chuyển tiếp an toàn: implementation plan đã được human duyệt được
-đóng gói thành DeveloperWorkPacket để bước Developer.act sau này dùng. Workflow
-này chưa tạo branch, chưa sửa code và chưa sync GitHub.
+Module này điều phối phần đầu của Phase 4 sau khi implementation plan đã được
+human duyệt: đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target
+repo, chạy Verification Runner, rồi bắt Validator kiểm trace requirement/design
+sang code/test. Code trace hiện là gate hybrid: static evidence trước, sau đó
+bắt buộc gọi LLM để review graph ngữ nghĩa trước khi cho workflow đi tiếp.
 """
 
 from __future__ import annotations
@@ -11,8 +12,10 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..agents.developer import DeveloperActAgent, DeveloperActResult, build_developer_work_packet
+from ..agents.validator import CodeTraceValidator
 from ..artifacts.writers import (
     write_phase4_code_change_report,
+    write_phase4_code_trace_report,
     write_phase4_developer_work_packet,
     write_phase4_test_report,
 )
@@ -35,7 +38,8 @@ from .phase3 import (
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 
 
 class PhaseFourWorkflow:
@@ -45,8 +49,10 @@ class PhaseFourWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
-        self.developer = DeveloperActAgent(LlmClient(settings))
+        self.llm_client = LlmClient(settings)
+        self.developer = DeveloperActAgent(self.llm_client)
         self.verification_runner = VerificationRunner()
+        self.code_trace_validator = CodeTraceValidator(self.llm_client)
 
     def approve_implementation_plan_checkpoint(
         self,
@@ -170,6 +176,8 @@ class PhaseFourWorkflow:
             return self._continue_developer_act(state=state, run_id=run_id)
         if status == "implementation_written":
             return self._continue_verification(state=state, run_id=run_id)
+        if status == "implementation_tested":
+            return self._continue_code_trace(state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
@@ -318,6 +326,105 @@ class PhaseFourWorkflow:
                     "summary_for_user": (
                         f"Verification Runner status={result.status} cho run {run_id}: {result.reason}. "
                         "Workflow không báo pass khi compile/unit test chưa pass thật."
+                    ),
+                }
+            )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _continue_code_trace(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Chạy Slice 4.4: Validator trace approved design sang code/unit test."""
+
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        try:
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
+            _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
+            for key in (
+                "design_artifact",
+                "requirement_design_trace",
+                "class_diagram_graph",
+                "sequence_diagram_graph",
+            ):
+                _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            target_info = self._validate_target_repo(allow_dirty=True)
+            trace_result = self.code_trace_validator.validate(
+                target_path=target_info.path,
+                work_packet=work_packet,
+            )
+            trace_payload = {
+                **trace_result.to_dict(),
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+            }
+            trace_path = write_phase4_code_trace_report(
+                store=self.store,
+                run_id=run_id,
+                report=trace_payload,
+                version=1,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bị chặn khi chạy Validator code trace: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **artifact_paths,
+            "requirement_design_code_trace": trace_path,
+        }
+        quality_reports = {
+            **_dict_value(state.get("quality_reports")),
+            "implementation_traceability": trace_result.to_quality_report(),
+        }
+        if trace_result.ok:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "implementation_traced",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_TRACED_ACTIONS,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Validator code trace đã pass cho run {run_id}: {trace_result.summary} "
+                        "Slice 4.4 chưa chạy QA/Tester Agent, chưa commit và chưa mở PR."
+                    ),
+                }
+            )
+        else:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": HarnessError(
+                        "implementation_traceability_failed",
+                        trace_result.summary,
+                        run_id=run_id,
+                    ).to_response(),
+                    "summary_for_user": (
+                        f"Validator code trace còn thiếu link cho run {run_id}: {trace_result.summary} "
+                        "Workflow chưa được phép mở PR."
                     ),
                 }
             )

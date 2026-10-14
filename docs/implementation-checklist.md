@@ -133,10 +133,15 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [x] Sinh `code_change_report_v1.md`.
 - [x] Verification Runner chạy compile/unit test hoặc ghi skipped rõ ràng.
 - [x] Sinh `test_report_v1.md`.
-- [ ] Validator sinh `requirement_design_code_trace_v1.json` từ approved requirement/design sang code/unit test.
-- [ ] Nếu compile/unit hoặc trace fail vì code thiếu, feedback quay về Developer trong giới hạn repair.
+- [x] Validator sinh `requirement_design_code_trace_v1.json` từ approved requirement/design sang code/unit test.
+- [x] Code trace bắt buộc chạy LLM/DeepSeek graph review sau static evidence; nếu
+  LLM phát hiện semantic gap thì block dù rule-based pass.
+- [ ] Nếu compile/unit hoặc trace fail vì code/test thiếu, feedback quay về Developer
+  trong giới hạn repair; sau repair phải chạy lại Verification Runner -> Validator
+  trước khi QA/Tester được chạy.
 - [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
-- [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace baseline ổn.
+- [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace
+  baseline đã pass ổn định sau repair loop nếu có.
 - [ ] Sinh `qa_test_report_v1.md` trước khi mở checkpoint code review.
 - [ ] Tạo Draft PR thật trên GitHub.
 - [ ] Sync PR/test/trace summary về Jira và Confluence.

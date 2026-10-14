@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.developer import DeveloperActResult
+from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
@@ -33,6 +34,45 @@ class OutOfScopeDeveloper:
                     "covered_design_elements": [],
                 }
             ],
+        )
+
+
+class RejectingCodeTraceLlm:
+    def complete(self, *, system: str, prompt: str) -> str:
+        return json.dumps(
+            {
+                "ok": False,
+                "confidence": 0.87,
+                "summary": "Semantic graph review found missing delete confirmation behavior.",
+                "graph_edges": [],
+                "missing_links": [
+                    {
+                        "type": "missing_behavior",
+                        "message": "Delete confirmation is not convincingly covered by code/test evidence.",
+                        "requirement_ref": "approved_requirement_packet",
+                        "design_element_id": "sequence:delete_cultural_heritage_main",
+                    }
+                ],
+                "risks": ["Code file exists but behavior evidence is weak."],
+            }
+        )
+
+
+class CapturingCodeTraceLlm:
+    def __init__(self) -> None:
+        self.prompt = ""
+
+    def complete(self, *, system: str, prompt: str) -> str:
+        self.prompt = prompt
+        return json.dumps(
+            {
+                "ok": True,
+                "confidence": 0.93,
+                "summary": "Semantic review accepted code snippets.",
+                "graph_edges": [],
+                "missing_links": [],
+                "risks": [],
+            }
         )
 
 
@@ -128,6 +168,10 @@ class PhaseFourTest(unittest.TestCase):
     def _create_phase4_written_run(self) -> dict[str, object]:
         ready = self._create_phase4_ready_run()
         return PhaseFourWorkflow(self.settings).continue_run(run_id=str(ready["run_id"]))
+
+    def _create_phase4_tested_run(self) -> dict[str, object]:
+        written = self._create_phase4_written_run()
+        return PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
 
     def test_approve_implementation_plan_creates_developer_work_packet(self) -> None:
         phase3 = self._create_phase3_run()
@@ -292,13 +336,77 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "implementation_testing")
         self.assertEqual(response["status"], "implementation_tested")
-        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("test_report", response["latest_artifacts"])
         report_path = self.repo_root / str(response["latest_artifacts"]["test_report"])
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Test Report V1", report)
         self.assertIn("Status: `passed`", report)
         self.assertIn("test placeholder", report)
+
+    def test_continue_run_runs_code_trace_after_implementation_tested(self) -> None:
+        tested = self._create_phase4_tested_run()
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["current_phase"], "implementation_testing")
+        self.assertEqual(response["status"], "implementation_traced")
+        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
+        self.assertTrue(response["quality_reports"]["implementation_traceability"]["ok"])
+        trace_path = self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])
+        trace = json.loads(trace_path.read_text(encoding="utf-8"))
+        self.assertEqual(trace["version"], "requirement_design_code_trace_v1")
+        self.assertTrue(trace["ok"])
+        self.assertTrue(trace["mappings"])
+        self.assertFalse(trace["missing_links"])
+        self.assertGreater(trace["stats"]["test_file_count"], 0)
+        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v1")
+        self.assertTrue(trace["llm_required"])
+        self.assertTrue(trace["llm_review"]["ok"])
+        self.assertTrue(trace["llm_review"]["review_context"]["code_snippets_included"])
+
+    def test_code_trace_llm_receives_source_and_test_snippets(self) -> None:
+        tested = self._create_phase4_tested_run()
+        llm = CapturingCodeTraceLlm()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(llm)
+
+        response = workflow.continue_run(run_id=str(tested["run_id"]))
+
+        self.assertEqual(response["status"], "implementation_traced")
+        self.assertIn('"code_snippets"', llm.prompt)
+        self.assertIn("DeleteCulturalHeritageService", llm.prompt)
+        self.assertIn("DeleteCulturalHeritageFlowTest", llm.prompt)
+        self.assertIn("deleteHeritage", llm.prompt)
+
+    def test_cli_continue_run_dispatches_phase4_code_trace(self) -> None:
+        tested = self._create_phase4_tested_run()
+        stdout = io.StringIO()
+        env = {
+            "SDLC_TARGET_REPO_PATH": str(self.target_repo),
+            "SDLC_TARGET_REPO_REMOTE": self.remote_url,
+            "SDLC_SYNC_MODE": "mock",
+        }
+
+        with patch.dict("os.environ", env), contextlib.redirect_stdout(stdout):
+            code = cli_main(
+                [
+                    "continue-run",
+                    "--run-id",
+                    str(tested["run_id"]),
+                    "--llm-mode",
+                    "fake",
+                    "--runtime-root",
+                    str(self.runtime_root),
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "implementation_traced")
+        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
 
     def test_cli_continue_run_dispatches_phase4_verification(self) -> None:
         written = self._create_phase4_written_run()
@@ -326,6 +434,70 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(payload["status"], "implementation_tested")
         self.assertIn("test_report", payload["latest_artifacts"])
+
+    def test_continue_run_blocks_when_code_trace_missing_test_file(self) -> None:
+        tested = self._create_phase4_tested_run()
+        test_file = (
+            self.target_repo
+            / "src"
+            / "test"
+            / "java"
+            / "com"
+            / "sdlc"
+            / "etour"
+            / "heritage"
+            / "DeleteCulturalHeritageFlowTest.java"
+        )
+        test_file.unlink()
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_testing")
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
+        trace = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertFalse(trace["ok"])
+        self.assertTrue(any(item["type"] == "missing_test_file" for item in trace["missing_links"]))
+
+    def test_continue_run_blocks_when_llm_code_trace_finds_semantic_gap(self) -> None:
+        tested = self._create_phase4_tested_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+
+        response = workflow.continue_run(run_id=str(tested["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_testing")
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        trace = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertFalse(trace["ok"])
+        self.assertTrue(trace["llm_required"])
+        self.assertFalse(trace["llm_review"]["ok"])
+        self.assertTrue(any(item["type"] == "llm_semantic_gap" for item in trace["missing_links"]))
+
+    def test_continue_run_blocks_when_code_trace_missing_test_report(self) -> None:
+        tested = self._create_phase4_tested_run()
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(str(tested["run_id"]))
+        latest = dict(state["latest_artifacts"])
+        latest.pop("test_report")
+        state["latest_artifacts"] = latest
+        store.write_state(state)
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_testing")
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "approved_implementation_plan_not_found")
 
     def test_continue_run_blocks_when_verification_fails(self) -> None:
         written = self._create_phase4_written_run()

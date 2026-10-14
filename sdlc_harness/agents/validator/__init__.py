@@ -1,4 +1,5 @@
 """Validator role cho Phase 2."""
+from .code_trace import CodeTraceResult, CodeTraceValidator
 from .traceability import (
     TraceabilityResult,
     ValidatorAgent,
@@ -8,6 +9,8 @@ from .traceability import (
 from .plan_review import ImplementationPlanReview, ImplementationPlanValidator
 
 __all__ = [
+    "CodeTraceResult",
+    "CodeTraceValidator",
     "ImplementationPlanReview",
     "ImplementationPlanValidator",
     "TraceabilityResult",

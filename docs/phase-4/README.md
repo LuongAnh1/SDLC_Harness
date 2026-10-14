@@ -64,6 +64,38 @@ Slice này chỉ chạy compile/unit test command của repo target. Nó chưa g
 Validator code trace, chưa chạy QA/Tester Agent acceptance/system test, chưa
 commit và chưa mở PR.
 
+## Slice 4.4 Đã Chốt
+
+Slice 4.4 chạy tiếp từ `implementation_tested`:
+
+```text
+continue-run(run_id)
+-> đọc developer_work_packet_v1.json
+-> đọc code_change_report_v1.md và test_report_v1.md
+-> kiểm target repo cho phép dirty vì code đã được apply
+-> Validator code trace V1 sinh static evidence design -> source/test file thực tế
+-> bắt buộc gọi LLM/DeepSeek review graph requirement -> design -> code -> test
+-> ghi requirement_design_code_trace_v1.json
+-> nếu pass: status=implementation_traced
+-> nếu fail: status=blocked với missing_links rõ
+```
+
+Slice này là hybrid rule + LLM gate. Rule-based evidence chỉ kiểm file/test/symbol
+tối thiểu; LLM/DeepSeek review graph là bắt buộc để soi semantic gap mà rule có
+thể bỏ sót. Đây là điểm nâng cấp của SDLC_Harness so với TraceDev gốc: pass chỉ
+được tính khi cả static evidence và LLM graph review cùng ok. Theo xác nhận của
+project owner, Validator được phép gửi source/test snippet giới hạn sang
+LLM/DeepSeek để review code trước khi human review.
+
+Slice này chưa chạy QA/Tester Agent, chưa tự repair code khi trace fail, chưa
+commit và chưa mở PR.
+
+Nếu Validator phát hiện missing link/semantic gap do code, trạng thái hiện tại là
+`blocked` và ghi `missing_links`/`llm_review`. Vòng feedback tự động về
+Developer để update code là slice kế tiếp, chưa được triển khai trong Slice 4.4.
+QA/Tester Agent chỉ được chạy sau khi repair loop này làm compile/unit test và
+Validator trace cùng pass ổn định.
+
 ## Luồng Phase 4
 
 ```text
@@ -78,11 +110,11 @@ approve_checkpoint(run_id)
 -> ghi code_change_report_v1
 -> Verification Runner chạy compile/unit test command hoặc ghi skipped rõ ràng
 -> ghi test_report_v1
--> Validator kiểm requirement -> design -> code -> test trace
+-> Validator kiểm requirement -> design -> code -> test trace bằng static evidence + LLM graph review
 -> ghi requirement_design_code_trace_v1.json
--> nếu code/unit test thiếu so với approved design: feedback về Developer và lặp trong giới hạn cấu hình
+-> nếu code/unit test thiếu so với approved design: feedback về Developer và lặp Verification Runner -> Validator trong giới hạn cấu hình
 -> nếu approved design mâu thuẫn hoặc không triển khai được: blocked/reopen design có human approval, không tự sửa design âm thầm
--> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã ổn
+-> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã pass ổn định
 -> nếu QA fail: feedback về Developer, rồi chạy lại unit test -> Validator -> QA trong giới hạn cấu hình
 -> tạo Draft PR trên GitHub
 -> sync PR/test/trace summary về Jira và Confluence
@@ -113,9 +145,13 @@ Phase 4 tách rõ ba vai để gần thực tế doanh nghiệp hơn TraceDev g�
 - Developer sinh/sửa code và unit test gần code.
 - Verification Runner chỉ chạy command compile/unit test của target repo và tạo
   `test_report_v1.md`; nó không phải AI Tester và không tự sửa source.
-- Validator kiểm traceability từ approved requirement/design sang code/unit test.
-- QA/Tester Agent là tầng sau: đọc use case đã được Validator bảo vệ, sinh/chạy
-  acceptance hoặc system-level test và gửi failure report về Developer.
+- Validator kiểm traceability từ approved requirement/design sang code/unit test;
+  LLM graph review là bắt buộc, rule-based evidence chỉ là lớp đầu.
+- Developer repair loop đứng ngay sau Validator fail do code/test thiếu: Developer
+  sửa code/test theo missing links, Verification Runner chạy lại, rồi Validator
+  review lại. Khi vòng này pass ổn định, workflow mới được chuyển sang QA/Tester.
+- QA/Tester Agent là tầng sau repair loop: đọc use case đã được Validator bảo vệ,
+  sinh/chạy acceptance hoặc system-level test và gửi failure report về Developer.
 
 `test_report_v1.md` của Verification Runner phải phân biệt rõ `passed`, `failed`
 và `skipped`. Nếu máy chưa có JDK hoặc target repo chưa có test harness đủ mạnh,
@@ -130,10 +166,15 @@ requirement id
   -> test file/case nếu có
 ```
 
-Nếu trace fail do code/unit test chưa cover approved design, Developer có thể
-repair trong giới hạn cấu hình. Nếu fail do approved design mâu thuẫn, mơ hồ hoặc
-không triển khai được, workflow phải `blocked` hoặc mở nhánh quay về design
-checkpoint có human approval; Validator không được tự sửa design trong Phase 4.
+Report này phải ghi `mode=hybrid_rule_llm_code_trace_v1`, `llm_required=true` và
+`llm_review`. Nếu LLM review trả `ok=false` hoặc phát hiện semantic gap, workflow
+phải `blocked` ngay cả khi static file/test evidence đã pass.
+
+Nếu trace fail do code/unit test chưa cover approved design, Developer phải repair
+trong giới hạn cấu hình trước khi QA/Tester được chạy. Nếu fail do approved
+design mâu thuẫn, mơ hồ hoặc không triển khai được, workflow phải `blocked` hoặc
+mở nhánh quay về design checkpoint có human approval; Validator không được tự sửa
+design trong Phase 4.
 
 QA/Tester Agent cũng không sửa code trực tiếp. Nếu acceptance/system test fail,
 Tester chỉ ghi failure evidence; Developer sửa code, Verification Runner chạy lại

@@ -2,6 +2,7 @@
 
 from .writers import (
     write_phase4_code_change_report,
+    write_phase4_code_trace_report,
     write_phase4_developer_work_packet,
     write_phase4_test_report,
     write_formal_check_report,
@@ -13,6 +14,7 @@ from .writers import (
 
 __all__ = [
     "write_phase4_code_change_report",
+    "write_phase4_code_trace_report",
     "write_phase4_developer_work_packet",
     "write_phase4_test_report",
     "write_formal_check_report",

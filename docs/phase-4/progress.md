@@ -110,11 +110,13 @@ Việc tiếp theo:
 - Slice 4.4: Validator kiểm requirement/design -> code/unit test trace, hoặc
   chuẩn bị Developer repair loop nếu muốn xử lý fail trước khi trace.
 
-## 2026-10-14 - Docs Sync: QA/Tester Là Gate Trước Code Review
+## 2026-10-14 - Docs Sync: Repair Loop Trước QA/Tester
 
-Mục tiêu của lượt đồng bộ docs này là sửa điểm nhập nhằng sau Slice 4.3:
-compile/unit pass mới chứng minh code chạy được, chưa chứng minh code đúng nghiệp
-vụ ở mức acceptance/system behavior.
+Mục tiêu của lượt đồng bộ docs này là sửa điểm nhập nhằng sau Slice 4.3 và 4.4:
+compile/unit pass mới chứng minh code chạy được; Validator trace + LLM review mới
+chứng minh code/test bám approved design. Nếu Validator đã phát hiện code/test
+thiếu link, workflow phải quay lại Developer repair trước, chưa được nhảy sang
+QA/Tester Agent.
 
 Đã chốt lại trong tài liệu:
 
@@ -122,8 +124,11 @@ vụ ở mức acceptance/system behavior.
   `test_report_v1.md`.
 - `Validator` kiểm approved requirement/design -> code/unit test trace và sinh
   `requirement_design_code_trace_v1.json`.
-- `QA/Tester Agent` là gate sau Validator: kiểm acceptance/system behavior từ use
-  case và sinh `qa_test_report_v1.md`.
+- `Developer repair loop` là gate ngay sau Validator fail do code/test thiếu:
+  Developer sửa code/test theo missing links, Verification Runner chạy lại, rồi
+  Validator kiểm lại.
+- `QA/Tester Agent` là gate sau khi compile/unit + trace đã ổn định: kiểm
+  acceptance/system behavior từ use case và sinh `qa_test_report_v1.md`.
 - `code_review_ready` chỉ được ghi sau khi có test report, trace report, QA report,
   commit/Draft PR và sync Phase 4.
 - `implementation_testing` hiện là umbrella state cho các sub-step test/trace/QA/repair;
@@ -132,5 +137,64 @@ vụ ở mức acceptance/system behavior.
 Việc tiếp theo:
 
 - Slice 4.4: triển khai Validator code trace.
-- Slice 4.5: triển khai QA/Tester Agent report và repair loop tối thiểu.
+- Slice 4.5: triển khai Validator feedback -> Developer repair loop cho code/test.
+- Slice 4.6: triển khai QA/Tester Agent report sau khi trace repair loop pass.
 - Sau đó mới đến commit/Draft PR/sync Phase 4.
+
+## 2026-10-14 - Slice 4.4: Validator Code Trace
+
+Mục tiêu của slice này là chặn trường hợp code compile/unit pass nhưng chưa có bằng
+chứng approved design đã đi tới source/test file trong target repo.
+
+Đã làm:
+
+- `continue-run` xử lý tiếp state `implementation_tested`.
+- Thêm `CodeTraceValidator` hybrid rule + LLM dưới vai Validator.
+- Validator đọc `developer_work_packet_v1.json`, target repo và mapping
+  `design_mappings_by_file`.
+- Validator sinh static evidence trước, sau đó bắt buộc gọi LLM/DeepSeek review
+  graph requirement -> design -> code -> test.
+- Sinh `requirement_design_code_trace_v1.json`.
+- Nếu trace pass: state chuyển sang `implementation_traced`.
+- Nếu trace fail: state chuyển sang `blocked`, `last_error=implementation_traceability_failed`
+  và artifact vẫn ghi `missing_links`.
+- Nếu LLM review phát hiện semantic gap, workflow block dù static file/test
+  evidence đã pass.
+- `latest_artifacts.requirement_design_code_trace` và
+  `quality_reports.implementation_traceability` được cập nhật.
+- `build_developer_work_packet` tự bổ sung file từ `design_mappings` vào output
+  contract để Developer.act được phép tạo đủ file mà Validator sẽ kiểm.
+- Fake Developer.act được cập nhật để tạo đủ các file chính trong mapping test.
+- Fake LLM được cập nhật cho `Code Trace LLM Review v1` để unit test không gọi API thật.
+
+Lưu ý egress:
+
+- Project owner đã xác nhận cho phép Validator gửi raw source/test snippet giới
+  hạn sang DeepSeek để review code trước khi human review.
+- `CodeTraceValidator` hiện đưa source/test snippet vào `Code Trace LLM Review v1`
+  với giới hạn dung lượng prompt để tránh gửi cả repo.
+
+Chưa làm trong slice này:
+
+- Chưa chạy QA/Tester Agent acceptance/system test.
+- Chưa có repair loop Developer khi trace fail. Nếu Validator phát hiện missing
+  link/semantic gap do code, workflow hiện `blocked`; feedback tự động về
+  Developer để update code là slice kế tiếp.
+- Chưa commit target repo, chưa mở Draft PR và chưa sync Phase 4.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: pass 21/21.
+- Live smoke với DeepSeek thật cho case semantic fail đã pass kỳ vọng: code/test
+  file tồn tại nhưng thiếu confirmation, duplicate-submit guard, notification và
+  test assertion; Validator gửi source/test snippet, LLM trả `ok=false`,
+  confidence `0.95`, `snippet_included=true` và sinh 9 missing links.
+
+Việc tiếp theo:
+
+- Slice 4.5: Validator feedback -> Developer repair loop. Khi trace fail do
+  code/test thiếu, Developer nhận `missing_links`/`llm_review`, sửa code/test,
+  Verification Runner chạy lại, rồi Validator review lại trong giới hạn cấu hình.
+- Slice 4.6: QA/Tester Agent sinh/chạy acceptance/system evidence và ghi
+  `qa_test_report_v1.md` sau khi compile/unit + trace đã pass ổn định.
+- Sau đó mới đến commit/Draft PR và sync Phase 4.

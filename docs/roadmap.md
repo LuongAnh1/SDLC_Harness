@@ -112,7 +112,9 @@ Kết quả mong muốn:
 
 Mục đích: sau khi implementation plan được duyệt, Developer triển khai code và
 unit test dựa trên plan và approved design; Harness chạy compile/unit test,
-Validator kiểm traceability, rồi QA/Tester Agent kiểm acceptance/system behavior.
+Validator kiểm traceability; nếu code/test thiếu link thì Developer repair trước;
+chỉ sau khi compile/unit + trace ổn định mới chạy QA/Tester Agent kiểm
+acceptance/system behavior.
 
 Tài liệu chi tiết: `docs/phase-4/README.md`.
 
@@ -127,8 +129,8 @@ approve_checkpoint(run_id)
 -> Developer.act tạo/sửa code và unit test dựa trên plan
 -> Verification Runner chạy compile/unit test hoặc ghi skipped rõ ràng
 -> nếu compile/unit fail và còn vòng repair: feedback về Developer, chạy lại runner
--> Validator kiểm approved requirement -> approved design -> code -> unit test trace
--> nếu code thiếu so với design: feedback về Developer
+-> Validator kiểm approved requirement -> approved design -> code -> unit test trace bằng static evidence + LLM graph review bắt buộc
+-> nếu code/test thiếu so với design: feedback về Developer, chạy lại runner -> Validator trong giới hạn cấu hình
 -> nếu design đã duyệt mâu thuẫn/không triển khai được: blocked/reopen design có human approval
 -> QA/Tester Agent kiểm acceptance/system behavior từ use case
 -> nếu QA fail và còn vòng repair: feedback về Developer, chạy lại runner -> Validator -> QA
@@ -144,7 +146,9 @@ Kết quả mong muốn:
 - Có branch/commit/Draft PR thật trong target repo.
 - Có `code_change_report_v1.md`.
 - Có `test_report_v1.md`.
-- Có `requirement_design_code_trace_v1.json`.
+- Có `requirement_design_code_trace_v1.json` với `mode=hybrid_rule_llm_code_trace_v1`
+  và `llm_review`.
+- Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy.
 - Có `qa_test_report_v1.md` cho acceptance/system behavior.
 - Có `tool_sync_report_v4.json`.
 - Niko báo được PR link, test summary, trace summary, QA summary và checkpoint code review.
@@ -271,3 +275,12 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > code thật vào target repo, rồi `continue-run` chạy Verification Runner để sinh
 > `test_report_v1.md`. State mới sau test pass là `implementation_tested`; code
 > trace Validator, QA/Tester Agent, commit và Draft PR vẫn là các slice sau.
+
+> Cập nhật 2026-10-14: Phase 4 đã có Slice 4.4. `continue-run` từ
+> `implementation_tested` sinh `requirement_design_code_trace_v1.json`, cập nhật
+> `quality_reports.implementation_traceability` và chuyển state sang
+> `implementation_traced` khi static evidence + LLM graph review cùng pass. Nếu
+> LLM phát hiện semantic gap, workflow block dù rule-based evidence pass.
+> Slice kế tiếp là Validator feedback -> Developer repair loop; QA/Tester Agent
+> đứng sau repair loop khi compile/unit + trace đã pass ổn định. Commit/Draft PR
+> và sync Phase 4 vẫn là các slice sau.

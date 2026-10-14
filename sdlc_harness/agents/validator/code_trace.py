@@ -1,0 +1,409 @@
+"""Validator code trace cho Phase 4.
+
+Module này kiểm tra lát V1 sau khi Developer.act đã ghi code và Verification
+Runner đã pass. Validator giữ hai lớp kiểm soát: rule-based evidence để chắc
+chắn file/test tồn tại, sau đó bắt buộc gọi LLM để review graph ngữ nghĩa giữa
+requirement, approved design, code và test. Workflow chỉ được đi tiếp khi cả hai
+lớp cùng pass, vì rule-based đơn thuần có thể bỏ sót thiếu sót nghiệp vụ.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+import json
+from pathlib import Path
+from typing import Any
+
+from ...core.errors import HarnessError
+from ...llm.client import LlmClient
+from ...storage.runtime import utc_now_iso
+
+
+@dataclass(frozen=True)
+class CodeTraceResult:
+    """Kết quả Validator code trace V1 hybrid rule + LLM."""
+
+    ok: bool
+    summary: str
+    mappings: list[dict[str, object]]
+    missing_links: list[dict[str, object]]
+    stats: dict[str, int]
+    llm_review: dict[str, object]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "version": "requirement_design_code_trace_v1",
+            "mode": "hybrid_rule_llm_code_trace_v1",
+            "created_at": utc_now_iso(),
+            "ok": self.ok,
+            "summary": self.summary,
+            "stats": self.stats,
+            "mappings": self.mappings,
+            "missing_links": self.missing_links,
+            "llm_required": True,
+            "llm_review": self.llm_review,
+        }
+
+    def to_quality_report(self) -> dict[str, object]:
+        return {
+            "ok": self.ok,
+            "mode": "hybrid_rule_llm_code_trace_v1",
+            "summary": self.summary,
+            "stats": self.stats,
+            "missing_count": len(self.missing_links),
+            "llm_required": True,
+            "llm_review_ok": self.llm_review.get("ok") is True,
+            "llm_confidence": self.llm_review.get("confidence"),
+        }
+
+
+class CodeTraceValidator:
+    """Kiểm approved design mappings đã đi tới code/test bằng rule và LLM."""
+
+    def __init__(self, llm_client: LlmClient):
+        self.llm_client = llm_client
+
+    def validate(self, *, target_path: Path, work_packet: dict[str, object]) -> CodeTraceResult:
+        mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
+        test_paths = _test_paths(work_packet)
+        existing_test_paths = [path for path in test_paths if (target_path / path).is_file()]
+        missing_test_paths = [path for path in test_paths if not (target_path / path).is_file()]
+        trace_mappings: list[dict[str, object]] = []
+        missing_links: list[dict[str, object]] = []
+
+        if not mappings_by_file:
+            missing_links.append(
+                {
+                    "type": "missing_design_mappings",
+                    "message": "DeveloperWorkPacket has no design_mappings_by_file.",
+                }
+            )
+
+        if not test_paths:
+            missing_links.append(
+                {
+                    "type": "missing_test_mapping",
+                    "message": "DeveloperWorkPacket has no proposed test files for code trace.",
+                }
+            )
+        elif missing_test_paths:
+            missing_links.append(
+                {
+                    "type": "missing_test_file",
+                    "message": "One or more proposed test files do not exist in the target repo after Developer.act.",
+                    "missing_test_files": missing_test_paths,
+                }
+            )
+
+        for source_path, design_items in mappings_by_file.items():
+            source_file = target_path / source_path
+            source_exists = source_file.is_file()
+            source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
+            if not source_exists:
+                missing_links.append(
+                    {
+                        "type": "missing_source_file",
+                        "source_file": source_path,
+                        "message": "Mapped source file does not exist in the target repo.",
+                    }
+                )
+
+            for item in design_items:
+                planned_target = str(item.get("planned_code_target") or source_path).strip()
+                symbol = _symbol_from_target(planned_target)
+                symbol_found = True if not symbol else symbol in source_text
+                design_element_id = str(item.get("design_element_id") or "").strip()
+                requirement_ref = _requirement_ref(item)
+                trace_mappings.append(
+                    {
+                        "requirement_ref": requirement_ref,
+                        "design_element_id": design_element_id,
+                        "design_element_type": str(item.get("design_element_type") or "").strip(),
+                        "design_element_name": str(item.get("design_element_name") or "").strip(),
+                        "planned_code_target": planned_target,
+                        "source_file": source_path,
+                        "source_exists": source_exists,
+                        "symbol": symbol,
+                        "symbol_found": symbol_found,
+                        "test_files": existing_test_paths,
+                        "test_covered": bool(existing_test_paths),
+                    }
+                )
+
+        static_ok = bool(trace_mappings) and not missing_links
+        llm_review = self._review_with_llm(
+            target_path=target_path,
+            work_packet=work_packet,
+            trace_mappings=trace_mappings,
+            static_missing_links=missing_links,
+            test_paths=existing_test_paths,
+        )
+        llm_missing_links = _llm_missing_links(llm_review)
+        missing_links.extend(llm_missing_links)
+        llm_ok = llm_review.get("ok") is True
+        ok = static_ok and llm_ok and not llm_missing_links
+        stats = {
+            "mapping_count": len(trace_mappings),
+            "missing_count": len(missing_links),
+            "test_file_count": len(existing_test_paths),
+        }
+        if ok:
+            summary = (
+                f"Validator code trace V1 passed with static evidence, LLM graph review, "
+                f"{len(trace_mappings)} mapping(s), and {len(existing_test_paths)} test file(s)."
+            )
+        else:
+            llm_summary = str(llm_review.get("summary") or "").strip()
+            detail = f" LLM review: {llm_summary}" if llm_summary else ""
+            summary = f"Validator code trace V1 found {len(missing_links)} missing link(s).{detail}"
+        return CodeTraceResult(
+            ok=ok,
+            summary=summary,
+            mappings=trace_mappings,
+            missing_links=missing_links,
+            stats=stats,
+            llm_review=llm_review,
+        )
+
+    def _review_with_llm(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        trace_mappings: list[dict[str, object]],
+        static_missing_links: list[dict[str, object]],
+        test_paths: list[str],
+    ) -> dict[str, object]:
+        """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
+
+        prompt = _code_trace_review_prompt(
+            work_packet=work_packet,
+            trace_mappings=trace_mappings,
+            static_missing_links=static_missing_links,
+            code_refs=_code_refs(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
+            code_snippets=_code_snippets(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
+        )
+        try:
+            raw = self.llm_client.complete(
+                system=(
+                    "You are a strict software traceability validator. "
+                    "Return only valid JSON."
+                ),
+                prompt=prompt,
+            )
+        except HarnessError as exc:
+            raise HarnessError(
+                "implementation_traceability_llm_failed",
+                f"LLM code trace review failed: {exc.message}",
+            ) from exc
+        try:
+            review = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HarnessError(
+                "implementation_traceability_llm_failed",
+                "LLM code trace review did not return valid JSON.",
+            ) from exc
+        if not isinstance(review, dict):
+            raise HarnessError(
+                "implementation_traceability_llm_failed",
+                "LLM code trace review JSON must be an object.",
+            )
+        review.setdefault("ok", False)
+        review.setdefault("summary", "")
+        review.setdefault("missing_links", [])
+        review.setdefault("graph_edges", [])
+        review.setdefault("risks", [])
+        review.setdefault("review_context", {"code_snippets_included": True})
+        return review
+
+
+def _dict_of_lists(value: object) -> dict[str, list[dict[str, Any]]]:
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, list[dict[str, Any]]] = {}
+    for key, items in value.items():
+        if not isinstance(items, list):
+            continue
+        normalized = [item for item in items if isinstance(item, dict)]
+        if normalized:
+            result[str(key).strip().replace("\\", "/")] = normalized
+    return result
+
+
+def _test_paths(work_packet: dict[str, object]) -> list[str]:
+    paths: list[str] = []
+    for item in _dict_items(work_packet.get("proposed_files")):
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        if path.startswith("src/test/java/"):
+            paths.append(path)
+    contract = work_packet.get("output_contract")
+    allowed = contract.get("allowed_paths") if isinstance(contract, dict) else None
+    if isinstance(allowed, list):
+        for item in allowed:
+            path = str(item).strip().replace("\\", "/")
+            if path.startswith("src/test/java/"):
+                paths.append(path)
+    return sorted({path for path in paths if path})
+
+
+def _dict_items(value: object) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _symbol_from_target(planned_target: str) -> str:
+    if "#" not in planned_target:
+        return ""
+    return planned_target.split("#", 1)[1].strip()
+
+
+def _requirement_ref(item: dict[str, object]) -> str:
+    for key in ("requirement_id", "requirement_ref", "requirement", "source_requirement"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return "approved_requirement_packet"
+
+
+def _llm_missing_links(review: dict[str, object]) -> list[dict[str, object]]:
+    """Chuẩn hóa missing links do LLM phát hiện thành cùng schema với static trace."""
+
+    value = review.get("missing_links")
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, object]] = []
+    for item in value:
+        if isinstance(item, dict):
+            original_type = str(item.get("type") or "").strip()
+            normalized_item = dict(item)
+            normalized_item["type"] = "llm_semantic_gap"
+            if original_type:
+                normalized_item["llm_type"] = original_type
+            normalized.append(normalized_item)
+        elif str(item).strip():
+            normalized.append({"type": "llm_semantic_gap", "message": str(item).strip()})
+    return normalized
+
+
+def _code_trace_review_prompt(
+    *,
+    work_packet: dict[str, object],
+    trace_mappings: list[dict[str, object]],
+    static_missing_links: list[dict[str, object]],
+    code_refs: list[dict[str, object]],
+    code_snippets: list[dict[str, str]],
+) -> str:
+    """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
+
+    review_input = {
+        "task": "Code Trace LLM Review v1",
+        "instruction": (
+            "Review whether the implemented code/test contents cover the approved requirement/design graph. "
+            "Rule-based evidence is not enough; inspect responsibilities, target names, control flow, assertions, "
+            "coverage intent, and weak links. Return ok=false when files/symbols exist but the behavior or tests "
+            "do not satisfy the approved design."
+        ),
+        "expected_json_schema": {
+            "ok": "boolean",
+            "confidence": "number between 0 and 1",
+            "summary": "short string",
+            "graph_edges": [
+                {
+                    "requirement_ref": "string",
+                    "design_element_id": "string",
+                    "code_ref": "file#symbol",
+                    "test_ref": "file or file#test",
+                    "evidence": "short string",
+                }
+            ],
+            "missing_links": [
+                {
+                    "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace",
+                    "message": "short string",
+                    "requirement_ref": "optional string",
+                    "design_element_id": "optional string",
+                    "code_ref": "optional string",
+                }
+            ],
+            "risks": ["short string"],
+        },
+        "developer_work_packet_summary": {
+            "run_id": work_packet.get("run_id"),
+            "issue_key": work_packet.get("issue_key"),
+            "implementation_steps": work_packet.get("implementation_steps"),
+            "design_mappings_by_file": work_packet.get("design_mappings_by_file"),
+        },
+        "static_trace_mappings": trace_mappings,
+        "static_missing_links": static_missing_links,
+        "code_refs": code_refs,
+        "code_snippets": code_snippets,
+        "egress_confirmation": "Project owner explicitly approved sending source/test snippets to the LLM provider for Validator review.",
+    }
+    return (
+        "Code Trace LLM Review v1\n"
+        "Return only valid JSON. Do not wrap the JSON in markdown.\n\n"
+        f"{json.dumps(review_input, ensure_ascii=False, indent=2)}"
+    )
+
+
+def _code_refs(
+    *,
+    target_path: Path,
+    mappings: list[dict[str, object]],
+    test_paths: list[str],
+) -> list[dict[str, object]]:
+    """Gửi metadata file/symbol cho LLM mà không đưa nội dung code ra ngoài."""
+
+    refs: list[dict[str, object]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in mappings:
+        path = str(item.get("source_file") or "").strip().replace("\\", "/")
+        symbol = str(item.get("symbol") or "").strip()
+        key = (path, symbol)
+        if not path or key in seen:
+            continue
+        seen.add(key)
+        refs.append(
+            {
+                "path": path,
+                "kind": "source",
+                "exists": (target_path / path).is_file(),
+                "symbol": symbol,
+                "symbol_found": item.get("symbol_found") is True,
+            }
+        )
+    for path in test_paths:
+        refs.append({"path": path, "kind": "test", "exists": (target_path / path).is_file()})
+    return refs
+
+
+def _code_snippets(
+    *,
+    target_path: Path,
+    mappings: list[dict[str, object]],
+    test_paths: list[str],
+) -> list[dict[str, str]]:
+    """Lấy source/test snippet để LLM review được nội dung code thật."""
+
+    paths = {
+        str(item.get("source_file") or "").strip().replace("\\", "/")
+        for item in mappings
+        if str(item.get("source_file") or "").strip()
+    }
+    paths.update(test_paths)
+    snippets: list[dict[str, str]] = []
+    total_chars = 0
+    max_total_chars = 12000
+    for rel_path in sorted(paths):
+        if total_chars >= max_total_chars:
+            break
+        file_path = target_path / rel_path
+        if not file_path.is_file():
+            continue
+        content = file_path.read_text(encoding="utf-8", errors="replace")
+        remaining = max_total_chars - total_chars
+        snippet = content[: min(3000, remaining)]
+        total_chars += len(snippet)
+        snippets.append({"path": rel_path, "content": snippet})
+    return snippets

@@ -120,6 +120,8 @@ def fake_completion(prompt: str) -> str:
         return fake_developer_implementation_plan()
     if "Developer Act v1" in prompt:
         return fake_developer_act()
+    if "Code Trace LLM Review v1" in prompt:
+        return fake_code_trace_review()
     return fake_refined_requirement(prompt)
 
 
@@ -442,6 +444,88 @@ public final class DeleteCulturalHeritageService {
                     ],
                 },
                 {
+                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageBoundary.java",
+                    "operation": "create_or_update",
+                    "content": """package com.sdlc.etour.heritage;
+
+public final class DeleteCulturalHeritageBoundary {
+    private final DeleteCulturalHeritageService service;
+    private boolean confirmationShown;
+    private String lastResult = "";
+
+    public DeleteCulturalHeritageBoundary(DeleteCulturalHeritageService service) {
+        this.service = service;
+    }
+
+    public boolean requestDeletion(String heritageId) {
+        showConfirmation();
+        boolean success = service.deleteHeritage(heritageId);
+        showResult(success ? "success" : "failed");
+        return success;
+    }
+
+    public void showConfirmation() {
+        confirmationShown = true;
+    }
+
+    public boolean confirmdeletion(String heritageId) {
+        return requestDeletion(heritageId);
+    }
+
+    public void showResult(String result) {
+        lastResult = result;
+    }
+
+    public boolean wasConfirmationShown() {
+        return confirmationShown;
+    }
+
+    public String lastResult() {
+        return lastResult;
+    }
+}
+""",
+                    "reason": "Implements the approved boundary interaction from the sequence diagram.",
+                    "covered_design_elements": [
+                        "class:DeleteCulturalHeritageBoundary",
+                        "method:DeleteCulturalHeritageBoundary.requestDeletion",
+                        "method:DeleteCulturalHeritageBoundary.showConfirmation",
+                        "method:DeleteCulturalHeritageBoundary.showResult",
+                    ],
+                },
+                {
+                    "path": "src/main/java/com/sdlc/etour/heritage/CulturalHeritageRepository.java",
+                    "operation": "create_or_update",
+                    "content": """package com.sdlc.etour.heritage;
+
+import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+
+public final class CulturalHeritageRepository {
+    private final Map<String, CulturalHeritage> records = new HashMap<>();
+
+    public Optional<CulturalHeritage> findById(String heritageId) {
+        return Optional.ofNullable(records.get(heritageId));
+    }
+
+    public void save(String heritageId, CulturalHeritage heritage) {
+        records.put(heritageId, heritage);
+    }
+
+    public boolean delete(String heritageId) {
+        return records.remove(heritageId) != null;
+    }
+}
+""",
+                    "reason": "Implements repository operations referenced by the approved design.",
+                    "covered_design_elements": [
+                        "class:CulturalHeritageRepository",
+                        "method:CulturalHeritageRepository.findById",
+                        "method:CulturalHeritageRepository.delete",
+                    ],
+                },
+                {
                     "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
                     "operation": "create_or_update",
                     "content": """package com.sdlc.etour.heritage;
@@ -462,6 +546,31 @@ public final class DeleteCulturalHeritageFlowTest {
                     "covered_design_elements": ["sequence:delete_cultural_heritage_main:1"],
                 },
             ],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_code_trace_review() -> str:
+    """LLM review giả lập cho code trace hybrid rule + LLM."""
+
+    return json.dumps(
+        {
+            "ok": True,
+            "confidence": 0.91,
+            "summary": "Fake LLM review accepts the requirement-design-code-test graph for deterministic tests.",
+            "graph_edges": [
+                {
+                    "requirement_ref": "approved_requirement_packet",
+                    "design_element_id": "class:DeleteCulturalHeritageService",
+                    "code_ref": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java#deleteHeritage",
+                    "test_ref": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
+                    "evidence": "Service and flow test references align with the approved delete use case.",
+                }
+            ],
+            "missing_links": [],
+            "risks": [],
         },
         ensure_ascii=False,
         indent=2,

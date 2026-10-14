@@ -11,7 +11,8 @@ waiting_implementation_plan_review
   -> implementation_writing
   -> implementation_written
   -> implementation_testing
-     (Verification Runner -> Validator code trace -> QA/Tester loop)
+     (Verification Runner -> Validator code trace -> Developer repair loop -> QA/Tester loop)
+  -> implementation_traced
   -> code_review_ready
 ```
 
@@ -29,7 +30,8 @@ cancelled
 | `implementation_ready` | Implementation plan đã được duyệt và `developer_work_packet_v1.json` đã sẵn sàng; chưa sửa code. | Harness slice tiếp theo |
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
 | `implementation_written` | Code change đã được apply vào target repo; chưa test/commit/PR. | Harness slice tiếp theo |
-| `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, QA/Tester acceptance/system test và repair loop Developer nếu compile/unit/trace/QA fail. | Harness |
+| `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, Developer repair loop khi compile/unit/trace fail, và QA/Tester acceptance/system test sau khi trace ổn. | Harness |
+| `implementation_traced` | Compile/unit test và Validator code trace hybrid rule + LLM đã pass ổn định sau repair loop nếu có; chưa chạy QA/Tester Agent, chưa commit/PR. | Harness slice tiếp theo |
 | `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -41,7 +43,7 @@ cancelled
 | `developer_work_packet_v1.json` | Gói đầu vào máy đọc được cho Developer.act, lấy từ implementation plan đã duyệt. |
 | `code_change_report_v1.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace pass. |
 | `test_report_v1.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
-| `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test. |
+| `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
 | `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ use case, không thay thế unit test report. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
@@ -85,6 +87,27 @@ pending_checkpoint=null
 allowed_next_actions=[get_status, cancel_run]
 summary_for_user
 ```
+
+Sau Slice 4.4 nếu Validator code trace hybrid rule + LLM pass. Nếu trace fail do
+code/test thiếu, Slice 4.5 phải repair trước và quay lại Verification Runner ->
+Validator. Đây vẫn chưa phải `code_review_ready` vì còn thiếu QA/Tester report,
+commit/Draft PR và sync Phase 4:
+
+```text
+current_phase=implementation_testing
+status=implementation_traced
+latest_artifacts.code_change_report
+latest_artifacts.test_report
+latest_artifacts.requirement_design_code_trace
+quality_reports.implementation_traceability
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
+
+`quality_reports.implementation_traceability` phải ghi `mode=hybrid_rule_llm_code_trace_v1`,
+`llm_required=true`, `llm_review_ok=true` và confidence nếu model trả về. Nếu LLM
+review phát hiện semantic gap, state phải là `blocked` thay vì `implementation_traced`.
 
 Sau Slice 4.3 nếu compile/unit test fail hoặc skipped:
 
@@ -150,6 +173,8 @@ Phase 4 phải `blocked` thay vì giả vờ pass trong các trường hợp:
 - không tạo được branch hoặc không ghi được code;
 - compile/unit test fail và không còn repair path an toàn về Developer;
 - Validator không nối được approved requirement/design với code/unit test;
+- LLM graph review trong Validator trả `ok=false` hoặc phát hiện semantic gap dù
+  static evidence đã pass;
 - Validator phát hiện approved design mâu thuẫn/không triển khai được; trường hợp này phải block hoặc reopen design checkpoint có human approval, không tự sửa design âm thầm trong Phase 4;
 - QA/Tester Agent phát hiện acceptance/system behavior fail quá giới hạn repair;
 - GitHub sync fail toàn bộ.

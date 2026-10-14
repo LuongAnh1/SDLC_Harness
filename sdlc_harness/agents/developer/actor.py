@@ -134,7 +134,7 @@ def _deterministic_developer_act(work_packet: dict[str, object]) -> DeveloperAct
     if not allowed_paths:
         raise HarnessError("developer_act_failed", "DeveloperWorkPacket has no allowed paths.")
     files: list[dict[str, object]] = []
-    for path in allowed_paths[:2]:
+    for path in allowed_paths:
         class_name = path.rsplit("/", 1)[-1].removesuffix(".java")
         if "/src/test/" in f"/{path}":
             content = _fake_test_content(class_name)

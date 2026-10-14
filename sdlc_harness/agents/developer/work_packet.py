@@ -28,8 +28,11 @@ def build_developer_work_packet(
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
 
-    proposed_files = _normalize_proposed_files(structured_plan.get("proposed_files"), run_id=run_id)
     design_mappings = _dict_items(structured_plan.get("design_mappings"))
+    proposed_files = _merge_mapping_targets_into_proposed_files(
+        proposed_files=_normalize_proposed_files(structured_plan.get("proposed_files"), run_id=run_id),
+        design_mappings=design_mappings,
+    )
     enriched_files = [
         _enrich_proposed_file(target_repo_path=target_repo_path, file_item=item, run_id=run_id)
         for item in proposed_files
@@ -140,6 +143,29 @@ def _group_design_mappings_by_file(mappings: list[dict[str, object]]) -> dict[st
             continue
         grouped.setdefault(file_path, []).append(item)
     return grouped
+
+
+def _merge_mapping_targets_into_proposed_files(
+    *,
+    proposed_files: list[dict[str, object]],
+    design_mappings: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    merged = list(proposed_files)
+    seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
+    for mapping in design_mappings:
+        target = str(mapping.get("planned_code_target") or "")
+        file_path = _target_file_from_mapping(target)
+        if not file_path or file_path in seen:
+            continue
+        seen.add(file_path)
+        merged.append(
+            {
+                "path": file_path,
+                "operation": "create_or_update",
+                "purpose": f"Implement mapped design element `{mapping.get('design_element_id') or ''}`.",
+            }
+        )
+    return merged
 
 
 def _target_file_from_mapping(target: str) -> str:

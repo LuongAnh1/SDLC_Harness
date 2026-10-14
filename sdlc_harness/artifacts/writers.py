@@ -395,6 +395,23 @@ def write_phase4_test_report(
     return store.relative(path)
 
 
+def write_phase4_code_trace_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi JSON trace requirement/design -> code/unit test cho Phase 4."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"requirement_design_code_trace_{suffix}.json"
+    path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 

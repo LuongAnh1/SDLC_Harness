@@ -79,20 +79,47 @@ skipped. Đây là test runner của repo target, không phải AI QA/Tester.
 
 Mục đích: chứng minh requirement/design đã đi tới code/test.
 
-- [ ] Sinh `requirement_design_code_trace_v1.json`.
-- [ ] Trace requirement -> design element -> source file/class/function.
-- [ ] Trace requirement -> test file/case nếu có.
-- [ ] Missing link được ghi riêng.
+- [x] Sinh `requirement_design_code_trace_v1.json`.
+- [x] Trace requirement -> design element -> source file/class/function.
+- [x] Trace requirement -> test file/case nếu có.
+- [x] Bắt buộc gọi LLM/DeepSeek review graph requirement -> design -> code -> test
+  sau static evidence.
+- [x] Trace report ghi `mode=hybrid_rule_llm_code_trace_v1`,
+  `llm_required=true` và `llm_review`.
+- [x] Nếu LLM review phát hiện semantic gap, workflow block dù static evidence pass.
+- [x] Quyết định policy gửi raw code/test snippet cho LLM: project owner đã xác
+  nhận cho phép Validator gửi snippet giới hạn sang DeepSeek để review.
+- [x] Missing link được ghi riêng.
 - [ ] Nếu trace fail vì code/unit test thiếu so với approved design, feedback về
   Developer trong giới hạn repair.
 - [ ] Nếu trace fail vì approved design mâu thuẫn/không triển khai được,
   state=`blocked` hoặc reopen design checkpoint có human approval; không tự sửa
   design trong Phase 4.
 
-## 6.1 QA/Tester Agent Loop
+## 6.1 Validator -> Developer Repair Loop
 
-Mục đích: kiểm acceptance/system behavior từ use case sau khi compile/unit và
-trace baseline đã ổn. Đây mới là vai Tester/QA gần thực tế doanh nghiệp.
+Mục đích: khi Validator lead phát hiện code/test thiếu link so với approved
+design, workflow phải giao feedback lại Developer sửa trước khi chạy QA/Tester.
+
+- [ ] Chuyển `missing_links`, `llm_review.summary`, `llm_review.risks` và trace
+  artifact thành feedback máy đọc được cho Developer.
+- [ ] Developer repair code/test trong `allowed_paths`, không tự sửa requirement
+  hoặc approved design.
+- [ ] Mỗi vòng repair ghi `code_change_report_v{n}`, `test_report_v{n}` và
+  `requirement_design_code_trace_v{n}` riêng; không ghi đè artifact cũ.
+- [ ] Sau Developer repair, workflow chạy lại Verification Runner.
+- [ ] Nếu Verification Runner pass, workflow chạy lại Validator code trace + LLM
+  review trước khi cho phép sang QA/Tester.
+- [ ] Repair loop tôn trọng giới hạn cấu hình; hết lượt vẫn fail thì
+  state=`blocked` với `last_error` rõ.
+- [ ] Nếu Validator xác định lỗi nằm ở approved design/requirement, workflow
+  block hoặc reopen checkpoint có human approval, không ép Developer vá code.
+
+## 6.2 QA/Tester Agent Loop
+
+Mục đích: kiểm acceptance/system behavior từ use case sau khi compile/unit,
+Validator trace và repair loop đã pass ổn định. Đây mới là vai Tester/QA gần
+thực tế doanh nghiệp.
 
 - [ ] QA/Tester Agent đọc use case/requirement packet đã duyệt và code/test
   summary do Validator bảo vệ.
@@ -125,11 +152,13 @@ Verification Runner, Validator hoặc QA/Tester.
 - [x] Ghi state `implementation_writing`.
 - [x] Ghi state trung gian `implementation_written` sau khi apply code nhưng chưa test/commit/PR.
 - [x] Ghi state `implementation_testing`.
+- [x] Ghi state trung gian `implementation_traced` sau khi Validator code trace pass.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
-- [ ] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
+- [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
 - [ ] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
-- [ ] `quality_reports` có traceability và QA acceptance summary.
+- [x] `quality_reports` có traceability summary.
+- [ ] `quality_reports` có QA acceptance summary.
 - [ ] `pending_checkpoint.type=code_review`.
 - [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
@@ -148,8 +177,9 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test branch/commit/PR payload formatting.
 - [ ] Unit test PR description chứa đủ link/context.
 - [x] Unit test test report `passed/failed/skipped`.
-- [ ] Unit test trace requirement-design-code-test.
-- [ ] Unit test blocked khi trace fail.
+- [x] Unit test trace requirement-design-code-test.
+- [x] Unit test blocked khi trace fail.
+- [x] Unit test blocked khi LLM code-trace review phát hiện semantic gap.
 - [ ] Unit test QA/Tester report `passed/failed/skipped`.
 - [ ] Unit test blocked khi QA fail quá giới hạn repair.
 - [ ] Unit test sync mock/local GitHub report.
