@@ -137,9 +137,10 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [ ] Nếu compile/unit hoặc trace fail vì code thiếu, feedback quay về Developer trong giới hạn repair.
 - [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
 - [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace baseline ổn.
+- [ ] Sinh `qa_test_report_v1.md` trước khi mở checkpoint code review.
 - [ ] Tạo Draft PR thật trên GitHub.
 - [ ] Sync PR/test/trace summary về Jira và Confluence.
-- [ ] State chuyển sang `code_review_ready`.
+- [ ] State chuyển sang `code_review_ready` chỉ sau khi unit/trace/QA pass, Draft PR được tạo và sync Phase 4 xong.
 - [ ] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator -> Developer/Verification Runner/Validator/QA Tester trong phạm vi một use case.
 
 ## Phase 5 - Sửa Tại Checkpoint

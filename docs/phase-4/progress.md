@@ -109,3 +109,28 @@ Việc tiếp theo:
 
 - Slice 4.4: Validator kiểm requirement/design -> code/unit test trace, hoặc
   chuẩn bị Developer repair loop nếu muốn xử lý fail trước khi trace.
+
+## 2026-10-14 - Docs Sync: QA/Tester Là Gate Trước Code Review
+
+Mục tiêu của lượt đồng bộ docs này là sửa điểm nhập nhằng sau Slice 4.3:
+compile/unit pass mới chứng minh code chạy được, chưa chứng minh code đúng nghiệp
+vụ ở mức acceptance/system behavior.
+
+Đã chốt lại trong tài liệu:
+
+- `Verification Runner` chỉ chạy compile/unit test của target repo và sinh
+  `test_report_v1.md`.
+- `Validator` kiểm approved requirement/design -> code/unit test trace và sinh
+  `requirement_design_code_trace_v1.json`.
+- `QA/Tester Agent` là gate sau Validator: kiểm acceptance/system behavior từ use
+  case và sinh `qa_test_report_v1.md`.
+- `code_review_ready` chỉ được ghi sau khi có test report, trace report, QA report,
+  commit/Draft PR và sync Phase 4.
+- `implementation_testing` hiện là umbrella state cho các sub-step test/trace/QA/repair;
+  chưa tách state code mới trong lượt docs-only này.
+
+Việc tiếp theo:
+
+- Slice 4.4: triển khai Validator code trace.
+- Slice 4.5: triển khai QA/Tester Agent report và repair loop tối thiểu.
+- Sau đó mới đến commit/Draft PR/sync Phase 4.

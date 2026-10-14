@@ -145,8 +145,9 @@ Kết quả mong muốn:
 - Có `code_change_report_v1.md`.
 - Có `test_report_v1.md`.
 - Có `requirement_design_code_trace_v1.json`.
+- Có `qa_test_report_v1.md` cho acceptance/system behavior.
 - Có `tool_sync_report_v4.json`.
-- Niko báo được PR link, test summary và checkpoint code review.
+- Niko báo được PR link, test summary, trace summary, QA summary và checkpoint code review.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

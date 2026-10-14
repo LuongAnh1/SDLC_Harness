@@ -146,6 +146,7 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/code_change_report_v1.md
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json
+.runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 .runtime/runs/<run_id>/sync/tool_sync_report_v4.json
 ```
 
@@ -157,15 +158,18 @@ status=code_review_ready
 latest_artifacts.code_change_report
 latest_artifacts.test_report
 latest_artifacts.requirement_design_code_trace
+latest_artifacts.qa_test_report
 quality_reports.implementation_traceability
+quality_reports.qa_acceptance
 last_sync.phase=code_review
 pending_checkpoint.type=code_review
 allowed_next_actions=[approve_checkpoint, request_change, cancel_run, get_status]
 summary_for_user
 ```
 
-Checkpoint `code_review` nghĩa là human cần review PR/code/test report. Nó không
-có nghĩa PR đã được merge.
+Checkpoint `code_review` nghĩa là human cần review PR/code/test/trace/QA report.
+Nó không có nghĩa PR đã được merge. Nếu thiếu `qa_test_report_v1.md` hoặc QA chưa
+pass/được block rõ ràng, workflow chưa được coi là `code_review_ready`.
 
 ## Không Làm Trong Phase 4
 

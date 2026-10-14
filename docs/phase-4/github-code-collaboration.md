@@ -74,6 +74,7 @@ PR description phải có:
 - danh sách file thay đổi;
 - traceability summary: requirement nào map tới file/class/function/test nào;
 - test/validation đã chạy;
+- QA/acceptance/system behavior summary đã chạy;
 - known limitations hoặc skipped tests.
 
 Nếu GitHub API/CLI không tạo được PR, Phase 4 có thể ghi local git report ở lát
@@ -86,7 +87,7 @@ Sau khi có PR:
 
 - Jira nhận comment ngắn gồm PR link, branch, test summary và trạng thái review.
 - Confluence nhận checkpoint đầy đủ gồm implementation plan, code change report,
-  traceability summary và test report.
+  traceability summary, test report và QA report.
 - `tool_sync_report_v4.json` ghi target GitHub/Jira/Confluence và URL tương ứng.
 
 Sync phải idempotent như Phase 1/2: nếu đã có external id do harness tạo, re-sync

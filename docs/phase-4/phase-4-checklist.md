@@ -97,6 +97,7 @@ trace baseline đã ổn. Đây mới là vai Tester/QA gần thực tế doanh 
 - [ ] QA/Tester Agent đọc use case/requirement packet đã duyệt và code/test
   summary do Validator bảo vệ.
 - [ ] QA/Tester Agent sinh hoặc chạy acceptance/system-level scenarios.
+- [ ] Sinh `qa_test_report_v1.md` với `passed/failed/skipped` và evidence rõ.
 - [ ] QA/Tester Agent không sửa code trực tiếp; chỉ ghi failure evidence.
 - [ ] Nếu QA fail và còn vòng repair, feedback quay về Developer.
 - [ ] Sau Developer repair, workflow chạy lại Verification Runner -> Validator ->
@@ -127,6 +128,8 @@ Verification Runner, Validator hoặc QA/Tester.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [ ] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
+- [ ] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
+- [ ] `quality_reports` có traceability và QA acceptance summary.
 - [ ] `pending_checkpoint.type=code_review`.
 - [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
@@ -147,6 +150,8 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [x] Unit test test report `passed/failed/skipped`.
 - [ ] Unit test trace requirement-design-code-test.
 - [ ] Unit test blocked khi trace fail.
+- [ ] Unit test QA/Tester report `passed/failed/skipped`.
+- [ ] Unit test blocked khi QA fail quá giới hạn repair.
 - [ ] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
