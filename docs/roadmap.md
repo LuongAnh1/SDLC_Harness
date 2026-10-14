@@ -130,7 +130,7 @@ approve_checkpoint(run_id)
 -> Verification Runner chạy compile/unit test hoặc ghi skipped rõ ràng
 -> nếu compile/unit fail và còn vòng repair: feedback về Developer, chạy lại runner
 -> Validator kiểm approved requirement -> approved design -> code -> unit test trace bằng static evidence + LLM graph review bắt buộc
--> nếu code/test thiếu so với design: feedback về Developer, chạy lại runner -> Validator trong giới hạn cấu hình
+-> nếu code/test thiếu so với design: refresh developer_work_packet_v{n}, feedback về Developer, chạy lại runner -> Validator trong giới hạn cấu hình
 -> nếu design đã duyệt mâu thuẫn/không triển khai được: blocked/reopen design có human approval
 -> QA/Tester Agent kiểm acceptance/system behavior từ use case
 -> nếu QA fail và còn vòng repair: feedback về Developer, chạy lại runner -> Validator -> QA
@@ -149,7 +149,9 @@ Kết quả mong muốn:
 - Có `requirement_design_code_trace_v1.json` với `mode=hybrid_rule_llm_code_trace_v1`
   và `llm_review`.
 - Có `implementation_repair_feedback_v1.json` khi trace fail vì code/test thiếu.
-- Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy.
+- Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy;
+  mỗi vòng repair refresh `developer_work_packet_v{n}`, ghi artifact v2/v3, chạy
+  lại Verification Runner rồi Validator.
 - Có `qa_test_report_v1.md` cho acceptance/system behavior.
 - Có `tool_sync_report_v4.json`.
 - Niko báo được PR link, test summary, trace summary, QA summary và checkpoint code review.
@@ -283,6 +285,11 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > `implementation_traced` khi static evidence + LLM graph review cùng pass.
 > Cập nhật 2026-10-14: Slice 4.5 đã thêm `implementation_repair_needed` và
 > `implementation_repair_feedback_v1.json` khi trace fail do code/test thiếu.
-> Slice kế tiếp mới dùng feedback đó để Developer repair code/test; QA/Tester
-> Agent đứng sau repair loop khi compile/unit + trace đã pass ổn định.
-> Commit/Draft PR và sync Phase 4 vẫn là các slice sau.
+> Slice 4.6 đã nối `continue-run` từ state đó sang Developer.repair một vòng:
+> repair trong `allowed_paths`, ghi `code_change_report_v2`/`test_report_v2`/
+> `requirement_design_code_trace_v2`, chạy lại Verification Runner rồi Validator,
+> và tôn trọng `SDLC_IMPLEMENTATION_REPAIR_LIMIT`. QA/Tester Agent, commit/Draft
+> PR và sync Phase 4 vẫn là các slice sau.
+> Cập nhật sau live DeepSeek 2026-10-14: repair loop đã refresh
+> `developer_work_packet_v{n}` từ target repo trước khi gọi Developer.repair để
+> tránh stale `current_files` từ packet v1.

@@ -222,8 +222,9 @@ slice sau mà không phải đoán từ `blocked` chung chung.
   không phải lỗi hệ thống.
 - Nếu trace fail vì input graph/artifact nền không đủ điều kiện repair, workflow
   vẫn `blocked`.
-- `continue-run` từ `implementation_repair_needed` trả
-  `implementation_repair_not_implemented` để tránh hiểu nhầm là đã có auto repair.
+- Tại thời điểm Slice 4.5, `continue-run` từ `implementation_repair_needed` còn
+  trả `implementation_repair_not_implemented` để tránh hiểu nhầm là đã có auto
+  repair. Slice 4.6 sau đó đã thay trạng thái này bằng vòng Developer.repair thật.
 
 Chưa làm trong slice này:
 
@@ -243,3 +244,232 @@ Việc tiếp theo:
 - Slice 4.6: dùng `implementation_repair_feedback_v1.json` làm input để Developer
   repair code/test trong `allowed_paths`, sau đó chạy lại Verification Runner ->
   Validator trong giới hạn cấu hình.
+
+## 2026-10-14 - Slice 4.6: Developer Repair Loop V1
+
+Mục tiêu của slice này là biến `implementation_repair_needed` thành một vòng
+repair thật, nhưng vẫn giữ phạm vi nhỏ: chỉ repair code/test theo feedback của
+Validator, chưa chạy QA/Tester Agent, chưa commit và chưa mở Draft PR.
+
+Đã làm:
+
+- Thêm cấu hình `SDLC_IMPLEMENTATION_REPAIR_LIMIT` và CLI
+  `--implementation-repair-limit`.
+- Thêm `DeveloperActAgent.repair(...)` với prompt `Developer Repair v1`.
+- `continue-run` từ `implementation_repair_needed` đọc
+  `developer_work_packet_v1.json` và `implementation_repair_feedback_v{n}`.
+- Workflow kiểm số vòng repair trước khi gọi Developer.
+- Developer.repair chỉ được apply file trong `output_contract.allowed_paths`.
+- Mỗi vòng repair ghi artifact version mới:
+  `code_change_report_v2.md`, `test_report_v2.md`,
+  `requirement_design_code_trace_v2.json` nếu là vòng đầu.
+- Sau repair, workflow chạy lại Verification Runner.
+- Nếu Verification Runner pass, workflow chạy lại Validator code trace + LLM
+  review.
+- Nếu trace pass, state quay về `implementation_traced` và
+  `quality_reports.implementation_repair.needed=false`.
+- Nếu trace vẫn repairable và còn lượt, workflow ghi feedback version mới rồi
+  giữ `implementation_repair_needed`.
+- Nếu hết lượt hoặc repair/test/trace không thể tiếp tục an toàn, workflow
+  `blocked` với `last_error` rõ.
+- Report Markdown v2/v3 hiển thị đúng title version và metadata repair
+  iteration/feedback.
+
+Chưa làm trong slice này:
+
+- Chưa tạo feedback loop cho compile/unit fail xảy ra trước khi có trace
+  feedback.
+- Chưa chạy QA/Tester Agent acceptance/system test.
+- Chưa commit target repo, chưa mở Draft PR và chưa sync Phase 4 lên GitHub/Jira/
+  Confluence.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: 26 passed.
+- `rtk proxy python -m pytest tests/test_phase1.py tests/test_phase2.py tests/test_phase3.py tests/test_phase4.py -q`: 109 passed.
+
+Việc tiếp theo:
+
+- Slice 4.7: triển khai QA/Tester Agent sau khi compile/unit + Validator trace
+  đã pass ổn định.
+- Sau QA mới đến commit/Draft PR/sync Phase 4.
+
+## 2026-10-14 - Slice 4.6.1: Refresh DeveloperWorkPacket Trước Repair
+
+Live test DeepSeek thật cho thấy Developer.repair đang dùng
+`developer_work_packet_v1.json`, tức snapshot được tạo trước khi Developer.act ghi
+code. Vì vậy nhiều file trong `current_files` vẫn rỗng hoặc là nội dung cũ, dù
+target repo đã có code mới. Điều này làm Developer dễ rewrite theo bối cảnh cũ và
+repair loop khó hội tụ.
+
+Đã làm:
+
+- Thêm refresh packet trước mỗi vòng Developer.repair.
+- Mỗi vòng repair ghi `developer_work_packet_v{n}.json` mới, trong đó
+  `current_files` và `proposed_files.current_content` được đọc lại từ target repo.
+- `latest_artifacts.developer_work_packet` trỏ tới packet mới nhất sau refresh.
+- `code_change_report_v{n}.md` và `test_report_v{n}.md` ghi rõ packet repair đã dùng.
+- Nếu Developer.repair có raw LLM response, workflow lưu
+  `developer_repair_raw_response_v{n}.txt` để debug.
+- Bổ sung regression test bắt trường hợp stale snapshot: packet gốc còn nội dung cũ,
+  còn packet repair version mới phải thấy nội dung thật sau Developer.act.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: 28 passed.
+- `rtk proxy python -m pytest tests/test_phase1.py tests/test_phase2.py tests/test_phase3.py tests/test_phase4.py -q`: 111 passed.
+
+Ghi chú live test:
+
+- Một lần chạy copy runtime với DeepSeek thật đã chứng minh repair sửa đúng feedback
+  semantic, nhưng bị block vì Verification Runner không thấy `javac` trong môi
+  trường script. Đây là vấn đề môi trường verification riêng, không phải bằng chứng
+  repair loop đã/không hội tụ.
+
+## 2026-10-14 - Slice 4.6.2: Java Env Auto-Detect Cho Verification Runner
+
+Live test kế tiếp xác nhận máy đã có JDK tại
+`C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot`, nhưng session chạy
+workflow vẫn ưu tiên Java 8 JRE cũ và không có `JAVA_HOME`, nên `scripts/test.ps1`
+không tìm thấy `javac`.
+
+Đã làm:
+
+- `VerificationRunner` tự dựng env cho subprocess test thay vì dùng nguyên env
+  hiện tại.
+- Runner ưu tiên `SDLC_JAVA_HOME`, sau đó `JAVA_HOME`, sau đó dò các thư mục JDK
+  phổ biến trên Windows như Eclipse Adoptium, Java, Microsoft, BellSoft, Zulu và
+  Amazon Corretto.
+- Khi tìm thấy JDK, runner tự prepend `<JDK>\bin` vào `PATH` và set `JAVA_HOME`
+  cho test command.
+- Bổ sung regression test mô phỏng terminal không có `javac` trong `PATH` nhưng có
+  `SDLC_JAVA_HOME`; Verification Runner phải chạy pass thay vì báo skipped.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: 29 passed.
+
+Kiểm tra máy hiện tại:
+
+- `_verification_env()` tự tìm thấy
+  `C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot\bin\javac.EXE`.
+- Chạy lại Verification Runner trực tiếp trên target copy của live repair trước đó
+  cho kết quả `status=passed`, stdout `All tests passed`; lỗi `test_skipped`
+  không còn tái hiện.
+
+## 2026-10-14 - Live Test Runtime Thật: Repair Limit 5
+
+Chạy trên runtime thật `run_20261013_160421_f661babf` với `--llm-mode deepseek`
+và `--implementation-repair-limit 5`.
+
+Kết quả:
+
+- Vòng code trace đầu tiên chuyển state từ `implementation_tested` sang
+  `implementation_repair_needed`.
+- Developer.repair chạy đủ 5 iteration và tạo các artifact đến version v6:
+  `developer_work_packet_v6.json`, `code_change_report_v6.md`,
+  `test_report_v6.md`, `requirement_design_code_trace_v6.json`,
+  `developer_repair_raw_response_v6.txt`.
+- `test_report_v6.md` cho thấy Verification Runner đã pass:
+  `Status: passed`, stdout `All tests passed`.
+- Workflow kết thúc `blocked` với `implementation_repair_limit_exceeded` vì
+  Validator code trace vẫn báo 7 missing link.
+
+Nhận định:
+
+- Lỗi môi trường `javac` đã được xử lý.
+- Vấn đề còn lại không giống compile/unit failure. Validator LLM liên tục nói
+  controller snippet bị truncate, test evidence không hiển thị đủ, và một số
+  mapping sequence đang trỏ vào symbol yếu/sai như `#true`, `#false`,
+  `notifyError/notifySuccess` ở sai class.
+- Trước khi tiếp tục tăng repair loop, nên sửa tầng Validator evidence:
+  đảm bảo LLM review thấy đầy đủ nội dung file liên quan và làm sạch mapping
+  sequence side-effect/boolean response để tránh Developer sửa vòng quanh.
+
+## 2026-10-14 - Slice 4.6.3: Sửa Validator Evidence/Mapping
+
+Sau live test repair limit 5, tầng Validator được cập nhật để phân biệt lỗi
+code/test thật với lỗi evidence hoặc trace mapping yếu.
+
+Đã làm:
+
+- Tăng evidence budget cho `CodeTraceValidator` và ưu tiên gửi full content của
+  controller, test chính, service/repository liên quan.
+- `llm_review.review_context` ghi metadata evidence: số file, tổng chars, danh
+  sách path, `chars_sent/chars_total`, và `content_truncated`.
+- Normalize sequence mapping yếu:
+  - `#true/#false` được xem là boolean branch evidence, không phải symbol code.
+  - `notifySuccess/notifyError` bị map nhầm qua `ETOURConnectionService` được
+    normalize về `NotificationService`.
+  - display-message side effect được đánh dấu là semantic side effect thay vì yêu
+    cầu method `display*Message` literal.
+- Prompt Code Trace LLM Review yêu cầu model không báo truncated nếu metadata cho
+  biết file đã gửi full, và dùng `trace_mapping_issue`/`evidence_incomplete` cho
+  lỗi thuộc Validator/trace graph.
+- Workflow Phase 4 không đưa `trace_mapping_issue` hoặc `evidence_incomplete` vào
+  Developer.repair; thay vào đó block bằng `validator_evidence_or_mapping_issue`.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: 31 passed.
+- `rtk proxy python -m pytest tests/test_phase1.py tests/test_phase2.py tests/test_phase3.py tests/test_phase4.py -q`: 114 passed.
+
+Kiểm tra DeepSeek thật không ghi state:
+
+- Chạy trực tiếp `CodeTraceValidator` trên target repo hiện tại với
+  `developer_work_packet_v6.json`.
+- `review_context.code_snippets_truncated=false`, 12 file được gửi full content,
+  tổng 37221 chars.
+- Lỗi "controller snippet truncated" không còn xuất hiện. Validator còn báo 3
+  semantic gaps cụ thể hơn: auth check trong `confirmDeletion`, delete theo id,
+  và test logout. Đây là tín hiệu code/test hoặc requirement-design policy thật,
+  không còn là lỗi evidence bị cắt.
+
+## 2026-10-14 - Slice 4.6.4: Revalidate/Resume Run Bị Block Do Repair Limit
+
+Mục tiêu của slice này là xử lý trường hợp live run đã `blocked` vì
+`implementation_repair_limit_exceeded`, nhưng sau đó Validator/evidence logic đã
+được sửa. Trước slice này, `continue-run --implementation-repair-limit 7` vẫn bị
+chặn bằng `run_not_continuable` vì state đã là `blocked`.
+
+Đã làm:
+
+- Thêm CLI `revalidate-implementation`.
+- Lệnh này chỉ cho chạy khi `status=blocked` và
+  `last_error.error_code=implementation_repair_limit_exceeded`.
+- Revalidate refresh `DeveloperWorkPacket` từ target repo hiện tại, chạy lại
+  Verification Runner, chạy lại Validator code trace, rồi ghi artifact version mới.
+- Revalidate không tăng `implementation_repair_iterations` vì chưa có vòng
+  Developer.repair mới.
+- Nếu trace pass, state chuyển `implementation_traced`.
+- Nếu trace còn repairable và limit mới còn lượt, state chuyển lại
+  `implementation_repair_needed` với feedback mới.
+- Nếu trace vẫn repairable nhưng limit mới không còn lượt, state giữ `blocked`
+  và `allowed_next_actions` có `revalidate_implementation`.
+- Mỗi vòng repair sau revalidate dùng `_next_phase4_artifact_version(...)` để
+  không ghi đè artifact cũ.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: 35 passed.
+
+Live test runtime thật:
+
+- Chạy `revalidate-implementation` trên `run_20261013_160421_f661babf` với
+  `--llm-mode deepseek --implementation-repair-limit 7`.
+- Run chuyển từ `blocked` sang `implementation_repair_needed`.
+- Iteration vẫn là `5`, artifact mới là `developer_work_packet_v7.json`,
+  `test_report_v7.md`, `requirement_design_code_trace_v7.json` và
+  `implementation_repair_feedback_v7.json`.
+- Validator sau khi revalidate còn 3 missing links rõ hơn, tập trung vào path
+  duplicate submission chưa gọi `notifyError("Operation already in progress")`.
+- Chạy tiếp đúng một vòng `continue-run` với limit 7.
+- Developer.repair iteration 6 pass Verification Runner và Validator code trace:
+  `status=implementation_traced`, `last_error=null`, `missing_count=0`,
+  `developer_work_packet_v8.json`, `code_change_report_v8.md`,
+  `test_report_v8.md`, `requirement_design_code_trace_v8.json`.
+
+Việc tiếp theo:
+
+- Phase 4 vẫn chưa khóa vì chưa có QA/Tester Agent, chưa commit target repo và
+  chưa mở Draft PR.

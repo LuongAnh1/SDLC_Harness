@@ -138,10 +138,14 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
   LLM phát hiện semantic gap do code/test thì dừng ở `implementation_repair_needed`
   dù rule-based pass.
 - [x] Nếu trace fail vì code/test thiếu, ghi feedback máy đọc được cho Developer
-  trước; repair loop thật sẽ dùng feedback này ở slice sau.
-- [ ] Nếu compile/unit fail hoặc trace repair feedback đã có, Developer repair trong
+  trước; repair loop thật dùng feedback này ở Slice 4.6.
+- [x] Nếu trace repair feedback đã có, Developer repair trong `allowed_paths` theo
   giới hạn cấu hình; sau repair phải chạy lại Verification Runner -> Validator
   trước khi QA/Tester được chạy.
+- [x] Trước mỗi vòng Developer repair, refresh `developer_work_packet_v{n}` từ target
+  repo hiện tại để Developer không dùng stale `current_files`.
+- [ ] Nếu compile/unit fail trước khi có trace feedback, feedback quay về Developer
+  thay vì block ngay.
 - [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
 - [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace
   baseline đã pass ổn định sau repair loop nếu có.

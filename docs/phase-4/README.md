@@ -87,14 +87,14 @@ thể bỏ sót. Đây là điểm nâng cấp của SDLC_Harness so với Trace
 project owner, Validator được phép gửi source/test snippet giới hạn sang
 LLM/DeepSeek để review code trước khi human review.
 
-Slice này chưa chạy QA/Tester Agent, chưa tự repair code khi trace fail, chưa
-commit và chưa mở PR.
+Slice này chưa chạy QA/Tester Agent, chưa commit và chưa mở PR.
 
-Nếu Validator phát hiện missing link/semantic gap do code, Slice 4.5 hiện chuyển
+Nếu Validator phát hiện missing link/semantic gap do code/test, Slice 4.5 chuyển
 run sang `implementation_repair_needed` và ghi
-`implementation_repair_feedback_v1.json`. Vòng Developer tự sửa code/test từ
-feedback này vẫn chưa được triển khai; QA/Tester Agent chỉ được chạy sau khi
-repair loop thật làm compile/unit test và Validator trace cùng pass ổn định.
+`implementation_repair_feedback_v1.json`. Slice 4.6 dùng feedback đó để
+Developer sửa code/test một vòng, rồi chạy lại Verification Runner và Validator.
+QA/Tester Agent chỉ được chạy sau khi repair loop làm compile/unit test và
+Validator trace cùng pass ổn định.
 
 ## Slice 4.5 Đã Chốt
 
@@ -113,9 +113,66 @@ continue-run(run_id)
 Artifact mới là `implementation_repair_feedback_v1.json`. Nó gom
 `missing_links`, `llm_review.summary`, `llm_review.risks`, trace artifact, repo
 branch và `allowed_paths` để slice sau giao lại cho Developer sửa code/test.
-Slice này chưa gọi Developer repair; nếu chạy `continue-run` tiếp từ
-`implementation_repair_needed`, CLI trả lỗi rõ
-`implementation_repair_not_implemented`.
+Slice này chỉ chuẩn hóa feedback. Slice 4.6 mới gọi Developer repair từ
+`implementation_repair_needed`.
+
+## Slice 4.6 Đã Chốt
+
+Slice 4.6 chạy tiếp từ `implementation_repair_needed`:
+
+```text
+continue-run(run_id)
+-> đọc developer_work_packet_v1.json
+-> đọc implementation_repair_feedback_v{n}
+-> kiểm số vòng repair bằng SDLC_IMPLEMENTATION_REPAIR_LIMIT
+-> refresh code/test snapshot từ target repo và ghi developer_work_packet_v{n+1}.json
+-> Developer.repair sửa code/test trong allowed_paths
+-> ghi code_change_report_v{n+1}.md
+-> chạy lại Verification Runner và ghi test_report_v{n+1}.md
+-> nếu test pass: chạy lại Validator code trace + LLM review
+-> nếu trace pass: status=implementation_traced
+-> nếu trace vẫn thiếu link repairable và còn lượt: ghi feedback version mới
+-> nếu hết lượt hoặc lỗi không repair được: status=blocked với last_error rõ
+```
+
+Slice này không sửa requirement, design hoặc implementation plan. Mỗi vòng repair
+chỉ xử lý code/test trong `output_contract.allowed_paths`, không ghi đè artifact
+cũ và không tự commit/mở PR. `SDLC_IMPLEMENTATION_REPAIR_LIMIT` hoặc CLI
+`--implementation-repair-limit` điều khiển số vòng Developer.repair.
+
+Từ bản sửa sau live test DeepSeek ngày 2026-10-14, mỗi vòng repair phải refresh
+`DeveloperWorkPacket.current_files` từ target repo thật trước khi gọi
+Developer.repair. `developer_work_packet_v1.json` vẫn là packet gốc sau khi duyệt
+implementation plan; các vòng repair dùng `developer_work_packet_v2.json`,
+`developer_work_packet_v3.json`, ... để tránh Developer sửa dựa trên snapshot cũ.
+Nếu Developer.repair gọi LLM thật và có raw response, workflow lưu thêm
+`developer_repair_raw_response_v{n}.txt` để debug parse/logic khi repair khó hội tụ.
+
+Khi repair pass, `quality_reports.implementation_repair.needed=false` và
+`implementation_repair_iterations` ghi số vòng đã chạy. Khi Verification Runner
+fail sau repair, workflow block với `test_failed`/`test_skipped`; khi Validator
+vẫn fail sau khi hết lượt, workflow block với
+`implementation_repair_limit_exceeded`.
+
+Nếu run đã `blocked` vì `implementation_repair_limit_exceeded` nhưng sau đó mình
+sửa Validator/evidence logic, không sửa tay `state.json`. Dùng lệnh:
+
+```bash
+rtk python -m sdlc_harness.cli revalidate-implementation \
+  --run-id <run_id> \
+  --llm-mode deepseek \
+  --implementation-repair-limit <new_limit>
+```
+
+Lệnh này không gọi Developer sửa code ngay. Nó refresh `DeveloperWorkPacket` từ
+target repo hiện tại, chạy lại Verification Runner, chạy lại Validator code trace,
+rồi:
+
+- nếu trace pass: chuyển về `implementation_traced`;
+- nếu còn gap repairable và limit mới còn lượt: ghi feedback version mới và chuyển
+  về `implementation_repair_needed`;
+- nếu vẫn hết lượt hoặc lỗi không repair được ở code/test: giữ `blocked` với
+  `last_error` rõ.
 
 ## Luồng Phase 4
 
@@ -134,7 +191,7 @@ approve_checkpoint(run_id)
 -> Validator kiểm requirement -> design -> code -> test trace bằng static evidence + LLM graph review
 -> ghi requirement_design_code_trace_v1.json
 -> nếu code/unit test thiếu so với approved design: ghi implementation_repair_feedback_v1.json và dừng ở implementation_repair_needed
--> slice sau mới dùng feedback đó để Developer sửa code/test rồi lặp Verification Runner -> Validator trong giới hạn cấu hình
+-> dùng feedback đó để Developer sửa code/test rồi lặp Verification Runner -> Validator trong giới hạn cấu hình
 -> nếu approved design mâu thuẫn hoặc không triển khai được: blocked/reopen design có human approval, không tự sửa design âm thầm
 -> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã pass ổn định
 -> nếu QA fail: feedback về Developer, rồi chạy lại unit test -> Validator -> QA trong giới hạn cấu hình
@@ -208,6 +265,7 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 
 ```text
 .runtime/runs/<run_id>/artifacts/developer_work_packet_v1.json
+.runtime/runs/<run_id>/artifacts/developer_work_packet_v{n}.json
 .runtime/runs/<run_id>/artifacts/code_change_report_v1.md
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json

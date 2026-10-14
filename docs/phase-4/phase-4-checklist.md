@@ -92,7 +92,13 @@ Mục đích: chứng minh requirement/design đã đi tới code/test.
   nhận cho phép Validator gửi snippet giới hạn sang DeepSeek để review.
 - [x] Missing link được ghi riêng.
 - [x] Nếu trace fail vì code/unit test thiếu so với approved design, ghi feedback
-  máy đọc được cho Developer; vòng repair thật dùng feedback này sẽ làm ở slice sau.
+  máy đọc được cho Developer; vòng repair thật dùng feedback này chạy ở Slice 4.6.
+- [x] Validator evidence gửi full content cho controller/test chính khi còn trong
+  budget, và ghi metadata `content_truncated/chars_sent/chars_total` để LLM không
+  nhầm evidence bị cắt.
+- [x] Boolean response và notification/display side-effect trong sequence diagram
+  được normalize thành evidence semantic, không ép Developer tạo literal symbol
+  như `#true`, `#false` hoặc `display*Message`.
 - [ ] Nếu trace fail vì approved design mâu thuẫn/không triển khai được,
   state=`blocked` hoặc reopen design checkpoint có human approval; không tự sửa
   design trong Phase 4.
@@ -106,19 +112,33 @@ design, workflow phải giao feedback lại Developer sửa trước khi chạy 
   artifact thành feedback máy đọc được cho Developer.
 - [x] Khi code trace fail nhưng lỗi nằm ở code/test, state chuyển thành
   `implementation_repair_needed` và ghi `implementation_repair_feedback_v1.json`.
-- [x] `continue-run` từ `implementation_repair_needed` trả lỗi rõ
-  `implementation_repair_not_implemented` cho tới khi repair loop thật được triển khai.
-- [ ] Developer repair code/test trong `allowed_paths`, không tự sửa requirement
+- [x] `continue-run` từ `implementation_repair_needed` gọi Developer.repair một vòng
+  thay vì trả `implementation_repair_not_implemented`.
+- [x] Developer repair code/test trong `allowed_paths`, không tự sửa requirement
   hoặc approved design.
-- [ ] Mỗi vòng repair ghi `code_change_report_v{n}`, `test_report_v{n}` và
+- [x] Trước mỗi vòng Developer.repair, workflow refresh `current_files` từ target
+  repo thật và ghi `developer_work_packet_v{n}` để tránh dùng snapshot cũ.
+- [x] Mỗi vòng repair ghi `code_change_report_v{n}`, `test_report_v{n}` và
   `requirement_design_code_trace_v{n}` riêng; không ghi đè artifact cũ.
-- [ ] Sau Developer repair, workflow chạy lại Verification Runner.
-- [ ] Nếu Verification Runner pass, workflow chạy lại Validator code trace + LLM
+- [x] Sau Developer repair, workflow chạy lại Verification Runner.
+- [x] Nếu Verification Runner pass, workflow chạy lại Validator code trace + LLM
   review trước khi cho phép sang QA/Tester.
-- [ ] Repair loop tôn trọng giới hạn cấu hình; hết lượt vẫn fail thì
+- [x] Repair loop tôn trọng giới hạn cấu hình; hết lượt vẫn fail thì
   state=`blocked` với `last_error` rõ.
-- [ ] Nếu Validator xác định lỗi nằm ở approved design/requirement, workflow
-  block hoặc reopen checkpoint có human approval, không ép Developer vá code.
+- [x] `SDLC_IMPLEMENTATION_REPAIR_LIMIT` và CLI `--implementation-repair-limit`
+  cấu hình số vòng Developer.repair.
+- [x] Có lệnh `revalidate-implementation` cho run bị block bởi
+  `implementation_repair_limit_exceeded`; lệnh này chạy lại Verification Runner +
+  Validator bằng logic mới, không sửa tay runtime state.
+- [x] Revalidate không reset `implementation_repair_iterations`; nếu tăng limit
+  thì chỉ mở thêm số vòng còn lại và ghi artifact version mới, không ghi đè file
+  cũ.
+- [x] Nếu Validator xác định lỗi là `trace_mapping_issue` hoặc
+  `evidence_incomplete`, workflow block bằng `validator_evidence_or_mapping_issue`
+  và không ép Developer vá code vòng quanh.
+- [ ] Nếu Validator xác định lỗi nằm ở approved design/requirement cấp nghiệp vụ,
+  workflow block hoặc reopen checkpoint có human approval, không ép Developer vá
+  code.
 
 ## 6.2 QA/Tester Agent Loop
 
@@ -163,6 +183,8 @@ Verification Runner, Validator hoặc QA/Tester.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
+- [x] `latest_artifacts` trỏ tới `developer_work_packet` mới nhất sau mỗi vòng
+  repair.
 - [ ] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
 - [x] `quality_reports` có traceability summary.
 - [ ] `quality_reports` có QA acceptance summary.
@@ -188,8 +210,16 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [x] Unit test repair-needed khi trace fail do thiếu test/source/code evidence.
 - [x] Unit test repair-needed khi LLM code-trace review phát hiện semantic gap.
 - [x] Unit test blocked khi trace fail vì lỗi không repair được ở code/test.
-- [x] Unit test `continue-run` từ `implementation_repair_needed` trả
-  `implementation_repair_not_implemented`.
+- [x] Unit test `continue-run` từ `implementation_repair_needed` gọi
+  Developer.repair, ghi artifact v2 và pass trace khi repair thành công.
+- [x] Unit test repair refresh packet từ target repo hiện tại trước khi gọi
+  Developer.repair, không dùng stale `current_files`.
+- [x] Unit test repair loop tôn trọng `SDLC_IMPLEMENTATION_REPAIR_LIMIT=0`.
+- [x] Unit test repair loop chặn output ngoài `allowed_paths`.
+- [x] Unit test repair loop block khi Verification Runner fail sau repair.
+- [x] Unit test revalidate blocked repair-limit: pass luôn, reopen
+  `implementation_repair_needed`, reject blocked state không đúng loại, và CLI
+  dispatch `revalidate-implementation`.
 - [ ] Unit test QA/Tester report `passed/failed/skipped`.
 - [ ] Unit test blocked khi QA fail quá giới hạn repair.
 - [ ] Unit test sync mock/local GitHub report.

@@ -13,7 +13,7 @@ waiting_implementation_plan_review
   -> implementation_testing
      (Verification Runner -> Validator code trace)
   -> implementation_repair_needed
-     (feedback đã ghi, Developer repair loop thật làm ở slice sau)
+     (Developer repair -> Verification Runner -> Validator; có thể lặp trong giới hạn)
   -> implementation_traced
   -> code_review_ready
 ```
@@ -33,7 +33,7 @@ cancelled
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
 | `implementation_written` | Code change đã được apply vào target repo; chưa test/commit/PR. | Harness slice tiếp theo |
 | `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, Developer repair loop khi compile/unit/trace fail, và QA/Tester acceptance/system test sau khi trace ổn. | Harness |
-| `implementation_repair_needed` | Validator code trace fail vì code/test thiếu link có thể sửa; `implementation_repair_feedback_v1.json` đã sẵn sàng nhưng Developer repair chưa chạy ở slice 4.5. | Harness slice tiếp theo |
+| `implementation_repair_needed` | Validator code trace fail vì code/test thiếu link có thể sửa; `implementation_repair_feedback_v{n}.json` đã sẵn sàng để `continue-run` gọi Developer.repair. | Harness |
 | `implementation_traced` | Compile/unit test và Validator code trace hybrid rule + LLM đã pass ổn định sau repair loop nếu có; chưa chạy QA/Tester Agent, chưa commit/PR. | Harness slice tiếp theo |
 | `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
@@ -44,6 +44,8 @@ cancelled
 | Artifact | Mục đích |
 | --- | --- |
 | `developer_work_packet_v1.json` | Gói đầu vào máy đọc được cho Developer.act, lấy từ implementation plan đã duyệt. |
+| `developer_work_packet_v{n}.json` | Snapshot đã refresh trước vòng Developer.repair thứ `n-1`; giữ nguyên scope nhưng đọc lại code/test thật trong target repo. |
+| `developer_repair_raw_response_v{n}.txt` | Raw response từ LLM Developer.repair nếu có, dùng để debug parse/logic khi repair khó hội tụ. |
 | `code_change_report_v1.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace pass. |
 | `test_report_v1.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
 | `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
@@ -116,8 +118,8 @@ review phát hiện semantic gap do code/test, state phải là
 repair được ở code/test mới `blocked`.
 
 Sau Slice 4.5 nếu Validator fail vì code/test thiếu link có thể sửa, workflow
-không còn dùng `blocked` chung chung. Nó dừng ở state trung gian để slice sau
-repair:
+không còn dùng `blocked` chung chung. Nó dừng ở state trung gian để Developer
+repair ở Slice 4.6:
 
 ```text
 current_phase=implementation_repair
@@ -126,17 +128,52 @@ latest_artifacts.requirement_design_code_trace
 latest_artifacts.implementation_repair_feedback
 quality_reports.implementation_traceability
 quality_reports.implementation_repair
+implementation_repair_iterations=0
 pending_checkpoint=null
 last_error=null
 allowed_next_actions=[continue_run, get_status, cancel_run]
 summary_for_user
 ```
 
-`continue-run` từ state này tạm thời trả
-`implementation_repair_not_implemented` cho tới khi Developer repair loop thật
-được triển khai. Nếu Validator fail vì thiếu design mapping, thiếu artifact nền,
-LLM review lỗi hệ thống hoặc lỗi không thể quy về code/test, state vẫn là
-`blocked`.
+`continue-run` từ state này gọi Developer.repair một vòng. Nếu repair pass test
+và Validator trace, state quay về `implementation_traced`. Nếu vẫn còn missing
+link repairable và còn lượt, workflow ghi feedback version mới và giữ
+`implementation_repair_needed`. Nếu hết lượt, test fail/skipped, thiếu design
+mapping, thiếu artifact nền, LLM review lỗi hệ thống hoặc lỗi không thể quy về
+code/test, state chuyển `blocked` với `last_error` rõ.
+
+Trước khi gọi Developer.repair, workflow phải refresh `developer_work_packet_v{n}`
+từ target repo hiện tại. Điều này bảo đảm `current_files` không còn là snapshot
+cũ từ trước khi Developer.act/repair ghi code. `latest_artifacts.developer_work_packet`
+phải trỏ tới packet version mới nhất trong vòng repair.
+
+Nếu state đã chuyển `blocked` vì
+`last_error.error_code=implementation_repair_limit_exceeded`, workflow có một đường
+vận hành riêng là `revalidate-implementation`. Đường này dùng khi Validator hoặc
+evidence logic vừa được sửa và cần trace lại code hiện tại bằng logic mới. Nó tạo
+artifact version mới cho `developer_work_packet`, `test_report` và
+`requirement_design_code_trace`, nhưng không tăng `implementation_repair_iterations`
+vì chưa có Developer.repair mới. Nếu trace còn repairable và limit mới còn lượt,
+state quay về `implementation_repair_needed`; nếu trace pass, state chuyển
+`implementation_traced`.
+
+Sau Slice 4.6 nếu Developer.repair pass:
+
+```text
+current_phase=implementation_testing
+status=implementation_traced
+latest_artifacts.code_change_report=code_change_report_v{n}.md
+latest_artifacts.test_report=test_report_v{n}.md
+latest_artifacts.requirement_design_code_trace=requirement_design_code_trace_v{n}.json
+latest_artifacts.developer_work_packet=developer_work_packet_v{n}.json
+quality_reports.implementation_traceability
+quality_reports.implementation_repair.needed=false
+implementation_repair_iterations>=1
+pending_checkpoint=null
+last_error=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
 
 Sau Slice 4.3 nếu compile/unit test fail hoặc skipped:
 
