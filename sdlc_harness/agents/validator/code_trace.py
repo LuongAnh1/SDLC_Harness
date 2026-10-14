@@ -17,6 +17,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
+from ...llm.json_utils import parse_first_json_object
 from ...storage.runtime import utc_now_iso
 
 MAX_SNIPPET_TOTAL_CHARS = 60000
@@ -208,11 +209,14 @@ class CodeTraceValidator:
                 f"LLM code trace review failed: {exc.message}",
             ) from exc
         try:
-            review = json.loads(raw)
+            review = parse_first_json_object(
+                raw,
+                expected_keys={"ok", "summary", "missing_links", "graph_edges", "risks"},
+            )
         except json.JSONDecodeError as exc:
             raise HarnessError(
                 "implementation_traceability_llm_failed",
-                "LLM code trace review did not return valid JSON.",
+                "LLM code trace review did not return a valid JSON object.",
             ) from exc
         if not isinstance(review, dict):
             raise HarnessError(

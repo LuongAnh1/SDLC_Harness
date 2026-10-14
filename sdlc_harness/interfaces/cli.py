@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run.add_argument("--run-id", required=True)
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     continue_run.add_argument("--implementation-repair-limit", default=None)
+    continue_run.add_argument("--qa-repair-limit", default=None)
     continue_run.add_argument("--runtime-root", default=None)
 
     revalidate = subparsers.add_parser("revalidate-implementation")
@@ -87,6 +88,8 @@ def _settings_from_args(args: argparse.Namespace):
         overrides["SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"] = str(args.implementation_plan_repair_limit)
     if getattr(args, "implementation_repair_limit", None) is not None:
         overrides["SDLC_IMPLEMENTATION_REPAIR_LIMIT"] = str(args.implementation_repair_limit)
+    if getattr(args, "qa_repair_limit", None) is not None:
+        overrides["SDLC_QA_REPAIR_LIMIT"] = str(args.qa_repair_limit)
     if getattr(args, "target_repo", None):
         overrides["SDLC_TARGET_REPO_PATH"] = str(args.target_repo)
     if getattr(args, "target_remote", None):

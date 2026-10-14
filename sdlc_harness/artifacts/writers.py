@@ -4,7 +4,8 @@ Artifact là sản phẩm mà checkpoint, Validator và tool sync tham chiếu. 
 sinh formal use case và requirement packet; Phase 2 sinh design, graph, trace và
 quality report theo từng version; Phase 3 sinh implementation plan trước khi sửa
 code; Phase 4 sinh work packet, code change report, test report, code trace và
-repair feedback theo từng version để không ghi đè lịch sử chạy.
+repair feedback theo từng version để không ghi đè lịch sử chạy. QA cũng có
+feedback riêng khi acceptance tests fail và cần Developer sửa lại code/test.
 """
 
 from __future__ import annotations
@@ -419,6 +420,105 @@ def write_phase4_code_trace_report(
     return store.relative(path)
 
 
+def write_phase4_qa_test_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi QA/Tester acceptance report sau khi code trace đã pass."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"qa_test_report_{suffix}.md"
+    path.write_text(
+        _qa_test_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
+        encoding="utf-8",
+    )
+    return store.relative(path)
+
+
+def write_phase4_qa_generated_tests(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    generated: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Write the QA-generated acceptance/system tests before execution."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"qa_generated_tests_{suffix}.json"
+    payload = {
+        **generated,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"qa_generated_tests_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
+def write_phase4_qa_execution_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Write the Verification Runner report after QA-generated tests are applied."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"qa_test_execution_{suffix}.md"
+    path.write_text(
+        _qa_execution_report_markdown({**report, "artifact_version": suffix.upper()}).rstrip() + "\n",
+        encoding="utf-8",
+    )
+    return store.relative(path)
+def write_phase4_qa_raw_response(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    raw_response: str,
+    version: int = 1,
+) -> str:
+    """Lưu raw LLM response của QA/Tester khi parse lỗi để debug output bị cắt."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"qa_tester_raw_response_{suffix}.txt"
+    path.write_text(raw_response.rstrip() + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
+def write_phase4_qa_repair_feedback(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    feedback: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi feedback QA để Developer sửa code/test theo acceptance failure."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"qa_repair_feedback_{suffix}.json"
+    payload = {
+        **feedback,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"qa_repair_feedback_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def write_phase4_repair_feedback(
     *,
     store: RuntimeStore,
@@ -611,6 +711,142 @@ def _test_report_markdown(report: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def _qa_test_report_markdown(report: dict[str, object]) -> str:
+    scenarios = _dict_items(report.get("scenarios"))
+    evidence = [str(item).strip() for item in report.get("evidence", []) if str(item).strip()] if isinstance(report.get("evidence"), list) else []
+    risks = [str(item).strip() for item in report.get("risks", []) if str(item).strip()] if isinstance(report.get("risks"), list) else []
+    context_budget = report.get("review_context")
+    context_budget = context_budget if isinstance(context_budget, dict) else {}
+    lines = [
+        f"# QA Test Report {report.get('artifact_version', 'V1')}",
+        "",
+        "## Run Context",
+        "",
+        f"- Run id: `{report.get('run_id', '')}`",
+        f"- Source ref: `{report.get('source_ref', '')}`",
+        f"- Issue key: `{report.get('issue_key', '')}`",
+        f"- Target repo: `{report.get('target_repo', '')}`",
+        f"- Branch: `{report.get('branch', '')}`",
+        "",
+        "## Generated Test Execution",
+        "",
+        f"- Generated tests artifact: `{report.get('qa_generated_tests', '')}`",
+        f"- Execution artifact: `{report.get('qa_test_execution', '')}`",
+        f"- Execution status: `{report.get('execution_status', '')}`",
+        "",
+        "### Applied Test Files",
+        "",
+    ]
+    applied_tests = _dict_items(report.get("applied_tests"))
+    lines.extend([f"- `{item.get('path', '')}`" for item in applied_tests] or ["- none"])
+    lines.extend(
+        [
+            "",
+            "## Acceptance Result",
+            "",
+            f"- Status: `{report.get('status', '')}`",
+            f"- Summary: {report.get('summary', '')}",
+            "",
+            "## Scenarios",
+            "",
+            "| Scenario | Result | Evidence | Risk |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for item in scenarios:
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _table_cell(str(item.get("name") or "")),
+                    _table_cell(str(item.get("result") or "")),
+                    _table_cell(str(item.get("evidence") or "")),
+                    _table_cell(str(item.get("risk") or "")),
+                ]
+            )
+            + " |"
+        )
+    if not scenarios:
+        lines.append("| _none_ |  |  |  |")
+    lines.extend(["", "## Evidence", ""])
+    lines.extend([f"- {item}" for item in evidence] or ["- none"])
+    lines.extend(["", "## Risks", ""])
+    lines.extend([f"- {item}" for item in risks] or ["- none"])
+    lines.extend(
+        [
+            "",
+            "## Context Budget",
+            "",
+            f"- Packet mode: `{context_budget.get('packet_mode', '')}`",
+            f"- Sections: `{context_budget.get('section_count', '')}`",
+            f"- Code files: `{context_budget.get('code_file_count', '')}`",
+            f"- Chars sent: `{context_budget.get('chars_sent', '')}`",
+            f"- Chars total: `{context_budget.get('chars_total', '')}`",
+            f"- Any truncated: `{str(context_budget.get('any_truncated', False)).lower()}`",
+            f"- Omitted full artifacts: `{', '.join(str(item) for item in context_budget.get('omitted_full_artifacts', []) if str(item).strip())}`",
+            "",
+            "## Scope",
+            "",
+            "- QA/Tester Agent generates acceptance/system tests from a compact packet, applies them under `src/test/java/`, and executes them through Verification Runner.",
+            "- Full design and implementation plan are references, not copied into the QA prompt in Slice 4.7A.",
+            "- Developer QA repair loop starts from `qa_repair_needed`; failed QA tests only block after the configured limit.",
+            "- Commit/Draft PR is not created in Slice 4.7A.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _qa_execution_report_markdown(report: dict[str, object]) -> str:
+    applied_tests = _dict_items(report.get("applied_tests"))
+    lines = [
+        f"# QA Test Execution {report.get('artifact_version', 'V1')}",
+        "",
+        "## Run Context",
+        "",
+        f"- Run id: `{report.get('run_id', '')}`",
+        f"- Source ref: `{report.get('source_ref', '')}`",
+        f"- Issue key: `{report.get('issue_key', '')}`",
+        f"- Target repo: `{report.get('target_repo', '')}`",
+        f"- Branch: `{report.get('branch', '')}`",
+        f"- Generated tests artifact: `{report.get('qa_generated_tests', '')}`",
+        "",
+        "## Applied QA Test Files",
+        "",
+    ]
+    lines.extend([f"- `{item.get('path', '')}`" for item in applied_tests] or ["- none"])
+    lines.extend(
+        [
+            "",
+            "## Verification Result",
+            "",
+            f"- Status: `{report.get('status', '')}`",
+            f"- Command: `{report.get('command', '')}`",
+            f"- Exit code: `{report.get('exit_code', '')}`",
+            f"- Duration: `{report.get('duration_seconds', '')}` seconds",
+            f"- Reason: {report.get('reason', '')}",
+            "",
+            "## Stdout",
+            "",
+            "```text",
+            str(report.get("stdout") or "").rstrip(),
+            "```",
+            "",
+            "## Stderr",
+            "",
+            "```text",
+            str(report.get("stderr") or "").rstrip(),
+            "```",
+            "",
+            "## Scope",
+            "",
+            "- Runner: Verification Runner after QA-generated acceptance tests are applied.",
+            "- Developer QA repair loop starts from `qa_repair_needed`; failed QA tests only block after the configured limit.",
+            "- Commit/Draft PR is not created in Slice 4.7A.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 def _dict_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
@@ -650,3 +886,5 @@ def _missing_links_markdown(missing_links: dict[str, list[dict[str, str]]]) -> s
         for item in items:
             lines.append(f"- {item.get('requirement')}: {item.get('content')}")
     return "\n".join(lines)
+
+

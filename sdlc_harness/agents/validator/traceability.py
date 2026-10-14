@@ -16,6 +16,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
+from ...llm.json_utils import parse_first_json_array, parse_first_json_object
 
 _PROMPT_DIR = Path(__file__).with_name("prompts")
 _CLASS_TRACE_PROMPT_PATH = _PROMPT_DIR / "traceability_class.txt"
@@ -174,12 +175,15 @@ def compute_missing_links(
 
 def _parse_trace_json(raw: str, *, diagram_name: str) -> list[dict[str, object]]:
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise HarnessError(
-            "validator_traceability_failed",
-            f"Validator {diagram_name} trace output is not valid JSON.",
-        ) from exc
+        parsed: object = parse_first_json_object(raw, expected_keys={"traceability", "items", "results"})
+    except json.JSONDecodeError:
+        try:
+            parsed = parse_first_json_array(raw)
+        except json.JSONDecodeError as exc:
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace output is not valid JSON.",
+            ) from exc
 
     if isinstance(parsed, dict):
         for key in ("traceability", "items", "results"):

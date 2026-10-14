@@ -10,13 +10,15 @@ kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
 ## Trạng Thái Hiện Tại
 
-Tính đến bản hiện tại, Phase 4 đã khóa tới mốc `implementation_traced`: harness
-tạo `developer_work_packet_v1`, checkout branch target repo, Developer.act
-sinh/apply code thật, Verification Runner chạy compile/unit test, Validator code
-trace chạy hybrid rule + LLM, và Developer.repair có thể sửa code/test rồi chạy
-lại runner + Validator trong giới hạn `SDLC_IMPLEMENTATION_REPAIR_LIMIT`.
+Tính đến bản hiện tại, Phase 4 đã khóa tới mốc `qa_tested` ở Slice 4.7A:
+harness tạo `developer_work_packet_v1`, checkout branch target repo,
+Developer.act sinh/apply code thật, Verification Runner chạy compile/unit test,
+Validator code trace chạy hybrid rule + LLM, Developer.repair có thể sửa
+code/test rồi chạy lại runner + Validator trong giới hạn
+`SDLC_IMPLEMENTATION_REPAIR_LIMIT`, và QA/Tester Agent V1 có thể review
+acceptance sau khi `implementation_traced`.
 
-Mốc này chưa phải `code_review_ready`. QA/Tester Agent, commit, Draft PR thật và
+Mốc này chưa phải `code_review_ready`. QA repair loop, commit, Draft PR thật và
 sync Phase 4 về Jira/Confluence/GitHub vẫn là các lát kế tiếp. Vì vậy tài liệu
 này tách rõ “đầu ra hiện tại” và “đầu ra đầy đủ của Phase 4”.
 
@@ -186,6 +188,29 @@ rồi:
 - nếu vẫn hết lượt hoặc lỗi không repair được ở code/test: giữ `blocked` với
   `last_error` rõ.
 
+## Slice 4.7A Đã Chốt
+
+Slice 4.7A chạy tiếp từ `implementation_traced`:
+
+```text
+continue-run(run_id)
+-> đọc accepted requirement, code hiện tại trong target repo, test report và trace summary
+-> đóng gói QA packet gọn, có content_truncated/chars_sent/chars_total/packet_mode
+-> QA/Tester Agent review acceptance/system behavior
+-> ghi qa_test_report_v1.md
+-> nếu pass: status=qa_tested
+-> nếu fail/skipped hoặc LLM output lỗi: status=blocked với last_error rõ
+```
+
+Slice này cố tình chưa triển khai vòng repair lớn từ QA về Developer. Nếu QA fail
+hoặc skipped, workflow block để người duyệt xem report trước; slice sau mới mở
+`qa_repair_needed`. Để tránh lỗi LLM output quá dài/không sạch từng gặp ở design
+và Validator, QA prompt chỉ nhận packet kiểu TraceDev: requirement/use case,
+current code, Verification Runner report và trace summary. Design artifact,
+implementation plan và code trace full chỉ còn là reference path. Parser lấy JSON
+object đầu tiên có schema mong đợi, và raw response được lưu vào
+`qa_tester_raw_response_v1.txt` khi parse lỗi.
+
 ## Luồng Phase 4
 
 ```text
@@ -243,7 +268,13 @@ Phase 4 tách rõ ba vai để gần thực tế doanh nghiệp hơn TraceDev g�
   sửa code/test theo missing links, Verification Runner chạy lại, rồi Validator
   review lại. Khi vòng này pass ổn định, workflow mới được chuyển sang QA/Tester.
 - QA/Tester Agent là tầng sau repair loop: đọc use case đã được Validator bảo vệ,
-  sinh/chạy acceptance hoặc system-level test và gửi failure report về Developer.
+  source/test hiện tại, Verification Runner report và trace summary để kiểm
+  acceptance/system-level behavior và gửi failure report về Developer.
+
+Phase 4 có hai vòng lặp: vòng nhỏ `Code -> Verification Runner -> Validator` để
+khóa compile/unit/trace, và vòng lớn `Code -> Verification Runner -> Validator ->
+QA/Tester` để khóa hành vi use case. Nếu QA fail, Developer sửa code rồi vẫn phải
+chạy lại cả Verification Runner và Validator trước khi QA test lại.
 
 `test_report_v1.md` của Verification Runner phải phân biệt rõ `passed`, `failed`
 và `skipped`. Nếu máy chưa có JDK hoặc target repo chưa có test harness đủ mạnh,
@@ -283,22 +314,25 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json
 .runtime/runs/<run_id>/artifacts/implementation_repair_feedback_v1.json
+.runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 ```
 
-Khi run đạt `implementation_traced`, state phải có:
+Khi run đạt `qa_tested`, state phải có:
 
 ```text
-current_phase=implementation_testing
-status=implementation_traced
+current_phase=qa_testing
+status=qa_tested
 latest_artifacts.developer_work_packet
 latest_artifacts.code_change_report
 latest_artifacts.test_report
 latest_artifacts.requirement_design_code_trace
+latest_artifacts.qa_test_report
 quality_reports.implementation_traceability
 quality_reports.implementation_repair nếu từng repair
+quality_reports.qa_acceptance
 implementation_repair_iterations
 pending_checkpoint=null
-allowed_next_actions=[continue_run, get_status, cancel_run]
+allowed_next_actions=[get_status, cancel_run]
 ```
 
 ## Đầu Ra Đầy Đủ Trước Code Review
@@ -307,7 +341,6 @@ Các artifact sau vẫn là mục tiêu của phần còn lại Phase 4, chưa p
 đã khóa ở bản hiện tại:
 
 ```text
-.runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 .runtime/runs/<run_id>/sync/tool_sync_report_v4.json
 ```
 
@@ -345,5 +378,61 @@ pass/được block rõ ràng, workflow chưa được coi là `code_review_read
 
 - `phase-4-checklist.md`: checklist triển khai code/test/Draft PR.
 - `state-and-artifacts.md`: state machine và artifact Phase 4.
+- `qa-tester-agent.md`: contract triển khai Slice 4.7 QA/Tester Agent trước khi
+  mở commit/Draft PR.
 - `github-code-collaboration.md`: policy dùng GitHub branch/commit/Draft PR.
 
+
+## QA Slice 4.7A Update - 2026-10-14
+
+QA/Tester Agent is now execution-based in code:
+
+```text
+implementation_traced
+-> compact QA packet
+-> QA generates Java test files
+-> workflow applies tests under src/test/java/
+-> Verification Runner runs again
+-> qa_tested only if the QA execution passed
+```
+
+Current artifacts:
+
+```text
+qa_generated_tests_v{n}.json
+qa_test_execution_v{n}.md
+qa_test_report_v{n}.md
+```
+
+The QA repair loop is not implemented yet. A failing or skipped QA execution
+blocks the run and leaves Developer repair for the next slice.
+## Live QA Generated-Test Check - 2026-10-14
+
+Live DeepSeek run `run_20261013_160421_f661babf` verified Slice 4.7A on a real runtime:
+
+- State moved from `implementation_traced` to `qa_tested`.
+- QA/Tester wrote `qa_generated_tests_v1.json` and one acceptance test file:
+  `src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageAcceptanceTest.java`.
+- Workflow applied the generated test into the target repo and reran Verification Runner through `scripts/test.ps1`.
+- Runner passed with exit code 0 and stdout `All tests passed`.
+- `quality_reports.qa_acceptance` recorded `ok=true`, 8 scenarios, and 5 risk notes.
+
+Remaining note: the QA packet still records `any_truncated=true` because full design and implementation-plan artifacts are referenced by path instead of copied into the QA prompt. This does not block the happy path, but selective fetch remains a good follow-up before the large QA repair loop.
+
+
+## Slice 4.7B QA Repair Loop
+
+The next implemented QA slice adds the large repair loop:
+
+```text
+QA fail
+-> qa_repair_feedback_v{n}.json
+-> qa_repair_needed
+-> Developer.repair
+-> Verification Runner
+-> Validator code trace
+-> QA tests again
+```
+
+The loop is controlled by `SDLC_QA_REPAIR_LIMIT` / `continue-run --qa-repair-limit`.
+It still does not commit, open a PR, or sync the code-review checkpoint.

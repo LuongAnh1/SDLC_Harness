@@ -473,3 +473,41 @@ Việc tiếp theo:
 
 - Phase 4 vẫn chưa khóa vì chưa có QA/Tester Agent, chưa commit target repo và
   chưa mở Draft PR.
+## 2026-10-14 - Slice 4.7A: Live DeepSeek QA Generated Tests
+
+Goal: verify that QA/Tester no longer only reviews in prose. It must generate tests, apply them to the target repo, and let Verification Runner decide pass/fail.
+
+Executed:
+
+- Command: `rtk proxy py -3.13 -m sdlc_harness.cli continue-run --run-id run_20261013_160421_f661babf --llm-mode deepseek`.
+- Previous state: `implementation_traced`.
+- Result state: `qa_tested`.
+- New artifacts: `qa_generated_tests_v1.json`, `qa_test_execution_v1.md`, `qa_test_report_v1.md`.
+- QA generated one test file: `src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageAcceptanceTest.java`.
+- Verification Runner ran `powershell -ExecutionPolicy Bypass -File scripts/test.ps1`, exit code 0, stdout `All tests passed`.
+- `quality_reports.qa_acceptance` recorded `ok=true`, 8 scenarios, and 5 risk notes.
+
+Conclusion:
+
+- The DeepSeek happy path for QA-generated acceptance tests passed.
+- Slice 4.7A still intentionally does not implement the large repair loop from QA failure back to Developer.
+- A separate QA fail/skipped live case is still needed before implementing the QA repair loop.
+
+
+## 2026-10-14 - Slice 4.7B: QA Repair Loop
+
+Da lam:
+
+- Them `SDLC_QA_REPAIR_LIMIT` va CLI `continue-run --qa-repair-limit`.
+- QA execution fail co the chuyen sang `qa_repair_needed` thay vi block ngay.
+- Workflow ghi `qa_repair_feedback_v{n}.json` de Developer.repair doc duoc.
+- `continue-run` tu `qa_repair_needed` chay Developer.repair -> Verification Runner
+  -> Validator code trace -> QA-generated tests lai.
+- Neu QA pass sau repair thi state=`qa_tested`; neu het limit thi block bang
+  `qa_repair_limit_exceeded`.
+
+Chua lam:
+
+- Chua commit/Draft PR/sync Phase 4.
+- Chua live DeepSeek case QA fail roi Developer sua pass; hien moi co unit test
+  state machine cho vong repair.

@@ -15,6 +15,9 @@ waiting_implementation_plan_review
   -> implementation_repair_needed
      (Developer repair -> Verification Runner -> Validator; có thể lặp trong giới hạn)
   -> implementation_traced
+  -> qa_repair_needed
+     (Developer repair -> Verification Runner -> Validator -> QA; có thể lặp trong giới hạn)
+  -> qa_tested
   -> code_review_ready
 ```
 
@@ -35,6 +38,8 @@ cancelled
 | `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, Developer repair loop khi compile/unit/trace fail, và QA/Tester acceptance/system test sau khi trace ổn. | Harness |
 | `implementation_repair_needed` | Validator code trace fail vì code/test thiếu link có thể sửa; `implementation_repair_feedback_v{n}.json` đã sẵn sàng để `continue-run` gọi Developer.repair. | Harness |
 | `implementation_traced` | Compile/unit test và Validator code trace hybrid rule + LLM đã pass ổn định sau repair loop nếu có; chưa chạy QA/Tester Agent, chưa commit/PR. | Harness slice tiếp theo |
+| `qa_repair_needed` | QA/Tester fail vì code/test behavior thiếu hoặc sai; report QA đã có feedback để Developer sửa rồi chạy lại runner/Validator/QA. | Harness |
+| `qa_tested` | QA/Tester đã pass acceptance/system-level behavior; chưa commit/Draft PR/sync Phase 4. | Harness slice tiếp theo |
 | `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -50,11 +55,15 @@ cancelled
 | `test_report_v{n}.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
 | `requirement_design_code_trace_v{n}.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
 | `implementation_repair_feedback_v{n}.json` | Feedback máy đọc được từ Validator cho Developer repair code/test; chỉ xuất hiện khi trace fail có thể sửa ở code/test. |
-| `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ use case, không thay thế unit test report. |
+| `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ compact packet gồm use case, code hiện tại, Verification Runner report và trace summary; không thay thế unit test report. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
 Artifact dùng version như các phase trước. Nếu repair/rerun code xảy ra trong
 giới hạn Phase 4, tạo `v2`, `v3`; không ghi đè file cũ.
+
+Chi tiết contract của `qa_test_report_v1.md` nằm ở
+`docs/phase-4/qa-tester-agent.md`. Tài liệu này là nguồn đọc trước khi triển khai
+state `qa_tested`/`qa_repair_needed` ở lát QA.
 
 ## State JSON Sau Khi Pass
 
@@ -175,6 +184,31 @@ allowed_next_actions=[continue_run, get_status, cancel_run]
 summary_for_user
 ```
 
+Sau Slice 4.7 nếu QA/Tester pass. Đây vẫn chưa phải `code_review_ready` vì còn
+thiếu commit/Draft PR và sync Phase 4:
+
+```text
+current_phase=qa_testing
+status=qa_tested
+latest_artifacts.qa_test_report
+quality_reports.qa_acceptance
+pending_checkpoint=null
+allowed_next_actions=[get_status, cancel_run]
+summary_for_user
+```
+
+Nếu QA/Tester fail vì code/test behavior có thể sửa:
+
+```text
+current_phase=implementation_repair
+status=qa_repair_needed
+latest_artifacts.qa_test_report
+quality_reports.qa_acceptance.ok=false
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
+
 Sau Slice 4.3 nếu compile/unit test fail hoặc skipped:
 
 ```text
@@ -247,3 +281,19 @@ Phase 4 phải `blocked` thay vì giả vờ pass trong các trường hợp:
 
 `last_error` phải đủ rõ để Niko nói lại cho anh biết đang kẹt ở đâu.
 
+
+## QA Artifacts Update - 2026-10-14
+
+Slice 4.7A now writes three QA artifacts together:
+
+```text
+qa_generated_tests_v{n}.json
+qa_test_execution_v{n}.md
+qa_test_report_v{n}.md
+```
+
+`qa_tested` is valid only when `qa_test_execution_v{n}.md` has status `passed`.
+If execution is `failed`, workflow writes `qa_repair_feedback_v{n}.json` and moves to
+`qa_repair_needed` while `SDLC_QA_REPAIR_LIMIT` still has capacity. If execution is
+`skipped`, workflow blocks with `qa_test_skipped`. If the repair limit is exhausted,
+workflow blocks with `qa_repair_limit_exceeded`.

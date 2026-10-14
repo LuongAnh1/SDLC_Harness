@@ -124,6 +124,10 @@ def fake_completion(prompt: str) -> str:
         return fake_developer_act()
     if "Code Trace LLM Review v1" in prompt:
         return fake_code_trace_review()
+    if "QA Tester Generate Acceptance Tests v1" in prompt:
+        return fake_qa_generated_tests()
+    if "QA Tester Acceptance Review v1" in prompt:
+        return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
 
 
@@ -579,6 +583,68 @@ def fake_code_trace_review() -> str:
     )
 
 
+def fake_qa_generated_tests() -> str:
+    """Fake QA-generated tests so Phase 4 can execute the QA slice deterministically."""
+
+    return json.dumps(
+        {
+            "summary": "Fake QA generated acceptance tests for the implemented delete heritage flow.",
+            "test_files": [
+                {
+                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java",
+                    "content": """package com.sdlc.etour.heritage;
+
+public final class DeleteCulturalHeritageQaAcceptanceTest {
+    public static void main(String[] args) {
+        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
+        if (!service.deleteHeritage(\"qa-heritage-1\")) {
+            throw new IllegalStateException(\"Expected delete operation to succeed\");
+        }
+        if (!service.isDeleted(\"qa-heritage-1\")) {
+            throw new IllegalStateException(\"Expected deleted heritage to be observable\");
+        }
+    }
+}
+""",
+                    "scenarios": ["Delete cultural heritage success path"],
+                }
+            ],
+            "scenarios": [
+                {
+                    "name": "Delete cultural heritage success path",
+                    "expected_result": "Selected heritage is marked deleted after confirmation.",
+                    "test_file": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java",
+                    "risk": "",
+                }
+            ],
+            "risks": [],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+def fake_qa_tester_review() -> str:
+    """QA review giả lập để Phase 4 có acceptance gate ổn định trong test."""
+
+    return json.dumps(
+        {
+            "status": "pass",
+            "summary": "Fake QA accepts the implemented use case after verification and code trace have passed.",
+            "scenarios": [
+                {
+                    "name": "Delete cultural heritage happy path",
+                    "result": "pass",
+                    "evidence": "Requirement, design, test report, and code trace artifacts are present.",
+                    "risk": "",
+                }
+            ],
+            "evidence": ["Verification Runner passed before QA acceptance review."],
+            "risks": [],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
 def _extract_requirements_from_trace_prompt(prompt: str, *, next_marker: str) -> list[dict[str, object]]:
     marker = "Requirements:"
     start = prompt.find(marker)
@@ -632,3 +698,4 @@ def _fake_sequence_links(content: str) -> list[dict[str, str]]:
     else:
         target = "validateDeletion(heritageId)"
     return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]
+

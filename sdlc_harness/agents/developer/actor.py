@@ -1,7 +1,7 @@
 """Developer actor cho Phase 4: sinh hoặc sửa file từ DeveloperWorkPacket.
 
 `act` tạo code/test lần đầu từ implementation plan đã duyệt. `repair` nhận
-feedback traceability từ Validator và chỉ sửa các file trong `allowed_paths`.
+feedback từ Validator hoặc QA và chỉ sửa các file trong `allowed_paths`.
 Agent này luôn trả JSON file đầy đủ để workflow kiểm path, apply vào target repo,
 chạy Verification Runner và Validator ở lớp ngoài. Nó không tự chạy git/test,
 không commit, không mở PR và không được sửa requirement/design đã duyệt.
@@ -64,7 +64,7 @@ class DeveloperActAgent:
         repair_feedback: dict[str, object],
         repair_iteration: int,
     ) -> DeveloperActResult:
-        """Sửa code/test theo feedback traceability mà không đổi requirement/design."""
+        """Sửa code/test theo feedback Validator hoặc QA mà không đổi requirement/design."""
 
         if not self.llm_client:
             result = _deterministic_developer_act(work_packet)
@@ -134,7 +134,7 @@ def _developer_repair_prompt(
 ) -> str:
     return f"""Developer Repair v1
 
-You are repairing an implementation that failed Validator code trace.
+You are repairing an implementation that failed Validator code trace or QA acceptance testing.
 Return JSON only with the same shape as Developer Act v1:
 {{
   "summary": "short repair summary",
@@ -154,7 +154,7 @@ Rules:
 - Only return files listed in output_contract.allowed_paths.
 - Return complete file content, not patches.
 - Do not change requirements, approved design, implementation plan, branch, or tool-sync records.
-- Fix the missing_links and weak trace evidence in ImplementationRepairFeedback.
+- Fix the missing_links, weak trace evidence, or QA acceptance failures in RepairFeedback.
 - Preserve package names and existing code style from current_files.
 - Generated code and tests must work when the repository path contains spaces or Unicode characters.
 - Use repository-relative paths; do not hard-code absolute paths from a developer machine.
@@ -165,7 +165,7 @@ Rules:
 DeveloperWorkPacket:
 {json.dumps(work_packet, ensure_ascii=False, indent=2)}
 
-ImplementationRepairFeedback:
+RepairFeedback:
 {json.dumps(repair_feedback, ensure_ascii=False, indent=2)}
 """.strip()
 

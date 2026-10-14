@@ -146,15 +146,27 @@ Mục đích: kiểm acceptance/system behavior từ use case sau khi compile/un
 Validator trace và repair loop đã pass ổn định. Đây mới là vai Tester/QA gần
 thực tế doanh nghiệp.
 
-- [ ] QA/Tester Agent đọc use case/requirement packet đã duyệt và code/test
-  summary do Validator bảo vệ.
-- [ ] QA/Tester Agent sinh hoặc chạy acceptance/system-level scenarios.
-- [ ] Sinh `qa_test_report_v1.md` với `passed/failed/skipped` và evidence rõ.
-- [ ] QA/Tester Agent không sửa code trực tiếp; chỉ ghi failure evidence.
-- [ ] Nếu QA fail và còn vòng repair, feedback quay về Developer.
-- [ ] Sau Developer repair, workflow chạy lại Verification Runner -> Validator ->
+- [x] Viết tài liệu triển khai `docs/phase-4/qa-tester-agent.md` để chốt input,
+  output, state, fake/LLM mode và repair path trước khi code.
+- [x] Chốt rõ hai vòng lặp: vòng nhỏ Code -> Verification Runner -> Validator;
+  vòng lớn Code -> Verification Runner -> Validator -> QA/Tester.
+- [x] QA/Tester Agent đọc use case/requirement packet đã duyệt, code/test hiện
+  tại trong target repo, Verification Runner report và trace summary do
+  Validator bảo vệ.
+- [x] QA/Tester Agent sinh hoặc chạy acceptance/system-level scenarios.
+- [x] Sinh `qa_test_report_v1.md` với `pass/fail/skipped` và evidence rõ.
+- [x] QA/Tester Agent không sửa code trực tiếp; chỉ ghi failure evidence.
+- [x] QA/Tester prompt dùng compact packet kiểu TraceDev, không nhét full
+  design/implementation plan/code trace vào prompt; packet có metadata
+  `content_truncated`, `chars_sent`, `chars_total`, `packet_mode`; nếu output LLM
+  không parse được thì workflow block và ghi `qa_tester_raw_response_v1.txt`.
+- [x] Note rõ `content_truncated=true` sau compact packet chủ yếu là code file
+  vượt budget, không phải lỗi mặc định; hướng tiếp theo là selective fetch đúng
+  file/hàm khi QA thiếu evidence.
+- [x] Nếu QA fail và còn vòng repair, feedback quay về Developer.
+- [x] Sau Developer repair, workflow chạy lại Verification Runner -> Validator ->
   QA/Tester Agent.
-- [ ] Nếu QA fail quá giới hạn repair, state=`blocked` với `last_error` rõ.
+- [x] Nếu QA fail quá giới hạn repair, state=`blocked` với `last_error` rõ.
 
 ## 7. Tool Sync Phase 4
 
@@ -180,14 +192,17 @@ Verification Runner, Validator hoặc QA/Tester.
 - [x] Ghi state trung gian `implementation_traced` sau khi Validator code trace pass.
 - [x] Ghi state trung gian `implementation_repair_needed` khi Validator fail do
   thiếu link có thể sửa ở code/test.
+- [x] Ghi state trung gian `qa_tested` sau khi QA/Tester pass.
+- [x] Ghi state trung gian `qa_repair_needed` khi QA/Tester fail do code/test có
+  thể sửa.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
 - [x] `latest_artifacts` trỏ tới `developer_work_packet` mới nhất sau mỗi vòng
   repair.
-- [ ] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
+- [x] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
 - [x] `quality_reports` có traceability summary.
-- [ ] `quality_reports` có QA acceptance summary.
+- [x] `quality_reports` có QA acceptance summary.
 - [ ] `pending_checkpoint.type=code_review`.
 - [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
@@ -220,8 +235,12 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [x] Unit test revalidate blocked repair-limit: pass luôn, reopen
   `implementation_repair_needed`, reject blocked state không đúng loại, và CLI
   dispatch `revalidate-implementation`.
-- [ ] Unit test QA/Tester report `passed/failed/skipped`.
-- [ ] Unit test blocked khi QA fail quá giới hạn repair.
+- [x] Unit test QA/Tester report pass và fail.
+- [x] Unit test QA/Tester LLM output bị cắt/JSON lỗi thì block và ghi raw response.
+- [x] Unit test Validator code-trace parse được JSON bị bọc trong prose để giảm
+  lỗi output không sạch từ LLM.
+- [ ] Unit test QA/Tester report `skipped`.
+- [x] Unit test blocked khi QA fail quá giới hạn repair.
 - [ ] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
@@ -229,6 +248,40 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
   vào PATH tạm: `All tests passed`.
 - [x] Ghi nhận và sửa lỗi test script không chịu được đường dẫn Unicode bằng cách
   chuyển sang repo-relative paths trong `SDLC_Target_eTour/scripts/test.ps1`.
+- [x] Live compact QA packet với DeepSeek thật trên runtime copy: happy path từ
+  `implementation_traced` sang `qa_tested`, runtime thật không bị mutate.
+- [ ] Live QA fail/skipped với DeepSeek thật trên runtime copy có lỗi hành vi rõ
+  hoặc thiếu evidence rõ.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 
+
+## QA Slice 4.7A Update - 2026-10-14
+
+Purpose: lock the difference between Validator and QA. Validator reviews the
+requirement/design/code/test trace. QA now generates independent acceptance or
+system tests and lets the runner execute them.
+
+- [x] `QaTesterAgent.generate_tests()` replaces the review-only path.
+- [x] QA output must parse as JSON with `summary`, `test_files`, and `scenarios`.
+- [x] Test file paths are guarded to `src/test/java/*.java`.
+- [x] Workflow writes `qa_generated_tests_v{n}.json`.
+- [x] Workflow applies QA tests into the target repo before running the runner.
+- [x] Workflow writes `qa_test_execution_v{n}.md`.
+- [x] QA pass/fail/skipped comes from Verification Runner after QA tests are applied.
+- [x] `latest_artifacts` includes `qa_generated_tests`, `qa_test_execution`, and `qa_test_report`.
+- [x] Unit test Phase 4 pass: `py -3.13 -m unittest discover -s tests -p test_phase4.py -v`.
+- [x] Live DeepSeek generated-test QA on a real runtime: `run_20261013_160421_f661babf` moved from `implementation_traced` to `qa_tested`; QA generated 1 acceptance test file and Verification Runner passed.
+- [x] QA repair loop from QA failure report back to Developer.
+
+
+## QA Slice 4.7B Update - 2026-10-14
+
+Purpose: close the first large Code -> Runner -> Validator -> QA repair loop
+without opening GitHub PR/sync yet.
+
+- [x] `SDLC_QA_REPAIR_LIMIT` and `continue-run --qa-repair-limit` control QA repair loops.
+- [x] QA execution fail can move to `qa_repair_needed` with `qa_repair_feedback_v{n}.json`.
+- [x] `continue-run` from `qa_repair_needed` calls Developer.repair, then reruns Verification Runner, Validator code trace, and QA tests.
+- [x] QA skipped and invalid QA JSON still block; they do not enter Developer repair.
+- [x] QA fail after the repair limit blocks with `qa_repair_limit_exceeded`.
