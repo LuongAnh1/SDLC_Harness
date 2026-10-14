@@ -1,10 +1,15 @@
-"""Workflow Phase 4: implementation plan -> code/test/trace.
+"""Workflow Phase 4: implementation plan -> code/test/trace/repair.
 
-Module này điều phối phần đầu của Phase 4 sau khi implementation plan đã được
-human duyệt: đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target
-repo, chạy Verification Runner, rồi bắt Validator kiểm trace requirement/design
-sang code/test. Code trace hiện là gate hybrid: static evidence trước, sau đó
-bắt buộc gọi LLM để review graph ngữ nghĩa trước khi cho workflow đi tiếp.
+Module này điều phối Phase 4 sau khi implementation plan đã được human duyệt:
+đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target repo, chạy
+Verification Runner, rồi bắt Validator kiểm trace requirement/design sang
+code/test. Nếu Validator thấy gap nằm trong code/test, workflow ghi feedback cho
+Developer.repair, refresh snapshot từ target repo thật, chạy lại runner +
+Validator và chỉ pass khi trace đạt `implementation_traced`.
+
+`revalidate_implementation` là đường vận hành riêng cho run từng bị block vì
+repair limit: nó kiểm lại code hiện tại bằng logic Validator mới mà không tự
+gọi Developer sửa thêm.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "g
 
 
 class PhaseFourWorkflow:
-    """Điều phối bước duyệt implementation plan trước khi Developer.act chạy."""
+    """Điều phối các lát Phase 4 từ plan đã duyệt tới code trace pass."""
 
     def __init__(self, settings: Settings):
         self.settings = settings

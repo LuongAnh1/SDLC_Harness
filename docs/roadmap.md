@@ -143,18 +143,18 @@ Kết quả mong muốn:
 
 - Có `developer_work_packet_v1.json` và state tạm `implementation_ready` sau Slice 4.1.
 - Có `code_change_report_v1.md` và state tạm `implementation_written` sau Slice 4.2.
-- Có branch/commit/Draft PR thật trong target repo.
-- Có `code_change_report_v1.md`.
-- Có `test_report_v1.md`.
+- Có branch thật và code change thật trong target repo; commit/Draft PR là lát sau.
+- Có `code_change_report_v{n}.md`.
+- Có `test_report_v{n}.md`.
 - Có `requirement_design_code_trace_v1.json` với `mode=hybrid_rule_llm_code_trace_v1`
   và `llm_review`.
 - Có `implementation_repair_feedback_v1.json` khi trace fail vì code/test thiếu.
 - Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy;
   mỗi vòng repair refresh `developer_work_packet_v{n}`, ghi artifact v2/v3, chạy
   lại Verification Runner rồi Validator.
-- Có `qa_test_report_v1.md` cho acceptance/system behavior.
-- Có `tool_sync_report_v4.json`.
-- Niko báo được PR link, test summary, trace summary, QA summary và checkpoint code review.
+- Sau lát hiện tại, state có thể đạt `implementation_traced` khi compile/unit + trace pass.
+- Chưa có `qa_test_report_v1.md`, `tool_sync_report_v4.json`, commit/Draft PR thật hoặc
+  Niko báo PR link cho đến khi các lát QA/PR/sync Phase 4 được triển khai.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -270,8 +270,8 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > `run_20261013_160421_f661babf`. Niko gọi SDLC_Harness từ Jira issue, duyệt
 > requirement, duyệt design, SDLC sinh `implementation_plan_v4`, Validator pass
 > sau 3 vòng repair và sync Jira/Confluence ở checkpoint
-> `waiting_implementation_plan_review`. Phase 4 code/test/Draft PR vẫn là bước
-> kế tiếp, chưa mở tự động từ Niko.
+> `waiting_implementation_plan_review`. Tại thời điểm khóa Phase 3, Phase 4 vẫn
+> chưa mở tự động từ Niko; các lát code/test/trace/PR được triển khai sau đó.
 
 > Cập nhật 2026-10-14: Phase 4 đã có Slice 4.1/4.2/4.3. Harness duyệt
 > implementation plan thành `developer_work_packet_v1.json`, Developer.act apply
@@ -293,3 +293,10 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Cập nhật sau live DeepSeek 2026-10-14: repair loop đã refresh
 > `developer_work_packet_v{n}` từ target repo trước khi gọi Developer.repair để
 > tránh stale `current_files` từ packet v1.
+
+> Cập nhật 2026-10-14: sau khi sửa tầng Validator evidence/code, live revalidate
+> đã đưa run Phase 4 từng bị `implementation_repair_limit_exceeded` về
+> `implementation_traced`. `revalidate-implementation` refresh packet từ target
+> repo hiện tại, chạy lại Verification Runner và Validator, rồi chỉ mở lại
+> `implementation_repair_needed` nếu vẫn còn gap repairable và còn lượt. QA/Tester
+> Agent, commit/Draft PR và sync Phase 4 vẫn là các lát kế tiếp.

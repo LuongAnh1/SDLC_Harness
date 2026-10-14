@@ -1,9 +1,10 @@
 ﻿"""Ghi artifact runtime cho các phase của SDLC Harness.
 
-Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 sinh formal
-use case và requirement packet; Phase 2 sinh design, graph, trace và quality
-report theo từng version; Phase 3 sinh implementation plan trước khi sửa code;
-Phase 4 sinh work packet và code change report theo từng lát nhỏ.
+Artifact là sản phẩm mà checkpoint, Validator và tool sync tham chiếu. Phase 1
+sinh formal use case và requirement packet; Phase 2 sinh design, graph, trace và
+quality report theo từng version; Phase 3 sinh implementation plan trước khi sửa
+code; Phase 4 sinh work packet, code change report, test report, code trace và
+repair feedback theo từng version để không ghi đè lịch sử chạy.
 """
 
 from __future__ import annotations

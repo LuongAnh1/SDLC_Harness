@@ -1,9 +1,10 @@
 """Chạy compile/unit test command của target repo cho Phase 4.
 
 Verification Runner là lớp công cụ, không phải AI Tester. Nó nhận
-DeveloperWorkPacket đã được Phase 4 chuẩn bị, chọn command kiểm thử gần code
-nhất, chạy trong target repo và trả kết quả có cấu trúc để workflow ghi
-`test_report_v1.md`.
+DeveloperWorkPacket đã được Phase 4 chuẩn bị hoặc refresh, chọn command kiểm thử
+gần code nhất, chạy trong target repo và trả kết quả có cấu trúc để workflow ghi
+`test_report_v{n}.md`. Trên Windows, runner cố gắng thêm JDK phổ biến vào PATH
+để các lần chạy sau không kẹt vì shell chưa nhận `javac`.
 """
 
 from __future__ import annotations

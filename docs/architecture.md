@@ -50,8 +50,12 @@ Artifact Store
   trace_graph_v1
   implementation_plan_v{n}
   implementation_plan_review_v{n}
-  code_change_report_v1
-  test_report_v1
+  developer_work_packet_v{n}
+  code_change_report_v{n}
+  test_report_v{n}
+  requirement_design_code_trace_v{n}
+  implementation_repair_feedback_v{n}
+  qa_test_report_v1
 
 Tool Sync Records
   jira_issue_key
@@ -98,14 +102,27 @@ Niko -> hỏi anh duyệt kế hoạch implement
 
 User: duyệt plan
 Niko -> approve_checkpoint(run_id)
-Harness -> code_change_report_v1, test_report_v1, Draft PR, code_review_ready
-Niko -> báo link PR và kết quả test/trace
+Harness -> developer_work_packet_v1, implementation_ready
+Niko -> báo đã sẵn sàng bước code
+
+User: chạy tiếp Phase 4
+Niko -> continue_run(run_id)
+Harness -> Developer.act -> Verification Runner -> Validator code trace
+Harness -> nếu trace thiếu link code/test: Developer.repair -> revalidate trong giới hạn cấu hình
+Harness -> implementation_traced khi compile/unit + trace pass
+Niko -> báo kết quả code/test/trace, chưa báo PR nếu QA/PR chưa mở
 ```
 
 Trong Phase 3, `implementation_plan_v{n}` có thể tăng version nếu Validator hybrid
 phát hiện semantic gap và `Developer.repair_plan` còn lượt sửa theo
 `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`. Chỉ version pass rule + LLM review mới
 được sync lên Jira/Confluence.
+
+Trong Phase 4 hiện tại, harness đã chạy được tới `implementation_traced`: tạo
+branch, sinh/apply code thật, chạy Verification Runner, Validator code trace
+hybrid rule + LLM, và repair/revalidate khi code/test còn thiếu link. QA/Tester
+Agent, commit, Draft PR và sync Phase 4 vẫn là các lát sau; không coi
+`implementation_traced` là `code_review_ready`.
 
 ## Tool Plane
 

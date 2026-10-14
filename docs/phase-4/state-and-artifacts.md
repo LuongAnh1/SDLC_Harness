@@ -46,10 +46,10 @@ cancelled
 | `developer_work_packet_v1.json` | Gói đầu vào máy đọc được cho Developer.act, lấy từ implementation plan đã duyệt. |
 | `developer_work_packet_v{n}.json` | Snapshot đã refresh trước vòng Developer.repair thứ `n-1`; giữ nguyên scope nhưng đọc lại code/test thật trong target repo. |
 | `developer_repair_raw_response_v{n}.txt` | Raw response từ LLM Developer.repair nếu có, dùng để debug parse/logic khi repair khó hội tụ. |
-| `code_change_report_v1.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace pass. |
-| `test_report_v1.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
-| `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
-| `implementation_repair_feedback_v1.json` | Feedback máy đọc được từ Validator cho Developer repair code/test; chỉ xuất hiện khi trace fail có thể sửa ở code/test. |
+| `code_change_report_v{n}.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace/QA pass. |
+| `test_report_v{n}.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
+| `requirement_design_code_trace_v{n}.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
+| `implementation_repair_feedback_v{n}.json` | Feedback máy đọc được từ Validator cho Developer repair code/test; chỉ xuất hiện khi trace fail có thể sửa ở code/test. |
 | `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ use case, không thay thế unit test report. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
@@ -65,7 +65,7 @@ current_phase=implementation_preparing
 status=implementation_ready
 latest_artifacts.developer_work_packet
 pending_checkpoint=null
-allowed_next_actions=[get_status, cancel_run]
+allowed_next_actions=[continue_run, get_status, cancel_run]
 summary_for_user
 ```
 

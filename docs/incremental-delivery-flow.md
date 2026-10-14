@@ -84,21 +84,27 @@ version kế tiếp. GitHub target repo chỉ được kiểm tra, chưa tạo b
 ```text
 Input: approve implementation plan checkpoint
 Output:
-  code_change_report_v1
-  test_report_v1
-  requirement_design_code_trace_v1
-  GitHub Draft PR
-  status=code_review_ready
+  developer_work_packet_v1
+  code_change_report_v{n}
+  test_report_v{n}
+  requirement_design_code_trace_v{n}
+  implementation_repair_feedback_v{n} nếu cần
+  status=implementation_traced khi compile/unit + trace pass
 ```
 
 Slice này dùng target test repo GitHub tách khỏi `SDLC_Harness`. Jira vẫn là
 issue nguồn nên không tạo GitHub Issue mới. GitHub dùng cho branch, commit,
 Draft PR, code review và test/CI signal nếu có.
 
-Lát mở đường có thể ghi rõ compile/test skipped để không đánh tráo trạng thái.
-Nhưng điều kiện khóa Phase 4 là phải có code change thật, Draft PR thật và tối
-thiểu một lớp validation có thể chạy được trong target repo hoặc được ghi rõ là
-blocked nếu chưa đủ điều kiện kiểm chứng.
+Trạng thái hiện tại của Slice 4 đã có code change thật, branch thật, Verification
+Runner, Validator code trace hybrid rule + LLM, Developer repair loop và lệnh
+`revalidate-implementation` cho run từng bị block vì repair limit. Lát này mới
+khóa tới `implementation_traced`.
+
+Điều kiện cuối của Phase 4 vẫn chưa xong: QA/Tester Agent, commit, Draft PR thật,
+sync PR/test/trace summary về Jira/Confluence và `status=code_review_ready`. Các
+bước đó phải được triển khai thành lát riêng, không ghi đè vào kết quả
+`implementation_traced`.
 
 ## Slice 5 - Sửa Tại Checkpoint
 

@@ -37,9 +37,15 @@ visibility: private
 default branch: main
 ```
 
-Repo hiện có Java skeleton tối thiểu và `scripts/test.ps1`. Trên máy hiện tại
-chưa có `javac`, nên script sẽ chạy static validation và báo rõ compile/runtime
-tests đang skipped; khi cài JDK, cùng script sẽ compile và chạy test harness.
+Repo hiện có Java skeleton tối thiểu và `scripts/test.ps1`. Verification Runner
+tự thêm JDK phổ biến vào `PATH` nếu shell chưa nhận `javac`; khi JDK khả dụng,
+script compile và chạy test harness thật. Nếu máy thiếu JDK hoặc test harness
+không đủ điều kiện, report phải ghi `skipped`/`failed` rõ ràng, không được coi là
+pass.
+
+Tính đến Slice 4.6, target repo có thể đang dirty trên branch feature vì
+Developer.act/repair đã apply code để live test. Commit và Draft PR chưa được mở
+cho đến lát GitHub sync sau QA/Tester.
 
 ## Branch, Commit Và PR
 

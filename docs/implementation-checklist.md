@@ -190,4 +190,14 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 > Cập nhật 2026-10-13: Phase 3 đã pass live qua Telegram/Niko với run
 > `run_20261013_160421_f661babf`. Run dừng ở
 > `waiting_implementation_plan_review`, artifact cuối `implementation_plan_v4`,
-> sync Jira/Confluence `synced`. Phase 4 code/test/Draft PR vẫn là bước kế tiếp.
+> sync Jira/Confluence `synced`.
+>
+> Cập nhật 2026-10-14: Phase 4 hiện đã chạy tới `implementation_traced`: duyệt
+> implementation plan thành DeveloperWorkPacket, tạo branch target repo,
+> Developer.act sinh/apply code, Verification Runner pass compile/unit test,
+> Validator code trace hybrid rule + LLM, Developer.repair loop, refresh packet
+> trước mỗi repair và `revalidate-implementation` cho run từng bị block vì repair
+> limit. Các mục còn lại trước khi khóa Phase 4 là compile/unit feedback quay về
+> Developer khi fail sớm, nhánh block/reopen design khi design nền sai, QA/Tester
+> Agent, `qa_test_report_v1.md`, commit/Draft PR thật, sync Phase 4 và
+> `code_review_ready`.

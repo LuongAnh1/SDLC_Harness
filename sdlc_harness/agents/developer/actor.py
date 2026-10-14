@@ -1,8 +1,10 @@
-"""Developer.act cho Phase 4: sinh file changes từ DeveloperWorkPacket.
+"""Developer actor cho Phase 4: sinh hoặc sửa file từ DeveloperWorkPacket.
 
-Phase 4.2 mới chỉ tạo code change để human review thủ công. Agent này nhận
-packet đã được chuẩn bị ở Slice 4.1, yêu cầu LLM trả JSON theo output contract,
-rồi để workflow kiểm path và apply vào target repo. Nó không tự chạy git/test.
+`act` tạo code/test lần đầu từ implementation plan đã duyệt. `repair` nhận
+feedback traceability từ Validator và chỉ sửa các file trong `allowed_paths`.
+Agent này luôn trả JSON file đầy đủ để workflow kiểm path, apply vào target repo,
+chạy Verification Runner và Validator ở lớp ngoài. Nó không tự chạy git/test,
+không commit, không mở PR và không được sửa requirement/design đã duyệt.
 """
 
 from __future__ import annotations
@@ -31,7 +33,7 @@ class DeveloperActResult:
 
 
 class DeveloperActAgent:
-    """Vai Developer ở Phase 4: tạo nội dung file, chưa commit/test/PR."""
+    """Vai Developer ở Phase 4: tạo/sửa nội dung file, chưa commit/test/PR."""
 
     def __init__(self, llm_client: Any | None = None):
         self.llm_client = llm_client

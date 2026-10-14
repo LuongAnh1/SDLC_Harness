@@ -1,7 +1,9 @@
 ﻿"""CLI JSON cho Niko gọi SDLC Harness bằng subprocess.
 
 Quy tắc quan trọng: stdout chỉ có JSON. Nếu cần debug, ghi stderr/log file sau;
-không trộn text tự do vào stdout vì Niko sẽ parse trực tiếp response này.
+không trộn text tự do vào stdout vì Niko sẽ parse trực tiếp response này. CLI
+hiện bao phủ start/status/sync/approve/continue và đường vận hành
+`revalidate-implementation` cho Phase 4 repair-limit runs.
 """
 
 from __future__ import annotations

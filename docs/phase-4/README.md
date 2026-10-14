@@ -8,6 +8,18 @@ design -> code -> test, rồi mở Draft PR để human review.
 Phase 4 mới là nơi GitHub trở thành tool sync chính. Phase 3 chỉ chuẩn bị plan và
 kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
+## Trạng Thái Hiện Tại
+
+Tính đến bản hiện tại, Phase 4 đã khóa tới mốc `implementation_traced`: harness
+tạo `developer_work_packet_v1`, checkout branch target repo, Developer.act
+sinh/apply code thật, Verification Runner chạy compile/unit test, Validator code
+trace chạy hybrid rule + LLM, và Developer.repair có thể sửa code/test rồi chạy
+lại runner + Validator trong giới hạn `SDLC_IMPLEMENTATION_REPAIR_LIMIT`.
+
+Mốc này chưa phải `code_review_ready`. QA/Tester Agent, commit, Draft PR thật và
+sync Phase 4 về Jira/Confluence/GitHub vẫn là các lát kế tiếp. Vì vậy tài liệu
+này tách rõ “đầu ra hiện tại” và “đầu ra đầy đủ của Phase 4”.
+
 ## Slice 4.1 Đã Chốt
 
 Slice đầu của Phase 4 hiện chỉ làm bước chuyển tiếp an toàn:
@@ -214,8 +226,9 @@ Developer.act không được sinh code từ design trần. Đầu vào bắt bu
 - requirement-design trace;
 - target repo status đã được guard.
 
-Code change report cần nói rõ branch, commit, file đổi, lý do đổi và phần
-requirement/design nào được cover.
+Code change report hiện cần nói rõ branch, file đổi, lý do đổi và phần
+requirement/design nào được cover. Commit xuất hiện ở lát GitHub sync sau khi
+compile/unit, Validator trace và QA/Tester đều đủ điều kiện.
 
 ## Verification Runner, Validator Và QA Tester
 
@@ -261,7 +274,7 @@ QA/Tester Agent cũng không sửa code trực tiếp. Nếu acceptance/system t
 Tester chỉ ghi failure evidence; Developer sửa code, Verification Runner chạy lại
 unit test, Validator kiểm lại trace, rồi QA test lại.
 
-## Đầu Ra Bắt Buộc
+## Đầu Ra Hiện Tại
 
 ```text
 .runtime/runs/<run_id>/artifacts/developer_work_packet_v1.json
@@ -270,11 +283,35 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json
 .runtime/runs/<run_id>/artifacts/implementation_repair_feedback_v1.json
+```
+
+Khi run đạt `implementation_traced`, state phải có:
+
+```text
+current_phase=implementation_testing
+status=implementation_traced
+latest_artifacts.developer_work_packet
+latest_artifacts.code_change_report
+latest_artifacts.test_report
+latest_artifacts.requirement_design_code_trace
+quality_reports.implementation_traceability
+quality_reports.implementation_repair nếu từng repair
+implementation_repair_iterations
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+```
+
+## Đầu Ra Đầy Đủ Trước Code Review
+
+Các artifact sau vẫn là mục tiêu của phần còn lại Phase 4, chưa phải trạng thái
+đã khóa ở bản hiện tại:
+
+```text
 .runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 .runtime/runs/<run_id>/sync/tool_sync_report_v4.json
 ```
 
-Và `state.json` phải có:
+Và `state.json` lúc đó phải có:
 
 ```text
 current_phase=code_review

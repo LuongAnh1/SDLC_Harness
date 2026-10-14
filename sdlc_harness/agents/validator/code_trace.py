@@ -1,10 +1,11 @@
 """Validator code trace cho Phase 4.
 
-Module này kiểm tra lát V1 sau khi Developer.act đã ghi code và Verification
-Runner đã pass. Validator giữ hai lớp kiểm soát: rule-based evidence để chắc
-chắn file/test tồn tại, sau đó bắt buộc gọi LLM để review graph ngữ nghĩa giữa
-requirement, approved design, code và test. Workflow chỉ được đi tiếp khi cả hai
-lớp cùng pass, vì rule-based đơn thuần có thể bỏ sót thiếu sót nghiệp vụ.
+Module này chạy sau khi Developer.act/repair đã ghi code và Verification Runner
+đã pass. Validator giữ hai lớp kiểm soát: rule-based evidence để chắc chắn
+file/test tồn tại, sau đó bắt buộc gọi LLM để review graph ngữ nghĩa giữa
+requirement, approved design, code và test. Kết quả được chuẩn hóa thành
+missing link repairable hoặc non-repairable để workflow biết nên giao lại
+Developer sửa code/test hay block/reopen checkpoint nền.
 """
 
 from __future__ import annotations
