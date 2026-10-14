@@ -11,7 +11,9 @@ waiting_implementation_plan_review
   -> implementation_writing
   -> implementation_written
   -> implementation_testing
-     (Verification Runner -> Validator code trace -> Developer repair loop -> QA/Tester loop)
+     (Verification Runner -> Validator code trace)
+  -> implementation_repair_needed
+     (feedback đã ghi, Developer repair loop thật làm ở slice sau)
   -> implementation_traced
   -> code_review_ready
 ```
@@ -31,6 +33,7 @@ cancelled
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
 | `implementation_written` | Code change đã được apply vào target repo; chưa test/commit/PR. | Harness slice tiếp theo |
 | `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, Developer repair loop khi compile/unit/trace fail, và QA/Tester acceptance/system test sau khi trace ổn. | Harness |
+| `implementation_repair_needed` | Validator code trace fail vì code/test thiếu link có thể sửa; `implementation_repair_feedback_v1.json` đã sẵn sàng nhưng Developer repair chưa chạy ở slice 4.5. | Harness slice tiếp theo |
 | `implementation_traced` | Compile/unit test và Validator code trace hybrid rule + LLM đã pass ổn định sau repair loop nếu có; chưa chạy QA/Tester Agent, chưa commit/PR. | Harness slice tiếp theo |
 | `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
@@ -44,6 +47,7 @@ cancelled
 | `code_change_report_v1.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace pass. |
 | `test_report_v1.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
 | `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
+| `implementation_repair_feedback_v1.json` | Feedback máy đọc được từ Validator cho Developer repair code/test; chỉ xuất hiện khi trace fail có thể sửa ở code/test. |
 | `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ use case, không thay thế unit test report. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
@@ -107,7 +111,32 @@ summary_for_user
 
 `quality_reports.implementation_traceability` phải ghi `mode=hybrid_rule_llm_code_trace_v1`,
 `llm_required=true`, `llm_review_ok=true` và confidence nếu model trả về. Nếu LLM
-review phát hiện semantic gap, state phải là `blocked` thay vì `implementation_traced`.
+review phát hiện semantic gap do code/test, state phải là
+`implementation_repair_needed` thay vì `implementation_traced`; lỗi không
+repair được ở code/test mới `blocked`.
+
+Sau Slice 4.5 nếu Validator fail vì code/test thiếu link có thể sửa, workflow
+không còn dùng `blocked` chung chung. Nó dừng ở state trung gian để slice sau
+repair:
+
+```text
+current_phase=implementation_repair
+status=implementation_repair_needed
+latest_artifacts.requirement_design_code_trace
+latest_artifacts.implementation_repair_feedback
+quality_reports.implementation_traceability
+quality_reports.implementation_repair
+pending_checkpoint=null
+last_error=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
+
+`continue-run` từ state này tạm thời trả
+`implementation_repair_not_implemented` cho tới khi Developer repair loop thật
+được triển khai. Nếu Validator fail vì thiếu design mapping, thiếu artifact nền,
+LLM review lỗi hệ thống hoặc lỗi không thể quy về code/test, state vẫn là
+`blocked`.
 
 Sau Slice 4.3 nếu compile/unit test fail hoặc skipped:
 
@@ -173,8 +202,8 @@ Phase 4 phải `blocked` thay vì giả vờ pass trong các trường hợp:
 - không tạo được branch hoặc không ghi được code;
 - compile/unit test fail và không còn repair path an toàn về Developer;
 - Validator không nối được approved requirement/design với code/unit test;
-- LLM graph review trong Validator trả `ok=false` hoặc phát hiện semantic gap dù
-  static evidence đã pass;
+- LLM graph review trong Validator trả `ok=false` vì lỗi không thể quy về repair
+  code/test an toàn;
 - Validator phát hiện approved design mâu thuẫn/không triển khai được; trường hợp này phải block hoặc reopen design checkpoint có human approval, không tự sửa design âm thầm trong Phase 4;
 - QA/Tester Agent phát hiện acceptance/system behavior fail quá giới hạn repair;
 - GitHub sync fail toàn bộ.

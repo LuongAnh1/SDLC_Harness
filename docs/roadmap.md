@@ -148,6 +148,7 @@ Kết quả mong muốn:
 - Có `test_report_v1.md`.
 - Có `requirement_design_code_trace_v1.json` với `mode=hybrid_rule_llm_code_trace_v1`
   và `llm_review`.
+- Có `implementation_repair_feedback_v1.json` khi trace fail vì code/test thiếu.
 - Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy.
 - Có `qa_test_report_v1.md` cho acceptance/system behavior.
 - Có `tool_sync_report_v4.json`.
@@ -279,8 +280,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > Cập nhật 2026-10-14: Phase 4 đã có Slice 4.4. `continue-run` từ
 > `implementation_tested` sinh `requirement_design_code_trace_v1.json`, cập nhật
 > `quality_reports.implementation_traceability` và chuyển state sang
-> `implementation_traced` khi static evidence + LLM graph review cùng pass. Nếu
-> LLM phát hiện semantic gap, workflow block dù rule-based evidence pass.
-> Slice kế tiếp là Validator feedback -> Developer repair loop; QA/Tester Agent
-> đứng sau repair loop khi compile/unit + trace đã pass ổn định. Commit/Draft PR
-> và sync Phase 4 vẫn là các slice sau.
+> `implementation_traced` khi static evidence + LLM graph review cùng pass.
+> Cập nhật 2026-10-14: Slice 4.5 đã thêm `implementation_repair_needed` và
+> `implementation_repair_feedback_v1.json` khi trace fail do code/test thiếu.
+> Slice kế tiếp mới dùng feedback đó để Developer repair code/test; QA/Tester
+> Agent đứng sau repair loop khi compile/unit + trace đã pass ổn định.
+> Commit/Draft PR và sync Phase 4 vẫn là các slice sau.

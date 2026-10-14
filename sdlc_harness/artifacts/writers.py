@@ -412,6 +412,28 @@ def write_phase4_code_trace_report(
     return store.relative(path)
 
 
+def write_phase4_repair_feedback(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    feedback: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi feedback máy đọc được để slice sau giao Developer repair code/test."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"implementation_repair_feedback_{suffix}.json"
+    payload = {
+        **feedback,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"implementation_repair_feedback_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 

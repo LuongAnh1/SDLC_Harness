@@ -435,7 +435,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(payload["status"], "implementation_tested")
         self.assertIn("test_report", payload["latest_artifacts"])
 
-    def test_continue_run_blocks_when_code_trace_missing_test_file(self) -> None:
+    def test_continue_run_marks_repair_needed_when_code_trace_missing_test_file(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
             self.target_repo
@@ -452,10 +452,12 @@ class PhaseFourTest(unittest.TestCase):
 
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
 
-        self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        self.assertEqual(response["current_phase"], "implementation_repair")
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertIsNone(response["last_error"])
         self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
+        self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
+        self.assertTrue(response["quality_reports"]["implementation_repair"]["needed"])
         trace = json.loads(
             (self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])).read_text(
                 encoding="utf-8"
@@ -463,17 +465,28 @@ class PhaseFourTest(unittest.TestCase):
         )
         self.assertFalse(trace["ok"])
         self.assertTrue(any(item["type"] == "missing_test_file" for item in trace["missing_links"]))
+        feedback = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["implementation_repair_feedback"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(feedback["version"], "implementation_repair_feedback_v1")
+        self.assertEqual(feedback["status"], "implementation_repair_needed")
+        self.assertEqual(feedback["repair_scope"], "code_or_test")
+        self.assertEqual(feedback["trace_artifact"], response["latest_artifacts"]["requirement_design_code_trace"])
+        self.assertTrue(any(item["type"] == "missing_test_file" for item in feedback["missing_links"]))
 
-    def test_continue_run_blocks_when_llm_code_trace_finds_semantic_gap(self) -> None:
+    def test_continue_run_marks_repair_needed_when_llm_code_trace_finds_semantic_gap(self) -> None:
         tested = self._create_phase4_tested_run()
         workflow = PhaseFourWorkflow(self.settings)
         workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
 
         response = workflow.continue_run(run_id=str(tested["run_id"]))
 
-        self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        self.assertEqual(response["current_phase"], "implementation_repair")
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertIsNone(response["last_error"])
+        self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
         trace = json.loads(
             (self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])).read_text(
                 encoding="utf-8"
@@ -483,6 +496,41 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(trace["llm_required"])
         self.assertFalse(trace["llm_review"]["ok"])
         self.assertTrue(any(item["type"] == "llm_semantic_gap" for item in trace["missing_links"]))
+        feedback = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["implementation_repair_feedback"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(feedback["llm_review"]["summary"], "Semantic graph review found missing delete confirmation behavior.")
+        self.assertTrue(feedback["developer_constraints"]["allowed_paths"])
+
+    def test_continue_run_from_repair_needed_returns_not_implemented(self) -> None:
+        tested = self._create_phase4_tested_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        response = workflow.continue_run(run_id=str(tested["run_id"]))
+
+        with self.assertRaises(HarnessError) as ctx:
+            PhaseFourWorkflow(self.settings).continue_run(run_id=str(response["run_id"]))
+
+        self.assertEqual(ctx.exception.error_code, "implementation_repair_not_implemented")
+
+    def test_continue_run_blocks_when_code_trace_failure_is_not_repairable(self) -> None:
+        tested = self._create_phase4_tested_run()
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(str(tested["run_id"]))
+        packet_path = self.repo_root / str(state["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["design_mappings_by_file"] = {}
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_testing")
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
+        self.assertNotIn("implementation_repair_feedback", response["latest_artifacts"])
 
     def test_continue_run_blocks_when_code_trace_missing_test_report(self) -> None:
         tested = self._create_phase4_tested_run()

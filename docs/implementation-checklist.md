@@ -135,9 +135,12 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [x] Sinh `test_report_v1.md`.
 - [x] Validator sinh `requirement_design_code_trace_v1.json` từ approved requirement/design sang code/unit test.
 - [x] Code trace bắt buộc chạy LLM/DeepSeek graph review sau static evidence; nếu
-  LLM phát hiện semantic gap thì block dù rule-based pass.
-- [ ] Nếu compile/unit hoặc trace fail vì code/test thiếu, feedback quay về Developer
-  trong giới hạn repair; sau repair phải chạy lại Verification Runner -> Validator
+  LLM phát hiện semantic gap do code/test thì dừng ở `implementation_repair_needed`
+  dù rule-based pass.
+- [x] Nếu trace fail vì code/test thiếu, ghi feedback máy đọc được cho Developer
+  trước; repair loop thật sẽ dùng feedback này ở slice sau.
+- [ ] Nếu compile/unit fail hoặc trace repair feedback đã có, Developer repair trong
+  giới hạn cấu hình; sau repair phải chạy lại Verification Runner -> Validator
   trước khi QA/Tester được chạy.
 - [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
 - [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace

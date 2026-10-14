@@ -90,11 +90,32 @@ LLM/DeepSeek để review code trước khi human review.
 Slice này chưa chạy QA/Tester Agent, chưa tự repair code khi trace fail, chưa
 commit và chưa mở PR.
 
-Nếu Validator phát hiện missing link/semantic gap do code, trạng thái hiện tại là
-`blocked` và ghi `missing_links`/`llm_review`. Vòng feedback tự động về
-Developer để update code là slice kế tiếp, chưa được triển khai trong Slice 4.4.
-QA/Tester Agent chỉ được chạy sau khi repair loop này làm compile/unit test và
-Validator trace cùng pass ổn định.
+Nếu Validator phát hiện missing link/semantic gap do code, Slice 4.5 hiện chuyển
+run sang `implementation_repair_needed` và ghi
+`implementation_repair_feedback_v1.json`. Vòng Developer tự sửa code/test từ
+feedback này vẫn chưa được triển khai; QA/Tester Agent chỉ được chạy sau khi
+repair loop thật làm compile/unit test và Validator trace cùng pass ổn định.
+
+## Slice 4.5 Đã Chốt
+
+Slice 4.5 là bước đệm hẹp trước repair loop tự động:
+
+```text
+continue-run(run_id)
+-> chạy Validator code trace như Slice 4.4
+-> nếu pass: status=implementation_traced
+-> nếu fail vì thiếu link có thể sửa ở code/test:
+   status=implementation_repair_needed
+   latest_artifacts.implementation_repair_feedback
+-> nếu fail vì input graph/artifact nền không đủ điều kiện repair: status=blocked
+```
+
+Artifact mới là `implementation_repair_feedback_v1.json`. Nó gom
+`missing_links`, `llm_review.summary`, `llm_review.risks`, trace artifact, repo
+branch và `allowed_paths` để slice sau giao lại cho Developer sửa code/test.
+Slice này chưa gọi Developer repair; nếu chạy `continue-run` tiếp từ
+`implementation_repair_needed`, CLI trả lỗi rõ
+`implementation_repair_not_implemented`.
 
 ## Luồng Phase 4
 
@@ -112,7 +133,8 @@ approve_checkpoint(run_id)
 -> ghi test_report_v1
 -> Validator kiểm requirement -> design -> code -> test trace bằng static evidence + LLM graph review
 -> ghi requirement_design_code_trace_v1.json
--> nếu code/unit test thiếu so với approved design: feedback về Developer và lặp Verification Runner -> Validator trong giới hạn cấu hình
+-> nếu code/unit test thiếu so với approved design: ghi implementation_repair_feedback_v1.json và dừng ở implementation_repair_needed
+-> slice sau mới dùng feedback đó để Developer sửa code/test rồi lặp Verification Runner -> Validator trong giới hạn cấu hình
 -> nếu approved design mâu thuẫn hoặc không triển khai được: blocked/reopen design có human approval, không tự sửa design âm thầm
 -> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã pass ổn định
 -> nếu QA fail: feedback về Developer, rồi chạy lại unit test -> Validator -> QA trong giới hạn cấu hình
@@ -167,8 +189,10 @@ requirement id
 ```
 
 Report này phải ghi `mode=hybrid_rule_llm_code_trace_v1`, `llm_required=true` và
-`llm_review`. Nếu LLM review trả `ok=false` hoặc phát hiện semantic gap, workflow
-phải `blocked` ngay cả khi static file/test evidence đã pass.
+`llm_review`. Nếu LLM review trả `ok=false` hoặc phát hiện semantic gap do
+code/test chưa cover approved design, workflow phải dừng ở
+`implementation_repair_needed` và ghi feedback. Chỉ block khi lỗi không thể quy
+về repair code/test an toàn.
 
 Nếu trace fail do code/unit test chưa cover approved design, Developer phải repair
 trong giới hạn cấu hình trước khi QA/Tester được chạy. Nếu fail do approved
@@ -187,6 +211,7 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/code_change_report_v1.md
 .runtime/runs/<run_id>/artifacts/test_report_v1.md
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json
+.runtime/runs/<run_id>/artifacts/implementation_repair_feedback_v1.json
 .runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 .runtime/runs/<run_id>/sync/tool_sync_report_v4.json
 ```

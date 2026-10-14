@@ -137,8 +137,9 @@ QA/Tester Agent.
 Việc tiếp theo:
 
 - Slice 4.4: triển khai Validator code trace.
-- Slice 4.5: triển khai Validator feedback -> Developer repair loop cho code/test.
-- Slice 4.6: triển khai QA/Tester Agent report sau khi trace repair loop pass.
+- Slice 4.5: chuẩn hóa Validator feedback cho Developer.
+- Slice 4.6: triển khai Developer repair loop cho code/test.
+- Slice 4.7: triển khai QA/Tester Agent report sau khi trace repair loop pass.
 - Sau đó mới đến commit/Draft PR/sync Phase 4.
 
 ## 2026-10-14 - Slice 4.4: Validator Code Trace
@@ -156,10 +157,12 @@ chứng approved design đã đi tới source/test file trong target repo.
   graph requirement -> design -> code -> test.
 - Sinh `requirement_design_code_trace_v1.json`.
 - Nếu trace pass: state chuyển sang `implementation_traced`.
-- Nếu trace fail: state chuyển sang `blocked`, `last_error=implementation_traceability_failed`
-  và artifact vẫn ghi `missing_links`.
-- Nếu LLM review phát hiện semantic gap, workflow block dù static file/test
-  evidence đã pass.
+- Nếu trace fail ở Slice 4.4 ban đầu: state chuyển sang `blocked`,
+  `last_error=implementation_traceability_failed` và artifact vẫn ghi
+  `missing_links`. Slice 4.5 đã thay phần repairable code/test fail này bằng
+  state `implementation_repair_needed`.
+- Nếu LLM review phát hiện semantic gap do code/test, Slice 4.5 ghi feedback
+  repair thay vì block chung chung.
 - `latest_artifacts.requirement_design_code_trace` và
   `quality_reports.implementation_traceability` được cập nhật.
 - `build_developer_work_packet` tự bổ sung file từ `design_mappings` vào output
@@ -177,9 +180,8 @@ Lưu ý egress:
 Chưa làm trong slice này:
 
 - Chưa chạy QA/Tester Agent acceptance/system test.
-- Chưa có repair loop Developer khi trace fail. Nếu Validator phát hiện missing
-  link/semantic gap do code, workflow hiện `blocked`; feedback tự động về
-  Developer để update code là slice kế tiếp.
+- Chưa có repair loop Developer khi trace fail. Slice 4.5 đã có feedback artifact
+  cho Developer, nhưng chưa tự gọi Developer update code.
 - Chưa commit target repo, chưa mở Draft PR và chưa sync Phase 4.
 
 Kết quả test:
@@ -192,9 +194,52 @@ Kết quả test:
 
 Việc tiếp theo:
 
-- Slice 4.5: Validator feedback -> Developer repair loop. Khi trace fail do
-  code/test thiếu, Developer nhận `missing_links`/`llm_review`, sửa code/test,
-  Verification Runner chạy lại, rồi Validator review lại trong giới hạn cấu hình.
-- Slice 4.6: QA/Tester Agent sinh/chạy acceptance/system evidence và ghi
+- Slice 4.5: chuẩn hóa Validator feedback thành `implementation_repair_feedback_v1.json`
+  trước, chưa tự sửa code/test.
+- Slice 4.6: Developer repair loop dùng feedback đó để sửa code/test, chạy lại
+  Verification Runner và Validator trong giới hạn cấu hình.
+- Slice 4.7: QA/Tester Agent sinh/chạy acceptance/system evidence và ghi
   `qa_test_report_v1.md` sau khi compile/unit + trace đã pass ổn định.
 - Sau đó mới đến commit/Draft PR và sync Phase 4.
+
+## 2026-10-14 - Slice 4.5: Validator Feedback Cho Developer
+
+Mục tiêu của slice này là không nhảy thẳng vào repair loop rộng. Trước tiên,
+Validator phải chuẩn hóa feedback đủ rõ để Developer có thể sửa code/test ở
+slice sau mà không phải đoán từ `blocked` chung chung.
+
+Đã làm:
+
+- Khi `CodeTraceValidator` pass, luồng giữ nguyên: state=`implementation_traced`.
+- Khi Validator fail vì missing link có thể sửa ở code/test, workflow chuyển sang
+  state=`implementation_repair_needed` thay vì `blocked`.
+- Sinh `implementation_repair_feedback_v1.json`.
+- Feedback gom `missing_links`, `llm_review.summary`, `llm_review.risks`, trace
+  artifact, branch, target repo và `allowed_paths`.
+- `latest_artifacts.implementation_repair_feedback` trỏ tới feedback mới.
+- `quality_reports.implementation_repair` tóm tắt việc cần repair cho Niko đọc.
+- `last_error` để `null` ở state repair-needed vì đây là trạng thái chờ xử lý,
+  không phải lỗi hệ thống.
+- Nếu trace fail vì input graph/artifact nền không đủ điều kiện repair, workflow
+  vẫn `blocked`.
+- `continue-run` từ `implementation_repair_needed` trả
+  `implementation_repair_not_implemented` để tránh hiểu nhầm là đã có auto repair.
+
+Chưa làm trong slice này:
+
+- Chưa gọi Developer sửa code/test từ feedback.
+- Chưa version hóa vòng repair `code_change_report_v2`, `test_report_v2`,
+  `requirement_design_code_trace_v2`.
+- Chưa chạy lại Verification Runner/Validator sau repair.
+- Chưa chạy QA/Tester Agent, chưa commit, chưa mở Draft PR.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: pass.
+- `rtk proxy python -m pytest tests/test_phase1.py tests/test_phase2.py tests/test_phase3.py tests/test_phase4.py -q`: pass.
+
+Việc tiếp theo:
+
+- Slice 4.6: dùng `implementation_repair_feedback_v1.json` làm input để Developer
+  repair code/test trong `allowed_paths`, sau đó chạy lại Verification Runner ->
+  Validator trong giới hạn cấu hình.

@@ -86,12 +86,13 @@ Mục đích: chứng minh requirement/design đã đi tới code/test.
   sau static evidence.
 - [x] Trace report ghi `mode=hybrid_rule_llm_code_trace_v1`,
   `llm_required=true` và `llm_review`.
-- [x] Nếu LLM review phát hiện semantic gap, workflow block dù static evidence pass.
+- [x] Nếu LLM review phát hiện semantic gap do code/test, workflow chuyển sang
+  `implementation_repair_needed` dù static evidence pass.
 - [x] Quyết định policy gửi raw code/test snippet cho LLM: project owner đã xác
   nhận cho phép Validator gửi snippet giới hạn sang DeepSeek để review.
 - [x] Missing link được ghi riêng.
-- [ ] Nếu trace fail vì code/unit test thiếu so với approved design, feedback về
-  Developer trong giới hạn repair.
+- [x] Nếu trace fail vì code/unit test thiếu so với approved design, ghi feedback
+  máy đọc được cho Developer; vòng repair thật dùng feedback này sẽ làm ở slice sau.
 - [ ] Nếu trace fail vì approved design mâu thuẫn/không triển khai được,
   state=`blocked` hoặc reopen design checkpoint có human approval; không tự sửa
   design trong Phase 4.
@@ -101,8 +102,12 @@ Mục đích: chứng minh requirement/design đã đi tới code/test.
 Mục đích: khi Validator lead phát hiện code/test thiếu link so với approved
 design, workflow phải giao feedback lại Developer sửa trước khi chạy QA/Tester.
 
-- [ ] Chuyển `missing_links`, `llm_review.summary`, `llm_review.risks` và trace
+- [x] Chuyển `missing_links`, `llm_review.summary`, `llm_review.risks` và trace
   artifact thành feedback máy đọc được cho Developer.
+- [x] Khi code trace fail nhưng lỗi nằm ở code/test, state chuyển thành
+  `implementation_repair_needed` và ghi `implementation_repair_feedback_v1.json`.
+- [x] `continue-run` từ `implementation_repair_needed` trả lỗi rõ
+  `implementation_repair_not_implemented` cho tới khi repair loop thật được triển khai.
 - [ ] Developer repair code/test trong `allowed_paths`, không tự sửa requirement
   hoặc approved design.
 - [ ] Mỗi vòng repair ghi `code_change_report_v{n}`, `test_report_v{n}` và
@@ -153,6 +158,8 @@ Verification Runner, Validator hoặc QA/Tester.
 - [x] Ghi state trung gian `implementation_written` sau khi apply code nhưng chưa test/commit/PR.
 - [x] Ghi state `implementation_testing`.
 - [x] Ghi state trung gian `implementation_traced` sau khi Validator code trace pass.
+- [x] Ghi state trung gian `implementation_repair_needed` khi Validator fail do
+  thiếu link có thể sửa ở code/test.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
@@ -178,8 +185,11 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test PR description chứa đủ link/context.
 - [x] Unit test test report `passed/failed/skipped`.
 - [x] Unit test trace requirement-design-code-test.
-- [x] Unit test blocked khi trace fail.
-- [x] Unit test blocked khi LLM code-trace review phát hiện semantic gap.
+- [x] Unit test repair-needed khi trace fail do thiếu test/source/code evidence.
+- [x] Unit test repair-needed khi LLM code-trace review phát hiện semantic gap.
+- [x] Unit test blocked khi trace fail vì lỗi không repair được ở code/test.
+- [x] Unit test `continue-run` từ `implementation_repair_needed` trả
+  `implementation_repair_not_implemented`.
 - [ ] Unit test QA/Tester report `passed/failed/skipped`.
 - [ ] Unit test blocked khi QA fail quá giới hạn repair.
 - [ ] Unit test sync mock/local GitHub report.

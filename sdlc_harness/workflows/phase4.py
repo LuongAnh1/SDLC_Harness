@@ -17,6 +17,7 @@ from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
     write_phase4_developer_work_packet,
+    write_phase4_repair_feedback,
     write_phase4_test_report,
 )
 from ..core.config import Settings
@@ -40,6 +41,7 @@ ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_ru
 ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 
 
 class PhaseFourWorkflow:
@@ -178,6 +180,12 @@ class PhaseFourWorkflow:
             return self._continue_verification(state=state, run_id=run_id)
         if status == "implementation_tested":
             return self._continue_code_trace(state=state, run_id=run_id)
+        if status == "implementation_repair_needed":
+            raise HarnessError(
+                "implementation_repair_not_implemented",
+                f"Run needs Developer repair feedback handling before it can continue: {run_id}",
+                run_id=run_id,
+            )
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
@@ -404,6 +412,52 @@ class PhaseFourWorkflow:
                     "summary_for_user": (
                         f"Validator code trace đã pass cho run {run_id}: {trace_result.summary} "
                         "Slice 4.4 chưa chạy QA/Tester Agent, chưa commit và chưa mở PR."
+                    ),
+                }
+            )
+        elif _is_repairable_code_trace_failure(trace_result):
+            feedback = _implementation_repair_feedback(
+                run_id=run_id,
+                state=state,
+                work_packet=work_packet,
+                trace_result=trace_result,
+                trace_path=trace_path,
+                target_repo=str(target_info.path),
+                branch=target_info.current_branch,
+            )
+            feedback_path = write_phase4_repair_feedback(
+                store=self.store,
+                run_id=run_id,
+                feedback=feedback,
+                version=1,
+            )
+            latest_artifacts = {
+                **latest_artifacts,
+                "implementation_repair_feedback": feedback_path,
+            }
+            quality_reports = {
+                **quality_reports,
+                "implementation_repair": {
+                    "needed": True,
+                    "feedback_artifact": feedback_path,
+                    "missing_count": len(trace_result.missing_links),
+                    "summary": trace_result.summary,
+                },
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "implementation_repair_needed",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Validator code trace còn thiếu link có thể sửa ở code/test cho run {run_id}: "
+                        f"{trace_result.summary} Đã ghi implementation_repair_feedback_v1.json để slice sau "
+                        "giao Developer repair; workflow chưa tự sửa code ở slice 4.5."
                     ),
                 }
             )
@@ -640,3 +694,69 @@ def _string_items(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _is_repairable_code_trace_failure(trace_result: object) -> bool:
+    """Chỉ chuyển sang repair-needed khi thiếu link nằm ở code/test, không phải input graph."""
+
+    missing_links = getattr(trace_result, "missing_links", [])
+    if not isinstance(missing_links, list) or not missing_links:
+        return False
+    repairable_types = {"missing_source_file", "missing_test_file", "llm_semantic_gap"}
+    for item in missing_links:
+        if not isinstance(item, dict):
+            return False
+        link_type = str(item.get("type") or "").strip()
+        if link_type not in repairable_types:
+            return False
+    return True
+
+
+def _implementation_repair_feedback(
+    *,
+    run_id: str,
+    state: dict[str, object],
+    work_packet: dict[str, object],
+    trace_result: object,
+    trace_path: str,
+    target_repo: str,
+    branch: str,
+) -> dict[str, object]:
+    """Đóng gói feedback Validator theo schema ổn định cho Developer repair slice sau."""
+
+    llm_review = getattr(trace_result, "llm_review", {})
+    if not isinstance(llm_review, dict):
+        llm_review = {}
+    missing_links = getattr(trace_result, "missing_links", [])
+    if not isinstance(missing_links, list):
+        missing_links = []
+    output_contract = _dict_value(work_packet.get("output_contract"))
+    return {
+        "version": "implementation_repair_feedback_v1",
+        "run_id": run_id,
+        "source_ref": state.get("source_ref"),
+        "issue_key": work_packet.get("issue_key"),
+        "status": "implementation_repair_needed",
+        "repair_scope": "code_or_test",
+        "severity": "repair_required",
+        "summary": getattr(trace_result, "summary", ""),
+        "required_action": (
+            "Developer must repair code/test within allowed_paths, then rerun Verification Runner "
+            "and Validator code trace. Requirement and approved design must not be edited in this slice."
+        ),
+        "target_repo": target_repo,
+        "branch": branch,
+        "trace_artifact": trace_path,
+        "missing_links": missing_links,
+        "llm_review": {
+            "ok": llm_review.get("ok"),
+            "confidence": llm_review.get("confidence"),
+            "summary": llm_review.get("summary"),
+            "risks": llm_review.get("risks", []),
+        },
+        "developer_constraints": {
+            "allowed_paths": output_contract.get("allowed_paths", []),
+            "changed_files_only": output_contract.get("changed_files_only"),
+            "format": output_contract.get("format"),
+        },
+    }
