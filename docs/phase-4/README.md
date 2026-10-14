@@ -26,28 +26,72 @@ là biến implementation plan đã được duyệt thành input máy đọc đ
 Developer.act ở slice tiếp theo, thay vì để Developer parse Markdown hoặc
 Confluence.
 
+## Slice 4.2 Đã Chốt
+
+Slice 4.2 chạy tiếp từ `implementation_ready`:
+
+```text
+continue-run(run_id)
+-> đọc developer_work_packet_v1.json
+-> kiểm target repo sạch
+-> tạo/checkout planned branch
+-> Developer.act sinh changed_files_json_v1
+-> validate file nằm trong allowed_paths
+-> apply file vào target repo
+-> ghi code_change_report_v1.md
+-> status=implementation_written
+```
+
+Slice này tạo code change thật nhưng vẫn chưa chạy test, chưa commit và chưa mở
+PR. Working tree của target repo có thể dirty sau bước này để human review code
+trực tiếp trước khi sang Verification Runner và Validator.
+
+## Slice 4.3 Đã Chốt
+
+Slice 4.3 chạy tiếp từ `implementation_written`:
+
+```text
+continue-run(run_id)
+-> đọc developer_work_packet_v1.json
+-> đọc code_change_report_v1.md
+-> chạy Verification Runner trong target repo
+-> ghi test_report_v1.md
+-> nếu passed: status=implementation_tested
+-> nếu failed/skipped: status=blocked với last_error rõ
+```
+
+Slice này chỉ chạy compile/unit test command của repo target. Nó chưa gọi
+Validator code trace, chưa chạy QA/Tester Agent acceptance/system test, chưa
+commit và chưa mở PR.
+
 ## Luồng Phase 4
 
 ```text
 approve_checkpoint(run_id)
 -> kiểm tra run đang ở waiting_implementation_plan_review
 -> chuẩn bị developer_work_packet_v1.json
+-> continue-run khi state=implementation_ready
 -> đọc approved implementation_plan_v1
 -> đọc approved design graph và requirement-design trace
 -> tạo branch trong target repo
--> Developer.act tạo/sửa code dựa trên plan
+-> Developer.act tạo/sửa code và unit test dựa trên plan
 -> ghi code_change_report_v1
--> Tester chạy compile/test hoặc ghi skipped rõ ràng
+-> Verification Runner chạy compile/unit test command hoặc ghi skipped rõ ràng
 -> ghi test_report_v1
 -> Validator kiểm requirement -> design -> code -> test trace
 -> ghi requirement_design_code_trace_v1.json
+-> nếu code/unit test thiếu so với approved design: feedback về Developer và lặp trong giới hạn cấu hình
+-> nếu approved design mâu thuẫn hoặc không triển khai được: blocked/reopen design có human approval, không tự sửa design âm thầm
+-> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã ổn
+-> nếu QA fail: feedback về Developer, rồi chạy lại unit test -> Validator -> QA trong giới hạn cấu hình
 -> tạo Draft PR trên GitHub
 -> sync PR/test/trace summary về Jira và Confluence
 -> status=code_review_ready
 ```
 
-Nếu code không cover design, test fail không có repair path, hoặc trace code-test
-thiếu nghiêm trọng, workflow phải `blocked` với `last_error` rõ.
+Nếu code không cover design, compile/unit test fail không có repair path, QA fail
+quá giới hạn, hoặc trace code-test thiếu nghiêm trọng, workflow phải `blocked`
+với `last_error` rõ.
 
 ## Developer.act
 
@@ -62,10 +106,19 @@ Developer.act không được sinh code từ design trần. Đầu vào bắt bu
 Code change report cần nói rõ branch, commit, file đổi, lý do đổi và phần
 requirement/design nào được cover.
 
-## Tester Và Validator
+## Verification Runner, Validator Và QA Tester
 
-Tester tạo `test_report_v1.md`. Report phải phân biệt rõ `passed`, `failed` và
-`skipped`. Nếu máy chưa có JDK hoặc target repo chưa có test harness đủ mạnh,
+Phase 4 tách rõ ba vai để gần thực tế doanh nghiệp hơn TraceDev gốc:
+
+- Developer sinh/sửa code và unit test gần code.
+- Verification Runner chỉ chạy command compile/unit test của target repo và tạo
+  `test_report_v1.md`; nó không phải AI Tester và không tự sửa source.
+- Validator kiểm traceability từ approved requirement/design sang code/unit test.
+- QA/Tester Agent là tầng sau: đọc use case đã được Validator bảo vệ, sinh/chạy
+  acceptance hoặc system-level test và gửi failure report về Developer.
+
+`test_report_v1.md` của Verification Runner phải phân biệt rõ `passed`, `failed`
+và `skipped`. Nếu máy chưa có JDK hoặc target repo chưa có test harness đủ mạnh,
 report vẫn phải ghi skipped với lý do, không được trình bày như pass.
 
 Validator tạo `requirement_design_code_trace_v1.json`, tối thiểu nối:
@@ -77,9 +130,14 @@ requirement id
   -> test file/case nếu có
 ```
 
-Nếu trace fail do code chưa cover, Developer có thể repair trong giới hạn cấu
-hình. Nếu fail do requirement/design mơ hồ, workflow phải quay về checkpoint phù
-hợp ở Phase 5, không tự sửa design trong Phase 4.
+Nếu trace fail do code/unit test chưa cover approved design, Developer có thể
+repair trong giới hạn cấu hình. Nếu fail do approved design mâu thuẫn, mơ hồ hoặc
+không triển khai được, workflow phải `blocked` hoặc mở nhánh quay về design
+checkpoint có human approval; Validator không được tự sửa design trong Phase 4.
+
+QA/Tester Agent cũng không sửa code trực tiếp. Nếu acceptance/system test fail,
+Tester chỉ ghi failure evidence; Developer sửa code, Verification Runner chạy lại
+unit test, Validator kiểm lại trace, rồi QA test lại.
 
 ## Đầu Ra Bắt Buộc
 

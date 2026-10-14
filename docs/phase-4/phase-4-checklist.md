@@ -38,7 +38,7 @@ Developer.act, tránh để bước code phải parse Markdown/Confluence.
 
 Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo harness.
 
-- [ ] Tạo branch theo issue/run.
+- [x] Tạo branch theo issue/run.
 - [x] Không thao tác khi target repo dirty.
 - [ ] Commit có issue key.
 - [ ] Không tạo GitHub Issue.
@@ -48,22 +48,32 @@ Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo 
 
 Mục đích: tạo code change có thể review, dựa trên plan đã duyệt.
 
-- [ ] Tạo prompt/module Developer.act riêng cho Phase 4.
-- [ ] Developer đọc implementation plan + approved design graph.
-- [ ] Developer tạo/sửa code trong target repo.
-- [ ] Sinh `code_change_report_v1.md`.
-- [ ] Report liệt kê file đổi, branch, commit và reasoning chính.
-- [ ] Code change đủ cụ thể để reviewer kiểm tra trong Draft PR.
+- [x] Tạo prompt/module Developer.act riêng cho Phase 4.
+- [x] Developer đọc `developer_work_packet_v1.json` từ implementation plan + approved design graph.
+- [x] Developer tạo/sửa code trong target repo.
+- [x] Sinh `code_change_report_v1.md`.
+- [x] Report liệt kê file đổi, branch và reasoning chính; commit để slice sau.
+- [x] Code change đủ cụ thể để reviewer kiểm tra thủ công trước khi Draft PR.
+- [x] DeveloperWorkPacket và Developer.act prompt có constraint: code/test/helper
+  script phải chạy được trong repo path có khoảng trắng hoặc Unicode; dùng
+  repo-relative paths, không hard-code absolute path, và dùng UTF-8 rõ ràng khi
+  toolchain hỗ trợ.
 
-## 5. Tester Và Validation
+## 5. Verification Runner Và Validation
 
-Mục đích: code output có kiểm chứng rõ ràng, kể cả khi test bị skipped.
+Mục đích: code output có kiểm chứng compile/unit rõ ràng, kể cả khi test bị
+skipped. Đây là test runner của repo target, không phải AI QA/Tester.
 
-- [ ] Tạo prompt/module Tester hoặc test runner adapter.
-- [ ] Chạy build/test nếu target repo hỗ trợ.
-- [ ] Sinh `test_report_v1.md`.
-- [ ] Report phân biệt `passed`, `failed`, `skipped`.
-- [ ] Nếu test fail, workflow không báo pass.
+- [x] Tạo Verification Runner/test runner adapter.
+- [x] Chạy build/unit test nếu target repo hỗ trợ.
+- [x] Sinh `test_report_v1.md`.
+- [x] Report phân biệt `passed`, `failed`, `skipped`.
+- [x] Nếu test fail, workflow không báo pass.
+- [x] Verification Runner phải chạy được trong repo path có khoảng trắng hoặc
+  Unicode; mọi compile/test command nên dùng repo-relative paths và UTF-8 rõ ràng
+  khi toolchain hỗ trợ.
+- [ ] Nếu compile/unit test fail và còn vòng repair, feedback quay về Developer;
+  sau repair phải chạy lại Verification Runner.
 
 ## 6. Code Traceability
 
@@ -73,7 +83,25 @@ Mục đích: chứng minh requirement/design đã đi tới code/test.
 - [ ] Trace requirement -> design element -> source file/class/function.
 - [ ] Trace requirement -> test file/case nếu có.
 - [ ] Missing link được ghi riêng.
-- [ ] Nếu trace fail nghiêm trọng, state=`blocked` với `last_error` rõ.
+- [ ] Nếu trace fail vì code/unit test thiếu so với approved design, feedback về
+  Developer trong giới hạn repair.
+- [ ] Nếu trace fail vì approved design mâu thuẫn/không triển khai được,
+  state=`blocked` hoặc reopen design checkpoint có human approval; không tự sửa
+  design trong Phase 4.
+
+## 6.1 QA/Tester Agent Loop
+
+Mục đích: kiểm acceptance/system behavior từ use case sau khi compile/unit và
+trace baseline đã ổn. Đây mới là vai Tester/QA gần thực tế doanh nghiệp.
+
+- [ ] QA/Tester Agent đọc use case/requirement packet đã duyệt và code/test
+  summary do Validator bảo vệ.
+- [ ] QA/Tester Agent sinh hoặc chạy acceptance/system-level scenarios.
+- [ ] QA/Tester Agent không sửa code trực tiếp; chỉ ghi failure evidence.
+- [ ] Nếu QA fail và còn vòng repair, feedback quay về Developer.
+- [ ] Sau Developer repair, workflow chạy lại Verification Runner -> Validator ->
+  QA/Tester Agent.
+- [ ] Nếu QA fail quá giới hạn repair, state=`blocked` với `last_error` rõ.
 
 ## 7. Tool Sync Phase 4
 
@@ -90,12 +118,15 @@ Confluence bởi SDLC Harness.
 
 ## 8. Workflow State Và Niko Reporting
 
-Mục đích: Niko báo được Phase 4 đang ở đâu mà không hiểu nội bộ Developer/Tester.
+Mục đích: Niko báo được Phase 4 đang ở đâu mà không hiểu nội bộ Developer,
+Verification Runner, Validator hoặc QA/Tester.
 
-- [ ] Ghi state `implementation_writing`.
-- [ ] Ghi state `implementation_testing`.
+- [x] Ghi state `implementation_writing`.
+- [x] Ghi state trung gian `implementation_written` sau khi apply code nhưng chưa test/commit/PR.
+- [x] Ghi state `implementation_testing`.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
-- [ ] `latest_artifacts` trỏ tới report/trace mới nhất.
+- [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
+- [ ] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
 - [ ] `pending_checkpoint.type=code_review`.
 - [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
@@ -106,14 +137,23 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 
 - [x] Unit test approve implementation plan checkpoint happy path.
 - [x] Unit test missing approved implementation plan.
+- [x] Unit test `continue-run` từ `implementation_ready` sang `implementation_written`.
+- [x] Unit test Developer.act chặn file ngoài `allowed_paths`.
+- [x] Unit test blocked khi target repo dirty trước Developer.act.
+- [x] Unit test `continue-run` từ `implementation_written` sang `implementation_tested`.
+- [x] Unit test Verification Runner `passed/failed/skipped`.
 - [ ] Unit test branch/commit/PR payload formatting.
 - [ ] Unit test PR description chứa đủ link/context.
-- [ ] Unit test test report `passed/failed/skipped`.
+- [x] Unit test test report `passed/failed/skipped`.
 - [ ] Unit test trace requirement-design-code-test.
 - [ ] Unit test blocked khi trace fail.
 - [ ] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
+- [x] Live compile/runtime test target repo sau Developer.act pass khi ép JDK 21
+  vào PATH tạm: `All tests passed`.
+- [x] Ghi nhận và sửa lỗi test script không chịu được đường dẫn Unicode bằng cách
+  chuyển sang repo-relative paths trong `SDLC_Target_eTour/scripts/test.ps1`.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 

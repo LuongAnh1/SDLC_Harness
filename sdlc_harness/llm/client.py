@@ -118,6 +118,8 @@ def fake_completion(prompt: str) -> str:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan()
+    if "Developer Act v1" in prompt:
+        return fake_developer_act()
     return fake_refined_requirement(prompt)
 
 
@@ -381,6 +383,85 @@ def fake_developer_implementation_plan() -> str:
             ],
             "assumptions": ["Repository can expose a delete operation or be extended in Phase 4."],
             "open_questions": [],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_developer_act() -> str:
+    """Developer.act giả lập để test Phase 4 không gọi API thật."""
+
+    return json.dumps(
+        {
+            "summary": "Fake Developer.act generated delete heritage code changes from the approved work packet.",
+            "files": [
+                {
+                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
+                    "operation": "create_or_update",
+                    "content": """package com.sdlc.etour.heritage;
+
+import java.util.HashSet;
+import java.util.Objects;
+import java.util.Set;
+
+public final class DeleteCulturalHeritageService {
+    private final Set<String> deletedHeritageIds = new HashSet<>();
+    private boolean operationInProgress;
+
+    public boolean validateDeletion(String heritageId) {
+        return heritageId != null && !heritageId.isBlank() && !operationInProgress;
+    }
+
+    public boolean deleteHeritage(String heritageId) {
+        if (!validateDeletion(heritageId)) {
+            return false;
+        }
+        operationInProgress = true;
+        try {
+            deletedHeritageIds.add(Objects.requireNonNull(heritageId));
+            return true;
+        } finally {
+            operationInProgress = false;
+        }
+    }
+
+    public void cancelDeletion() {
+        operationInProgress = false;
+    }
+
+    public boolean isDeleted(String heritageId) {
+        return deletedHeritageIds.contains(heritageId);
+    }
+}
+""",
+                    "reason": "Implements the approved delete, validate, cancel and duplicate-submit guard behavior.",
+                    "covered_design_elements": [
+                        "class:DeleteCulturalHeritageService",
+                        "method:DeleteCulturalHeritageService.deleteHeritage",
+                    ],
+                },
+                {
+                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
+                    "operation": "create_or_update",
+                    "content": """package com.sdlc.etour.heritage;
+
+public final class DeleteCulturalHeritageFlowTest {
+    public static void main(String[] args) {
+        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
+        if (!service.deleteHeritage("heritage-1")) {
+            throw new IllegalStateException("Expected delete operation to succeed");
+        }
+        if (!service.isDeleted("heritage-1")) {
+            throw new IllegalStateException("Expected heritage id to be marked deleted");
+        }
+    }
+}
+""",
+                    "reason": "Captures the approved success path for later test runner integration.",
+                    "covered_design_elements": ["sequence:delete_cultural_heritage_main:1"],
+                },
+            ],
         },
         ensure_ascii=False,
         indent=2,

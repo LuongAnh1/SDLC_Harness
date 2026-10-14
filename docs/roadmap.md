@@ -110,8 +110,9 @@ Kết quả mong muốn:
 
 ## Phase 4 - Implementation Plan Đến Code/Test/Draft PR
 
-Mục đích: sau khi implementation plan được duyệt, Developer triển khai code dựa
-trên plan và approved design, sau đó Tester/Validator kiểm chứng bằng graph.
+Mục đích: sau khi implementation plan được duyệt, Developer triển khai code và
+unit test dựa trên plan và approved design; Harness chạy compile/unit test,
+Validator kiểm traceability, rồi QA/Tester Agent kiểm acceptance/system behavior.
 
 Tài liệu chi tiết: `docs/phase-4/README.md`.
 
@@ -121,10 +122,16 @@ Luồng:
 approve_checkpoint(run_id)
 -> đọc approved implementation_plan_v1 + approved design graph
 -> sinh developer_work_packet_v1.json
+-> continue-run sinh/apply code change
 -> tạo branch trong target repo
--> Developer.act tạo/sửa code dựa trên plan
--> Tester chạy compile/test hoặc ghi skipped rõ ràng
--> Validator kiểm requirement -> design -> code -> test trace
+-> Developer.act tạo/sửa code và unit test dựa trên plan
+-> Verification Runner chạy compile/unit test hoặc ghi skipped rõ ràng
+-> nếu compile/unit fail và còn vòng repair: feedback về Developer, chạy lại runner
+-> Validator kiểm approved requirement -> approved design -> code -> unit test trace
+-> nếu code thiếu so với design: feedback về Developer
+-> nếu design đã duyệt mâu thuẫn/không triển khai được: blocked/reopen design có human approval
+-> QA/Tester Agent kiểm acceptance/system behavior từ use case
+-> nếu QA fail và còn vòng repair: feedback về Developer, chạy lại runner -> Validator -> QA
 -> tạo Draft PR trên GitHub
 -> sync PR/test/trace summary về Jira và Confluence
 -> status=code_review_ready
@@ -133,6 +140,7 @@ approve_checkpoint(run_id)
 Kết quả mong muốn:
 
 - Có `developer_work_packet_v1.json` và state tạm `implementation_ready` sau Slice 4.1.
+- Có `code_change_report_v1.md` và state tạm `implementation_written` sau Slice 4.2.
 - Có branch/commit/Draft PR thật trong target repo.
 - Có `code_change_report_v1.md`.
 - Có `test_report_v1.md`.
@@ -256,3 +264,9 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > sau 3 vòng repair và sync Jira/Confluence ở checkpoint
 > `waiting_implementation_plan_review`. Phase 4 code/test/Draft PR vẫn là bước
 > kế tiếp, chưa mở tự động từ Niko.
+
+> Cập nhật 2026-10-14: Phase 4 đã có Slice 4.1/4.2/4.3. Harness duyệt
+> implementation plan thành `developer_work_packet_v1.json`, Developer.act apply
+> code thật vào target repo, rồi `continue-run` chạy Verification Runner để sinh
+> `test_report_v1.md`. State mới sau test pass là `implementation_tested`; code
+> trace Validator, QA/Tester Agent, commit và Draft PR vẫn là các slice sau.

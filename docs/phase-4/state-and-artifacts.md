@@ -9,6 +9,7 @@ bắt đầu khi implementation plan đã được duyệt.
 waiting_implementation_plan_review
   -> implementation_ready
   -> implementation_writing
+  -> implementation_written
   -> implementation_testing
   -> code_review_ready
 ```
@@ -26,7 +27,8 @@ cancelled
 | --- | --- | --- |
 | `implementation_ready` | Implementation plan đã được duyệt và `developer_work_packet_v1.json` đã sẵn sàng; chưa sửa code. | Harness slice tiếp theo |
 | `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
-| `implementation_testing` | Đang chạy compile/test/trace check. | Harness |
+| `implementation_written` | Code change đã được apply vào target repo; chưa test/commit/PR. | Harness slice tiếp theo |
+| `implementation_testing` | Đang chạy Verification Runner, code traceability check, hoặc vòng repair Developer nếu compile/unit/trace fail. | Harness |
 | `code_review_ready` | Draft PR và report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -36,9 +38,10 @@ cancelled
 | Artifact | Mục đích |
 | --- | --- |
 | `developer_work_packet_v1.json` | Gói đầu vào máy đọc được cho Developer.act, lấy từ implementation plan đã duyệt. |
-| `code_change_report_v1.md` | Tóm tắt branch, commit, file đổi và lý do đổi. |
-| `test_report_v1.md` | Compile/test/validation result, ghi rõ pass/fail/skipped. |
+| `code_change_report_v1.md` | Tóm tắt branch, file đổi, lý do đổi; commit xuất hiện ở slice sau khi test/trace pass. |
+| `test_report_v1.md` | Kết quả Verification Runner cho compile/unit test command của target repo, ghi rõ pass/fail/skipped. |
 | `requirement_design_code_trace_v1.json` | Trace requirement -> design -> file/class/function/test. |
+| `qa_test_report_v1.md` | Optional/future artifact cho QA/Tester Agent: acceptance/system-level test từ use case, không thay thế unit test report. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
 Artifact dùng version như các phase trước. Nếu repair/rerun code xảy ra trong
@@ -53,6 +56,40 @@ current_phase=implementation_preparing
 status=implementation_ready
 latest_artifacts.developer_work_packet
 pending_checkpoint=null
+allowed_next_actions=[get_status, cancel_run]
+summary_for_user
+```
+
+Sau Slice 4.2:
+
+```text
+current_phase=implementation_writing
+status=implementation_written
+latest_artifacts.code_change_report
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
+
+Sau Slice 4.3 nếu compile/unit test pass:
+
+```text
+current_phase=implementation_testing
+status=implementation_tested
+latest_artifacts.code_change_report
+latest_artifacts.test_report
+pending_checkpoint=null
+allowed_next_actions=[get_status, cancel_run]
+summary_for_user
+```
+
+Sau Slice 4.3 nếu compile/unit test fail hoặc skipped:
+
+```text
+current_phase=implementation_testing
+status=blocked
+latest_artifacts.test_report
+last_error.error_code=test_failed | test_skipped
 allowed_next_actions=[get_status, cancel_run]
 summary_for_user
 ```
@@ -101,8 +138,10 @@ Phase 4 phải `blocked` thay vì giả vờ pass trong các trường hợp:
 
 - thiếu approved implementation plan;
 - không tạo được branch hoặc không ghi được code;
-- test/compile fail và không có repair path an toàn;
-- Validator không nối được requirement/design với code/test;
+- compile/unit test fail và không còn repair path an toàn về Developer;
+- Validator không nối được approved requirement/design với code/unit test;
+- Validator phát hiện approved design mâu thuẫn/không triển khai được; trường hợp này phải block hoặc reopen design checkpoint có human approval, không tự sửa design âm thầm trong Phase 4;
+- QA/Tester Agent phát hiện acceptance/system behavior fail quá giới hạn repair;
 - GitHub sync fail toàn bộ.
 
 `last_error` phải đủ rõ để Niko nói lại cho anh biết đang kẹt ở đâu.

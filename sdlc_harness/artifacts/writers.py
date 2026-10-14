@@ -3,7 +3,7 @@
 Artifact là sản phẩm mà checkpoint và tool sync tham chiếu. Phase 1 sinh formal
 use case và requirement packet; Phase 2 sinh design, graph, trace và quality
 report theo từng version; Phase 3 sinh implementation plan trước khi sửa code;
-Phase 4 bắt đầu bằng work packet để Developer dùng ở bước sinh code.
+Phase 4 sinh work packet và code change report theo từng lát nhỏ.
 """
 
 from __future__ import annotations
@@ -361,6 +361,40 @@ def write_phase4_developer_work_packet(
     return store.relative(path)
 
 
+def write_phase4_code_change_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi report code change sau khi Developer.act apply file vào target repo."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"code_change_report_{suffix}.md"
+    path.write_text(_code_change_report_markdown(report).rstrip() + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
+def write_phase4_test_report(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi report Verification Runner sau khi chạy compile/unit test."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"test_report_{suffix}.md"
+    path.write_text(_test_report_markdown(report).rstrip() + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 
@@ -368,6 +402,109 @@ def _with_heading(title: str, content: str) -> str:
     if text.startswith("#"):
         return text + "\n"
     return f"# {title}\n\n{text}\n"
+
+
+def _code_change_report_markdown(report: dict[str, object]) -> str:
+    files = _dict_items(report.get("files"))
+    lines = [
+        "# Code Change Report V1",
+        "",
+        "## Run Context",
+        "",
+        f"- Run id: `{report.get('run_id', '')}`",
+        f"- Source ref: `{report.get('source_ref', '')}`",
+        f"- Issue key: `{report.get('issue_key', '')}`",
+        f"- Target repo: `{report.get('target_repo', '')}`",
+        f"- Branch: `{report.get('branch', '')}`",
+        "",
+        "## Developer Summary",
+        "",
+        str(report.get("summary") or "").strip() or "Developer.act did not provide a summary.",
+        "",
+        "## Files Applied",
+        "",
+        "| File | Operation | Reason | Covered design elements |",
+        "| --- | --- | --- | --- |",
+    ]
+    for item in files:
+        covered = ", ".join(str(value) for value in item.get("covered_design_elements", []) if str(value).strip())
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    _table_cell(f"`{item.get('path') or ''}`"),
+                    _table_cell(str(item.get("operation") or "")),
+                    _table_cell(str(item.get("reason") or "")),
+                    _table_cell(covered),
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Verification Status",
+            "",
+            "- Tests: not run in Slice 4.2.",
+            "- Commit: not created in Slice 4.2.",
+            "- Draft PR: not created in Slice 4.2.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _test_report_markdown(report: dict[str, object]) -> str:
+    lines = [
+        "# Test Report V1",
+        "",
+        "## Run Context",
+        "",
+        f"- Run id: `{report.get('run_id', '')}`",
+        f"- Source ref: `{report.get('source_ref', '')}`",
+        f"- Issue key: `{report.get('issue_key', '')}`",
+        f"- Target repo: `{report.get('target_repo', '')}`",
+        f"- Branch: `{report.get('branch', '')}`",
+        "",
+        "## Verification Result",
+        "",
+        f"- Status: `{report.get('status', '')}`",
+        f"- Command: `{report.get('command', '')}`",
+        f"- Exit code: `{report.get('exit_code', '')}`",
+        f"- Duration: `{report.get('duration_seconds', '')}` seconds",
+        f"- Reason: {report.get('reason', '')}",
+        "",
+        "## Stdout",
+        "",
+        "```text",
+        str(report.get("stdout") or "").rstrip(),
+        "```",
+        "",
+        "## Stderr",
+        "",
+        "```text",
+        str(report.get("stderr") or "").rstrip(),
+        "```",
+        "",
+        "## Scope",
+        "",
+        "- Runner: Verification Runner.",
+        "- QA/Tester Agent: not run in Slice 4.3.",
+        "- Code traceability Validator: not run in Slice 4.3.",
+        "- Commit/Draft PR: not created in Slice 4.3.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _dict_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _table_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ").strip()
 
 
 def _excerpt(content: str, *, limit: int = 1400) -> str:

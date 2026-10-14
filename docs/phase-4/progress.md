@@ -24,4 +24,88 @@ Việc tiếp theo:
 
 - Slice 4.2: Developer.act đọc `developer_work_packet_v1.json`, tạo branch và sinh
   code change theo output contract.
-- Sau đó mới đến Tester, code traceability và Draft PR.
+- Sau đó mới đến Verification Runner, code traceability, QA/Tester loop và Draft PR.
+
+## 2026-10-14 - Slice 4.2: Developer.act Applies Code Changes
+
+Mục tiêu của slice này là biến DeveloperWorkPacket đã duyệt thành code change thật
+trong target repo để anh có thể review trực tiếp trước khi chạy test/trace/PR.
+
+Đã làm:
+
+- Thêm CLI `continue-run --run-id <run_id>`.
+- `continue-run` xử lý state `implementation_ready`.
+- Workflow đọc `developer_work_packet_v1.json`.
+- Workflow kiểm target repo sạch trước khi thao tác.
+- Workflow tạo hoặc checkout planned branch.
+- Thêm `DeveloperActAgent` và prompt `Developer Act v1`.
+- Developer.act trả JSON `changed_files_json_v1` với file content đầy đủ.
+- Workflow chặn file ngoài `output_contract.allowed_paths`.
+- Workflow apply file vào target repo.
+- Sinh `code_change_report_v1.md`.
+- State chuyển sang `implementation_written`.
+
+Chưa làm trong slice này:
+
+- Chưa chạy Verification Runner/build/unit test.
+- Chưa sinh requirement-design-code trace.
+- Chưa commit.
+- Chưa mở Draft PR.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: pass 10/10.
+- Live test 2026-10-14 với run `run_20261013_160421_f661babf` đã checkout
+  branch `feature/sdlc-1-implementation`, apply đủ 12 file theo
+  `developer_work_packet_v1.json` và sinh `code_change_report_v1.md`.
+- Sau khi cài JDK 21, compile/runtime test target repo pass với `All tests
+  passed`. Lỗi phát hiện trong lúc test: script test ban đầu truyền absolute
+  path có dấu `D:\Dự án cá nhân\...` vào `javac`, gây mojibake path. Đã sửa
+  script target repo sang repo-relative paths; đồng thời bổ sung constraint cho
+  DeveloperWorkPacket/Developer.act: code, test và helper script phải chạy được
+  trong repo path có khoảng trắng hoặc Unicode, không hard-code absolute path và
+  dùng UTF-8 rõ ràng khi toolchain hỗ trợ.
+
+Việc tiếp theo:
+
+- Slice 4.3: Verification Runner đọc code change, chạy command compile/unit test
+  của target repo hoặc ghi skipped/failure rõ ràng. QA/Tester Agent acceptance
+  loop là bước sau khi baseline compile/unit/trace đã ổn.
+
+## 2026-10-14 - Slice 4.3: Verification Runner
+
+Mục tiêu của slice này là chạy được compile/unit test command của target repo sau
+khi Developer.act đã apply code, rồi ghi kết quả rõ ràng thay vì báo pass mù.
+
+Đã làm:
+
+- Thêm package `sdlc_harness.verification` với `VerificationRunner`.
+- `continue-run` dispatch theo state:
+  - `implementation_ready` vẫn chạy Developer.act như Slice 4.2.
+  - `implementation_written` chạy Verification Runner.
+- Runner chọn command từ `developer_work_packet_v1.json`/`test_intents`, fallback
+  về `powershell -ExecutionPolicy Bypass -File scripts/test.ps1`.
+- Runner capture stdout, stderr, exit code, duration và phân loại `passed`,
+  `failed`, `skipped`.
+- Sinh `test_report_v1.md`.
+- Nếu pass: state chuyển sang `implementation_tested`.
+- Nếu fail/skipped: state chuyển sang `blocked` với `last_error` là
+  `test_failed` hoặc `test_skipped`.
+- Verification cho phép target repo dirty vì đây là trạng thái mong muốn sau khi
+  Developer.act apply code.
+
+Chưa làm trong slice này:
+
+- Chưa có repair loop Developer khi compile/unit test fail.
+- Chưa chạy Validator code trace.
+- Chưa chạy QA/Tester Agent acceptance/system test.
+- Chưa commit, chưa mở Draft PR và chưa sync Phase 4 lên tool.
+
+Kết quả test:
+
+- `rtk proxy python -m pytest tests/test_phase4.py -q`: pass 15/15.
+
+Việc tiếp theo:
+
+- Slice 4.4: Validator kiểm requirement/design -> code/unit test trace, hoặc
+  chuẩn bị Developer repair loop nếu muốn xử lý fail trước khi trace.

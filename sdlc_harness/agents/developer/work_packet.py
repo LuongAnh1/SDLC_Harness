@@ -68,6 +68,9 @@ def build_developer_work_packet(
             "Chỉ tạo/sửa file nằm trong output_contract.allowed_paths ở slice Developer.act V1.",
             "Không sửa file ngoài target repo.",
             "Không tự đổi requirement/design đã được duyệt trong Phase 4.",
+            "Code, test và script build/test phải chạy được khi repo nằm trong đường dẫn có khoảng trắng hoặc Unicode.",
+            "Ưu tiên repo-relative paths, không hard-code absolute path theo máy cá nhân.",
+            "Khi đọc/ghi/compile source hoặc chạy test, dùng UTF-8 rõ ràng nếu toolchain hỗ trợ.",
             "Nếu thiếu ngữ cảnh để code an toàn, Developer phải trả lỗi thay vì đoán.",
         ],
     }

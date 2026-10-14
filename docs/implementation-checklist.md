@@ -127,17 +127,20 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [x] Duyệt `implementation_plan_review` để mở Phase 4 Slice 4.1.
 - [x] Sinh `developer_work_packet_v1.json` từ implementation plan đã duyệt.
 - [x] State chuyển sang `implementation_ready` trước khi Developer.act sửa code.
-- [ ] Tạo branch trong target repo.
-- [ ] Developer.act đọc implementation plan + approved design graph.
-- [ ] Sinh code change thật trong target repo.
-- [ ] Sinh `code_change_report_v1.md`.
-- [ ] Tester chạy compile/test hoặc ghi skipped rõ ràng.
-- [ ] Sinh `test_report_v1.md`.
-- [ ] Validator sinh `requirement_design_code_trace_v1.json`.
+- [x] Tạo branch trong target repo.
+- [x] Developer.act đọc work packet từ implementation plan + approved design graph.
+- [x] Sinh code change thật trong target repo.
+- [x] Sinh `code_change_report_v1.md`.
+- [x] Verification Runner chạy compile/unit test hoặc ghi skipped rõ ràng.
+- [x] Sinh `test_report_v1.md`.
+- [ ] Validator sinh `requirement_design_code_trace_v1.json` từ approved requirement/design sang code/unit test.
+- [ ] Nếu compile/unit hoặc trace fail vì code thiếu, feedback quay về Developer trong giới hạn repair.
+- [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
+- [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace baseline ổn.
 - [ ] Tạo Draft PR thật trên GitHub.
 - [ ] Sync PR/test/trace summary về Jira và Confluence.
 - [ ] State chuyển sang `code_review_ready`.
-- [ ] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator -> Developer/Tester/Validator trong phạm vi một use case.
+- [ ] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator -> Developer/Verification Runner/Validator/QA Tester trong phạm vi một use case.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

@@ -10,12 +10,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..agents.developer import build_developer_work_packet
-from ..artifacts.writers import write_phase4_developer_work_packet
+from ..agents.developer import DeveloperActAgent, DeveloperActResult, build_developer_work_packet
+from ..artifacts.writers import (
+    write_phase4_code_change_report,
+    write_phase4_developer_work_packet,
+    write_phase4_test_report,
+)
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..llm.client import LlmClient
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
+from ..verification import VerificationRunner
 from .phase3 import (
     _dirty_status_without_codegraph,
     _dict_value,
@@ -27,7 +33,9 @@ from .phase3 import (
     _target_source_files,
 )
 
-ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["get_status", "cancel_run"]
 
 
 class PhaseFourWorkflow:
@@ -37,6 +45,8 @@ class PhaseFourWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
+        self.developer = DeveloperActAgent(LlmClient(settings))
+        self.verification_runner = VerificationRunner()
 
     def approve_implementation_plan_checkpoint(
         self,
@@ -151,6 +161,169 @@ class PhaseFourWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def continue_run(self, *, run_id: str) -> dict[str, object]:
+        """Chạy bước Phase 4 tiếp theo theo state hiện tại của run."""
+
+        state = self.store.read_state(run_id)
+        status = str(state.get("status"))
+        if status == "implementation_ready":
+            return self._continue_developer_act(state=state, run_id=run_id)
+        if status == "implementation_written":
+            return self._continue_verification(state=state, run_id=run_id)
+        raise HarnessError(
+            "run_not_continuable",
+            f"Run is not ready for the next Phase 4 step: {run_id}",
+            run_id=run_id,
+        )
+
+    def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
+
+        try:
+            artifact_paths = _string_dict(state.get("latest_artifacts"))
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            target_info = self._validate_target_repo()
+            branch = self._checkout_implementation_branch(target_path=target_info.path, work_packet=work_packet)
+            result = self.developer.act(work_packet=work_packet)
+            applied_files = _apply_developer_changes(
+                result=result,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                run_id=run_id,
+            )
+            report = {
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": branch,
+                "summary": result.summary,
+                "files": applied_files,
+            }
+            report_path = write_phase4_code_change_report(
+                store=self.store,
+                run_id=run_id,
+                report=report,
+                version=1,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_writing",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bị chặn khi Developer.act sinh/apply code: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **artifact_paths,
+            "code_change_report": report_path,
+        }
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "implementation_writing",
+                "status": "implementation_written",
+                "latest_artifacts": latest_artifacts,
+                "pending_checkpoint": None,
+                "allowed_next_actions": ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS,
+                "last_error": None,
+                "summary_for_user": (
+                    f"Developer.act đã apply {len(applied_files)} file cho run {run_id} trên branch `{branch}`. "
+                    "Slice 4.2 chưa chạy test, chưa commit và chưa mở PR."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _continue_verification(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Chạy Slice 4.3: Verification Runner compile/unit test target repo."""
+
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        try:
+            _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            target_info = self._validate_target_repo(allow_dirty=True)
+            result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            report = {
+                "run_id": run_id,
+                "source_ref": state.get("source_ref"),
+                "issue_key": work_packet.get("issue_key"),
+                "target_repo": str(target_info.path),
+                "branch": target_info.current_branch,
+                **result.to_dict(),
+            }
+            report_path = write_phase4_test_report(
+                store=self.store,
+                run_id=run_id,
+                report=report,
+                version=1,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 4 bị chặn khi chạy Verification Runner: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        latest_artifacts = {
+            **artifact_paths,
+            "test_report": report_path,
+        }
+        if result.status == "passed":
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "implementation_tested",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_TESTED_ACTIONS,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Verification Runner đã pass compile/unit test cho run {run_id} "
+                        f"trên branch `{target_info.current_branch}`. Slice 4.3 chưa chạy code trace, "
+                        "chưa commit và chưa mở PR."
+                    ),
+                }
+            )
+        else:
+            error_code = "test_skipped" if result.status == "skipped" else "test_failed"
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_testing",
+                    "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": HarnessError(error_code, result.reason, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        f"Verification Runner status={result.status} cho run {run_id}: {result.reason}. "
+                        "Workflow không báo pass khi compile/unit test chưa pass thật."
+                    ),
+                }
+            )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
     def _require_implementation_plan_checkpoint(
         self,
         state: dict[str, object],
@@ -195,7 +368,7 @@ class PhaseFourWorkflow:
             )
         return path
 
-    def _validate_target_repo(self) -> "_TargetRepoInfo":
+    def _validate_target_repo(self, *, allow_dirty: bool = False) -> "_TargetRepoInfo":
         target_path = self.settings.target_repo_path.resolve()
         repo_root = self.settings.repo_root.resolve()
         if target_path == repo_root:
@@ -215,7 +388,7 @@ class PhaseFourWorkflow:
 
         dirty = _git_output(target_path, "status", "--porcelain")
         dirty_without_codegraph = _dirty_status_without_codegraph(dirty)
-        if dirty_without_codegraph.strip():
+        if dirty_without_codegraph.strip() and not allow_dirty:
             raise HarnessError("target_repo_dirty", "Target repo has uncommitted changes outside .codegraph/.")
         return _TargetRepoInfo(
             path=target_path,
@@ -223,6 +396,23 @@ class PhaseFourWorkflow:
             current_branch=_git_output(target_path, "rev-parse", "--abbrev-ref", "HEAD"),
             source_files=_target_source_files(target_path),
         )
+
+    def _checkout_implementation_branch(self, *, target_path: Path, work_packet: dict[str, object]) -> str:
+        repository = _dict_value(work_packet.get("target_repository"))
+        branch = str(repository.get("planned_branch") or "").strip()
+        if not branch:
+            raise HarnessError("developer_act_branch_missing", "DeveloperWorkPacket has no planned branch.")
+        current_branch = _git_output(target_path, "rev-parse", "--abbrev-ref", "HEAD")
+        if current_branch == branch:
+            return branch
+        if _branch_exists(target_path, branch):
+            _git_output(target_path, "checkout", branch)
+            return branch
+        base_branch = str(repository.get("base_branch") or self.settings.target_base_branch or "main").strip()
+        if current_branch != base_branch:
+            _git_output(target_path, "checkout", base_branch)
+        _git_output(target_path, "checkout", "-b", branch)
+        return branch
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         return {
@@ -260,3 +450,86 @@ def _required_phase4_artifact(artifact_paths: dict[str, str], key: str, *, run_i
             run_id=run_id,
         )
     return value
+
+
+def _branch_exists(target_path: Path, branch: str) -> bool:
+    try:
+        _git_output(target_path, "rev-parse", "--verify", branch)
+    except HarnessError:
+        return False
+    return True
+
+
+def _apply_developer_changes(
+    *,
+    result: DeveloperActResult,
+    work_packet: dict[str, object],
+    target_path: Path,
+    run_id: str,
+) -> list[dict[str, object]]:
+    allowed_paths = set(_allowed_paths(work_packet))
+    if not allowed_paths:
+        raise HarnessError("developer_act_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.")
+    applied: list[dict[str, object]] = []
+    for item in result.files:
+        rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
+        if rel_path not in allowed_paths:
+            raise HarnessError(
+                "developer_act_out_of_scope",
+                f"Developer.act tried to modify a file outside allowed_paths: {rel_path}",
+                run_id=run_id,
+            )
+        target_file = (target_path / rel_path).resolve()
+        try:
+            target_file.relative_to(target_path.resolve())
+        except ValueError as exc:
+            raise HarnessError(
+                "developer_act_unsafe_path",
+                f"Developer.act path escapes target repo: {rel_path}",
+                run_id=run_id,
+            ) from exc
+        content = str(item.get("content") or "")
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        target_file.write_text(content.rstrip() + "\n", encoding="utf-8")
+        applied.append(
+            {
+                "path": rel_path,
+                "operation": str(item.get("operation") or ""),
+                "reason": str(item.get("reason") or ""),
+                "covered_design_elements": _string_items(item.get("covered_design_elements")),
+            }
+        )
+    if not applied:
+        raise HarnessError("developer_act_failed", "Developer.act did not apply any file.")
+    return applied
+
+
+def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
+    output_contract = _dict_value(work_packet.get("output_contract"))
+    values = output_contract.get("allowed_paths")
+    if not isinstance(values, list):
+        return []
+    return [_normalize_code_path(str(value), run_id="") for value in values if str(value).strip()]
+
+
+def _normalize_code_path(raw_path: str, *, run_id: str) -> str:
+    path = raw_path.strip().replace("\\", "/").lstrip("/")
+    if (
+        not path
+        or path.startswith("../")
+        or "/../" in path
+        or path == ".."
+        or not (path.startswith("src/main/java/") or path.startswith("src/test/java/"))
+    ):
+        raise HarnessError(
+            "developer_act_unsafe_path",
+            f"Unsafe or unsupported Developer.act path: {raw_path}",
+            run_id=run_id or None,
+        )
+    return path
+
+
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]

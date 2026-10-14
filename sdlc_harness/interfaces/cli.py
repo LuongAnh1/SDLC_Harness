@@ -15,6 +15,7 @@ from ..core.config import load_settings, repo_root
 from ..core.errors import HarnessError
 from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
+from ..workflows.phase4 import PhaseFourWorkflow
 from ..workflows.target_repo import TargetRepoPreparationWorkflow
 
 
@@ -43,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     sync = subparsers.add_parser("sync-run")
     sync.add_argument("--run-id", required=True)
     sync.add_argument("--runtime-root", default=None)
+
+    continue_run = subparsers.add_parser("continue-run")
+    continue_run.add_argument("--run-id", required=True)
+    continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    continue_run.add_argument("--runtime-root", default=None)
 
     approve = subparsers.add_parser("approve-checkpoint")
     approve.add_argument("--run-id", required=True)
@@ -97,6 +103,9 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "sync-run":
         workflow = PhaseOneWorkflow(settings)
         return workflow.sync_run(run_id=args.run_id)
+    if args.command == "continue-run":
+        workflow = PhaseFourWorkflow(settings)
+        return workflow.continue_run(run_id=args.run_id)
     if args.command == "approve-checkpoint":
         workflow = CheckpointApprovalWorkflow(settings)
         return workflow.approve_checkpoint(
