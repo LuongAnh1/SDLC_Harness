@@ -1,8 +1,8 @@
 """Tạo, lưu và xác minh Git worktree riêng cho từng SDLC run.
 
 Manager sở hữu identity machine-local, thứ tự lock và các side effect Git của
-workspace. Từ Slice 4.9A3, Phase 3 tạo workspace còn toàn bộ action Phase 4
-resolve và khóa workspace này thay vì thao tác trên checkout canonical.
+workspace. Từ Slice 4.9A3, Phase 3/4 dùng worktree theo run; Slice 4.9B bổ sung
+đường nhận nuôi branch/PR legacy có kiểm chứng thay vì nối ngầm theo checkout.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import subprocess
 from types import TracebackType
-from typing import BinaryIO, Iterator
+from typing import BinaryIO, Callable, Iterator
 
 from ..core.config import Settings
 from ..core.errors import HarnessError
@@ -23,6 +23,8 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 from .model import RunWorkspaceRecord, branch_name_for_run, run_suffix
 
 WORKSPACE_ARTIFACT = "run_workspace_v1.json"
+LEGACY_GITHUB_ARTIFACT = "github_code_review_v1.json"
+PullRequestReader = Callable[[str, int, Path], dict[str, object]]
 
 
 def _normalized_remote(value: str) -> str:
@@ -146,6 +148,37 @@ class RunWorkspaceManager:
                     self._reconcile_state(record, state=state)
                     return record
                 return self._create_locked(run_id=run_id, state=state)
+
+    def adopt_legacy_run(
+        self,
+        run_id: str,
+        *,
+        pull_request_reader: PullRequestReader,
+    ) -> tuple[RunWorkspaceRecord, bool]:
+        """Nhận nuôi branch/PR cũ vào worktree riêng mà không đổi commit."""
+
+        run_suffix(run_id)
+        with self.registry_lock():
+            with self.run_lock(run_id):
+                state = self.store.read_state(run_id)
+                if self.artifact_path(run_id).exists():
+                    try:
+                        record = self._read_unlocked(run_id)
+                        self._validate_record(record, state=state, verify_git=True)
+                        self._reconcile_state(record, state=state)
+                    except HarnessError as exc:
+                        raise self._adoption_error(run_id, exc.message) from exc
+                    return record, False
+                try:
+                    return self._adopt_legacy_locked(
+                        run_id=run_id,
+                        state=state,
+                        pull_request_reader=pull_request_reader,
+                    ), True
+                except HarnessError as exc:
+                    if exc.error_code == "workspace_adoption_failed":
+                        raise
+                    raise self._adoption_error(run_id, exc.message) from exc
 
     def write(self, record: RunWorkspaceRecord) -> Path:
         """Ghi contract thủ công; production creation nên dùng `create_for_run`."""
@@ -351,6 +384,307 @@ class RunWorkspaceManager:
                 run_id=run_id,
             )
         return record
+
+    def _adopt_legacy_locked(
+        self,
+        *,
+        run_id: str,
+        state: dict[str, object],
+        pull_request_reader: PullRequestReader,
+    ) -> RunWorkspaceRecord:
+        """Xác minh đủ runtime/GitHub/Git evidence rồi mới chuyển branch sang worktree."""
+
+        canonical_repo, remote = self._validate_canonical_repo(run_id=run_id)
+        publication = self._read_legacy_publication(run_id=run_id, state=state)
+        repository, branch, commit_sha, pr_number, pr_url = self._publication_identity(
+            run_id=run_id,
+            publication=publication,
+            state=state,
+            remote=remote,
+        )
+        pull_request = pull_request_reader(repository, pr_number, canonical_repo)
+        self._validate_pull_request_identity(
+            run_id=run_id,
+            pull_request=pull_request,
+            branch=branch,
+            commit_sha=commit_sha,
+            pr_number=pr_number,
+            pr_url=pr_url,
+        )
+
+        self._git(
+            canonical_repo,
+            "fetch",
+            "--prune",
+            "origin",
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+        base_ref = f"origin/{self.settings.target_base_branch}"
+        base_sha = self._git(
+            canonical_repo,
+            "rev-parse",
+            "--verify",
+            base_ref,
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+        pr_base_sha = str(pull_request.get("baseRefOid") or "")
+        if base_sha != pr_base_sha:
+            raise self._adoption_error(run_id, "GitHub PR base commit does not match the fetched remote base.")
+        if not self._ref_exists(canonical_repo, f"refs/heads/{branch}", run_id=run_id):
+            raise self._adoption_error(run_id, f"Legacy local branch does not exist: {branch}")
+        local_head = self._git(
+            canonical_repo,
+            "rev-parse",
+            branch,
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+        remote_head = self._git(
+            canonical_repo,
+            "rev-parse",
+            "--verify",
+            f"origin/{branch}",
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+        if len({local_head, remote_head, commit_sha}) != 1:
+            raise self._adoption_error(run_id, "Runtime, local branch and remote branch do not share one HEAD.")
+        self._git(
+            canonical_repo,
+            "merge-base",
+            "--is-ancestor",
+            base_sha,
+            local_head,
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+
+        worktree_path = self.expected_worktree_path(run_id)
+        if _is_same_or_inside(worktree_path, canonical_repo) or worktree_path.exists():
+            raise self._adoption_error(run_id, "Legacy workspace path is invalid or already exists without ownership.")
+        registry = self._worktree_registry(canonical_repo, run_id=run_id)
+        branch_ref = f"refs/heads/{branch}"
+        owners = [path for path, entry in registry.items() if entry.get("branch") == branch_ref]
+        current_branch = self._git(
+            canonical_repo,
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+            error_code="workspace_adoption_failed",
+            run_id=run_id,
+        )
+        base_branch = self.settings.target_base_branch
+        if current_branch not in {branch, base_branch}:
+            raise self._adoption_error(
+                run_id,
+                f"Canonical repo must be on {branch} or {base_branch}, got {current_branch}.",
+            )
+        if owners and owners != [canonical_repo]:
+            raise self._adoption_error(run_id, "Legacy branch is already checked out by another worktree.")
+
+        try:
+            self.settings.target_worktree_root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise self._adoption_error(run_id, str(exc)) from exc
+
+        switched = current_branch == branch
+        try:
+            if switched:
+                self._git(
+                    canonical_repo,
+                    "switch",
+                    base_branch,
+                    error_code="workspace_adoption_failed",
+                    run_id=run_id,
+                )
+            self._git(
+                canonical_repo,
+                "worktree",
+                "add",
+                str(worktree_path),
+                branch,
+                error_code="workspace_adoption_failed",
+                run_id=run_id,
+            )
+            now = utc_now_iso()
+            record = RunWorkspaceRecord(
+                run_id=run_id,
+                source_ref=str(state.get("source_ref") or ""),
+                canonical_repo=str(canonical_repo),
+                worktree_path=str(worktree_path),
+                branch=branch,
+                base_ref=base_ref,
+                base_sha=base_sha,
+                head_sha=commit_sha,
+                remote=remote,
+                lifecycle="active",
+                provisioning_mode="adopted_legacy",
+                created_at=now,
+                updated_at=now,
+                pr_number=pr_number,
+                pr_url=pr_url,
+            )
+            self._validate_record(record, state=state, verify_git=True)
+            self._write_record_locked(record)
+            self._reconcile_state(record, state=state)
+            return record
+        except HarnessError as exc:
+            if self.artifact_path(run_id).exists():
+                raise self._adoption_error(run_id, exc.message) from exc
+            rollback_error = self._rollback_legacy_adoption(
+                canonical_repo=canonical_repo,
+                worktree_path=worktree_path,
+                original_branch=branch,
+                expected_head=commit_sha,
+                restore_original_branch=switched,
+                run_id=run_id,
+            )
+            message = exc.message
+            if rollback_error:
+                message = f"{message}; safe rollback failed: {rollback_error}"
+            raise self._adoption_error(run_id, message) from exc
+
+    def _read_legacy_publication(
+        self,
+        *,
+        run_id: str,
+        state: dict[str, object],
+    ) -> dict[str, object]:
+        if state.get("current_phase") != "code_review" or state.get("status") != "code_review_ready":
+            raise self._adoption_error(run_id, "Legacy run is not at the code_review_ready checkpoint.")
+        checkpoint = state.get("pending_checkpoint")
+        if not isinstance(checkpoint, dict) or checkpoint.get("type") != "code_review":
+            raise self._adoption_error(run_id, "Legacy run does not have a Code Review checkpoint.")
+        path = self.store.run_dir(run_id) / "sync" / LEGACY_GITHUB_ARTIFACT
+        expected_ref = self.store.relative(path)
+        latest = state.get("latest_artifacts")
+        if not isinstance(latest, dict) or latest.get("github_code_review") != expected_ref:
+            raise self._adoption_error(run_id, "Runtime does not point to the expected GitHub publication artifact.")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise self._adoption_error(run_id, "GitHub publication artifact is missing or invalid.") from exc
+        if not isinstance(payload, dict):
+            raise self._adoption_error(run_id, "GitHub publication artifact must be a JSON object.")
+        return payload
+
+    def _publication_identity(
+        self,
+        *,
+        run_id: str,
+        publication: dict[str, object],
+        state: dict[str, object],
+        remote: str,
+    ) -> tuple[str, str, str, int, str]:
+        commit = publication.get("commit")
+        pull_request = publication.get("pull_request")
+        push = publication.get("push")
+        if not isinstance(commit, dict) or not isinstance(pull_request, dict) or not isinstance(push, dict):
+            raise self._adoption_error(run_id, "GitHub publication artifact is missing commit/push/PR identity.")
+        repository = str(publication.get("repository") or "")
+        branch = str(publication.get("branch") or "")
+        commit_sha = str(commit.get("sha") or "")
+        pr_url = str(pull_request.get("url") or "")
+        pr_number = pull_request.get("number")
+        checks = (
+            publication.get("version") == "github_code_review_v1",
+            publication.get("status") == "published",
+            publication.get("run_id") == run_id,
+            publication.get("issue_key") == self._source_identity(state),
+            _normalized_remote(str(publication.get("remote") or "")) == _normalized_remote(remote),
+            publication.get("base_branch") == self.settings.target_base_branch,
+            push.get("status") == "pushed",
+            push.get("branch") == branch,
+            pull_request.get("headRefName") == branch,
+            pull_request.get("baseRefName") == self.settings.target_base_branch,
+            pull_request.get("isDraft") is True,
+            type(pr_number) is int and pr_number > 0,
+            bool(repository and branch and commit_sha and pr_url),
+        )
+        if not all(checks):
+            raise self._adoption_error(run_id, "GitHub publication artifact has inconsistent legacy identity.")
+        return repository, branch, commit_sha, int(pr_number), pr_url
+
+    def _validate_pull_request_identity(
+        self,
+        *,
+        run_id: str,
+        pull_request: dict[str, object],
+        branch: str,
+        commit_sha: str,
+        pr_number: int,
+        pr_url: str,
+    ) -> None:
+        if (
+            pull_request.get("number") != pr_number
+            or pull_request.get("url") != pr_url
+            or pull_request.get("state") != "OPEN"
+            or pull_request.get("isDraft") is not True
+            or pull_request.get("headRefName") != branch
+            or pull_request.get("headRefOid") != commit_sha
+            or pull_request.get("baseRefName") != self.settings.target_base_branch
+            or not str(pull_request.get("baseRefOid") or "")
+        ):
+            raise self._adoption_error(run_id, "Live GitHub pull request does not match the runtime publication.")
+
+    def _rollback_legacy_adoption(
+        self,
+        *,
+        canonical_repo: Path,
+        worktree_path: Path,
+        original_branch: str,
+        expected_head: str,
+        restore_original_branch: bool,
+        run_id: str,
+    ) -> str:
+        """Gỡ mutation chưa có ownership và phục hồi checkout cũ khi chứng minh an toàn."""
+
+        try:
+            registry = self._worktree_registry(canonical_repo, run_id=run_id)
+            if worktree_path.resolve() in registry:
+                status = self._git(
+                    worktree_path,
+                    "status",
+                    "--porcelain",
+                    error_code="workspace_adoption_failed",
+                    run_id=run_id,
+                )
+                head = self._git(
+                    worktree_path,
+                    "rev-parse",
+                    "HEAD",
+                    error_code="workspace_adoption_failed",
+                    run_id=run_id,
+                )
+                if self._dirty_status_without_codegraph(status) or head != expected_head:
+                    return "new legacy worktree is dirty or moved away from the verified HEAD"
+                self._git(
+                    canonical_repo,
+                    "worktree",
+                    "remove",
+                    str(worktree_path),
+                    error_code="workspace_adoption_failed",
+                    run_id=run_id,
+                )
+            elif worktree_path.exists():
+                return "unregistered legacy workspace path remains"
+            if restore_original_branch:
+                self._git(
+                    canonical_repo,
+                    "switch",
+                    original_branch,
+                    error_code="workspace_adoption_failed",
+                    run_id=run_id,
+                )
+            return ""
+        except HarnessError as exc:
+            return exc.message
+
+    @staticmethod
+    def _adoption_error(run_id: str, message: str) -> HarnessError:
+        return HarnessError("workspace_adoption_failed", message, run_id=run_id)
 
     def _raise_after_safe_rollback(
         self,

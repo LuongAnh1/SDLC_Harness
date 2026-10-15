@@ -1,9 +1,8 @@
-"""Xuất code đã qua QA lên GitHub dưới dạng Draft PR.
+"""Đọc PR identity và xuất code đã qua QA lên GitHub dưới dạng Draft PR.
 
-Module này chỉ sở hữu các side effect của code plane: kiểm manifest file, tạo
-commit, push branch và create/update Draft PR. Workflow Phase 4 vẫn quyết định
-khi nào được gọi publisher và cách chuyển state; Jira/Confluence thuộc lát sync
-code-review kế tiếp.
+Module sở hữu adapter GitHub của code plane: reader chỉ đọc identity của PR; còn
+publisher kiểm manifest file, tạo commit, push branch và create/update Draft PR.
+Workflow vẫn quyết định khi nào gọi adapter và cách chuyển state.
 """
 
 from __future__ import annotations
@@ -29,6 +28,46 @@ class GitHubCodeReviewResult:
 
     def to_dict(self) -> dict[str, object]:
         return dict(self.payload)
+
+
+class GitHubPullRequestReader:
+    """Đọc identity bất biến của pull request mà không thay đổi GitHub."""
+
+    def __init__(self, gh_runner: GhRunner | None = None):
+        self._gh_runner = gh_runner or _run_gh
+
+    def read(
+        self,
+        *,
+        target_path: Path,
+        repository: str,
+        pr_number: int,
+        run_id: str,
+    ) -> dict[str, object]:
+        """Trả identity branch/base/commit cần để nhận nuôi một run cũ."""
+
+        try:
+            return _json_object(
+                self._gh_runner(
+                    [
+                        "pr",
+                        "view",
+                        str(pr_number),
+                        "--repo",
+                        repository,
+                        "--json",
+                        "number,url,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid",
+                    ],
+                    target_path,
+                ),
+                run_id=run_id,
+            )
+        except HarnessError as exc:
+            raise HarnessError(
+                "workspace_adoption_failed",
+                f"Cannot read GitHub pull request identity: {exc.message}",
+                run_id=run_id,
+            ) from exc
 
 
 class GitHubPublishError(HarnessError):
