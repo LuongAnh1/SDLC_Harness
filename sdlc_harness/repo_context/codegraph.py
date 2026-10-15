@@ -1,9 +1,9 @@
 """CodeGraph context cho target repo mà Phase 3 sẽ lập kế hoạch sửa.
 
-Phase 3 chưa được ghi code vào target repo, nhưng Developer cần hiểu repo thật
-thay vì chỉ đoán file từ tên class trong design graph. Module này giữ ranh giới
-đó: bắt buộc target repo đã có `.codegraph/`, đọc context qua CodeGraph, rồi trả
-về evidence ngắn để Developer LLM lập implementation plan.
+Phase 3 chưa ghi code, nhưng Developer cần hiểu snapshot worktree thật thay vì
+chỉ đoán file từ tên class trong design graph. Module này khởi tạo `.codegraph/`
+ngay trong worktree của run, đọc context qua CodeGraph, rồi trả evidence ngắn để
+Developer LLM lập implementation plan.
 """
 
 from __future__ import annotations
@@ -47,15 +47,13 @@ class CodeGraphContextProvider:
         self.fake_mode = fake_mode
 
     def require_index(self, target_path: Path) -> None:
-        """Chặn Phase 3 sớm nếu target repo chưa được `codegraph init`."""
+        """Chặn khi workspace chưa có index sau bước prepare tự động."""
 
         if not (target_path / ".codegraph").exists():
             raise HarnessError(
                 "target_repo_codegraph_missing",
                 (
-                    "Target repo has no .codegraph/ index. Run "
-                    "`python -m sdlc_harness.cli prepare-target-repo --init-codegraph` "
-                    "before approving the design checkpoint."
+                    "Run workspace has no .codegraph/ index after automatic preparation."
                 ),
             )
 
@@ -97,12 +95,17 @@ class CodeGraphContextProvider:
         )
 
     def prepare_index(self, target_path: Path) -> dict[str, object]:
-        """Chạy `codegraph init` khi người dùng gọi lệnh setup riêng."""
+        """Khởi tạo index cho đúng snapshot worktree trước khi thu context."""
 
         before = (target_path / ".codegraph").exists()
         initialized = False
         if not before:
-            _run_codegraph_init(target_path=target_path, timeout_seconds=self.timeout_seconds)
+            if self.fake_mode:
+                marker = target_path / ".codegraph" / "README.md"
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("Fake CodeGraph index for isolated workflow tests.\n", encoding="utf-8")
+            else:
+                _run_codegraph_init(target_path=target_path, timeout_seconds=self.timeout_seconds)
             initialized = True
         after = (target_path / ".codegraph").exists()
         smoke = None

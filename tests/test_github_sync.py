@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.storage.runtime import RuntimeStore
@@ -16,6 +17,7 @@ from sdlc_harness.sync.github import (
     GitHubPublishError,
 )
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
+from sdlc_harness.workspaces import RunWorkspaceManager
 
 
 class FakeGh:
@@ -189,11 +191,14 @@ class GitHubSyncTest(unittest.TestCase):
         workflow = PhaseFourWorkflow(settings)
         workflow.github_publisher = publisher
 
-        response = workflow.continue_run(run_id=run_id)
+        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+            response = workflow.continue_run(run_id=run_id)
 
         self.assertEqual(response["status"], "code_review_published")
         self.assertIsNone(response["pending_checkpoint"])
         self.assertIn("github_code_review", response["latest_artifacts"])
+        self.assertEqual(response["workspace"]["pr_number"], 7)
+        self.assertEqual(response["workspace"]["pr_url"], "https://github.com/example/target/pull/7")
         self.assertEqual(response["quality_reports"]["code_review_publication"]["pr_url"], "https://github.com/example/target/pull/7")
         self.assertEqual(len(publisher.calls), 1)
         publication_paths = publisher.calls[0]["publication_paths"]
@@ -207,13 +212,17 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(repeated["pending_checkpoint"]["type"], "code_review")
         self.assertEqual(len(publisher.calls), 1)
         self.assertTrue((store.run_dir(run_id) / "sync" / "tool_sync_report_v4.json").exists())
+        workspace = RunWorkspaceManager(settings).resolve(run_id)
+        self.assertEqual(workspace.pr_number, 7)
+        self.assertEqual(workspace.pr_url, "https://github.com/example/target/pull/7")
 
     def test_workflow_keeps_partial_publication_evidence_for_retry(self) -> None:
         settings, store, run_id = self._workflow_fixture()
         workflow = PhaseFourWorkflow(settings)
         workflow.github_publisher = FailingPublisher()
 
-        response = workflow.continue_run(run_id=run_id)
+        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+            response = workflow.continue_run(run_id=run_id)
 
         self.assertEqual(response["status"], "code_review_publish_failed")
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
@@ -227,7 +236,7 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(report["push"]["status"], "pushed")
 
     def _workflow_fixture(self):
-        target = self._init_workflow_target()
+        target, remote = self._init_workflow_target()
         runtime_root = self.root / "runtime"
         settings = load_settings(
             root=Path(__file__).resolve().parents[1],
@@ -236,19 +245,51 @@ class GitHubSyncTest(unittest.TestCase):
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
                 "SDLC_TARGET_REPO_PATH": str(target),
-                "SDLC_TARGET_REPO_REMOTE": "https://github.com/example/target.git",
+                "SDLC_TARGET_REPO_REMOTE": str(remote.resolve()),
                 "SDLC_TARGET_BASE_BRANCH": "main",
             },
         )
-        run_id = "run_workflow_github"
+        run_id = "run_20261015_150000_c0decafe"
         store = RuntimeStore(repo_root=settings.repo_root, runtime_root=runtime_root)
+        store.write_state(
+            {
+                "ok": True,
+                "run_id": run_id,
+                "source_ref": "jira_issue:SDLC-1",
+                "current_phase": "qa_testing",
+                "status": "qa_tested",
+                "latest_artifacts": {},
+            }
+        )
+        workspace = RunWorkspaceManager(settings).create_for_run(run_id)
+        worktree = Path(workspace.worktree_path)
+        (worktree / ".codegraph").mkdir(exist_ok=True)
+        (worktree / "src" / "main" / "java" / "example" / "Feature.java").write_text(
+            "final class Feature { int value; }\n",
+            encoding="utf-8",
+        )
         artifacts = store.run_dir(run_id) / "artifacts"
-        artifacts.mkdir(parents=True)
+        artifacts.mkdir(parents=True, exist_ok=True)
         work_packet = {
             "issue_key": "SDLC-1",
             "target_repository": {
-                "planned_branch": "feature/sdlc-1-implementation",
+                "local_path": str(worktree),
+                "remote": workspace.remote,
+                "planned_branch": workspace.branch,
                 "base_branch": "main",
+                "workspace_mode": workspace.workspace_mode,
+                "workspace_ref": store.relative(RunWorkspaceManager(settings).artifact_path(run_id)),
+                "base_sha": workspace.base_sha,
+            },
+            "run_workspace": {
+                "version": workspace.version,
+                "workspace_mode": workspace.workspace_mode,
+                "workspace_ref": store.relative(RunWorkspaceManager(settings).artifact_path(run_id)),
+                "branch": workspace.branch,
+                "base_ref": workspace.base_ref,
+                "base_sha": workspace.base_sha,
+                "head_sha": workspace.head_sha,
+                "remote": workspace.remote,
             },
             "verification_plan": [{"command": "powershell -File scripts/test.ps1"}],
             "output_contract": {"allowed_paths": ["src/main/java/example/Feature.java"]},
@@ -258,7 +299,9 @@ class GitHubSyncTest(unittest.TestCase):
             "scenarios": [{"name": "Approved behavior"}],
             "risks": [],
         }
-        latest: dict[str, str] = {}
+        latest: dict[str, str] = {
+            "run_workspace": store.relative(RunWorkspaceManager(settings).artifact_path(run_id)),
+        }
         for name, value in (
             ("developer_work_packet", json.dumps(work_packet)),
             ("qa_generated_tests", json.dumps(qa_generated)),
@@ -319,7 +362,9 @@ class GitHubSyncTest(unittest.TestCase):
         self._git(target, "checkout", "-b", "feature/sdlc-1-implementation")
         return target, remote
 
-    def _init_workflow_target(self) -> Path:
+    def _init_workflow_target(self) -> tuple[Path, Path]:
+        remote = self.root / "workflow-remote.git"
+        self._git(self.root, "init", "--bare", str(remote))
         target = self.root / "workflow-target"
         source = target / "src" / "main" / "java" / "example"
         tests = target / "src" / "test" / "java" / "example"
@@ -337,10 +382,9 @@ class GitHubSyncTest(unittest.TestCase):
         self._git(target, "add", ".")
         self._git(target, "commit", "-m", "Initial")
         self._git(target, "branch", "-M", "main")
-        self._git(target, "remote", "add", "origin", "https://github.com/example/target.git")
-        self._git(target, "checkout", "-b", "feature/sdlc-1-implementation")
-        (source / "Feature.java").write_text("final class Feature { int value; }\n", encoding="utf-8")
-        return target
+        self._git(target, "remote", "add", "origin", str(remote))
+        self._git(target, "push", "-u", "origin", "main")
+        return target, remote
 
     def _git(self, cwd: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True, encoding="utf-8")

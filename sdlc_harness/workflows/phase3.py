@@ -1,19 +1,17 @@
 """Workflow Phase 3: approved design -> implementation plan checkpoint.
 
-Phase 3 chỉ bắt đầu sau khi design checkpoint đã được duyệt. Workflow đọc
-requirement/design/trace graph đã duyệt, khóa target repo guard, tạo
+Phase 3 chỉ bắt đầu sau khi design checkpoint đã được duyệt. Workflow tạo và
+khóa Git worktree riêng cho run, đọc requirement/design/trace graph đã duyệt, tạo
 implementation plan có cấu trúc và chạy Validator.review_plan hybrid. Phase này chưa
-sửa target repo, chưa tạo branch/commit/PR.
+sửa source/test, chưa tạo commit/PR; branch/worktree đã được cấp phát cho run.
 """
 
 from __future__ import annotations
 
-# Smart Developer V1: Phase 3 yêu cầu target repo đã được CodeGraph index trước.
-# Workflow chỉ đọc repo context để lập plan, chưa tạo branch/commit/PR.
+# Smart Developer V1 đọc CodeGraph từ snapshot worktree riêng của run. Phase 3
+# đã tạo branch/worktree nhưng chỉ đọc context để lập plan, chưa sửa code/commit/PR.
 
 import json
-import re
-import subprocess
 from pathlib import Path
 
 from ..agents.developer import DeveloperPlanAgent
@@ -25,6 +23,7 @@ from ..llm.client import LlmClient
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
+from ..workspaces import RunWorkspaceManager
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "approve_checkpoint",
@@ -44,9 +43,40 @@ class PhaseThreeWorkflow:
         self.developer = DeveloperPlanAgent(llm_client)
         self.validator = ImplementationPlanValidator(llm_client)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
+        self.workspace_manager = RunWorkspaceManager(settings)
 
     def approve_design_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
-        """Duyệt design checkpoint và tạo implementation plan checkpoint."""
+        """Tạo workspace rồi duyệt design để sinh implementation plan checkpoint."""
+
+        state = self.store.read_state(run_id)
+        self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        try:
+            self.workspace_manager.create_for_run(run_id)
+        except HarnessError as exc:
+            state = self.store.read_state(run_id)
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_planning",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "request_change", "cancel_run"],
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Phase 3 bị chặn khi chuẩn bị run workspace: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+        with self.workspace_manager.locked_workspace(run_id):
+            return self._approve_design_checkpoint_locked(run_id=run_id, checkpoint_id=checkpoint_id)
+
+    def _approve_design_checkpoint_locked(
+        self,
+        *,
+        run_id: str,
+        checkpoint_id: str | None = None,
+    ) -> dict[str, object]:
+        """Thực thi Phase 3 trong khi caller giữ per-run workspace lock."""
 
         state = self.store.read_state(run_id)
         self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
@@ -62,22 +92,10 @@ class PhaseThreeWorkflow:
         class_graph_abs_path = self._existing_artifact_path(class_graph_path, run_id=run_id)
         sequence_graph_abs_path = self._existing_artifact_path(sequence_graph_path, run_id=run_id)
 
-        try:
-            target_info = self._validate_target_repo()
-        except HarnessError as exc:
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_planning",
-                    "status": "blocked",
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "request_change", "cancel_run"],
-                    "last_error": exc.to_response(),
-                    "summary_for_user": f"Phase 3 bị chặn khi kiểm tra target repo: {exc.message}",
-                }
-            )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
+        workspace = self.workspace_manager.resolve(run_id)
+        target_path = Path(workspace.worktree_path)
+        self.repo_context_provider.prepare_index(target_path)
+        target_files = _target_source_files(target_path)
 
         state.update(
             {
@@ -107,13 +125,9 @@ class PhaseThreeWorkflow:
         class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
         sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
         issue_key = _issue_key_from_state(state)
-        planned_branch = _planned_branch(
-            prefix=self.settings.implementation_branch_prefix,
-            issue_key=issue_key,
-        )
         repo_context = self.repo_context_provider.collect(
-            target_path=target_info.path,
-            target_files=target_info.source_files,
+            target_path=target_path,
+            target_files=target_files,
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             issue_key=issue_key,
@@ -128,13 +142,16 @@ class PhaseThreeWorkflow:
                 requirement_design_trace=requirement_design_trace,
                 class_graph=class_graph,
                 sequence_graph=sequence_graph,
-                target_repo_path=str(target_info.path),
-                target_repo_remote=target_info.remote,
+                target_repo_path=str(target_path),
+                target_repo_remote=workspace.remote,
                 target_base_branch=self.settings.target_base_branch,
-                planned_branch=planned_branch,
-                target_files=target_info.source_files,
+                planned_branch=workspace.branch,
+                target_files=target_files,
                 test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
                 repo_context=repo_context,
+                workspace_mode=workspace.workspace_mode,
+                workspace_ref=artifact_paths["run_workspace"],
+                base_sha=workspace.base_sha,
             )
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -236,13 +253,16 @@ class PhaseThreeWorkflow:
                     requirement_design_trace=requirement_design_trace,
                     class_graph=class_graph,
                     sequence_graph=sequence_graph,
-                    target_repo_path=str(target_info.path),
-                    target_repo_remote=target_info.remote,
+                    target_repo_path=str(target_path),
+                    target_repo_remote=workspace.remote,
                     target_base_branch=self.settings.target_base_branch,
-                    planned_branch=planned_branch,
-                    target_files=target_info.source_files,
+                    planned_branch=workspace.branch,
+                    target_files=target_files,
                     test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
                     repo_context=repo_context,
+                    workspace_mode=workspace.workspace_mode,
+                    workspace_ref=artifact_paths["run_workspace"],
+                    base_sha=workspace.base_sha,
                 )
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -308,8 +328,8 @@ class PhaseThreeWorkflow:
                 "summary_for_user": (
                     f"Đã duyệt design và tạo implementation plan cho run {run_id}. "
                     f"Validator.review_plan hybrid đã pass sau {review.repair_iterations} vòng repair, "
-                    f"target repo `{target_info.path}` sạch, "
-                    f"remote khớp, planned branch `{planned_branch}`, sync status={last_sync.get('status')}. "
+                    f"run workspace đã sẵn sàng trên branch `{workspace.branch}`, "
+                    f"base `{workspace.base_sha[:12]}`, sync status={last_sync.get('status')}. "
                     "Run đang chờ review implementation plan trước khi slice tiếp theo tạo code/PR."
                 ),
             }
@@ -377,38 +397,6 @@ class PhaseThreeWorkflow:
         )
         self.store.write_state(state)
 
-    def _validate_target_repo(self) -> "_TargetRepoInfo":
-        target_path = self.settings.target_repo_path.resolve()
-        repo_root = self.settings.repo_root.resolve()
-        if target_path == repo_root:
-            raise HarnessError("target_repo_is_harness", "Target repo points to SDLC_Harness itself.")
-        if not target_path.exists() or not target_path.is_dir():
-            raise HarnessError("target_repo_not_found", f"Target repo does not exist: {target_path}")
-        if not (target_path / ".git").exists():
-            raise HarnessError("target_repo_not_git", f"Target repo is not a git repository: {target_path}")
-        self.repo_context_provider.require_index(target_path)
-
-        remote = _git_output(target_path, "remote", "get-url", "origin")
-        if _normalize_remote(remote) != _normalize_remote(self.settings.target_repo_remote):
-            raise HarnessError(
-                "target_repo_remote_mismatch",
-                f"Target repo remote mismatch: expected {self.settings.target_repo_remote}, got {remote}",
-            )
-
-        dirty = _git_output(target_path, "status", "--porcelain")
-        dirty_without_codegraph = _dirty_status_without_codegraph(dirty)
-        if dirty_without_codegraph.strip():
-            raise HarnessError("target_repo_dirty", "Target repo has uncommitted changes outside .codegraph/.")
-
-        current_branch = _git_output(target_path, "rev-parse", "--abbrev-ref", "HEAD")
-        source_files = _target_source_files(target_path)
-        return _TargetRepoInfo(
-            path=target_path,
-            remote=remote,
-            current_branch=current_branch,
-            source_files=source_files,
-        )
-
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         return {
             "ok": True,
@@ -423,32 +411,10 @@ class PhaseThreeWorkflow:
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
+            "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
         }
-
-
-class _TargetRepoInfo:
-    def __init__(self, *, path: Path, remote: str, current_branch: str, source_files: list[str]):
-        self.path = path
-        self.remote = remote
-        self.current_branch = current_branch
-        self.source_files = source_files
-
-
-def _git_output(cwd: Path, *args: str) -> str:
-    try:
-        completed = subprocess.run(
-            ["git", *args],
-            cwd=str(cwd),
-            check=True,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise HarnessError("target_repo_git_failed", f"Git command failed in target repo: {' '.join(args)}") from exc
-    return completed.stdout.strip()
 
 
 def _target_source_files(target_path: Path) -> list[str]:
@@ -460,16 +426,6 @@ def _target_source_files(target_path: Path) -> list[str]:
         for path in sorted(root.rglob("*.java")):
             files.append(str(path.relative_to(target_path)).replace("\\", "/"))
     return files
-
-
-def _dirty_status_without_codegraph(status: str) -> str:
-    lines: list[str] = []
-    for line in status.splitlines():
-        path = line[3:].strip() if len(line) > 3 else line.strip()
-        if path == ".codegraph" or path.startswith(".codegraph/") or path.startswith(".codegraph\\"):
-            continue
-        lines.append(line)
-    return "\n".join(lines)
 
 
 def _required_artifact(artifact_paths: dict[str, str], key: str, *, run_id: str) -> str:
@@ -524,15 +480,6 @@ def _issue_key_from_state(state: dict[str, object]) -> str:
     if dataset and use_case:
         return f"{dataset}-{use_case}"
     return use_case or "SDLC"
-
-
-def _planned_branch(*, prefix: str, issue_key: str) -> str:
-    slug = re.sub(r"[^a-zA-Z0-9]+", "-", issue_key.lower()).strip("-") or "implementation"
-    return f"{prefix}/{slug}-implementation"
-
-
-def _normalize_remote(remote: str) -> str:
-    return remote.strip().rstrip("/").removesuffix(".git").lower()
 
 
 def _artifact_ref(path: str) -> str:

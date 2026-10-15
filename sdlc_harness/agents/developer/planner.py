@@ -111,6 +111,9 @@ class DeveloperPlanAgent:
         repo_context: dict[str, object] | None = None,
         repair_feedback: str = "",
         previous_review: dict[str, object] | None = None,
+        workspace_mode: str = "",
+        workspace_ref: str = "",
+        base_sha: str = "",
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
@@ -162,6 +165,9 @@ class DeveloperPlanAgent:
                 "remote": target_repo_remote,
                 "base_branch": target_base_branch,
                 "planned_branch": planned_branch,
+                "workspace_mode": workspace_mode,
+                "workspace_ref": workspace_ref,
+                "base_sha": base_sha,
             },
             "inputs": {
                 "requirement_design_trace_version": requirement_design_trace.get("version", ""),
@@ -178,8 +184,8 @@ class DeveloperPlanAgent:
             "design_mappings": mappings,
             "test_intents": test_intents,
             "assumptions": [
-                "Phase 3 chỉ lập kế hoạch; Phase 4 mới tạo branch, sửa code, chạy test và mở Draft PR.",
-                "Các target file chưa tồn tại được hiểu là file Phase 4 có thể tạo mới trong target repo.",
+                "Phase 3 tạo branch/worktree riêng cho run để lập kế hoạch; Phase 4 mới sửa code, chạy test và mở Draft PR.",
+                "Các target file chưa tồn tại được hiểu là file Phase 4 có thể tạo mới trong run workspace.",
             ],
             "open_questions": [
                 "Nếu human muốn đổi kiến trúc hoặc đổi package Java, cần request_change trước khi duyệt plan.",
@@ -191,7 +197,7 @@ class DeveloperPlanAgent:
                 "repair_feedback_attached": bool(repair_feedback.strip()),
             },
             "out_of_scope": [
-                "Không tạo Git branch trong Phase 3.",
+                "Không sửa source/test hoặc tạo commit trong Phase 3.",
                 "Không ghi file source/test trong target repo ở Phase 3.",
                 "Không tạo Pull Request trong Phase 3.",
             ],
@@ -225,6 +231,9 @@ class DeveloperPlanAgent:
         target_files: list[str],
         test_command: str,
         repo_context: dict[str, object] | None = None,
+        workspace_mode: str = "",
+        workspace_ref: str = "",
+        base_sha: str = "",
     ) -> ImplementationPlanDraft:
         """Tạo lại plan dựa trên feedback của Validator.review_plan.
 
@@ -251,6 +260,9 @@ class DeveloperPlanAgent:
             repo_context=repo_context,
             repair_feedback=developer_feedback,
             previous_review=review_report,
+            workspace_mode=workspace_mode,
+            workspace_ref=workspace_ref,
+            base_sha=base_sha,
         )
         structured = {
             **repaired.structured,
@@ -704,6 +716,8 @@ def _markdown_plan(
         f"- Remote: `{repo.get('remote', '')}`",
         f"- Base branch: `{repo.get('base_branch', '')}`",
         f"- Planned branch: `{repo.get('planned_branch', '')}`",
+        f"- Workspace mode: `{repo.get('workspace_mode', '')}`",
+        f"- Base SHA: `{repo.get('base_sha', '')}`",
         "",
         "## Repo Evidence",
         "",

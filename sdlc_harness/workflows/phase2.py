@@ -347,6 +347,7 @@ class PhaseTwoWorkflow:
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
+            "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
         }

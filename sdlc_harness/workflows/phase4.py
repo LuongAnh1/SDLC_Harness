@@ -1,7 +1,7 @@
 """Workflow Phase 4: implementation plan -> code/test/trace/QA -> Draft PR.
 
 Module này điều phối Phase 4 sau khi implementation plan đã được human duyệt:
-đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target repo, chạy
+đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào run worktree, chạy
 Verification Runner, rồi bắt Validator kiểm trace requirement/design sang
 code/test. Nếu Validator thấy gap nằm trong code/test, workflow ghi feedback cho
 Developer.repair, refresh snapshot từ target repo thật, chạy lại runner +
@@ -14,6 +14,10 @@ QA-generated tests hoặc verification support path đã được tham chiếu. 
 push và Draft PR được lưu thành artifact riêng; bước kế tiếp sync evidence sang
 Jira/Confluence và mở checkpoint `code_review_ready` cho human review.
 
+Mọi action đọc/sửa code resolve `run_workspace_v1.json` và giữ per-run lock.
+Canonical target repo chỉ còn dùng để fetch/quản lý Git worktree, không bị checkout
+hay ghi code bởi workflow Phase 4.
+
 `revalidate_implementation` là đường vận hành riêng cho run từng bị block vì
 repair limit: nó kiểm lại code hiện tại bằng logic Validator mới mà không tự
 gọi Developer sửa thêm.
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+import subprocess
 
 from ..agents.developer import (
     DeveloperActAgent,
@@ -55,16 +60,8 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync.github import GitHubCodeReviewPublisher, GitHubPublishError, github_repository_from_remote
 from ..sync.runner import sync_code_review_checkpoint
 from ..verification import VerificationRunner
-from .phase3 import (
-    _dirty_status_without_codegraph,
-    _dict_value,
-    _git_output,
-    _issue_key_from_state,
-    _normalize_remote,
-    _read_json_artifact,
-    _string_dict,
-    _target_source_files,
-)
+from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
+from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -97,6 +94,7 @@ class PhaseFourWorkflow:
         self.code_trace_validator = CodeTraceValidator(self.llm_client)
         self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
+        self.workspace_manager = RunWorkspaceManager(settings)
 
     def approve_implementation_plan_checkpoint(
         self,
@@ -104,7 +102,23 @@ class PhaseFourWorkflow:
         run_id: str,
         checkpoint_id: str | None = None,
     ) -> dict[str, object]:
-        """Duyệt implementation plan và sinh DeveloperWorkPacket V1."""
+        """Duyệt implementation plan trong workspace đã được Phase 3 khóa."""
+
+        state = self.store.read_state(run_id)
+        self._require_implementation_plan_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        with self.workspace_manager.locked_workspace(run_id):
+            return self._approve_implementation_plan_checkpoint_locked(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
+
+    def _approve_implementation_plan_checkpoint_locked(
+        self,
+        *,
+        run_id: str,
+        checkpoint_id: str | None = None,
+    ) -> dict[str, object]:
+        """Sinh DeveloperWorkPacket khi caller đang giữ per-run lock."""
 
         state = self.store.read_state(run_id)
         self._require_implementation_plan_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
@@ -147,13 +161,15 @@ class PhaseFourWorkflow:
             )
 
         try:
-            target_info = self._validate_target_repo()
+            workspace = self.workspace_manager.resolve(run_id)
+            target_info = self._workspace_target_info(run_id=run_id, allow_dirty=False)
             packet = build_developer_work_packet(
                 run_id=run_id,
                 source_ref=str(state.get("source_ref") or ""),
                 issue_key=_issue_key_from_state(state),
                 structured_plan=structured_plan,
                 target_repo_path=target_info.path,
+                run_workspace=workspace.to_dict(),
                 approved_plan_refs={
                     "implementation_plan": implementation_plan_path,
                     "implementation_plan_structured": structured_plan_path,
@@ -204,7 +220,7 @@ class PhaseFourWorkflow:
                 "summary_for_user": (
                     f"Đã duyệt implementation plan cho run {run_id} và chuẩn bị DeveloperWorkPacket V1. "
                     f"Target repo `{target_info.path}` sạch, packet có {len(packet['proposed_files'])} file mục tiêu. "
-                    "Slice này chưa tạo branch, chưa sửa code và chưa mở PR."
+                    "Workspace/branch của run đã được khóa; slice này chưa sửa code và chưa mở PR."
                 ),
             }
         )
@@ -214,29 +230,30 @@ class PhaseFourWorkflow:
     def continue_run(self, *, run_id: str) -> dict[str, object]:
         """Chạy bước Phase 4 tiếp theo theo state hiện tại của run."""
 
-        state = self.store.read_state(run_id)
-        status = str(state.get("status"))
-        if status == "implementation_ready":
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "implementation_written":
-            return self._continue_verification(state=state, run_id=run_id)
-        if status == "implementation_tested":
-            return self._continue_code_trace(state=state, run_id=run_id)
-        if status == "implementation_traced":
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "implementation_repair_needed":
-            return self._continue_implementation_repair(state=state, run_id=run_id)
-        if status == "qa_repair_needed":
-            return self._continue_qa_repair(state=state, run_id=run_id)
-        if status in {"qa_tested", "code_review_publish_failed"}:
-            return self._continue_code_review_publish(state=state, run_id=run_id)
-        if status == "code_review_published":
-            return self._continue_code_review_sync(state=state, run_id=run_id)
-        raise HarnessError(
-            "run_not_continuable",
-            f"Run is not ready for the next Phase 4 step: {run_id}",
-            run_id=run_id,
-        )
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            status = str(state.get("status"))
+            if status == "implementation_ready":
+                return self._continue_developer_act(state=state, run_id=run_id)
+            if status == "implementation_written":
+                return self._continue_verification(state=state, run_id=run_id)
+            if status == "implementation_tested":
+                return self._continue_code_trace(state=state, run_id=run_id)
+            if status == "implementation_traced":
+                return self._continue_qa_test(state=state, run_id=run_id)
+            if status == "implementation_repair_needed":
+                return self._continue_implementation_repair(state=state, run_id=run_id)
+            if status == "qa_repair_needed":
+                return self._continue_qa_repair(state=state, run_id=run_id)
+            if status in {"qa_tested", "code_review_publish_failed"}:
+                return self._continue_code_review_publish(state=state, run_id=run_id)
+            if status == "code_review_published":
+                return self._continue_code_review_sync(state=state, run_id=run_id)
+            raise HarnessError(
+                "run_not_continuable",
+                f"Run is not ready for the next Phase 4 step: {run_id}",
+                run_id=run_id,
+            )
 
     def _continue_code_review_publish(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Commit/push code đã qua QA và tạo hoặc cập nhật Draft PR."""
@@ -244,6 +261,7 @@ class PhaseFourWorkflow:
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
         report_path = ""
+        workspace: RunWorkspaceRecord | None = None
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             qa_generated_path = _required_phase4_artifact(artifact_paths, "qa_generated_tests", run_id=run_id)
@@ -271,7 +289,8 @@ class PhaseFourWorkflow:
                 self._existing_artifact_path(qa_generated_path, run_id=run_id),
                 run_id=run_id,
             )
-            target_info = self._validate_target_repo(allow_dirty=True)
+            workspace = self.workspace_manager.resolve(run_id)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             target_repository = _dict_value(work_packet.get("target_repository"))
             branch = str(target_repository.get("planned_branch") or "").strip()
             if not branch:
@@ -314,6 +333,12 @@ class PhaseFourWorkflow:
             report_path = write_phase4_github_code_review(store=self.store, run_id=run_id, report=report)
             latest_artifacts["github_code_review"] = report_path
             pull_request = _dict_value(report.get("pull_request"))
+            workspace = self.workspace_manager.refresh_locked(
+                workspace,
+                pr_number=_positive_int_or_none(pull_request.get("number")),
+                pr_url=str(pull_request.get("url") or ""),
+            )
+            state["workspace"] = workspace.status_summary()
             quality_reports = {
                 **_dict_value(state.get("quality_reports")),
                 "code_review_publication": {
@@ -326,6 +351,14 @@ class PhaseFourWorkflow:
             }
         except GitHubPublishError as exc:
             if exc.partial_result:
+                partial_pr = _dict_value(exc.partial_result.get("pull_request"))
+                if workspace is not None and _dict_value(exc.partial_result.get("commit")).get("sha"):
+                    workspace = self.workspace_manager.refresh_locked(
+                        workspace,
+                        pr_number=_positive_int_or_none(partial_pr.get("number")),
+                        pr_url=str(partial_pr.get("url") or "") or None,
+                    )
+                    state["workspace"] = workspace.status_summary()
                 report_path = write_phase4_github_code_review(
                     store=self.store,
                     run_id=run_id,
@@ -396,10 +429,16 @@ class PhaseFourWorkflow:
             }
         )
         self.store.write_state(state)
-        return self.sync_code_review(run_id=run_id)
+        return self._sync_code_review_locked(run_id=run_id)
 
     def sync_code_review(self, *, run_id: str) -> dict[str, object]:
         """Sync hoặc re-sync checkpoint Code Review; không approve hay sửa artifact."""
+
+        with self.workspace_manager.locked_workspace(run_id):
+            return self._sync_code_review_locked(run_id=run_id)
+
+    def _sync_code_review_locked(self, *, run_id: str) -> dict[str, object]:
+        """Sync Code Review khi caller đang giữ per-run lock."""
 
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
@@ -488,18 +527,22 @@ class PhaseFourWorkflow:
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification Runner and Validator for repair-limit blocked runs."""
 
-        state = self.store.read_state(run_id)
-        last_error = _dict_value(state.get("last_error"))
-        if str(state.get("status")) != "blocked" or last_error.get("error_code") != "implementation_repair_limit_exceeded":
-            raise HarnessError(
-                "implementation_revalidate_not_allowed",
-                (
-                    "Implementation revalidate is only allowed when a Phase 4 run is blocked by "
-                    f"implementation_repair_limit_exceeded: {run_id}"
-                ),
-                run_id=run_id,
-            )
-        return self._revalidate_current_implementation(state=state, run_id=run_id)
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            last_error = _dict_value(state.get("last_error"))
+            if (
+                str(state.get("status")) != "blocked"
+                or last_error.get("error_code") != "implementation_repair_limit_exceeded"
+            ):
+                raise HarnessError(
+                    "implementation_revalidate_not_allowed",
+                    (
+                        "Implementation revalidate is only allowed when a Phase 4 run is blocked by "
+                        f"implementation_repair_limit_exceeded: {run_id}"
+                    ),
+                    run_id=run_id,
+                )
+            return self._revalidate_current_implementation(state=state, run_id=run_id)
 
     def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
@@ -508,8 +551,8 @@ class PhaseFourWorkflow:
             artifact_paths = _string_dict(state.get("latest_artifacts"))
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            target_info = self._validate_target_repo()
-            branch = self._checkout_implementation_branch(target_path=target_info.path, work_packet=work_packet)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet, allow_dirty=False)
+            branch = target_info.current_branch
             result = self.developer.act(work_packet=work_packet)
             applied_files = _apply_developer_changes(
                 result=result,
@@ -577,7 +620,7 @@ class PhaseFourWorkflow:
             _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
             report = {
                 "run_id": run_id,
@@ -665,7 +708,7 @@ class PhaseFourWorkflow:
             ):
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             trace_result = self.code_trace_validator.validate(
                 target_path=target_info.path,
                 work_packet=work_packet,
@@ -808,7 +851,7 @@ class PhaseFourWorkflow:
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             qa_run = self._run_qa_generated_tests(
                 state=state,
                 artifact_paths=artifact_paths,
@@ -860,7 +903,7 @@ class PhaseFourWorkflow:
                     run_id=run_id,
                 )
             artifact_version = _next_phase4_artifact_version(self.store, run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
@@ -1392,7 +1435,7 @@ class PhaseFourWorkflow:
             ):
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
@@ -1657,7 +1700,7 @@ class PhaseFourWorkflow:
                     run_id=run_id,
                 )
             artifact_version = _next_phase4_artifact_version(self.store, run_id)
-            target_info = self._validate_target_repo(allow_dirty=True)
+            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
@@ -1983,51 +2026,43 @@ class PhaseFourWorkflow:
             )
         return path
 
-    def _validate_target_repo(self, *, allow_dirty: bool = False) -> "_TargetRepoInfo":
-        target_path = self.settings.target_repo_path.resolve()
-        repo_root = self.settings.repo_root.resolve()
-        if target_path == repo_root:
-            raise HarnessError("target_repo_is_harness", "Target repo points to SDLC_Harness itself.")
-        if not target_path.exists() or not target_path.is_dir():
-            raise HarnessError("target_repo_not_found", f"Target repo does not exist: {target_path}")
-        if not (target_path / ".git").exists():
-            raise HarnessError("target_repo_not_git", f"Target repo is not a git repository: {target_path}")
+    def _workspace_target_info(
+        self,
+        *,
+        run_id: str,
+        work_packet: dict[str, object] | None = None,
+        allow_dirty: bool = True,
+    ) -> "_TargetRepoInfo":
+        """Resolve workspace đã khóa và đối chiếu packet với identity của run."""
+
+        workspace = self.workspace_manager.resolve(run_id)
+        if work_packet is not None:
+            _require_work_packet_workspace(work_packet=work_packet, workspace=workspace, run_id=run_id)
+        target_path = Path(workspace.worktree_path)
         self.repo_context_provider.require_index(target_path)
-
-        remote = _git_output(target_path, "remote", "get-url", "origin")
-        if _normalize_remote(remote) != _normalize_remote(self.settings.target_repo_remote):
-            raise HarnessError(
-                "target_repo_remote_mismatch",
-                f"Target repo remote mismatch: expected {self.settings.target_repo_remote}, got {remote}",
+        if not allow_dirty:
+            completed = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(target_path),
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
             )
-
-        dirty = _git_output(target_path, "status", "--porcelain")
-        dirty_without_codegraph = _dirty_status_without_codegraph(dirty)
-        if dirty_without_codegraph.strip() and not allow_dirty:
-            raise HarnessError("target_repo_dirty", "Target repo has uncommitted changes outside .codegraph/.")
+            dirty = _dirty_status_without_codegraph(completed.stdout)
+            if dirty:
+                raise HarnessError(
+                    "workspace_dirty",
+                    "Run workspace has uncommitted changes before the next write action.",
+                    run_id=run_id,
+                )
         return _TargetRepoInfo(
             path=target_path,
-            remote=remote,
-            current_branch=_git_output(target_path, "rev-parse", "--abbrev-ref", "HEAD"),
+            remote=workspace.remote,
+            current_branch=workspace.branch,
             source_files=_target_source_files(target_path),
         )
-
-    def _checkout_implementation_branch(self, *, target_path: Path, work_packet: dict[str, object]) -> str:
-        repository = _dict_value(work_packet.get("target_repository"))
-        branch = str(repository.get("planned_branch") or "").strip()
-        if not branch:
-            raise HarnessError("developer_act_branch_missing", "DeveloperWorkPacket has no planned branch.")
-        current_branch = _git_output(target_path, "rev-parse", "--abbrev-ref", "HEAD")
-        if current_branch == branch:
-            return branch
-        if _branch_exists(target_path, branch):
-            _git_output(target_path, "checkout", branch)
-            return branch
-        base_branch = str(repository.get("base_branch") or self.settings.target_base_branch or "main").strip()
-        if current_branch != base_branch:
-            _git_output(target_path, "checkout", base_branch)
-        _git_output(target_path, "checkout", "-b", branch)
-        return branch
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         return {
@@ -2045,6 +2080,7 @@ class PhaseFourWorkflow:
             "quality_reports": state.get("quality_reports", {}),
             "implementation_repair_iterations": state.get("implementation_repair_iterations", 0),
             "qa_repair_iterations": state.get("qa_repair_iterations", 0),
+            "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
         }
@@ -2056,6 +2092,61 @@ class _TargetRepoInfo:
         self.remote = remote
         self.current_branch = current_branch
         self.source_files = source_files
+
+
+def _dirty_status_without_codegraph(status: str) -> str:
+    lines: list[str] = []
+    for line in status.splitlines():
+        path = line[3:].strip() if len(line) > 3 else line.strip()
+        if path == ".codegraph" or path.startswith(".codegraph/") or path.startswith(".codegraph\\"):
+            continue
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _require_work_packet_workspace(
+    *,
+    work_packet: dict[str, object],
+    workspace: RunWorkspaceRecord,
+    run_id: str,
+) -> None:
+    """Fail closed nếu packet cũ/tampered không còn trỏ đúng workspace của run."""
+
+    packet_workspace = _dict_value(work_packet.get("run_workspace"))
+    repository = _dict_value(work_packet.get("target_repository"))
+    expected = {
+        "workspace_mode": workspace.workspace_mode,
+        "branch": workspace.branch,
+        "base_sha": workspace.base_sha,
+        "remote": workspace.remote,
+    }
+    actual = {
+        "workspace_mode": str(packet_workspace.get("workspace_mode") or ""),
+        "branch": str(packet_workspace.get("branch") or repository.get("planned_branch") or ""),
+        "base_sha": str(packet_workspace.get("base_sha") or repository.get("base_sha") or ""),
+        "remote": str(packet_workspace.get("remote") or repository.get("remote") or ""),
+    }
+    if actual != expected:
+        raise HarnessError(
+            "run_workspace_mismatch",
+            "DeveloperWorkPacket does not match the owning run workspace.",
+            run_id=run_id,
+        )
+    local_path = Path(str(repository.get("local_path") or "")).resolve()
+    if local_path != Path(workspace.worktree_path).resolve():
+        raise HarnessError(
+            "run_workspace_mismatch",
+            "DeveloperWorkPacket local_path does not match the owning worktree.",
+            run_id=run_id,
+        )
+
+
+def _positive_int_or_none(value: object) -> int | None:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
 
 
 def _qa_review_context(
@@ -2592,14 +2683,6 @@ def _required_phase4_artifact(artifact_paths: dict[str, str], key: str, *, run_i
             run_id=run_id,
         )
     return value
-
-
-def _branch_exists(target_path: Path, branch: str) -> bool:
-    try:
-        _git_output(target_path, "rev-parse", "--verify", branch)
-    except HarnessError:
-        return False
-    return True
 
 
 def _apply_developer_changes(

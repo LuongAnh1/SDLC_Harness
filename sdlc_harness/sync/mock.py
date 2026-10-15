@@ -3,8 +3,7 @@
 Phase 4 còn dùng adapter này để giả lập checkpoint Code Review sau khi Draft PR
 đã được publish. Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact
 giả lập để unit test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật;
-ownership vẫn
-giữ ở SDLC_Harness, Niko chỉ đọc report trả về.
+ownership vẫn giữ ở SDLC_Harness, Niko chỉ đọc report trả về.
 """
 
 from __future__ import annotations
@@ -271,7 +270,7 @@ Trang này giả lập bản review implementation plan sau khi design checkpoin
 
 ## Human Checkpoint
 
-Review implementation plan trước khi cho phép Phase 4 tạo branch, code, test và Draft PR.
+Review implementation plan trước khi cho phép Phase 4 sửa code, chạy test và tạo Draft PR trong branch/worktree đã cấp cho run.
 """,
         encoding="utf-8",
     )

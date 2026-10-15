@@ -86,7 +86,10 @@ class PhaseThreeTest(unittest.TestCase):
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
-        self.remote_url = "https://github.com/example/SDLC_Target_eTour.git"
+        self.remote_path = Path(self.temp_dir.name) / "target.git"
+        self.remote_path.mkdir()
+        self._git(self.remote_path, "init", "--bare")
+        self.remote_url = str(self.remote_path.resolve())
         self.target_repo = self._init_target_repo(remote_url=self.remote_url)
         self.settings = self._settings()
 
@@ -132,6 +135,7 @@ class PhaseThreeTest(unittest.TestCase):
         self._git(target, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
         self._git(target, "branch", "-M", "main")
         self._git(target, "remote", "add", "origin", remote_url)
+        self._git(target, "push", "-u", "origin", "main")
         return target
 
     def _git(self, cwd: Path, *args: str) -> None:
@@ -181,7 +185,8 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(response["pending_checkpoint"]["type"], "implementation_plan_review")
         self.assertIn("implementation_plan", response["latest_artifacts"])
         self.assertIn("approve_checkpoint", response["allowed_next_actions"])
-        self.assertIn("planned branch", response["summary_for_user"])
+        self.assertIn("run workspace", response["summary_for_user"])
+        self.assertEqual(response["workspace"]["workspace_mode"], "git_worktree_v1")
         self.assertIn("implementation_plan_structured", response["latest_artifacts"])
         self.assertIn("implementation_plan_review", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["implementation_plan_review"]["ok"])
@@ -200,10 +205,14 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertIn("Design To Code Mapping", content)
         self.assertIn(str(self.target_repo), content)
         self.assertIn(self.remote_url, content)
-        self.assertIn("feature/etour-uc1-implementation", content)
+        workspace_artifact = json.loads(
+            (self.repo_root / response["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8")
+        )
+        self.assertIn(workspace_artifact["branch"], content)
+        self.assertIn(workspace_artifact["worktree_path"], content)
         self.assertIn("DeleteCulturalHeritageService.deleteHeritage", content)
         self.assertIn("Test Intent", content)
-        self.assertIn("Không tạo Git branch trong Phase 3", content)
+        self.assertIn("Phase 3 tạo branch/worktree riêng cho run", content)
 
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
@@ -411,6 +420,8 @@ Thanks."""
         self.assertIn("<h2>Execution Steps</h2>", confluence_body)
         self.assertIn("<h2>Code Targets</h2>", confluence_body)
         self.assertIn("<th>Code target</th>", confluence_body)
+        self.assertNotIn("target_repo-worktrees", confluence_body)
+        self.assertNotIn("<th>Local path</th>", confluence_body)
         self.assertIn("Implement class/method behavior and wire flow interactions.", confluence_body)
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
@@ -639,9 +650,9 @@ Thanks."""
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "target_repo_dirty")
+        self.assertEqual(response["last_error"]["error_code"], "workspace_dirty")
 
-    def test_target_repo_guard_blocks_missing_codegraph_index(self) -> None:
+    def test_phase3_initializes_codegraph_inside_run_workspace(self) -> None:
         approved = self._create_phase2_run()
         index_marker = self.target_repo / ".codegraph" / "README.md"
         index_marker.unlink()
@@ -651,8 +662,13 @@ Thanks."""
 
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
 
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "target_repo_codegraph_missing")
+        self.assertEqual(response["status"], "waiting_implementation_plan_review")
+        workspace_path = Path(
+            json.loads(
+                (self.repo_root / response["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8")
+            )["worktree_path"]
+        )
+        self.assertTrue((workspace_path / ".codegraph").is_dir())
 
     def test_target_repo_guard_blocks_remote_mismatch(self) -> None:
         approved = self._create_phase2_run()
@@ -661,7 +677,7 @@ Thanks."""
         response = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(approved["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "target_repo_remote_mismatch")
+        self.assertEqual(response["last_error"]["error_code"], "workspace_remote_mismatch")
 
     def test_missing_approved_design_artifact_is_rejected(self) -> None:
         approved = self._create_phase2_run()

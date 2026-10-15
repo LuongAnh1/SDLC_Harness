@@ -258,7 +258,10 @@ class PhaseFourTest(unittest.TestCase):
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
-        self.remote_url = "https://github.com/example/SDLC_Target_eTour.git"
+        self.remote_path = Path(self.temp_dir.name) / "target.git"
+        self.remote_path.mkdir()
+        self._git(self.remote_path, "init", "--bare")
+        self.remote_url = str(self.remote_path.resolve())
         self.target_repo = self._init_target_repo(remote_url=self.remote_url)
         self.settings = self._settings()
 
@@ -314,6 +317,7 @@ class PhaseFourTest(unittest.TestCase):
         self._git(target, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
         self._git(target, "branch", "-M", "main")
         self._git(target, "remote", "add", "origin", remote_url)
+        self._git(target, "push", "-u", "origin", "main")
         return target
 
     def _git(self, cwd: Path, *args: str) -> None:
@@ -355,6 +359,10 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         return PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
 
+    def _workspace_path(self, run: dict[str, object]) -> Path:
+        artifact = self.repo_root / str(run["latest_artifacts"]["run_workspace"])
+        return Path(json.loads(artifact.read_text(encoding="utf-8"))["worktree_path"])
+
     def test_approve_implementation_plan_creates_developer_work_packet(self) -> None:
         phase3 = self._create_phase3_run()
 
@@ -366,7 +374,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIsNone(response["pending_checkpoint"])
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("developer_work_packet", response["latest_artifacts"])
-        self.assertIn("chưa tạo branch", response["summary_for_user"])
+        self.assertIn("Workspace/branch", response["summary_for_user"])
         self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), "")
 
@@ -378,6 +386,8 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(packet["implementation_steps"])
         self.assertTrue(packet["proposed_files"])
         self.assertTrue(packet["current_files"])
+        self.assertEqual(packet["run_workspace"]["workspace_mode"], "git_worktree_v1")
+        self.assertEqual(packet["run_workspace"]["branch"], response["workspace"]["branch"])
         self.assertEqual(packet["output_contract"]["format"], "changed_files_json_v1")
         self.assertTrue(packet["output_contract"]["changed_files_only"])
         self.assertTrue(packet["output_contract"]["allowed_paths"])
@@ -440,12 +450,12 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_target_repo_dirty_blocks_without_writing_packet(self) -> None:
         phase3 = self._create_phase3_run()
-        (self.target_repo / "dirty.txt").write_text("dirty", encoding="utf-8")
+        (self._workspace_path(phase3) / "dirty.txt").write_text("dirty", encoding="utf-8")
 
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(phase3["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "target_repo_dirty")
+        self.assertEqual(response["last_error"]["error_code"], "workspace_dirty")
         self.assertNotIn("developer_work_packet", response["latest_artifacts"])
 
     def test_continue_run_applies_developer_act_code_changes(self) -> None:
@@ -458,16 +468,19 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "implementation_written")
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("code_change_report", response["latest_artifacts"])
+        workspace_path = self._workspace_path(response)
         self.assertEqual(
-            self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"),
-            "feature/etour-uc1-implementation",
+            self._git_output(workspace_path, "rev-parse", "--abbrev-ref", "HEAD"),
+            response["workspace"]["branch"],
         )
-        status = self._git_output(self.target_repo, "status", "--porcelain")
+        self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
+        self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), "")
+        status = self._git_output(workspace_path, "status", "--porcelain")
         self.assertIn("DeleteCulturalHeritageService.java", status)
         self.assertIn("DeleteCulturalHeritageFlowTest.java", status)
 
         service_path = (
-            self.target_repo
+            workspace_path
             / "src"
             / "main"
             / "java"
@@ -482,6 +495,42 @@ class PhaseFourTest(unittest.TestCase):
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Code Change Report V1", report)
         self.assertIn("Tests: not run in Slice 4.2", report)
+
+    def test_canonical_checkout_change_does_not_redirect_run_workspace(self) -> None:
+        ready = self._create_phase4_ready_run()
+        self._git(self.target_repo, "checkout", "-b", "manual-review")
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(ready["run_id"]))
+
+        self.assertEqual(response["status"], "implementation_written")
+        self.assertEqual(self._git_output(self.target_repo, "branch", "--show-current"), "manual-review")
+        workspace_path = self._workspace_path(response)
+        self.assertEqual(
+            self._git_output(workspace_path, "branch", "--show-current"),
+            response["workspace"]["branch"],
+        )
+
+    def test_legacy_phase4_run_without_workspace_is_not_auto_adopted(self) -> None:
+        phase3 = self._create_phase3_run()
+        workspace_artifact = self.repo_root / str(phase3["latest_artifacts"]["run_workspace"])
+        workspace_artifact.unlink()
+
+        with self.assertRaises(HarnessError) as ctx:
+            PhaseFourWorkflow(self.settings).approve_implementation_plan_checkpoint(run_id=str(phase3["run_id"]))
+
+        self.assertEqual(ctx.exception.error_code, "run_workspace_missing")
+
+    def test_tampered_work_packet_workspace_fails_closed(self) -> None:
+        ready = self._create_phase4_ready_run()
+        packet_path = self.repo_root / str(ready["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["run_workspace"]["branch"] = "feature/wrong-run"
+        packet_path.write_text(json.dumps(packet), encoding="utf-8")
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(ready["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "run_workspace_mismatch")
 
     def test_cli_continue_run_dispatches_phase4_developer_act(self) -> None:
         ready = self._create_phase4_ready_run()
@@ -607,7 +656,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("Any truncated:", report)
         self.assertTrue(
             (
-                self.target_repo
+                self._workspace_path(response)
                 / "src"
                 / "test"
                 / "java"
@@ -848,7 +897,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_continue_run_marks_repair_needed_when_code_trace_missing_test_file(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -918,7 +967,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_continue_run_from_repair_needed_repairs_code_then_retraces(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -961,7 +1010,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_repair_refreshes_developer_work_packet_from_current_target_repo(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -1019,7 +1068,7 @@ class PhaseFourTest(unittest.TestCase):
         self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="0")
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -1042,7 +1091,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_continue_run_from_repair_needed_blocks_out_of_scope_repair_output(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -1064,7 +1113,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "developer_act_out_of_scope")
         self.assertFalse(
             (
-                self.target_repo
+                self._workspace_path(response)
                 / "src"
                 / "main"
                 / "java"
@@ -1079,7 +1128,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_continue_run_from_repair_needed_blocks_when_repair_verification_fails(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
-            self.target_repo
+            self._workspace_path(tested)
             / "src"
             / "test"
             / "java"
@@ -1091,7 +1140,7 @@ class PhaseFourTest(unittest.TestCase):
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
-        (self.target_repo / "scripts" / "test.ps1").write_text(
+        (self._workspace_path(repair_needed) / "scripts" / "test.ps1").write_text(
             "Write-Error 'repair unit failed'\nexit 1\n",
             encoding="utf-8",
         )
@@ -1286,7 +1335,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_continue_run_blocks_when_verification_fails(self) -> None:
         written = self._create_phase4_written_run()
-        (self.target_repo / "scripts" / "test.ps1").write_text(
+        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
             "Write-Error 'unit failed'\nexit 1\n",
             encoding="utf-8",
         )
@@ -1303,7 +1352,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_continue_run_blocks_when_verification_is_skipped(self) -> None:
         written = self._create_phase4_written_run()
-        (self.target_repo / "scripts" / "test.ps1").write_text(
+        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
             "Write-Host \"JDK compiler 'javac' was not found, so compile/runtime tests were skipped.\"\n",
             encoding="utf-8",
         )
@@ -1397,12 +1446,12 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_continue_run_blocks_dirty_target_repo(self) -> None:
         ready = self._create_phase4_ready_run()
-        (self.target_repo / "dirty.txt").write_text("dirty", encoding="utf-8")
+        (self._workspace_path(ready) / "dirty.txt").write_text("dirty", encoding="utf-8")
 
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(ready["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "target_repo_dirty")
+        self.assertEqual(response["last_error"]["error_code"], "workspace_dirty")
         self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
 
     def test_continue_run_blocks_missing_developer_work_packet(self) -> None:
@@ -1431,7 +1480,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "developer_act_out_of_scope")
         self.assertFalse(
             (
-                self.target_repo
+                self._workspace_path(response)
                 / "src"
                 / "main"
                 / "java"

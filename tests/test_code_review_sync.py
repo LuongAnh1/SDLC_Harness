@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from sdlc_harness.interfaces.cli import _settings_from_args, build_parser
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.atlassian import _find_remote_confluence_checkpoint, real_sync_code_review_checkpoint
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
+from sdlc_harness.workspaces import RunWorkspaceManager
 
 
 class CodeReviewSyncTest(unittest.TestCase):
@@ -22,6 +24,27 @@ class CodeReviewSyncTest(unittest.TestCase):
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
+        self.remote_path = Path(self.temp_dir.name) / "target.git"
+        self.remote_path.mkdir()
+        self._git(self.remote_path, "init", "--bare")
+        self.target_repo = Path(self.temp_dir.name) / "target_repo"
+        self.target_repo.mkdir()
+        (self.target_repo / "README.md").write_text("# Test target\n", encoding="utf-8")
+        self._git(self.target_repo, "init")
+        self._git(self.target_repo, "add", ".")
+        self._git(
+            self.target_repo,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "init",
+        )
+        self._git(self.target_repo, "branch", "-M", "main")
+        self._git(self.target_repo, "remote", "add", "origin", str(self.remote_path.resolve()))
+        self._git(self.target_repo, "push", "-u", "origin", "main")
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -176,6 +199,7 @@ class CodeReviewSyncTest(unittest.TestCase):
                 "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
             }
         )
+        RunWorkspaceManager(settings).create_for_run(run_id)
         workflow = PhaseFourWorkflow(settings)
         failed_sync = {
             "phase": "code_review",
@@ -218,10 +242,13 @@ class CodeReviewSyncTest(unittest.TestCase):
                 "CONFLUENCE_SYNC_ENABLED": "1" if confluence else "0",
                 "CONFLUENCE_SYNC_SPACE_ID": "98315",
                 "CONFLUENCE_SYNC_PARENT_PAGE_ID": "294923",
+                "SDLC_TARGET_REPO_PATH": str(self.target_repo),
+                "SDLC_TARGET_REPO_REMOTE": str(self.remote_path.resolve()),
+                "SDLC_TARGET_BASE_BRANCH": "main",
             },
         )
         store = RuntimeStore(repo_root=settings.repo_root, runtime_root=self.runtime_root)
-        run_id = "run_20261015_000000_4a8b"
+        run_id = "run_20261015_000000_4a8b0000"
         artifact_dir = store.run_dir(run_id) / "artifacts"
         sync_dir = store.run_dir(run_id) / "sync"
         artifact_dir.mkdir(parents=True)
@@ -264,6 +291,17 @@ class CodeReviewSyncTest(unittest.TestCase):
     @staticmethod
     def _adf(text: str) -> dict[str, object]:
         return {"type": "doc", "version": 1, "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+
+    @staticmethod
+    def _git(cwd: Path, *args: str) -> None:
+        subprocess.run(
+            ["git", *args],
+            cwd=str(cwd),
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
 
 
 if __name__ == "__main__":

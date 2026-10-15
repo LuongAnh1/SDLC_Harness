@@ -25,6 +25,7 @@ def build_developer_work_packet(
     issue_key: str,
     structured_plan: dict[str, object],
     target_repo_path: Path,
+    run_workspace: dict[str, object],
     approved_plan_refs: dict[str, str],
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
@@ -47,6 +48,16 @@ def build_developer_work_packet(
         "issue_key": issue_key,
         "created_at": utc_now_iso(),
         "target_repository": _dict_value(structured_plan.get("target_repository")),
+        "run_workspace": {
+            "version": run_workspace.get("version"),
+            "workspace_mode": run_workspace.get("workspace_mode"),
+            "workspace_ref": _dict_value(structured_plan.get("target_repository")).get("workspace_ref"),
+            "branch": run_workspace.get("branch"),
+            "base_ref": run_workspace.get("base_ref"),
+            "base_sha": run_workspace.get("base_sha"),
+            "head_sha": run_workspace.get("head_sha"),
+            "remote": run_workspace.get("remote"),
+        },
         "approved_plan": approved_plan_refs,
         "implementation_steps": _dict_items(structured_plan.get("implementation_steps")),
         "proposed_files": enriched_files,
