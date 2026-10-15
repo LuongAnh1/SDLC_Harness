@@ -1,5 +1,21 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Tài Liệu Slice 4.9: Run Workspace Isolation
+
+Đã chốt tài liệu prerequisite trước Code Review approval và Phase 5:
+
+- mỗi run sở hữu một Git worktree và branch có run suffix;
+- run mới tạo từ `origin/main` vừa fetch, resume không tự rebase/reset;
+- mọi action code phải resolve workspace theo `run_id` và có per-run lock;
+- run hiện tại `run_20261013_160421_f661babf` cùng Draft PR #1 sẽ được adopt,
+  không sinh lại code và không đổi HEAD;
+- cleanup là lệnh explicit sau human merge hoặc cancel, không xóa remote branch;
+- approve chỉ chuyển Draft PR thành Ready for review, còn merge luôn do human;
+- request-change Phase 5 giữ nguyên workspace/branch/PR của run.
+
+Tài liệu nằm tại `docs/phase-4/workspace-isolation/`. Code Slice 4.9A-4.9D chưa
+được triển khai và checklist tương ứng vẫn để trống.
+
 ## 2026-10-13 - Slice 4.1: Approve Plan To DeveloperWorkPacket
 
 Mục tiêu của slice này là mở Phase 4 thật nhỏ: duyệt implementation plan đã qua
@@ -581,6 +597,68 @@ Kiểm tra idempotency bằng lần chạy thứ hai:
 - artifact ghi `commit.operation=reused` và
   `pull_request.operation=updated`.
 
-Kết quả test trước live: toàn bộ `130/130` unittest pass. Slice 4.8A được khóa;
-Slice 4.8B còn sync PR/test/trace summary về Jira/Confluence và tạo checkpoint
-`code_review_ready` cho Niko/human review.
+Kết quả test tại mốc 4.8A trước live: toàn bộ `130/130` unittest pass. Khi đó
+Slice 4.8B vẫn còn nhiệm vụ sync PR/test/trace summary về Jira/Confluence và tạo
+checkpoint `code_review_ready`; phần này đã được hoàn thành ở mục 4.8B bên dưới.
+
+## 2026-10-15 - Slice 4.8B: Code Review Checkpoint Sync (Trước Live Test)
+
+Đã triển khai:
+
+- `code_review_published -> code_review_syncing -> code_review_ready`;
+- mock/real adapter sinh `tool_sync_report_v4.json`, tham chiếu GitHub Draft PR
+  và sync tóm tắt test/Validator trace/QA sang Jira + Confluence;
+- partial failure chuyển `code_review_sync_failed`, giữ evidence và cho
+  `sync-run` retry;
+- `pending_checkpoint.type=code_review`, nhưng chưa mở approve/request-change;
+- Jira comment và Confluence page dùng identity ổn định `source_ref + phase`;
+- khi report local mất, adapter tìm target remote bằng marker; legacy target chỉ
+  được migrate nếu tìm thấy duy nhất một bản, nếu nhập nhằng thì fail closed bằng
+  `remote_sync_ambiguous`;
+- Jira source loader bỏ comment do Harness sinh để run cũ không nhiễm vào source
+  của Requirement Refiner;
+- CLI side-effect mặc định `--sync-mode mock`; ghi tool thật phải chọn rõ `real`
+  hoặc `both`. Niko có `NIKO_SDLC_SYNC_MODE` và local demo đang chọn `real`.
+
+Kiểm thử trước live:
+
+- full suite SDLC_Harness: `136/136` pass;
+- Niko SDLC client + dashboard: `26/26` pass;
+- đã cover remote recovery, legacy migration/ambiguity, partial failure/retry,
+  CLI default mock và workflow mở checkpoint Code Review.
+
+Nguyên nhân các lần CLI test trước đây tạo thêm Design review có run id khác:
+
+- xóa `.runtime` làm mất active-run index và external id trong sync report;
+- title/identity remote cũ gắn với `run_id`, nên adapter không tìm lại target;
+- Jira source loader còn nạp chính comment Harness vào source, kéo run id cũ vào
+  requirement packet mới.
+
+Live gate còn lại: chạy run hiện tại với `--sync-mode real`, xác nhận đúng một
+Jira comment và một Confluence page Code Review; chạy lại `sync-run` phải giữ
+nguyên external ID và Draft PR `#1`.
+
+## 2026-10-15 - Slice 4.8B: Live Code Review Sync
+
+Run: `run_20261013_160421_f661babf`.
+
+Lần sync đầu:
+
+- state chuyển `code_review_published -> code_review_syncing -> code_review_ready`;
+- Jira tạo Code Review comment `10104`;
+- Confluence tạo page `2129921` với title ổn định
+  `SDLC Harness - SDLC-1 - Code Review Checkpoint`;
+- GitHub chỉ được tham chiếu tới Draft PR `#1`, không publish lại;
+- `pending_checkpoint.type=code_review` và action chỉ gồm
+  `get_status`, `sync_run`, `cancel_run`.
+
+Lần `sync-run --sync-mode real` thứ hai:
+
+- Jira `operation=updated`, external ID vẫn là `10104`;
+- Confluence `operation=updated`, external ID vẫn là `2129921`;
+- Draft PR vẫn là `#1` và state vẫn `code_review_ready`;
+- không chạy nhánh Design sync.
+
+Kết luận: Slice 4.8B đã pass code test và live test. Bước tiếp theo mới thiết kế
+human approve/request-change cho Code Review checkpoint; 4.8B không giả lập hai
+action này khi contract chưa tồn tại.

@@ -402,7 +402,11 @@ Thanks."""
         confluence_payload = calls[0][2]
         self.assertIsNotNone(confluence_payload)
         confluence_body = confluence_payload["body"]["value"]
-        self.assertIn("<h1>Implementation Plan Checkpoint - eTour UC1</h1>", confluence_body)
+        self.assertIn("<h1>SDLC Harness - UC1 - Implementation Plan Checkpoint</h1>", confluence_body)
+        self.assertIn(
+            "SDLC-HARNESS-CHECKPOINT::implementation_plan::dataset_use_case:eTour:UC1",
+            confluence_body,
+        )
         self.assertIn("<h2>Decision Needed</h2>", confluence_body)
         self.assertIn("<h2>Execution Steps</h2>", confluence_body)
         self.assertIn("<h2>Code Targets</h2>", confluence_body)
@@ -417,10 +421,11 @@ Thanks."""
         self.assertIsNotNone(jira_payload)
         jira_blocks = jira_payload["body"]["content"]
         self.assertIn("Implementation plan review", jira_blocks[0]["content"][0]["text"])
+        summary_list = next(block for block in jira_blocks if block["type"] == "bulletList")
         self.assertTrue(
             any(
                 "Confluence review page" in item["content"][0]["content"][0]["text"]
-                for item in jira_blocks[2]["content"]
+                for item in summary_list["content"]
             )
         )
 

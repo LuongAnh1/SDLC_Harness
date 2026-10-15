@@ -1,7 +1,9 @@
-﻿"""Mock sync adapter cho checkpoint requirement, design và implementation plan.
+﻿"""Mock sync adapter cho các checkpoint từ requirement đến code review.
 
-Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact giả lập để unit
-test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật; ownership vẫn
+Phase 4 còn dùng adapter này để giả lập checkpoint Code Review sau khi Draft PR
+đã được publish. Sync thật đã nằm ở adapter Atlassian. File này chỉ tạo artifact
+giả lập để unit test/smoke test chạy được khi chưa cấu hình Jira/Confluence thật;
+ownership vẫn
 giữ ở SDLC_Harness, Niko chỉ đọc report trả về.
 """
 
@@ -326,6 +328,104 @@ Review implementation plan trước khi cho phép Phase 4 tạo branch, code, te
             }
             for target in targets
         ],
+    }
+
+
+def mock_sync_code_review_checkpoint(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, object]:
+    """Tạo mock checkpoint Code Review mà không chạm Jira/Confluence thật."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    jira_comment_path = sync_dir / "code-review-jira-comment.md"
+    confluence_page_path = sync_dir / "code-review-confluence-page.md"
+    report_path = sync_dir / "tool_sync_report_v4.json"
+    github_path = artifact_paths["github_code_review"]
+    github = json.loads((store.repo_root / github_path).read_text(encoding="utf-8"))
+    pull_request = github.get("pull_request", {})
+    commit = github.get("commit", {})
+    previous_targets = _previous_targets(report_path)
+
+    jira_comment_path.write_text(
+        f"""# Mock Jira Comment - Code Review Checkpoint
+
+Run: `{run_id}`
+Source: `{source_ref}`
+Status: `code_review_ready`
+Draft PR: `{pull_request.get('url', '')}`
+Branch: `{github.get('branch', '')}`
+Commit: `{commit.get('sha', '')}`
+""",
+        encoding="utf-8",
+    )
+    confluence_page_path.write_text(
+        f"""# Mock Confluence Page - Code Review Checkpoint
+
+Run: `{run_id}`
+Source: `{source_ref}`
+Draft PR: `{pull_request.get('url', '')}`
+
+Evidence:
+- Verification: `{artifact_paths['test_report']}`
+- Validator trace: `{artifact_paths['requirement_design_code_trace']}`
+- QA: `{artifact_paths['qa_test_report']}`
+""",
+        encoding="utf-8",
+    )
+    targets = [
+        {
+            "tool": "github",
+            "mode": "reference",
+            "status": "referenced",
+            "operation": str(pull_request.get("operation") or "referenced"),
+            "external_id": str(pull_request.get("number") or ""),
+            "url": str(pull_request.get("url") or ""),
+        },
+        {
+            "tool": "jira",
+            "mode": "mock_file",
+            "status": "synced",
+            "operation": "mock_file",
+            "external_id": previous_targets.get("jira", {}).get("external_id", ""),
+            "url": previous_targets.get("jira", {}).get("url", ""),
+            "path": store.relative(jira_comment_path),
+        },
+        {
+            "tool": "confluence",
+            "mode": "mock_file",
+            "status": "synced",
+            "operation": "mock_file",
+            "external_id": previous_targets.get("confluence", {}).get("external_id", ""),
+            "url": previous_targets.get("confluence", {}).get("url", ""),
+            "path": store.relative(confluence_page_path),
+        },
+    ]
+    report = {
+        "version": "tool_sync_report_v4",
+        "phase": "code_review",
+        "status": "mock_synced",
+        "mode": "mock",
+        "targets": targets,
+        "checkpoint": {
+            "type": "code_review",
+            "artifact_ref": _artifact_ref(github_path),
+            "artifact_path": github_path,
+        },
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "phase": "code_review",
+        "status": "mock_synced",
+        "mode": "mock",
+        "report": store.relative(report_path),
+        "targets": targets,
     }
 
 

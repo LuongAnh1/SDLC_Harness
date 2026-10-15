@@ -115,8 +115,39 @@ tạo commit có trailer `SDLC-Run: <run_id>`, push planned branch và tạo/c�
 Draft PR bằng GitHub CLI đã đăng nhập.
 
 Hai artifact local là `github_pr_body_v1.md` và
-`github_code_review_v1.json`. Chạy lại cùng run không tạo commit/PR thứ hai: commit
-được tái sử dụng theo trailer và Draft PR đang mở được cập nhật. Jira/Confluence
-sync và checkpoint `code_review_ready` thuộc Slice 4.8B, không được suy diễn chỉ
-từ việc Draft PR đã tồn tại.
+`github_code_review_v1.json`. Retry publication từ `code_review_publish_failed`
+không tạo commit/PR thứ hai: commit được tái sử dụng theo trailer và Draft PR đang
+mở được cập nhật. Khi đã ở `code_review_published`, bước kế tiếp thuộc Slice 4.8B:
+sync Jira/Confluence rồi mở checkpoint `code_review_ready`, không publish GitHub
+lần nữa.
+
+## Slice 4.8B Đã Triển Khai Ở Mức Code/Test
+
+- Jira và Confluence giữ một checkpoint trên mỗi `source_ref + phase`; `run_id`
+  nằm trong nội dung và version history.
+- Mất report local không buộc tạo target mới: adapter tìm marker remote trước.
+- Legacy target chỉ được dùng khi có đúng một ứng viên; nhiều ứng viên trả
+  `remote_sync_ambiguous`, không tự xóa dữ liệu cũ.
+- `tool_sync_report_v4.json` ghi GitHub ở mode `reference`, còn Jira/Confluence
+  là target sync thật.
+- CLI mặc định mock; live sync cần `--sync-mode real` rõ ràng.
+
+Live gate đã pass trên run `run_20261013_160421_f661babf`: Jira comment `10104`,
+Confluence page `2129921`, Draft PR `#1`; lần `sync-run --sync-mode real` thứ hai
+cập nhật đúng hai target cũ và giữ nguyên external ID.
+
+## Slice 4.9 - Workspace Và Branch Isolation Dự Kiến
+
+Mỗi run sẽ sở hữu một Git worktree và branch có run suffix. Canonical target repo
+chỉ dùng để fetch và quản lý worktree; Developer, Runner, Validator và QA không
+được chạy trực tiếp trong canonical working directory.
+
+Run mới tạo branch từ SHA mới nhất của `origin/main`. Resume cùng run dùng lại
+đúng worktree/branch đã ghi trong `run_workspace_v1.json`; run mới của cùng Jira
+issue vẫn tạo branch mới. Run/PR #1 hiện tại sẽ được adopt một lần, giữ nguyên
+HEAD và PR identity.
+
+Approve Code Review chỉ chuyển Draft PR thành Ready for review. Harness không
+merge, không bật auto-merge và không xóa remote branch. Xem contract và checklist
+tại `workspace-isolation/`.
 

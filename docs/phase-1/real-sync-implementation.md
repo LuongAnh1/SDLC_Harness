@@ -182,8 +182,8 @@ Trước khi chạy, dùng runtime sạch hoặc run mới để tránh nhầm a
 có run cũ từ mock sync, dùng `sync-run` để sync thật lại run đó.
 
 ```bash
-python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode deepseek
-python -m sdlc_harness.cli sync-run --run-id <run_id>
+python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode deepseek --sync-mode real
+python -m sdlc_harness.cli sync-run --run-id <run_id> --sync-mode real
 python -m sdlc_harness.cli get-status --run-id <run_id>
 ```
 

@@ -129,6 +129,18 @@ Khi bắt đầu thêm code:
 
 Sync artifact lên Jira/Confluence/GitHub thuộc SDLC Harness. Niko chỉ gọi action, đọc `get_status`, nhận `tool_sync_report` và phản hồi người dùng. Không để Niko tự sync artifact SDLC để tránh chia đôi workflow state.
 
+## Run Workspace Ownership
+
+Trước Code Review approval và Phase 5, triển khai contract trong
+`docs/phase-4/workspace-isolation/`: mỗi run sở hữu một Git worktree và branch có
+run suffix. Canonical target repo chỉ dùng để fetch/quản lý worktree; Developer,
+Runner, Validator và QA phải resolve workspace theo `run_id`, không dùng current
+branch của canonical repo làm nguồn sự thật.
+
+Run hiện tại/PR #1 cần được adopt mà không đổi HEAD. Cleanup chỉ qua lệnh explicit
+sau human merge hoặc cancel, không xóa remote branch. Harness được phép chuyển
+Draft PR thành Ready for review nhưng không bao giờ merge hoặc bật auto-merge.
+
 
 ## Source Ownership
 
@@ -143,9 +155,16 @@ SDLC: source intake từ fixture/Jira, Requirement Refiner, Designer, Validator,
 Developer, QA/Tester, runtime state, artifact và tool sync. Phase 3 chỉ sinh/kiểm
 `implementation_plan_v1` và dừng ở `waiting_implementation_plan_review`. Phase 4
 hiện đã triển khai code/test, Validator code trace, QA repair loop và GitHub
-publication tới `code_review_published`; Jira/Confluence sync và
-`code_review_ready` là lát kế tiếp. Khi Niko gọi repo này, contract phải là CLI
-JSON ổn định; không in log tự do ra stdout.
+publication, rồi sync bằng chứng PR/test/trace/QA sang Jira và Confluence để mở
+checkpoint `code_review_ready`. Việc approve/request-change checkpoint Code
+Review thuộc lát sau và chỉ mở sau Slice 4.9 workspace isolation. Approve chỉ
+được chuyển Draft PR thành Ready for review; merge luôn do human. Khi Niko gọi repo này, contract
+phải là CLI JSON ổn định; không in log tự do ra stdout.
+
+Các lệnh CLI có side effect mặc định dùng `--sync-mode mock`. Caller phải truyền
+`--sync-mode real` rõ ràng mới được ghi lên Jira/Confluence. Remote identity của
+checkpoint dùng `source_ref + phase`; khi mất report local, adapter phải tìm lại
+marker từ remote, fail closed nếu kết quả nhập nhằng và không tự xóa artifact cũ.
 
 Không chuyển logic đọc Jira, ghi artifact, sync Confluence/Jira hoặc validate
 requirement packet sang Niko. Nếu cần trả thêm dữ liệu cho Telegram, mở rộng

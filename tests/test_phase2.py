@@ -680,7 +680,8 @@ class OnlyClass {
         confluence_payload = calls[1][2]
         self.assertIsNotNone(confluence_payload)
         confluence_body = confluence_payload["body"]["value"]
-        self.assertIn("<h1>Design Checkpoint - eTour UC1</h1>", confluence_body)
+        self.assertIn("<h1>SDLC Harness - UC1 - Design Checkpoint</h1>", confluence_body)
+        self.assertIn("SDLC-HARNESS-CHECKPOINT::design::dataset_use_case:eTour:UC1", confluence_body)
         self.assertIn("<h2>Design Diagrams</h2>", confluence_body)
         self.assertIn("<h3>Class Diagram</h3>", confluence_body)
         self.assertIn("<h3>Sequence Diagram</h3>", confluence_body)

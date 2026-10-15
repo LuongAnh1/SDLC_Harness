@@ -1,15 +1,21 @@
-"""Chọn adapter sync theo runtime config."""
+"""Chọn mock/real adapter cho từng checkpoint theo runtime config.
+
+CLI truyền sync mode rõ ràng vào đây; runner chỉ điều phối adapter và hợp nhất
+report, không tự quyết định ghi lên tool cộng tác.
+"""
 
 from __future__ import annotations
 
 from ..core.config import Settings
 from ..storage.runtime import RuntimeStore
 from .atlassian import (
+    real_sync_code_review_checkpoint,
     real_sync_design_checkpoint,
     real_sync_implementation_plan_checkpoint,
     real_sync_requirement_checkpoint,
 )
 from .mock import (
+    mock_sync_code_review_checkpoint,
     mock_sync_design_checkpoint,
     mock_sync_implementation_plan_checkpoint,
     mock_sync_requirement_checkpoint,
@@ -107,6 +113,39 @@ def sync_implementation_plan_checkpoint(
             artifact_paths=artifact_paths,
         )
     return real_sync_implementation_plan_checkpoint(
+        store=store,
+        settings=settings,
+        run_id=run_id,
+        source_ref=source_ref,
+        artifact_paths=artifact_paths,
+    )
+
+
+def sync_code_review_checkpoint(
+    *,
+    store: RuntimeStore,
+    settings: Settings,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> dict[str, object]:
+    """Sync checkpoint Code Review bằng mock, real hoặc cả hai."""
+
+    if settings.sync_mode == "mock":
+        return mock_sync_code_review_checkpoint(
+            store=store,
+            run_id=run_id,
+            source_ref=source_ref,
+            artifact_paths=artifact_paths,
+        )
+    if settings.sync_mode == "both":
+        mock_sync_code_review_checkpoint(
+            store=store,
+            run_id=run_id,
+            source_ref=source_ref,
+            artifact_paths=artifact_paths,
+        )
+    return real_sync_code_review_checkpoint(
         store=store,
         settings=settings,
         run_id=run_id,

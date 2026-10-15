@@ -18,10 +18,10 @@ Phase 1 hiện có bốn lệnh CLI chính:
 
 | Lệnh | Mục đích | Có ghi dữ liệu thật không |
 | --- | --- | --- |
-| `start-or-get-run` | Tạo run mới nếu chưa có active run, hoặc trả run đang chờ duyệt | Có thể gọi LLM; sync theo `SDLC_SYNC_MODE` |
-| `start-from-jira` | Tạo run mới từ Jira issue thật, hoặc trả run đang chờ duyệt của issue đó | Có thể gọi LLM và gọi Jira đọc dữ liệu; sync theo `SDLC_SYNC_MODE` |
+| `start-or-get-run` | Tạo run mới nếu chưa có active run, hoặc trả run đang chờ duyệt | Có thể gọi LLM; tool sync mặc định mock |
+| `start-from-jira` | Tạo run mới từ Jira issue thật, hoặc trả run đang chờ duyệt của issue đó | Có thể gọi LLM và gọi Jira đọc dữ liệu; tool sync mặc định mock |
 | `get-status` | Đọc trạng thái run đã có | Không |
-| `sync-run` | Re-sync checkpoint của run đã có lên Jira/Confluence/mock file | Có, nếu `SDLC_SYNC_MODE=real` |
+| `sync-run` | Re-sync checkpoint của run đã có lên Jira/Confluence/mock file | Có, chỉ khi truyền `--sync-mode real` hoặc `both` |
 
 ## Chuẩn Bị
 
@@ -45,7 +45,7 @@ SDLC_LLM_API_KEY=<secret>
 SDLC_LLM_BASE_URL=https://api.deepseek.com
 SDLC_LLM_MODEL=deepseek-chat
 
-SDLC_SYNC_MODE=real
+SDLC_SYNC_MODE=real  # Giá trị nền; CLI vẫn cần --sync-mode real để ghi tool thật.
 ATLASSIAN_BASE_URL=https://<site>.atlassian.net
 ATLASSIAN_EMAIL=<email Atlassian>
 ATLASSIAN_API_TOKEN=<api token>
@@ -65,13 +65,13 @@ Không commit `.env`, `.runtime`, API token hoặc output có dữ liệu riêng
 Từ fixture local:
 
 ```powershell
-rtk python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual
+rtk python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --sync-mode real
 ```
 
 Từ Jira issue thật:
 
 ```powershell
-rtk python -m sdlc_harness.cli start-from-jira --issue-key SDLC-1 --requested-by manual
+rtk python -m sdlc_harness.cli start-from-jira --issue-key SDLC-1 --requested-by manual --sync-mode real
 ```
 
 Kết quả cần chú ý:
@@ -115,7 +115,7 @@ Niko dùng lệnh này để trả lời các câu như “run này đến đâu
 ### 3. Re-sync Checkpoint
 
 ```powershell
-rtk python -m sdlc_harness.cli sync-run --run-id <run_id>
+rtk python -m sdlc_harness.cli sync-run --run-id <run_id> --sync-mode real
 ```
 
 Lệnh này dùng khi:

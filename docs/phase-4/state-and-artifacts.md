@@ -18,6 +18,8 @@ waiting_implementation_plan_review
   -> qa_repair_needed
      (Developer repair -> Verification Runner -> Validator -> QA; có thể lặp trong giới hạn)
   -> qa_tested
+  -> code_review_published
+  -> code_review_syncing
   -> code_review_ready
 ```
 
@@ -40,6 +42,9 @@ cancelled
 | `implementation_traced` | Compile/unit test và Validator code trace hybrid rule + LLM đã pass ổn định sau repair loop nếu có; chưa chạy QA/Tester Agent, chưa commit/PR. | Harness slice tiếp theo |
 | `qa_repair_needed` | QA/Tester fail vì code/test behavior thiếu hoặc sai; report QA đã có feedback để Developer sửa rồi chạy lại runner/Validator/QA. | Harness |
 | `qa_tested` | QA/Tester đã pass acceptance/system-level behavior; chưa commit/Draft PR/sync Phase 4. | Harness slice tiếp theo |
+| `code_review_published` | Commit/branch/Draft PR đã publish; Jira/Confluence Code Review checkpoint chưa sync. | Harness |
+| `code_review_syncing` | Harness đang sync hoặc retry Jira/Confluence; nếu lỗi chuyển `code_review_sync_failed`. | Harness |
+| `code_review_sync_failed` | GitHub/QA/Validator evidence vẫn còn nhưng Atlassian sync chưa đủ; `sync-run` có thể retry. | Harness hoặc human |
 | `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
@@ -127,9 +132,21 @@ pending_checkpoint=null
 allowed_next_actions=[continue_run, get_status, cancel_run]
 ```
 
-`continue_run` từ cả `code_review_publish_failed` và `code_review_published` đều
-chạy lại publication theo hướng idempotent. Commit được tìm lại bằng trailer
-`SDLC-Run: <run_id>`; Draft PR được tìm theo repository/head/base branch.
+`continue_run` từ `code_review_publish_failed` chạy lại publication theo hướng
+idempotent. Từ `code_review_published`, `continue_run` chuyển sang sync checkpoint
+Code Review; nó không publish GitHub lần nữa.
+
+Nếu Jira/Confluence sync lỗi một phần:
+
+```text
+current_phase=code_review_syncing
+status=code_review_sync_failed
+latest_artifacts.github_code_review
+last_sync.phase=code_review
+last_error.error_code=code_review_sync_failed
+pending_checkpoint=null
+allowed_next_actions=[get_status, sync_run, cancel_run]
+```
 
 Sau Slice 4.4 nếu Validator code trace hybrid rule + LLM pass. Nếu trace fail do
 code/test thiếu, Slice 4.5 phải repair trước và quay lại Verification Runner ->
@@ -260,14 +277,32 @@ latest_artifacts.qa_test_report
 quality_reports.implementation_traceability
 quality_reports.qa_acceptance
 pending_checkpoint.type=code_review
-pending_checkpoint.artifact_ref=code_change_report_v1
-allowed_next_actions=[approve_checkpoint, request_change, cancel_run, get_status]
+pending_checkpoint.artifact_ref=github_code_review_v1
+allowed_next_actions=[get_status, sync_run, cancel_run]
 last_sync.phase=code_review
 summary_for_user
 ```
 
 Checkpoint `code_review` nghĩa là human cần review PR/code/test report. Nó không
-có nghĩa PR đã được merge.
+có nghĩa PR đã được merge. Slice 4.8B chưa xử lý approve/request-change, vì vậy
+hai action đó không được quảng bá trước khi slice tiếp theo triển khai contract.
+
+## Run Workspace Artifact Dự Kiến Cho Slice 4.9
+
+Trước Phase 5, `run_workspace_v1.json` phải trở thành nguồn sự thật cho worktree,
+branch, base SHA, head SHA, remote và PR identity của run. Mọi bước đọc/sửa code
+phải resolve artifact này thay vì dùng branch hiện đang checkout trong canonical
+repo.
+
+```text
+latest_artifacts.run_workspace
+workspace.workspace_mode=git_worktree_v1
+workspace.lifecycle=active | cleanup_pending | cleaned
+```
+
+Chi tiết schema, lock và error contract nằm trong
+`workspace-isolation/runtime-contract.md`. Phần này hiện là kế hoạch, chưa phải
+runtime behavior đã triển khai.
 
 ## Last Sync Phase 4
 

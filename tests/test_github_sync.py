@@ -203,10 +203,10 @@ class GitHubSyncTest(unittest.TestCase):
 
         repeated = workflow.continue_run(run_id=run_id)
 
-        self.assertEqual(repeated["status"], "code_review_published")
-        self.assertEqual(len(publisher.calls), 2)
-        self.assertEqual(publisher.calls[0]["run_id"], publisher.calls[1]["run_id"])
-        self.assertEqual(publisher.calls[0]["branch"], publisher.calls[1]["branch"])
+        self.assertEqual(repeated["status"], "code_review_ready")
+        self.assertEqual(repeated["pending_checkpoint"]["type"], "code_review")
+        self.assertEqual(len(publisher.calls), 1)
+        self.assertTrue((store.run_dir(run_id) / "sync" / "tool_sync_report_v4.json").exists())
 
     def test_workflow_keeps_partial_publication_evidence_for_retry(self) -> None:
         settings, store, run_id = self._workflow_fixture()

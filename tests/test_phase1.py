@@ -133,6 +133,55 @@ class PhaseOneTest(unittest.TestCase):
             load_jira_issue_source(settings=settings, issue_key="SDLC-1", request_json=fake_request)
         self.assertEqual(ctx.exception.error_code, "jira_source_empty")
 
+    def test_jira_source_loader_filters_harness_comments_but_keeps_user_comments(self) -> None:
+        settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "ATLASSIAN_BASE_URL": "https://example.atlassian.net",
+                "ATLASSIAN_EMAIL": "test@example.com",
+                "ATLASSIAN_API_TOKEN": "secret",
+            },
+        )
+
+        def paragraph(text: str) -> dict[str, object]:
+            return {"type": "doc", "content": [{"type": "paragraph", "content": [{"type": "text", "text": text}]}]}
+
+        def fake_request(method: str, url: str, payload: dict[str, object] | None):
+            return {
+                "fields": {
+                    "summary": "Delete cultural heritage",
+                    "description": paragraph("Delete the selected object."),
+                    "comment": {
+                        "comments": [
+                            {
+                                "author": {"displayName": "SDLC Harness"},
+                                "body": paragraph(
+                                    "SDLC Harness checkpoint: Design review "
+                                    "Source: jira_issue:SDLC-1 Run: run_old"
+                                ),
+                            },
+                            {
+                                "author": {"displayName": "SDLC Harness"},
+                                "body": paragraph(
+                                    "SDLC-HARNESS-CHECKPOINT::code_review::jira_issue:SDLC-1"
+                                ),
+                            },
+                            {
+                                "author": {"displayName": "Reviewer"},
+                                "body": paragraph("Keep the cancellation flow."),
+                            },
+                        ]
+                    },
+                }
+            }
+
+        source = load_jira_issue_source(settings=settings, issue_key="SDLC-1", request_json=fake_request)
+
+        self.assertIn("Keep the cancellation flow", source.text)
+        self.assertNotIn("run_old", source.text)
+        self.assertNotIn("SDLC-HARNESS-CHECKPOINT", source.text)
+
     def test_requirement_prompt_templates_exist(self) -> None:
         prompt_root = self.repo_root / "sdlc_harness" / "agents" / "requirements" / "prompts"
         packet_prompt = (prompt_root / "requirement_packet_v1.md").read_text(encoding="utf-8")
@@ -455,7 +504,8 @@ class PhaseOneTest(unittest.TestCase):
         confluence_payload = calls[1][2]
         self.assertIsNotNone(confluence_payload)
         confluence_body = confluence_payload["body"]["value"]
-        self.assertIn("<h1>Requirement Checkpoint - eTour UC1</h1>", confluence_body)
+        self.assertIn("<h1>SDLC Harness - UC1 - Requirement Checkpoint</h1>", confluence_body)
+        self.assertIn("SDLC-HARNESS-CHECKPOINT::requirement::dataset_use_case:eTour:UC1", confluence_body)
         self.assertIn("<table>", confluence_body)
         self.assertIn("<h2>Requirement Packet</h2>", confluence_body)
         self.assertIn("<h3>Alternative / Exception Flows</h3>", confluence_body)

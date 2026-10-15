@@ -11,7 +11,7 @@ File này mô tả contract kỹ thuật. Nếu cần hướng dẫn chạy theo
 python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode fake
 python -m sdlc_harness.cli start-from-jira --issue-key SDLC-1 --requested-by manual --llm-mode fake
 python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
-python -m sdlc_harness.cli sync-run --run-id <run_id>
+python -m sdlc_harness.cli sync-run --run-id <run_id> --sync-mode real
 ```
 
 Tên module hiện tại là `sdlc_harness.cli`. Behavior và JSON contract không nên thay đổi nếu không cập nhật docs.
@@ -124,20 +124,21 @@ Input flags:
 | Flag | Bắt buộc | Ý nghĩa |
 | --- | --- | --- |
 | `--run-id` | có | run đã có artifact requirement cần sync lại |
+| `--sync-mode` | không | `mock` (mặc định), `real` hoặc `both`; phải ghi rõ `real` khi muốn cập nhật tool thật |
 | `--runtime-root` | không | override thư mục runtime, chủ yếu dùng cho test |
 
 `sync-run` không tạo artifact mới và không gọi Requirement Refiner. Lệnh này đọc
 `latest_artifacts` trong state hiện tại, sync lại requirement checkpoint theo
-`SDLC_SYNC_MODE`, cập nhật `last_sync`, ghi `tool_sync_report_v1.json`, rồi trả
+`--sync-mode`, cập nhật `last_sync`, ghi sync report đúng phase, rồi trả
 cùng schema status như `get-status`.
 
 Lý do có lệnh riêng: `start-or-get-run` cố ý idempotent theo `source_ref`. Nếu
 run cũ đang tồn tại, lệnh start không refine hoặc sync lại mù quáng. Khi chuyển
 từ mock sync sang real sync, dùng `sync-run` để thao tác rõ ràng.
 
-Với real sync, `sync-run` cũng idempotent theo target đã lưu trong report: Jira
-comment cũ được update nếu có `external_id`, Confluence page cũ được update nếu
-có `external_id`. Nếu chưa có `external_id`, adapter có thể tạo target mới.
+Với real sync, `sync-run` idempotent theo target đã lưu trong report hoặc marker
+remote ổn định `source_ref + phase`: Jira comment/Confluence page cũ được update.
+Nếu nhiều legacy target cùng khớp, lệnh fail closed thay vì tạo hoặc xóa mù.
 
 ## Error Response
 
@@ -200,5 +201,8 @@ CONFLUENCE_SYNC_SPACE_ID=<space id>
 CONFLUENCE_SYNC_PARENT_PAGE_ID=<page id>
 ```
 
-CLI flag `--llm-mode` có ưu tiên cao hơn `.env`, nên có thể ép `--llm-mode fake` trong test mà không sửa file cấu hình thật.
+CLI flag `--llm-mode` có ưu tiên cao hơn `.env`, nên có thể ép `--llm-mode fake`
+trong test mà không sửa file cấu hình thật. Các lệnh có side effect luôn mặc định
+`--sync-mode mock`, kể cả `.env` ghi `SDLC_SYNC_MODE=real`; muốn sync thật phải
+truyền `--sync-mode real` rõ ràng.
 

@@ -2,6 +2,8 @@
 
 Module này kéo context từ Jira xuống SDLC Harness. Nhánh sync ở
 `sdlc_harness/sync/` làm chiều ngược lại: đẩy checkpoint đã xử lý lên tool.
+Các comment do chính Harness sinh ra có marker checkpoint riêng và bị loại khỏi
+source context, tránh để lần chạy sau tự nuốt lại output của lần chạy trước.
 """
 
 from __future__ import annotations
@@ -18,6 +20,14 @@ from ..core.errors import HarnessError
 from .fixtures import UseCaseSource
 
 JsonRequester = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
+
+HARNESS_CHECKPOINT_MARKER = "SDLC-HARNESS-CHECKPOINT::"
+_LEGACY_HARNESS_COMMENT_HEADINGS = (
+    "SDLC Harness checkpoint: Requirement review",
+    "SDLC Harness checkpoint: Design review",
+    "SDLC Harness checkpoint: Implementation plan review",
+    "SDLC Harness checkpoint: Code review",
+)
 
 
 def jira_source_ref_for(issue_key: str) -> str:
@@ -133,6 +143,13 @@ def _named_field(value: object) -> str:
 
 
 def _extract_comments(raw_comment: object) -> list[dict[str, str]]:
+    """Chỉ giữ comment của người dùng làm source context.
+
+    Checkpoint do chính SDLC Harness ghi lên Jira là output của workflow. Nếu
+    nạp ngược chúng vào Requirement Refiner, một run mới sẽ mang theo artifact
+    và run id cũ, khiến context phình to và sai nguồn sự thật.
+    """
+
     if not isinstance(raw_comment, dict):
         return []
     comments = raw_comment.get("comments")
@@ -147,9 +164,18 @@ def _extract_comments(raw_comment: object) -> list[dict[str, str]]:
         if isinstance(author, dict):
             author_name = str(author.get("displayName") or author.get("name") or "").strip()
         body = _adf_to_text(comment.get("body")).strip()
-        if body:
+        if body and not _is_harness_generated_comment(body):
             extracted.append({"author": author_name or "unknown", "body": body})
     return extracted
+
+
+def _is_harness_generated_comment(body: str) -> bool:
+    """Nhận diện cả marker mới lẫn heading checkpoint legacy của Harness."""
+
+    normalized = " ".join(str(body or "").split())
+    if HARNESS_CHECKPOINT_MARKER in normalized:
+        return True
+    return any(heading in normalized for heading in _LEGACY_HARNESS_COMMENT_HEADINGS)
 
 
 def _adf_to_text(node: object) -> str:

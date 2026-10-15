@@ -175,11 +175,17 @@ Confluence bởi SDLC Harness.
 
 - [x] Tạo hoặc cập nhật Draft PR trên GitHub.
 - [x] PR description có Jira link, Confluence link, `run_id`, summary, tests và trace.
-- [ ] Sync Jira comment với PR link/status.
-- [ ] Sync Confluence code review checkpoint.
-- [ ] Ghi `tool_sync_report_v4.json` với `phase=code_review`.
-- [ ] Re-sync không tạo PR/comment/page trùng nếu đã có external id.
-- [ ] Partial failure không xóa artifact local.
+- [x] Sync Jira comment với PR link/status.
+- [x] Sync Confluence code review checkpoint.
+- [x] Ghi `tool_sync_report_v4.json` với `phase=code_review`.
+- [x] Re-sync không tạo PR/comment/page trùng nếu đã có external id; khi mất
+  report local, adapter tìm lại target bằng marker ổn định `source_ref + phase`.
+- [x] Partial failure không xóa artifact local và chuyển sang
+  `code_review_sync_failed` để `sync-run` retry.
+- [x] CLI mặc định `--sync-mode mock`; chỉ ghi tool thật khi caller chọn rõ
+  `real` hoặc `both`.
+- [x] Jira source loader loại comment checkpoint do Harness sinh, không đưa
+  output cũ quay lại Requirement Refiner.
 
 ## 8. Workflow State Và Niko Reporting
 
@@ -197,7 +203,7 @@ Verification Runner, Validator hoặc QA/Tester.
   thể sửa.
 - [x] Ghi state trung gian `code_review_published` sau commit/push/Draft PR và
   trước Jira/Confluence sync.
-- [ ] Ghi state cuối `code_review_ready` khi pass.
+- [x] Ghi state cuối `code_review_ready` khi sync pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
 - [x] `latest_artifacts` trỏ tới `developer_work_packet` mới nhất sau mỗi vòng
@@ -205,8 +211,9 @@ Verification Runner, Validator hoặc QA/Tester.
 - [x] `latest_artifacts` trỏ tới `qa_test_report` sau QA/Tester Agent.
 - [x] `quality_reports` có traceability summary.
 - [x] `quality_reports` có QA acceptance summary.
-- [ ] `pending_checkpoint.type=code_review`.
-- [ ] `allowed_next_actions` gồm `approve_checkpoint`, `request_change`, `cancel_run`, `get_status`.
+- [x] `pending_checkpoint.type=code_review`.
+- [x] Slice 4.8B chỉ quảng bá action đã có thật:
+  `get_status`, `sync_run`, `cancel_run`; approve/request-change để slice sau.
 - [ ] Niko hiển thị PR link, test summary và checkpoint code review ngắn gọn.
 
 ## 9. Test Và Acceptance
@@ -244,6 +251,12 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test QA/Tester report `skipped`.
 - [x] Unit test blocked khi QA fail quá giới hạn repair.
 - [x] Unit test sync mock/local GitHub report.
+- [x] Unit test `code_review_published -> code_review_ready` và report v4.
+- [x] Unit test mất report local vẫn khôi phục remote ID theo marker.
+- [x] Unit test legacy migration chỉ nhận một target duy nhất; nhiều target trả
+  `remote_sync_ambiguous` và không tự xóa remote artifact.
+- [x] Unit test partial failure giữ evidence và retry sang `code_review_ready`.
+- [x] Unit test CLI mặc định mock dù `.env` đang để real.
 - [x] Live GitHub PR create/update bằng GitHub CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
 - [x] Live compile/runtime test target repo sau Developer.act pass khi ép JDK 21
@@ -254,7 +267,8 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
   `implementation_traced` sang `qa_tested`, runtime thật không bị mutate.
 - [x] Live QA fail với DeepSeek thật trên runtime copy có lỗi hành vi rõ; run `run_live_qa_repair_20261014_03` chuyển `implementation_traced -> qa_repair_needed -> qa_tested` sau một vòng Developer repair.
 - [ ] Live QA `skipped` trên runtime copy có môi trường kiểm thử thiếu dependency/compiler rõ ràng.
-- [ ] Smoke test CLI từ run Phase 3 thật sang `code_review_ready`.
+- [x] Smoke test CLI từ run thật `run_20261013_160421_f661babf` sang
+  `code_review_ready`.
 - [ ] Smoke test qua Niko sau khi CLI pass.
 
 
@@ -302,7 +316,8 @@ Confluence checkpoint vào cùng một lát.
 - [x] Push planned branch và tạo/cập nhật đúng Draft PR đang mở.
 - [x] Ghi `github_pr_body_v1.md` và `github_code_review_v1.json`.
 - [x] Giữ partial evidence và trạng thái retryable `code_review_publish_failed`.
-- [x] Cho phép chạy lại `code_review_published` theo hướng idempotent.
+- [x] Retry publication từ `code_review_publish_failed` theo hướng idempotent;
+  `code_review_published` chuyển sang bước sync 4.8B, không publish GitHub lại.
 - [x] Unit test local bare remote + fake GitHub CLI cho create/update idempotency.
 - [x] Unit test workflow `qa_tested -> code_review_published` và retry partial failure.
 - [x] Live test thật trên `run_20261013_160421_f661babf`: commit
@@ -310,4 +325,23 @@ Confluence checkpoint vào cùng một lát.
 - [x] Xác nhận chạy lại không tạo commit hoặc Draft PR trùng: commit count giữ
   nguyên `3`, artifact ghi `commit.operation=reused` và
   `pull_request.operation=updated`.
-- [ ] Slice 4.8B sync Jira/Confluence và mở `code_review_ready`.
+- [x] Slice 4.8B code + unit test sync Jira/Confluence và mở
+  `code_review_ready` (`136/136` test pass).
+- [x] Slice 4.8B live sync run thật: Jira comment `10104`, Confluence page
+  `2129921`; re-sync trả `operation=updated` và giữ nguyên cả hai external ID.
+
+## Slice 4.9 - Run Workspace Isolation
+
+Mục đích: khóa branch/worktree identity theo run trước khi mở approve Code Review
+và request-change Phase 5. Checklist chi tiết nằm tại
+`workspace-isolation/checklist.md`.
+
+- [x] Viết contract kiến trúc worktree-per-run, runtime artifact và migration.
+- [x] Chốt branch theo issue/source slug + run suffix.
+- [x] Chốt run hiện tại/PR #1 được adopt, không chạy lại từ đầu.
+- [x] Chốt explicit cleanup sau human merge hoặc cancel; không xóa remote branch.
+- [x] Chốt invariant Harness chỉ Draft -> Ready, human luôn tự merge.
+- [ ] Triển khai Slice 4.9A workspace manager và guards.
+- [ ] Triển khai Slice 4.9B adopt legacy run.
+- [ ] Triển khai Slice 4.9C lifecycle/cleanup.
+- [ ] Triển khai Slice 4.9D Code Review approval.

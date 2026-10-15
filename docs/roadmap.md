@@ -157,9 +157,15 @@ Kết quả mong muốn:
   `qa_test_report_v{n}.md`.
 - Có vòng repair lớn QA -> Developer -> Verification Runner -> Validator -> QA;
   live DeepSeek đã hội tụ tới `qa_tested` sau một lỗi acceptance thật.
-- Sau lát hiện tại, state có thể đạt `qa_tested` khi compile/unit, trace và QA pass.
-- Chưa có `tool_sync_report_v4.json`, commit/Draft PR thật hoặc Niko báo PR link
-  cho đến khi lát GitHub/sync code review được triển khai.
+- Slice 4.8A đã live-test commit/push/Draft PR thật và ghi
+  `github_code_review_v1.json`.
+- Slice 4.8B đã có `tool_sync_report_v4.json`, Jira/Confluence Code Review
+  checkpoint và state `code_review_ready`; live re-sync giữ nguyên remote ID.
+- Slice 4.9 là prerequisite bắt buộc trước approve/request-change: mỗi run có
+  Git worktree, branch và lock riêng; run hiện tại/PR #1 được adopt mà không đổi
+  HEAD. Checklist nằm tại `docs/phase-4/workspace-isolation/checklist.md`.
+- Sau workspace isolation, approve Code Review chỉ chuyển Draft PR thành Ready
+  for review và sync trạng thái. Merge luôn do human; request-change mở Phase 5.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -174,6 +180,11 @@ request_change(run_id, "đổi actor thành Admin")
 -> sync lại tool
 -> giữ status ở checkpoint tương ứng
 ```
+
+Với change ở code-review checkpoint, Phase 5 phải giữ nguyên worktree, branch và
+PR của run. Nếu PR đã Ready for review, Harness đưa PR về Draft trước khi sửa;
+sau Developer -> Runner -> Validator -> QA và sync, run quay lại
+`code_review_ready`. Harness không merge PR.
 
 ## Phase 6 - Context Động Từ Tool
 

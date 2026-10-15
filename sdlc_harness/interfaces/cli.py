@@ -3,7 +3,8 @@
 Quy tắc quan trọng: stdout chỉ có JSON. Nếu cần debug, ghi stderr/log file sau;
 không trộn text tự do vào stdout vì Niko sẽ parse trực tiếp response này. CLI
 hiện bao phủ start/status/sync/approve/continue và đường vận hành
-`revalidate-implementation` cho Phase 4 repair-limit runs.
+`revalidate-implementation` cho Phase 4 repair-limit runs. Các lệnh có thể ghi
+tool cộng tác mặc định `--sync-mode mock`; real sync phải được caller chọn rõ.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--use-case", required=True)
     start.add_argument("--requested-by", required=True)
     start.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    _add_sync_mode_argument(start)
     start.add_argument("--runtime-root", default=None)
 
     start_jira = subparsers.add_parser("start-from-jira")
     start_jira.add_argument("--issue-key", required=True)
     start_jira.add_argument("--requested-by", required=True)
     start_jira.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    _add_sync_mode_argument(start_jira)
     start_jira.add_argument("--runtime-root", default=None)
 
     status = subparsers.add_parser("get-status")
@@ -45,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = subparsers.add_parser("sync-run")
     sync.add_argument("--run-id", required=True)
+    _add_sync_mode_argument(sync)
     sync.add_argument("--runtime-root", default=None)
 
     continue_run = subparsers.add_parser("continue-run")
@@ -52,6 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     continue_run.add_argument("--implementation-repair-limit", default=None)
     continue_run.add_argument("--qa-repair-limit", default=None)
+    _add_sync_mode_argument(continue_run)
     continue_run.add_argument("--runtime-root", default=None)
 
     revalidate = subparsers.add_parser("revalidate-implementation")
@@ -67,6 +72,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--design-repair-limit", default=None)
     approve.add_argument("--implementation-plan-repair-limit", default=None)
     approve.add_argument("--implementation-repair-limit", default=None)
+    _add_sync_mode_argument(approve)
     approve.add_argument("--runtime-root", default=None)
 
     prepare_target = subparsers.add_parser("prepare-target-repo")
@@ -75,6 +81,12 @@ def build_parser() -> argparse.ArgumentParser:
     prepare_target.add_argument("--target-remote", default=None)
     prepare_target.add_argument("--runtime-root", default=None)
     return parser
+
+
+def _add_sync_mode_argument(parser: argparse.ArgumentParser) -> None:
+    """Các lệnh có side effect tool mặc định mock; real phải được chỉ rõ."""
+
+    parser.add_argument("--sync-mode", choices=["mock", "real", "both"], default="mock")
 
 
 def _settings_from_args(args: argparse.Namespace):
@@ -90,6 +102,8 @@ def _settings_from_args(args: argparse.Namespace):
         overrides["SDLC_IMPLEMENTATION_REPAIR_LIMIT"] = str(args.implementation_repair_limit)
     if getattr(args, "qa_repair_limit", None) is not None:
         overrides["SDLC_QA_REPAIR_LIMIT"] = str(args.qa_repair_limit)
+    if getattr(args, "sync_mode", None):
+        overrides["SDLC_SYNC_MODE"] = str(args.sync_mode)
     if getattr(args, "target_repo", None):
         overrides["SDLC_TARGET_REPO_PATH"] = str(args.target_repo)
     if getattr(args, "target_remote", None):
@@ -116,8 +130,11 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         workflow = PhaseOneWorkflow(settings)
         return workflow.get_status(run_id=args.run_id)
     if args.command == "sync-run":
-        workflow = PhaseOneWorkflow(settings)
-        return workflow.sync_run(run_id=args.run_id)
+        phase_one = PhaseOneWorkflow(settings)
+        state = phase_one.store.read_state(args.run_id)
+        if str(state.get("status") or "").startswith("code_review"):
+            return PhaseFourWorkflow(settings).sync_code_review(run_id=args.run_id)
+        return phase_one.sync_run(run_id=args.run_id)
     if args.command == "continue-run":
         workflow = PhaseFourWorkflow(settings)
         return workflow.continue_run(run_id=args.run_id)

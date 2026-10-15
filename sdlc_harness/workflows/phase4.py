@@ -11,7 +11,8 @@ Developer.repair rồi chạy lại Runner -> Validator -> QA.
 
 Khi QA pass, lát GitHub publication chỉ stage các file có trong work packet,
 QA-generated tests hoặc verification support path đã được tham chiếu. Commit,
-push và Draft PR được lưu thành artifact riêng trước khi Jira/Confluence sync.
+push và Draft PR được lưu thành artifact riêng; bước kế tiếp sync evidence sang
+Jira/Confluence và mở checkpoint `code_review_ready` cho human review.
 
 `revalidate_implementation` là đường vận hành riêng cho run từng bị block vì
 repair limit: nó kiểm lại code hiện tại bằng logic Validator mới mà không tự
@@ -52,6 +53,7 @@ from ..llm.client import LlmClient
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync.github import GitHubCodeReviewPublisher, GitHubPublishError, github_repository_from_remote
+from ..sync.runner import sync_code_review_checkpoint
 from ..verification import VerificationRunner
 from .phase3 import (
     _dirty_status_without_codegraph,
@@ -73,6 +75,7 @@ ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "g
 ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
 
 MAX_QA_REQUIREMENT_CHARS = 6000
 MAX_QA_VERIFICATION_CHARS = 4000
@@ -225,8 +228,10 @@ class PhaseFourWorkflow:
             return self._continue_implementation_repair(state=state, run_id=run_id)
         if status == "qa_repair_needed":
             return self._continue_qa_repair(state=state, run_id=run_id)
-        if status in {"qa_tested", "code_review_publish_failed", "code_review_published"}:
+        if status in {"qa_tested", "code_review_publish_failed"}:
             return self._continue_code_review_publish(state=state, run_id=run_id)
+        if status == "code_review_published":
+            return self._continue_code_review_sync(state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
@@ -373,6 +378,110 @@ class PhaseFourWorkflow:
                 ),
             }
         )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _continue_code_review_sync(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Mở checkpoint Code Review bằng cách sync evidence PR sang tool cộng tác."""
+
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "code_review_syncing",
+                "status": "code_review_syncing",
+                "pending_checkpoint": None,
+                "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                "last_error": None,
+                "summary_for_user": f"Đang sync checkpoint Code Review cho run {run_id}.",
+            }
+        )
+        self.store.write_state(state)
+        return self.sync_code_review(run_id=run_id)
+
+    def sync_code_review(self, *, run_id: str) -> dict[str, object]:
+        """Sync hoặc re-sync checkpoint Code Review; không approve hay sửa artifact."""
+
+        state = self.store.read_state(run_id)
+        status = str(state.get("status") or "")
+        if status not in {
+            "code_review_published",
+            "code_review_syncing",
+            "code_review_sync_failed",
+            "code_review_ready",
+        }:
+            raise HarnessError(
+                "sync_not_ready",
+                f"Run is not ready for code review sync: {run_id}",
+                run_id=run_id,
+            )
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        for key in (
+            "github_code_review",
+            "test_report",
+            "requirement_design_code_trace",
+            "qa_test_execution",
+            "qa_test_report",
+        ):
+            _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+
+        last_sync = sync_code_review_checkpoint(
+            store=self.store,
+            settings=self.settings,
+            run_id=run_id,
+            source_ref=str(state.get("source_ref") or ""),
+            artifact_paths=artifact_paths,
+        )
+        sync_ok = str(last_sync.get("status") or "") in {"synced", "mock_synced"}
+        github_report_path = artifact_paths["github_code_review"]
+        github_report = _read_json_artifact(
+            self._existing_artifact_path(github_report_path, run_id=run_id),
+            run_id=run_id,
+        )
+        pull_request = _dict_value(github_report.get("pull_request"))
+        if sync_ok:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review",
+                    "status": "code_review_ready",
+                    "pending_checkpoint": {
+                        "checkpoint_id": f"checkpoint_code_review_{run_id}",
+                        "type": "code_review",
+                        "artifact_ref": "github_code_review_v1",
+                        "artifact_path": github_report_path,
+                        "pull_request_url": str(pull_request.get("url") or ""),
+                    },
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                    "last_sync": last_sync,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Checkpoint Code Review đã sẵn sàng cho run {run_id}. "
+                        f"Draft PR: {pull_request.get('url', '')}. "
+                        "Slice này chỉ mở review; approve/request-change sẽ được triển khai ở slice sau."
+                    ),
+                }
+            )
+        else:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_syncing",
+                    "status": "code_review_sync_failed",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                    "last_sync": last_sync,
+                    "last_error": {
+                        "ok": False,
+                        "error_code": "code_review_sync_failed",
+                        "message": f"Code Review sync status={last_sync.get('status')}",
+                        "run_id": run_id,
+                    },
+                    "summary_for_user": (
+                        f"Checkpoint Code Review chưa sync đủ cho run {run_id}; "
+                        f"sync status={last_sync.get('status')}. Evidence GitHub/QA/Validator vẫn được giữ để retry."
+                    ),
+                }
+            )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 

@@ -150,10 +150,28 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [x] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace
   baseline đã pass ổn định sau repair loop nếu có.
 - [x] Sinh `qa_test_report_v1.md` trước khi mở checkpoint code review.
-- [ ] Tạo Draft PR thật trên GitHub.
-- [ ] Sync PR/test/trace summary về Jira và Confluence.
-- [ ] State chuyển sang `code_review_ready` chỉ sau khi unit/trace/QA pass, Draft PR được tạo và sync Phase 4 xong.
-- [ ] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator -> Developer/Verification Runner/Validator/QA Tester trong phạm vi một use case.
+- [x] Tạo Draft PR thật trên GitHub.
+- [x] Triển khai, unit test và live-test sync PR/test/trace/QA summary về Jira +
+  Confluence; re-sync giữ nguyên external ID.
+- [x] State chỉ chuyển sang `code_review_ready` sau khi unit/trace/QA pass, Draft
+  PR tồn tại và sync Phase 4 thành công.
+- [x] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator ->
+  Developer/Verification Runner/Validator/QA Tester -> Draft PR trong phạm vi một
+  use case; live sync Code Review cũng đã đạt `code_review_ready`.
+
+### Phase 4 Gate - Run Workspace Isolation Và Code Review Approval
+
+Mục đích: cô lập code lineage theo run trước khi cho phép request-change. Chi tiết
+nằm tại `docs/phase-4/workspace-isolation/`.
+
+- [x] Viết kiến trúc, runtime contract, migration và checklist worktree-per-run.
+- [ ] Tạo `run_workspace_v1.json` và workspace manager.
+- [ ] Mọi action Phase 4 resolve đúng worktree theo `run_id`.
+- [ ] Branch mới chứa run suffix và bắt đầu từ `origin/main` vừa fetch.
+- [ ] Adopt run hiện tại/PR #1 mà không đổi HEAD.
+- [ ] Thêm explicit cleanup cho merged/cancelled run; không xóa remote branch.
+- [ ] Approve Code Review chỉ chuyển Draft PR thành Ready for review.
+- [ ] Có guard/test chứng minh Harness không merge hoặc bật auto-merge.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -161,6 +179,8 @@ Mục đích: người dùng có thể yêu cầu sửa và hệ thống rerun �
 
 - [ ] Có `request_change(run_id, message)`.
 - [ ] Phân loại change target: requirement/design/implementation plan/code.
+- [ ] Request change tại Code Review tiếp tục trên cùng worktree/branch/PR.
+- [ ] Nếu PR đã Ready, chuyển về Draft trước khi chạy vòng sửa.
 - [ ] Tạo artifact version mới.
 - [ ] Đánh dấu artifact phía sau là stale nếu cần.
 - [ ] Chạy lại Validator.

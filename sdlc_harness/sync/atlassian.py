@@ -1,10 +1,11 @@
 """Real sync adapters for Jira and Confluence Cloud.
 
 Adapters in this module push checkpoint artifacts to Atlassian tools and write a
-tool sync report under the run directory. Phase 1 writes requirement review
-reports; Phase 2 writes design review reports; Phase 3 writes implementation
-plan review reports. Niko only reads the report through `get-status`; it never
-calls Atlassian APIs directly.
+tool sync report under the run directory. Phase 1 writes requirement review,
+Phase 2 design review, Phase 3 implementation-plan review, and Phase 4 Code
+Review backed by the published Draft PR. Remote identity is stable by
+`source_ref + phase`, so a missing local report does not automatically create a
+duplicate Jira comment or Confluence page. Niko never calls Atlassian directly.
 """
 
 from __future__ import annotations
@@ -16,11 +17,14 @@ from pathlib import Path
 import re
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from ..agents.designer.plantuml import extract_class_sequence_diagrams
 from ..core.config import Settings
+from ..core.errors import HarnessError
+from ..sources.jira import HARNESS_CHECKPOINT_MARKER
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 JsonRequester = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
@@ -44,9 +48,34 @@ _IMPLEMENTATION_PLAN_ARTIFACT_KEYS = {
     "class_diagram_graph",
     "sequence_diagram_graph",
 }
+_CODE_REVIEW_ARTIFACT_KEYS = {
+    "github_code_review",
+    "test_report",
+    "requirement_design_code_trace",
+    "qa_test_execution",
+    "qa_test_report",
+}
 _PLANTUML_APP_EXTENSION_KEY = "f0d9b32e-808f-4e58-9330-0346bc051ed9/32a28da1-3e65-4244-a865-3244636e10c6/static/plantuml-confluence"
 _PLANTUML_APP_EXTENSION_ID = f"ari:cloud:ecosystem::extension/{_PLANTUML_APP_EXTENSION_KEY}"
 _PLANTUML_APP_TITLE = "PlantUML Diagrams"
+_CHECKPOINT_TITLES = {
+    "requirement": "Requirement Checkpoint",
+    "design": "Design Checkpoint",
+    "implementation_plan": "Implementation Plan Checkpoint",
+    "code_review": "Code Review Checkpoint",
+}
+_LEGACY_CONFLUENCE_PREFIXES = {
+    "requirement": "Requirement Packet - eTour UC1 - ",
+    "design": "Design Checkpoint - eTour UC1 - ",
+    "implementation_plan": "Implementation Plan Checkpoint - eTour UC1 - ",
+    "code_review": "Code Review Checkpoint - eTour UC1 - ",
+}
+_LEGACY_JIRA_HEADINGS = {
+    "requirement": "SDLC Harness checkpoint: Requirement review",
+    "design": "SDLC Harness checkpoint: Design review",
+    "implementation_plan": "SDLC Harness checkpoint: Implementation plan review",
+    "code_review": "SDLC Harness checkpoint: Code review",
+}
 
 
 def real_sync_requirement_checkpoint(
@@ -67,29 +96,51 @@ def real_sync_requirement_checkpoint(
 
     targets: list[dict[str, object]] = []
     if settings.jira_sync_enabled:
-        targets.append(
-            _sync_jira_comment(
-                settings,
-                requester,
-                store,
-                run_id,
-                source_ref,
-                artifact_paths,
-                previous_comment_id=_previous_target_id(report_path, "jira"),
+        try:
+            previous_comment_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="requirement",
+                tool="jira",
+                local_target_id=_previous_target_id(report_path, "jira"),
             )
-        )
+            targets.append(
+                _sync_jira_comment(
+                    settings,
+                    requester,
+                    store,
+                    run_id,
+                    source_ref,
+                    artifact_paths,
+                    previous_comment_id=previous_comment_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            targets.append(_failed_target("jira", source_ref, exc, issue_key=settings.jira_sync_issue_key))
     if settings.confluence_sync_enabled:
-        targets.append(
-            _sync_confluence_page(
-                settings,
-                requester,
-                store,
-                run_id,
-                source_ref,
-                artifact_paths,
-                previous_page_id=_previous_target_id(report_path, "confluence"),
+        try:
+            previous_page_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="requirement",
+                tool="confluence",
+                local_target_id=_previous_target_id(report_path, "confluence"),
             )
-        )
+            targets.append(
+                _sync_confluence_page(
+                    settings,
+                    requester,
+                    store,
+                    run_id,
+                    source_ref,
+                    artifact_paths,
+                    previous_page_id=previous_page_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            targets.append(_failed_target("confluence", source_ref, exc))
     if not targets:
         targets.append(
             {
@@ -121,6 +172,8 @@ def real_sync_requirement_checkpoint(
                 "status": target.get("status"),
                 "url": target.get("url", ""),
                 "external_id": target.get("external_id", ""),
+                "error_code": target.get("error_code", ""),
+                "message": target.get("message", ""),
             }
             for target in targets
         ],
@@ -145,35 +198,51 @@ def real_sync_design_checkpoint(
 
     targets: list[dict[str, object]] = []
     if settings.jira_sync_enabled:
-        targets.append(
-            _sync_jira_design_comment(
-                settings,
-                requester,
-                store,
-                run_id,
-                source_ref,
-                artifact_paths,
-                previous_comment_id=_previous_target_id_from_reports(
-                    [report_path],
-                    "jira",
-                ),
+        try:
+            previous_comment_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="design",
+                tool="jira",
+                local_target_id=_previous_target_id_from_reports([report_path], "jira"),
             )
-        )
+            targets.append(
+                _sync_jira_design_comment(
+                    settings,
+                    requester,
+                    store,
+                    run_id,
+                    source_ref,
+                    artifact_paths,
+                    previous_comment_id=previous_comment_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            targets.append(_failed_target("jira", source_ref, exc, issue_key=settings.jira_sync_issue_key))
     if settings.confluence_sync_enabled:
-        targets.append(
-            _sync_confluence_design_page(
-                settings,
-                requester,
-                store,
-                run_id,
-                source_ref,
-                artifact_paths,
-                previous_page_id=_previous_target_id_from_reports(
-                    [report_path],
-                    "confluence",
-                ),
+        try:
+            previous_page_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="design",
+                tool="confluence",
+                local_target_id=_previous_target_id_from_reports([report_path], "confluence"),
             )
-        )
+            targets.append(
+                _sync_confluence_design_page(
+                    settings,
+                    requester,
+                    store,
+                    run_id,
+                    source_ref,
+                    artifact_paths,
+                    previous_page_id=previous_page_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            targets.append(_failed_target("confluence", source_ref, exc))
     if not targets:
         targets.append(
             {
@@ -243,37 +312,53 @@ def real_sync_implementation_plan_checkpoint(
     targets: list[dict[str, object]] = []
     confluence_url = ""
     if settings.confluence_sync_enabled:
-        confluence_target = _sync_confluence_implementation_plan_page(
-            settings,
-            requester,
-            store,
-            run_id,
-            source_ref,
-            artifact_paths,
-            previous_page_id=_previous_target_id_from_reports(
-                [report_path],
-                "confluence",
-            ),
-        )
-        targets.append(confluence_target)
-        if confluence_target.get("status") == "synced":
-            confluence_url = str(confluence_target.get("url") or "")
-    if settings.jira_sync_enabled:
-        targets.append(
-            _sync_jira_implementation_plan_comment(
+        try:
+            previous_page_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="implementation_plan",
+                tool="confluence",
+                local_target_id=_previous_target_id_from_reports([report_path], "confluence"),
+            )
+            confluence_target = _sync_confluence_implementation_plan_page(
                 settings,
                 requester,
                 store,
                 run_id,
                 source_ref,
                 artifact_paths,
-                confluence_url=confluence_url,
-                previous_comment_id=_previous_target_id_from_reports(
-                    [report_path],
-                    "jira",
-                ),
+                previous_page_id=previous_page_id,
             )
-        )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            confluence_target = _failed_target("confluence", source_ref, exc)
+        targets.append(confluence_target)
+        if confluence_target.get("status") == "synced":
+            confluence_url = str(confluence_target.get("url") or "")
+    if settings.jira_sync_enabled:
+        try:
+            previous_comment_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="implementation_plan",
+                tool="jira",
+                local_target_id=_previous_target_id_from_reports([report_path], "jira"),
+            )
+            targets.append(
+                _sync_jira_implementation_plan_comment(
+                    settings,
+                    requester,
+                    store,
+                    run_id,
+                    source_ref,
+                    artifact_paths,
+                    confluence_url=confluence_url,
+                    previous_comment_id=previous_comment_id,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            targets.append(_failed_target("jira", source_ref, exc, issue_key=settings.jira_sync_issue_key))
     if not targets:
         targets.append(
             {
@@ -324,6 +409,139 @@ def real_sync_implementation_plan_checkpoint(
     }
 
 
+def real_sync_code_review_checkpoint(
+    *,
+    store: RuntimeStore,
+    settings: Settings,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+    request_json: JsonRequester | None = None,
+) -> dict[str, object]:
+    """Sync checkpoint review code sau khi GitHub Draft PR đã publish thành công."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    report_path = sync_dir / "tool_sync_report_v4.json"
+    requester = request_json or _request_json(settings)
+    github_report = _read_json_artifact(store, artifact_paths, "github_code_review")
+    pull_request = github_report.get("pull_request")
+    pull_request = pull_request if isinstance(pull_request, dict) else {}
+    commit = github_report.get("commit")
+    commit = commit if isinstance(commit, dict) else {}
+    targets: list[dict[str, object]] = [
+        {
+            "tool": "github",
+            "mode": "reference",
+            "status": "referenced",
+            "operation": str(pull_request.get("operation") or "referenced"),
+            "external_id": str(pull_request.get("number") or ""),
+            "url": str(pull_request.get("url") or ""),
+            "source_ref": source_ref,
+            "commit_sha": str(commit.get("sha") or ""),
+        }
+    ]
+    sync_targets: list[dict[str, object]] = []
+    confluence_url = ""
+
+    if settings.confluence_sync_enabled:
+        try:
+            previous_page_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="code_review",
+                tool="confluence",
+                local_target_id=_previous_target_id(report_path, "confluence"),
+            )
+            confluence_target = _sync_confluence_code_review_page(
+                settings,
+                requester,
+                store,
+                run_id,
+                source_ref,
+                artifact_paths,
+                previous_page_id=previous_page_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            confluence_target = _failed_target("confluence", source_ref, exc)
+        sync_targets.append(confluence_target)
+        if confluence_target.get("status") == "synced":
+            confluence_url = str(confluence_target.get("url") or "")
+
+    if settings.jira_sync_enabled:
+        try:
+            previous_comment_id = _resolve_checkpoint_target_id(
+                settings=settings,
+                request_json=requester,
+                source_ref=source_ref,
+                phase="code_review",
+                tool="jira",
+                local_target_id=_previous_target_id(report_path, "jira"),
+            )
+            jira_target = _sync_jira_code_review_comment(
+                settings,
+                requester,
+                store,
+                run_id,
+                source_ref,
+                artifact_paths,
+                confluence_url=confluence_url,
+                previous_comment_id=previous_comment_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
+            jira_target = _failed_target("jira", source_ref, exc, issue_key=settings.jira_sync_issue_key)
+        sync_targets.append(jira_target)
+
+    if not sync_targets:
+        sync_targets.append(
+            {
+                "tool": "sync",
+                "mode": "real_api",
+                "status": "failed",
+                "operation": "none",
+                "error_code": "no_real_sync_targets",
+                "message": "No real sync targets are enabled.",
+                "source_ref": source_ref,
+            }
+        )
+    targets.extend(sync_targets)
+    status = _aggregate_status(sync_targets)
+    report = {
+        "version": "tool_sync_report_v4",
+        "phase": "code_review",
+        "status": status,
+        "mode": "real",
+        "targets": targets,
+        "checkpoint": {
+            "type": "code_review",
+            "artifact_ref": _artifact_ref(artifact_paths.get("github_code_review", "")),
+            "artifact_path": artifact_paths.get("github_code_review", ""),
+        },
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+    }
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return {
+        "phase": "code_review",
+        "status": status,
+        "mode": "real",
+        "report": store.relative(report_path),
+        "targets": [
+            {
+                "tool": target.get("tool"),
+                "status": target.get("status"),
+                "operation": target.get("operation", ""),
+                "url": target.get("url", ""),
+                "external_id": target.get("external_id", ""),
+                "error_code": target.get("error_code", ""),
+                "message": target.get("message", ""),
+            }
+            for target in targets
+        ],
+    }
+
+
 def _sync_jira_comment(
     settings: Settings,
     request_json: JsonRequester,
@@ -334,7 +552,7 @@ def _sync_jira_comment(
     *,
     previous_comment_id: str | None,
 ) -> dict[str, object]:
-    issue_key = settings.jira_sync_issue_key
+    issue_key = _jira_issue_key(settings, source_ref)
     operation = "updated" if previous_comment_id else "created"
     try:
         _require_atlassian_settings(settings)
@@ -380,7 +598,7 @@ def _sync_jira_design_comment(
     *,
     previous_comment_id: str | None,
 ) -> dict[str, object]:
-    issue_key = settings.jira_sync_issue_key
+    issue_key = _jira_issue_key(settings, source_ref)
     operation = "updated" if previous_comment_id else "created"
     try:
         _require_atlassian_settings(settings)
@@ -437,7 +655,7 @@ def _sync_jira_implementation_plan_comment(
     confluence_url: str,
     previous_comment_id: str | None,
 ) -> dict[str, object]:
-    issue_key = settings.jira_sync_issue_key
+    issue_key = _jira_issue_key(settings, source_ref)
     operation = "updated" if previous_comment_id else "created"
     try:
         _require_atlassian_settings(settings)
@@ -480,6 +698,64 @@ def _sync_jira_implementation_plan_comment(
             issue_key=issue_key,
             operation=operation,
             artifact_refs=_implementation_plan_artifact_refs(artifact_paths),
+            error=_trim_error(str(exc)),
+        )
+
+
+def _sync_jira_code_review_comment(
+    settings: Settings,
+    request_json: JsonRequester,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+    *,
+    confluence_url: str,
+    previous_comment_id: str | None,
+) -> dict[str, object]:
+    issue_key = _jira_issue_key(settings, source_ref)
+    operation = "updated" if previous_comment_id else "created"
+    try:
+        _require_atlassian_settings(settings)
+        if not issue_key:
+            raise ValueError("Missing JIRA_SYNC_ISSUE_KEY.")
+        payload = {
+            "body": _jira_code_review_comment_body(
+                store=store,
+                run_id=run_id,
+                source_ref=source_ref,
+                artifact_paths=artifact_paths,
+                confluence_url=confluence_url,
+            )
+        }
+        response, operation = _upsert_jira_comment(
+            settings=settings,
+            request_json=request_json,
+            issue_key=issue_key,
+            payload=payload,
+            previous_comment_id=previous_comment_id,
+        )
+        comment_id = str(response.get("id", previous_comment_id or ""))
+        return {
+            "tool": "jira",
+            "mode": "real_api",
+            "operation": operation,
+            "status": "synced",
+            "issue_key": issue_key,
+            "external_id": comment_id,
+            "url": _jira_comment_url(settings.atlassian_base_url, issue_key, comment_id),
+            "source_ref": source_ref,
+            "artifact_refs": _code_review_artifact_refs(artifact_paths),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - lỗi từng target phải thành report.
+        return _failed_target(
+            "jira",
+            source_ref,
+            exc,
+            issue_key=issue_key,
+            operation=operation,
+            artifact_refs=_code_review_artifact_refs(artifact_paths),
             error=_trim_error(str(exc)),
         )
 
@@ -533,7 +809,7 @@ def _sync_confluence_page(
         if not settings.confluence_sync_parent_page_id:
             raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
 
-        title = f"Requirement Packet - eTour UC1 - {run_id}"
+        title = _checkpoint_title(source_ref, "requirement")
         body = _confluence_storage_body(store, run_id, source_ref, artifact_paths)
         if previous_page_id:
             current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
@@ -593,7 +869,7 @@ def _sync_confluence_design_page(
         if not settings.confluence_sync_parent_page_id:
             raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
 
-        title = f"Design Checkpoint - eTour UC1 - {run_id}"
+        title = _checkpoint_title(source_ref, "design")
         body = _confluence_design_storage_body(store, run_id, source_ref, artifact_paths)
         if previous_page_id:
             current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
@@ -663,7 +939,7 @@ def _sync_confluence_implementation_plan_page(
         if not settings.confluence_sync_parent_page_id:
             raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
 
-        title = f"Implementation Plan Checkpoint - eTour UC1 - {run_id}"
+        title = _checkpoint_title(source_ref, "implementation_plan")
         body = _confluence_implementation_plan_storage_body(store, run_id, source_ref, artifact_paths)
         if previous_page_id:
             current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
@@ -711,6 +987,75 @@ def _sync_confluence_implementation_plan_page(
             exc,
             operation=operation,
             artifact_refs=_implementation_plan_artifact_refs(artifact_paths),
+            error=_trim_error(str(exc)),
+        )
+
+
+def _sync_confluence_code_review_page(
+    settings: Settings,
+    request_json: JsonRequester,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+    *,
+    previous_page_id: str | None,
+) -> dict[str, object]:
+    operation = "updated" if previous_page_id else "created"
+    try:
+        _require_atlassian_settings(settings)
+        if not settings.confluence_sync_space_id:
+            raise ValueError("Missing CONFLUENCE_SYNC_SPACE_ID.")
+        if not settings.confluence_sync_parent_page_id:
+            raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
+
+        title = _checkpoint_title(source_ref, "code_review")
+        body = _confluence_code_review_storage_body(store, run_id, source_ref, artifact_paths)
+        if previous_page_id:
+            current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
+            version = int(current.get("version", {}).get("number", 1)) + 1
+            response = request_json(
+                "PUT",
+                f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}",
+                {
+                    "id": previous_page_id,
+                    "status": "current",
+                    "title": title,
+                    "body": {"representation": "storage", "value": body},
+                    "version": {"number": version, "message": f"SDLC Harness code review sync {run_id}"},
+                },
+            )
+        else:
+            response = request_json(
+                "POST",
+                f"{settings.atlassian_base_url}/wiki/api/v2/pages",
+                {
+                    "spaceId": settings.confluence_sync_space_id,
+                    "status": "current",
+                    "title": title,
+                    "parentId": settings.confluence_sync_parent_page_id,
+                    "body": {"representation": "storage", "value": body},
+                },
+            )
+        page_id = str(response.get("id", previous_page_id or ""))
+        return {
+            "tool": "confluence",
+            "mode": "real_api",
+            "operation": operation,
+            "status": "synced",
+            "external_id": page_id,
+            "url": _confluence_page_url(settings.atlassian_base_url, response),
+            "source_ref": source_ref,
+            "artifact_refs": _code_review_artifact_refs(artifact_paths),
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 - lỗi từng target phải thành report.
+        return _failed_target(
+            "confluence",
+            source_ref,
+            exc,
+            operation=operation,
+            artifact_refs=_code_review_artifact_refs(artifact_paths),
             error=_trim_error(str(exc)),
         )
 
@@ -775,6 +1120,7 @@ def _jira_comment_body(
         "version": 1,
         "content": [
             _adf_heading("SDLC Harness checkpoint: Requirement review", level=2),
+            _adf_paragraph(_checkpoint_marker(source_ref, "requirement")),
             _adf_paragraph("Requirement packet has been normalized and is waiting for human approval."),
             _adf_bullet_list(
                 [
@@ -828,6 +1174,7 @@ def _jira_design_comment_body(
         "version": 1,
         "content": [
             _adf_heading("SDLC Harness checkpoint: Design review", level=2),
+            _adf_paragraph(_checkpoint_marker(source_ref, "design")),
             _adf_paragraph("Design artifacts passed traceability validation and are waiting for human approval."),
             _adf_bullet_list(
                 [
@@ -893,10 +1240,54 @@ def _jira_implementation_plan_comment_body(
         "version": 1,
         "content": [
             _adf_heading("SDLC Harness checkpoint: Implementation plan review", level=2),
+            _adf_paragraph(_checkpoint_marker(source_ref, "implementation_plan")),
             _adf_paragraph("Implementation plan passed Validator.review_plan and is waiting for human approval."),
             _adf_bullet_list(summary_items),
             _adf_heading("Artifacts", level=3),
             _adf_bullet_list(artifact_items),
+        ],
+    }
+
+
+def _jira_code_review_comment_body(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+    confluence_url: str,
+) -> dict[str, object]:
+    context = _code_review_context(store, artifact_paths)
+    summary_items = [
+        f"Run: {run_id}",
+        f"Source: {source_ref}",
+        "Status: code_review_ready",
+        f"Draft PR: {context['pr_url']}",
+        f"Branch: {context['branch']}",
+        f"Commit: {context['commit_sha']}",
+        f"Verification: {context['verification']}",
+        f"Validator trace: {context['trace']}",
+        f"QA acceptance: {context['qa']}",
+        "Next action: human reviews the Draft PR; approval/change handling is added in the next slice.",
+    ]
+    if confluence_url:
+        summary_items.append(f"Confluence review page: {confluence_url}")
+    return {
+        "type": "doc",
+        "version": 1,
+        "content": [
+            _adf_heading("SDLC Harness checkpoint: Code review", level=2),
+            _adf_paragraph(_checkpoint_marker(source_ref, "code_review")),
+            _adf_paragraph("Code passed Verification Runner, Validator trace review, and QA acceptance before publication."),
+            _adf_bullet_list(summary_items),
+            _adf_heading("Artifacts", level=3),
+            _adf_bullet_list(
+                [
+                    f"{_artifact_label(name)}: {path}"
+                    for name, path in artifact_paths.items()
+                    if name in _CODE_REVIEW_ARTIFACT_KEYS
+                ]
+            ),
         ],
     }
 
@@ -925,7 +1316,8 @@ def _confluence_storage_body(
     requirement_body = _markdown_to_confluence_storage(requirement_text)
 
     return f"""
-<h1>Requirement Checkpoint - eTour UC1</h1>
+<!-- {escape(_checkpoint_marker(source_ref, "requirement"))} -->
+<h1>{escape(_checkpoint_title(source_ref, "requirement"))}</h1>
 <p>This page is generated by SDLC_Harness Phase 1 so the requirement packet can be reviewed before design work starts.</p>
 <table>
 <tbody>
@@ -980,7 +1372,8 @@ def _confluence_design_storage_body(
     )
 
     return f"""
-<h1>Design Checkpoint - eTour UC1</h1>
+<!-- {escape(_checkpoint_marker(source_ref, "design"))} -->
+<h1>{escape(_checkpoint_title(source_ref, "design"))}</h1>
 <p>This page is generated by SDLC_Harness Phase 2 after the requirement checkpoint has been approved.</p>
 <table>
 <tbody>
@@ -1068,7 +1461,8 @@ def _confluence_implementation_plan_storage_body(
     test_rows = _confluence_implementation_test_rows(test_intents)
 
     return f"""
-<h1>Implementation Plan Checkpoint - eTour UC1</h1>
+<!-- {escape(_checkpoint_marker(source_ref, "implementation_plan"))} -->
+<h1>{escape(_checkpoint_title(source_ref, "implementation_plan"))}</h1>
 <p>This page is generated by SDLC_Harness Phase 3 after the design checkpoint has been approved. It is the human review surface before Phase 4 is allowed to create a branch, change code, run tests, and prepare a PR.</p>
 <h2>Decision Needed</h2>
 <table>
@@ -1140,6 +1534,87 @@ def _confluence_implementation_plan_storage_body(
 <p>The generated markdown is kept below for audit. The review sections above are rendered from the structured plan.</p>
 {_confluence_code_macro(implementation_plan, language="markdown")}
 """.strip()
+
+
+def _confluence_code_review_storage_body(
+    store: RuntimeStore,
+    run_id: str,
+    source_ref: str,
+    artifact_paths: dict[str, str],
+) -> str:
+    context = _code_review_context(store, artifact_paths)
+    artifact_rows = "\n".join(
+        "<tr>"
+        f"<td><strong>{escape(_artifact_label(name))}</strong></td>"
+        f"<td><code>{escape(path)}</code></td>"
+        "</tr>"
+        for name, path in artifact_paths.items()
+        if name in _CODE_REVIEW_ARTIFACT_KEYS
+    )
+    return f"""
+<!-- {escape(_checkpoint_marker(source_ref, "code_review"))} -->
+<h1>{escape(_checkpoint_title(source_ref, "code_review"))}</h1>
+<p>This checkpoint is generated after code passed local verification, Validator traceability review, and QA acceptance, then was published as a Draft PR.</p>
+<h2>Review Target</h2>
+<table>
+<tbody>
+<tr><th>Run</th><td><code>{escape(run_id)}</code></td></tr>
+<tr><th>Source</th><td><code>{escape(source_ref)}</code></td></tr>
+<tr><th>Status</th><td><strong>code_review_ready</strong></td></tr>
+<tr><th>Repository</th><td><code>{escape(str(context['repository']))}</code></td></tr>
+<tr><th>Branch</th><td><code>{escape(str(context['branch']))}</code></td></tr>
+<tr><th>Commit</th><td><a href="{escape(str(context['commit_url']))}"><code>{escape(str(context['commit_sha']))}</code></a></td></tr>
+<tr><th>Draft PR</th><td><a href="{escape(str(context['pr_url']))}">{escape(str(context['pr_url']))}</a></td></tr>
+<tr><th>Verification</th><td>{escape(str(context['verification']))}</td></tr>
+<tr><th>Validator trace</th><td>{escape(str(context['trace']))}</td></tr>
+<tr><th>QA acceptance</th><td>{escape(str(context['qa']))}</td></tr>
+</tbody>
+</table>
+<h2>Review Boundary</h2>
+<p>Human review starts from the Draft PR. This slice opens the checkpoint only; approve and request-change transitions are intentionally deferred to the next slice.</p>
+<h2>Evidence Artifacts</h2>
+<table>
+<tbody>
+<tr><th>Artifact</th><th>Local path</th></tr>
+{artifact_rows}
+</tbody>
+</table>
+""".strip()
+
+
+def _code_review_context(store: RuntimeStore, artifact_paths: dict[str, str]) -> dict[str, str]:
+    github = _read_json_artifact(store, artifact_paths, "github_code_review")
+    trace = _read_json_artifact(store, artifact_paths, "requirement_design_code_trace")
+    pull_request = github.get("pull_request")
+    pull_request = pull_request if isinstance(pull_request, dict) else {}
+    commit = github.get("commit")
+    commit = commit if isinstance(commit, dict) else {}
+    trace_stats = trace.get("stats")
+    trace_stats = trace_stats if isinstance(trace_stats, dict) else {}
+    test_report = _read_artifact(store, artifact_paths, "test_report")
+    qa_report = _read_artifact(store, artifact_paths, "qa_test_report")
+    return {
+        "repository": str(github.get("repository") or ""),
+        "branch": str(github.get("branch") or pull_request.get("headRefName") or ""),
+        "commit_sha": str(commit.get("sha") or ""),
+        "commit_url": str(commit.get("url") or ""),
+        "pr_url": str(pull_request.get("url") or ""),
+        "verification": _report_result_line(test_report, fallback="See test report."),
+        "trace": (
+            f"{'passed' if trace.get('ok') is True else 'not passed'}; "
+            f"mappings={trace_stats.get('mapping_count', 0)}, missing={trace_stats.get('missing_count', 0)}"
+        ),
+        "qa": _report_result_line(qa_report, fallback="See QA report."),
+    }
+
+
+def _report_result_line(markdown: str, *, fallback: str) -> str:
+    for line in markdown.splitlines():
+        clean = line.strip().lstrip("-*").strip()
+        lowered = clean.lower()
+        if lowered.startswith(("result:", "status:", "summary:")):
+            return clean
+    return fallback
 
 
 def _implementation_mapping_counts(mappings: list[dict[str, object]]) -> dict[str, int]:
@@ -1528,6 +2003,196 @@ def _implementation_plan_artifact_refs(artifact_paths: dict[str, str]) -> list[s
     ]
 
 
+def _code_review_artifact_refs(artifact_paths: dict[str, str]) -> list[str]:
+    return [
+        _artifact_ref(path)
+        for key, path in artifact_paths.items()
+        if key in _CODE_REVIEW_ARTIFACT_KEYS and path
+    ]
+
+
+def _checkpoint_marker(source_ref: str, phase: str) -> str:
+    """Marker máy đọc được, ổn định qua nhiều run cho cùng source/phase."""
+
+    return f"{HARNESS_CHECKPOINT_MARKER}{phase}::{source_ref}"
+
+
+def _checkpoint_title(source_ref: str, phase: str) -> str:
+    """Tiêu đề Confluence ổn định; run id nằm trong body/version history."""
+
+    source_label = source_ref.rsplit(":", 1)[-1].strip() or source_ref
+    return f"SDLC Harness - {source_label} - {_CHECKPOINT_TITLES[phase]}"
+
+
+def _jira_issue_key(settings: Settings, source_ref: str) -> str:
+    if source_ref.startswith("jira_issue:"):
+        return source_ref.rsplit(":", 1)[-1].strip().upper()
+    return settings.jira_sync_issue_key
+
+
+def _resolve_checkpoint_target_id(
+    *,
+    settings: Settings,
+    request_json: JsonRequester,
+    source_ref: str,
+    phase: str,
+    tool: str,
+    local_target_id: str | None,
+) -> str | None:
+    """Khôi phục remote id khi report local đã mất.
+
+    Jira-backed runs dùng marker `source_ref + phase` làm identity. Với fixture
+    local, report trong runtime vẫn là nguồn identity vì không có issue nguồn để
+    truy vấn ngược một cách đáng tin cậy.
+    """
+
+    if local_target_id:
+        return local_target_id
+    if not source_ref.startswith("jira_issue:"):
+        return None
+    if tool == "jira":
+        return _find_remote_jira_checkpoint(settings, request_json, source_ref, phase)
+    if tool == "confluence":
+        return _find_remote_confluence_checkpoint(settings, request_json, source_ref, phase)
+    return None
+
+
+def _find_remote_jira_checkpoint(
+    settings: Settings,
+    request_json: JsonRequester,
+    source_ref: str,
+    phase: str,
+) -> str | None:
+    issue_key = _jira_issue_key(settings, source_ref)
+    response = request_json(
+        "GET",
+        f"{settings.atlassian_base_url}/rest/api/3/issue/{issue_key}/comment?maxResults=100",
+        None,
+    )
+    comments = response.get("comments", [])
+    marker = _checkpoint_marker(source_ref, phase)
+    exact: list[str] = []
+    legacy: list[str] = []
+    legacy_heading = _LEGACY_JIRA_HEADINGS[phase]
+    for comment in comments if isinstance(comments, list) else []:
+        if not isinstance(comment, dict):
+            continue
+        comment_id = str(comment.get("id") or "").strip()
+        body = _adf_plain_text(comment.get("body"))
+        if not comment_id:
+            continue
+        if marker in body:
+            exact.append(comment_id)
+        elif legacy_heading.lower() in body.lower() and source_ref.lower() in body.lower():
+            legacy.append(comment_id)
+    return _single_remote_match(exact or legacy, tool="jira", source_ref=source_ref, phase=phase)
+
+
+def _find_remote_confluence_checkpoint(
+    settings: Settings,
+    request_json: JsonRequester,
+    source_ref: str,
+    phase: str,
+) -> str | None:
+    title = _checkpoint_title(source_ref, phase)
+    query = urlencode(
+        {
+            "space-id": settings.confluence_sync_space_id,
+            "title": title,
+            "status": "current",
+            "limit": "100",
+        }
+    )
+    response = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages?{query}", None)
+    exact = _page_ids(response, title=title)
+    if exact:
+        return _single_remote_match(exact, tool="confluence", source_ref=source_ref, phase=phase)
+
+    parent_id = settings.confluence_sync_parent_page_id
+    if not parent_id:
+        return None
+    children = request_json(
+        "GET",
+        (
+            f"{settings.atlassian_base_url}/wiki/api/v2/pages/{parent_id}/children"
+            "?limit=250&body-format=storage"
+        ),
+        None,
+    )
+    marker = _checkpoint_marker(source_ref, phase)
+    marker_matches: list[str] = []
+    legacy_matches: list[str] = []
+    legacy_prefix = _LEGACY_CONFLUENCE_PREFIXES[phase]
+    for page in children.get("results", []) if isinstance(children.get("results"), list) else []:
+        if not isinstance(page, dict):
+            continue
+        page_id = str(page.get("id") or "").strip()
+        page_title = str(page.get("title") or "")
+        body = _confluence_page_body(page)
+        if not page_id:
+            continue
+        if marker in body:
+            marker_matches.append(page_id)
+        elif page_title.startswith(legacy_prefix):
+            legacy_matches.append(page_id)
+    return _single_remote_match(
+        marker_matches or legacy_matches,
+        tool="confluence",
+        source_ref=source_ref,
+        phase=phase,
+    )
+
+
+def _single_remote_match(ids: list[str], *, tool: str, source_ref: str, phase: str) -> str | None:
+    unique = list(dict.fromkeys(item for item in ids if item))
+    if len(unique) > 1:
+        raise HarnessError(
+            "remote_sync_ambiguous",
+            f"Found multiple {tool} checkpoints for {source_ref} phase={phase}: {', '.join(unique)}",
+        )
+    return unique[0] if unique else None
+
+
+def _page_ids(response: dict[str, Any], *, title: str) -> list[str]:
+    results = response.get("results", [])
+    if not isinstance(results, list):
+        return []
+    return [
+        str(page.get("id") or "")
+        for page in results
+        if isinstance(page, dict) and str(page.get("title") or "") == title and page.get("id")
+    ]
+
+
+def _confluence_page_body(page: dict[str, Any]) -> str:
+    body = page.get("body")
+    if not isinstance(body, dict):
+        return ""
+    storage = body.get("storage")
+    if isinstance(storage, dict):
+        return str(storage.get("value") or "")
+    return str(body.get("value") or "")
+
+
+def _adf_plain_text(node: object) -> str:
+    parts: list[str] = []
+
+    def visit(value: object) -> None:
+        if isinstance(value, str):
+            parts.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        elif isinstance(value, dict):
+            text = value.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+            visit(value.get("content"))
+
+    visit(node)
+    return "\n".join(parts)
+
+
 def _previous_target_id_from_reports(report_paths: list[Path], tool: str) -> str | None:
     for report_path in report_paths:
         external_id = _previous_target_id(report_path, tool)
@@ -1560,11 +2225,12 @@ def _aggregate_status(targets: list[dict[str, object]]) -> str:
 
 
 def _failed_target(tool: str, source_ref: str, exc: Exception, **extra: object) -> dict[str, object]:
+    error_code = exc.error_code if isinstance(exc, HarnessError) else "sync_failed"
     return {
         "tool": tool,
         "mode": "real_api",
         "status": "failed",
-        "error_code": "sync_failed",
+        "error_code": error_code,
         "message": _trim_error(str(exc)),
         "source_ref": source_ref,
         **extra,

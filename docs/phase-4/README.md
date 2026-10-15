@@ -10,7 +10,8 @@ kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
 ## Trạng Thái Hiện Tại
 
-Phase 4 đã khóa tới Slice 4.8A và trạng thái trung gian `code_review_published`.
+Phase 4 đã khóa code/unit test tới Slice 4.8B. Sau khi Draft PR được publish,
+Harness sync evidence về Jira/Confluence và mở checkpoint `code_review_ready`.
 Developer.act sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
 rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có giới hạn:
 
@@ -22,9 +23,14 @@ command baseline. Việc chỉ compile file QA hoặc chạy một unit-test cla
 còn được tính là QA pass.
 
 Slice 4.8A đã được live-test để commit target repo, push branch và tạo/cập nhật
-Draft PR thật. Mốc trung gian là `code_review_published`; nó vẫn chưa phải
-`code_review_ready`. Slice 4.8B còn phải sync code-review checkpoint về Jira và
-Confluence rồi mới mở checkpoint cho human/Niko review.
+Draft PR thật. Slice 4.8B cũng đã được live-test cho bước
+`code_review_published -> code_review_ready`; re-sync cập nhật đúng Jira comment
+và Confluence page cũ thay vì tạo bản trùng.
+
+Trước khi mở approve Code Review và Phase 5, Slice 4.9 phải thay cơ chế một
+working directory dùng chung bằng worktree-per-run. Contract triển khai nằm tại
+`workspace-isolation/README.md`; checklist riêng chưa được tick vì code workspace
+manager, lock, adoption và cleanup chưa tồn tại.
 
 ## Slice 4.1 Đã Chốt
 
@@ -259,8 +265,30 @@ qa_tested
 
 Nếu commit/push/PR lỗi sau khi đã hoàn thành một phần, workflow giữ evidence trong
 `github_code_review_v1.json`, chuyển sang `code_review_publish_failed` và cho phép
-`continue_run` retry. Chạy lại từ `code_review_published` cũng là idempotent: không
-tạo commit hay PR trùng.
+`continue_run` retry. Khi đã ở `code_review_published`, lần `continue_run` kế tiếp
+không publish GitHub lần nữa mà sync checkpoint Code Review sang Jira/Confluence.
+Re-sync dùng `sync-run` và giữ nguyên remote target theo marker `source_ref + phase`.
+
+## Slice 4.8B - Code Review Checkpoint Sync
+
+```text
+code_review_published
+-> status=code_review_syncing
+-> đọc github_code_review + test report + Validator trace + QA report
+-> sync một Jira comment và một Confluence page ổn định theo source_ref + phase
+-> ghi tool_sync_report_v4.json
+-> status=code_review_ready
+-> pending_checkpoint.type=code_review
+```
+
+GitHub trong report v4 là target tham chiếu, không bị publish lại. Nếu một target
+Atlassian lỗi, state chuyển `code_review_sync_failed`, giữ nguyên toàn bộ evidence
+và chỉ cho retry bằng `sync-run`. Nếu report local bị mất, adapter tìm lại remote
+target bằng marker. Nhiều target cùng marker hoặc nhiều legacy page phù hợp sẽ trả
+`remote_sync_ambiguous`; Harness không tự chọn bừa và không tự xóa page/comment cũ.
+
+Jira source loader loại cả marker mới và heading checkpoint legacy do Harness tạo.
+Nhờ vậy output của run cũ không quay ngược vào source packet của run mới.
 
 Nếu code không cover design, compile/unit test fail không có repair path, QA fail
 quá giới hạn, hoặc trace code-test thiếu nghiêm trọng, workflow phải `blocked`
@@ -364,8 +392,7 @@ allowed_next_actions=[get_status, cancel_run]
 
 ## Đầu Ra Đầy Đủ Trước Code Review
 
-Các artifact sau vẫn là mục tiêu của phần còn lại Phase 4, chưa phải trạng thái
-đã khóa ở bản hiện tại:
+Slice 4.8B đã sinh và live-test artifact sau:
 
 ```text
 .runtime/runs/<run_id>/sync/tool_sync_report_v4.json
@@ -384,13 +411,22 @@ quality_reports.implementation_traceability
 quality_reports.qa_acceptance
 last_sync.phase=code_review
 pending_checkpoint.type=code_review
-allowed_next_actions=[approve_checkpoint, request_change, cancel_run, get_status]
+allowed_next_actions=[get_status, sync_run, cancel_run]
 summary_for_user
 ```
 
 Checkpoint `code_review` nghĩa là human cần review PR/code/test/trace/QA report.
 Nó không có nghĩa PR đã được merge. Nếu thiếu `qa_test_report_v1.md` hoặc QA chưa
 pass/được block rõ ràng, workflow chưa được coi là `code_review_ready`.
+
+Approve checkpoint ở lát sau chỉ được chuyển Draft PR thành Ready for review và
+sync trạng thái; merge luôn do human thực hiện trực tiếp trên GitHub. Request
+change thuộc Phase 5 và phải tiếp tục trên đúng worktree/branch/PR của run.
+
+CLI side-effect mặc định `--sync-mode mock`, kể cả `.env` đang để real. Muốn ghi
+Jira/Confluence thật phải truyền rõ `--sync-mode real`; Niko làm việc này qua
+`NIKO_SDLC_SYNC_MODE`. Đây là guard chống một lần test CLI vô tình phát lại các
+checkpoint cũ lên tool thật.
 
 ## Không Làm Trong Phase 4
 
@@ -400,6 +436,8 @@ pass/được block rõ ràng, workflow chưa được coi là `code_review_read
 - Không invalidate context ngoài tool; đó là Phase 6.
 - Không mở đa ngôn ngữ. Java/eTour vẫn là target ban đầu để bám TraceDev.
 - Không để Niko tự thao tác GitHub hoặc tự sửa code.
+- Không dùng current branch của canonical target repo làm identity của run sau
+  khi Slice 4.9 được triển khai.
 
 ## Tài Liệu Trong Folder Này
 
@@ -408,6 +446,8 @@ pass/được block rõ ràng, workflow chưa được coi là `code_review_read
 - `qa-tester-agent.md`: contract triển khai Slice 4.7 QA/Tester Agent trước khi
   mở commit/Draft PR.
 - `github-code-collaboration.md`: policy dùng GitHub branch/commit/Draft PR.
+- `workspace-isolation/`: kiến trúc, runtime contract, migration và checklist
+  worktree-per-run trước Code Review approval/Phase 5.
 
 
 ## QA Slice 4.7A/4.7B Live Update - 2026-10-14
@@ -433,6 +473,7 @@ Live DeepSeek run `run_live_qa_repair_20261014_03` trên runtime/target repo cop
 - Baseline verification pass, Validator rule + LLM pass, QA sinh/chạy lại class.
 - State cuối `qa_tested`, `qa_repair_iterations=1`, `last_error=null`.
 
-Đoạn trên là mốc lịch sử của Slice 4.7B. Slice 4.8A sau đó đã publish Draft PR
-thật; lát tiếp theo chỉ còn sync code-review checkpoint về Jira/Confluence để
-chuyển sang `code_review_ready`.
+Đoạn trên là mốc lịch sử của Slice 4.7B. Slice 4.8A sau đó đã publish Draft PR và
+Slice 4.8B đã sync code-review checkpoint về Jira/Confluence để chuyển sang
+`code_review_ready`. Bước kế tiếp là Slice 4.9 worktree-per-run trước khi mở
+approve Code Review và Phase 5.
