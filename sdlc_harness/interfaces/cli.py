@@ -2,7 +2,7 @@
 
 Quy tắc quan trọng: stdout chỉ có JSON. Nếu cần debug, ghi stderr/log file sau;
 không trộn text tự do vào stdout vì Niko sẽ parse trực tiếp response này. CLI
-hiện bao phủ start/status/sync/approve/continue, legacy workspace adoption và
+hiện bao phủ start/status/sync/approve/continue, workspace adoption/cleanup và
 đường vận hành `revalidate-implementation` cho Phase 4 repair-limit runs. Các
 lệnh có thể ghi tool cộng tác mặc định `--sync-mode mock`; real sync phải được
 caller chọn rõ.
@@ -22,6 +22,7 @@ from ..workflows.phase1 import PhaseOneWorkflow
 from ..workflows.phase4 import PhaseFourWorkflow
 from ..workflows.target_repo import TargetRepoPreparationWorkflow
 from ..workflows.workspace_adoption import WorkspaceAdoptionWorkflow
+from ..workflows.workspace_cleanup import WorkspaceCleanupWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -86,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
     adopt_workspace = subparsers.add_parser("adopt-run-workspace")
     adopt_workspace.add_argument("--run-id", required=True)
     adopt_workspace.add_argument("--runtime-root", default=None)
+
+    cleanup_workspace = subparsers.add_parser("cleanup-run-workspace")
+    cleanup_workspace.add_argument("--run-id", required=True)
+    cleanup_workspace.add_argument("--runtime-root", default=None)
     return parser
 
 
@@ -158,6 +163,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         return workflow.prepare(init_codegraph=bool(args.init_codegraph))
     if args.command == "adopt-run-workspace":
         return WorkspaceAdoptionWorkflow(settings).adopt(run_id=args.run_id)
+    if args.command == "cleanup-run-workspace":
+        return WorkspaceCleanupWorkflow(settings).cleanup(run_id=args.run_id)
     raise HarnessError("unknown_command", f"Unknown command: {args.command}")
 
 

@@ -126,6 +126,8 @@ class GitHubSyncTest(unittest.TestCase):
             "headRefOid": "a" * 40,
             "baseRefName": "main",
             "baseRefOid": "b" * 40,
+            "mergedAt": None,
+            "mergeCommit": None,
         }
 
         def fake_gh(args: list[str], cwd: Path) -> str:
@@ -142,6 +144,8 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(result, expected)
         self.assertEqual(calls[0][0][:3], ["pr", "view", "7"])
         self.assertIn("headRefOid", calls[0][0][-1])
+        self.assertIn("mergedAt", calls[0][0][-1])
+        self.assertIn("mergeCommit", calls[0][0][-1])
         self.assertEqual(calls[0][1], self.root)
 
     def test_publisher_commits_pushes_and_updates_same_draft_pr(self) -> None:

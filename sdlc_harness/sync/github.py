@@ -31,7 +31,7 @@ class GitHubCodeReviewResult:
 
 
 class GitHubPullRequestReader:
-    """Đọc identity bất biến của pull request mà không thay đổi GitHub."""
+    """Đọc identity và lifecycle của pull request mà không thay đổi GitHub."""
 
     def __init__(self, gh_runner: GhRunner | None = None):
         self._gh_runner = gh_runner or _run_gh
@@ -43,8 +43,9 @@ class GitHubPullRequestReader:
         repository: str,
         pr_number: int,
         run_id: str,
+        error_code: str = "workspace_adoption_failed",
     ) -> dict[str, object]:
-        """Trả identity branch/base/commit cần để nhận nuôi một run cũ."""
+        """Trả identity branch/base/merge cần cho adoption hoặc cleanup."""
 
         try:
             return _json_object(
@@ -56,7 +57,10 @@ class GitHubPullRequestReader:
                         "--repo",
                         repository,
                         "--json",
-                        "number,url,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid",
+                        (
+                            "number,url,state,isDraft,headRefName,headRefOid,"
+                            "baseRefName,baseRefOid,mergedAt,mergeCommit"
+                        ),
                     ],
                     target_path,
                 ),
@@ -64,7 +68,7 @@ class GitHubPullRequestReader:
             )
         except HarnessError as exc:
             raise HarnessError(
-                "workspace_adoption_failed",
+                error_code,
                 f"Cannot read GitHub pull request identity: {exc.message}",
                 run_id=run_id,
             ) from exc

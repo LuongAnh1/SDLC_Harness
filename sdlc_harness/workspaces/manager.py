@@ -2,7 +2,8 @@
 
 Manager sở hữu identity machine-local, thứ tự lock và các side effect Git của
 workspace. Từ Slice 4.9A3, Phase 3/4 dùng worktree theo run; Slice 4.9B bổ sung
-đường nhận nuôi branch/PR legacy có kiểm chứng thay vì nối ngầm theo checkout.
+đường nhận nuôi branch/PR legacy có kiểm chứng; Slice 4.9C bổ sung cleanup có
+audit và retry, không xóa remote branch.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 from types import TracebackType
 from typing import BinaryIO, Callable, Iterator
@@ -25,6 +27,7 @@ from .model import RunWorkspaceRecord, branch_name_for_run, run_suffix
 WORKSPACE_ARTIFACT = "run_workspace_v1.json"
 LEGACY_GITHUB_ARTIFACT = "github_code_review_v1.json"
 PullRequestReader = Callable[[str, int, Path], dict[str, object]]
+CleanupPullRequestReader = Callable[[RunWorkspaceRecord], dict[str, object]]
 
 
 def _normalized_remote(value: str) -> str:
@@ -179,6 +182,62 @@ class RunWorkspaceManager:
                     if exc.error_code == "workspace_adoption_failed":
                         raise
                     raise self._adoption_error(run_id, exc.message) from exc
+
+    def cleanup_run(
+        self,
+        run_id: str,
+        *,
+        pull_request_reader: CleanupPullRequestReader,
+    ) -> tuple[RunWorkspaceRecord, bool]:
+        """Dọn worktree/local branch sau merge hoặc cancel, có thể retry an toàn."""
+
+        run_suffix(run_id)
+        with self.registry_lock():
+            with self.run_lock(run_id):
+                state = self.store.read_state(run_id)
+                record = self._read_unlocked(run_id)
+                self._validate_record(record, state=state, verify_git=False)
+                if record.lifecycle == "cleaned":
+                    self._reconcile_state(record, state=state)
+                    return record, False
+
+                if record.lifecycle == "active":
+                    self._validate_record(record, state=state, verify_git=True)
+                    self._require_clean_worktree(record)
+                    cleanup_fields = self._authorize_cleanup(
+                        record=record,
+                        state=state,
+                        pull_request_reader=pull_request_reader,
+                    )
+                    self._ensure_cleanup_recovery(record, cleanup_reason=cleanup_fields["cleanup_reason"])
+                    pending = replace(
+                        record,
+                        lifecycle="cleanup_pending",
+                        cleanup_reason=cleanup_fields["cleanup_reason"],
+                        cleanup_started_at=utc_now_iso(),
+                        merge_commit_sha=cleanup_fields["merge_commit_sha"],
+                        pr_state_at_cleanup=cleanup_fields["pr_state_at_cleanup"],
+                        pr_merged_at=cleanup_fields["pr_merged_at"],
+                        updated_at=utc_now_iso(),
+                    )
+                    self._write_record_locked(pending)
+                    self._reconcile_state(pending, state=state)
+                    record = pending
+                elif record.lifecycle != "cleanup_pending":
+                    raise self._cleanup_error(run_id, f"Unsupported cleanup lifecycle: {record.lifecycle}")
+                else:
+                    self._ensure_cleanup_recovery(record, cleanup_reason=record.cleanup_reason)
+                self._remove_workspace_and_branch(record)
+                cleaned = replace(
+                    record,
+                    lifecycle="cleaned",
+                    cleaned_at=utc_now_iso(),
+                    local_branch_deleted=True,
+                    updated_at=utc_now_iso(),
+                )
+                self._write_record_locked(cleaned)
+                self._reconcile_state(cleaned, state=state)
+                return cleaned, True
 
     def write(self, record: RunWorkspaceRecord) -> Path:
         """Ghi contract thủ công; production creation nên dùng `create_for_run`."""
@@ -629,6 +688,194 @@ class RunWorkspaceManager:
         ):
             raise self._adoption_error(run_id, "Live GitHub pull request does not match the runtime publication.")
 
+    def _authorize_cleanup(
+        self,
+        *,
+        record: RunWorkspaceRecord,
+        state: dict[str, object],
+        pull_request_reader: CleanupPullRequestReader,
+    ) -> dict[str, str]:
+        """Chốt lý do cleanup trước khi ghi `cleanup_pending`."""
+
+        if str(state.get("status") or "") == "cancelled":
+            return {
+                "cleanup_reason": "run_cancelled",
+                "merge_commit_sha": "",
+                "pr_state_at_cleanup": "",
+                "pr_merged_at": "",
+            }
+        if record.pr_number is None or not record.pr_url:
+            raise self._cleanup_not_allowed(record.run_id, "Run has no pull request identity to prove a human merge.")
+        try:
+            pull_request = pull_request_reader(record)
+        except HarnessError as exc:
+            raise self._cleanup_error(record.run_id, f"Cannot read GitHub pull request: {exc.message}") from exc
+        merge_commit = pull_request.get("mergeCommit")
+        merge_commit_sha = str(merge_commit.get("oid") or "") if isinstance(merge_commit, dict) else ""
+        merged_at = str(pull_request.get("mergedAt") or "")
+        checks = (
+            pull_request.get("number") == record.pr_number,
+            pull_request.get("url") == record.pr_url,
+            pull_request.get("state") == "MERGED",
+            pull_request.get("headRefName") == record.branch,
+            pull_request.get("headRefOid") == record.head_sha,
+            pull_request.get("baseRefName") == self.settings.target_base_branch,
+            bool(merged_at and merge_commit_sha),
+        )
+        if not all(checks):
+            raise self._cleanup_not_allowed(
+                record.run_id,
+                "Pull request is not human-merged or does not match the recorded workspace identity.",
+            )
+        return {
+            "cleanup_reason": "pr_merged",
+            "merge_commit_sha": merge_commit_sha,
+            "pr_state_at_cleanup": "MERGED",
+            "pr_merged_at": merged_at,
+        }
+
+    def _require_clean_worktree(self, record: RunWorkspaceRecord) -> None:
+        worktree_path = Path(record.worktree_path)
+        tracked_codegraph = self._git(
+            worktree_path,
+            "ls-files",
+            "--",
+            ".codegraph",
+            error_code="workspace_cleanup_failed",
+            run_id=record.run_id,
+        )
+        status = self._git(
+            worktree_path,
+            "status",
+            "--porcelain",
+            error_code="workspace_cleanup_failed",
+            run_id=record.run_id,
+        )
+        if tracked_codegraph or self._dirty_status_without_codegraph(status):
+            raise HarnessError(
+                "workspace_dirty",
+                "Run workspace has uncommitted changes outside generated .codegraph/ data.",
+                run_id=record.run_id,
+            )
+
+    def _ensure_cleanup_recovery(self, record: RunWorkspaceRecord, *, cleanup_reason: str) -> None:
+        """Chứng minh commit vẫn có bản sao phục hồi trước khi xóa local ref."""
+
+        canonical_repo = Path(record.canonical_repo)
+        self._git(
+            canonical_repo,
+            "fetch",
+            "--prune",
+            "origin",
+            error_code="workspace_cleanup_failed",
+            run_id=record.run_id,
+        )
+        if cleanup_reason == "pr_merged":
+            self._git(
+                canonical_repo,
+                "merge-base",
+                "--is-ancestor",
+                record.head_sha,
+                record.base_ref,
+                error_code="workspace_cleanup_not_allowed",
+                run_id=record.run_id,
+            )
+            return
+        if cleanup_reason == "run_cancelled":
+            remote_ref = f"refs/remotes/origin/{record.branch}"
+            if not self._ref_exists(
+                canonical_repo,
+                remote_ref,
+                run_id=record.run_id,
+                error_code="workspace_cleanup_failed",
+            ):
+                raise self._cleanup_not_allowed(
+                    record.run_id,
+                    "Cancelled run has no remote branch preserving the recorded HEAD.",
+                )
+            remote_head = self._git(
+                canonical_repo,
+                "rev-parse",
+                "--verify",
+                remote_ref,
+                error_code="workspace_cleanup_failed",
+                run_id=record.run_id,
+            )
+            if remote_head != record.head_sha:
+                raise self._cleanup_not_allowed(
+                    record.run_id,
+                    "Cancelled run remote branch does not preserve the recorded HEAD.",
+                )
+            return
+        raise self._cleanup_error(record.run_id, f"Invalid recorded cleanup reason: {cleanup_reason}")
+
+    def _remove_workspace_and_branch(self, record: RunWorkspaceRecord) -> None:
+        """Remove worktree rồi xóa đúng local ref bằng expected SHA; không chạm remote."""
+
+        canonical_repo = Path(record.canonical_repo)
+        worktree_path = Path(record.worktree_path).resolve()
+        registry = self._worktree_registry(canonical_repo, run_id=record.run_id)
+        if worktree_path in registry:
+            self._require_clean_worktree(record)
+            self._remove_generated_codegraph(worktree_path, run_id=record.run_id)
+            self._git(
+                canonical_repo,
+                "worktree",
+                "remove",
+                str(worktree_path),
+                error_code="workspace_cleanup_failed",
+                run_id=record.run_id,
+            )
+        elif worktree_path.exists():
+            raise self._cleanup_error(record.run_id, "Workspace path exists but is no longer registered by Git.")
+        self._git(
+            canonical_repo,
+            "worktree",
+            "prune",
+            error_code="workspace_cleanup_failed",
+            run_id=record.run_id,
+        )
+        branch_ref = f"refs/heads/{record.branch}"
+        if self._ref_exists(
+            canonical_repo,
+            branch_ref,
+            run_id=record.run_id,
+            error_code="workspace_cleanup_failed",
+        ):
+            branch_head = self._git(
+                canonical_repo,
+                "rev-parse",
+                "--verify",
+                branch_ref,
+                error_code="workspace_cleanup_failed",
+                run_id=record.run_id,
+            )
+            if branch_head != record.head_sha:
+                raise self._cleanup_error(record.run_id, "Local branch moved after cleanup was authorized.")
+            self._git(
+                canonical_repo,
+                "update-ref",
+                "-d",
+                branch_ref,
+                record.head_sha,
+                error_code="workspace_cleanup_failed",
+                run_id=record.run_id,
+            )
+
+    def _remove_generated_codegraph(self, worktree_path: Path, *, run_id: str) -> None:
+        candidate = worktree_path / ".codegraph"
+        if not candidate.exists():
+            return
+        if candidate.is_symlink() or candidate.resolve().parent != worktree_path:
+            raise self._cleanup_error(run_id, "Generated .codegraph path is not safe to remove.")
+        try:
+            if candidate.is_dir():
+                shutil.rmtree(candidate)
+            else:
+                candidate.unlink()
+        except OSError as exc:
+            raise self._cleanup_error(run_id, f"Cannot remove generated .codegraph data: {exc}") from exc
+
     def _rollback_legacy_adoption(
         self,
         *,
@@ -685,6 +932,14 @@ class RunWorkspaceManager:
     @staticmethod
     def _adoption_error(run_id: str, message: str) -> HarnessError:
         return HarnessError("workspace_adoption_failed", message, run_id=run_id)
+
+    @staticmethod
+    def _cleanup_not_allowed(run_id: str, message: str) -> HarnessError:
+        return HarnessError("workspace_cleanup_not_allowed", message, run_id=run_id)
+
+    @staticmethod
+    def _cleanup_error(run_id: str, message: str) -> HarnessError:
+        return HarnessError("workspace_cleanup_failed", message, run_id=run_id)
 
     def _raise_after_safe_rollback(
         self,
@@ -1009,7 +1264,14 @@ class RunWorkspaceManager:
             current[key] = value.strip()
         return entries
 
-    def _ref_exists(self, canonical_repo: Path, ref: str, *, run_id: str) -> bool:
+    def _ref_exists(
+        self,
+        canonical_repo: Path,
+        ref: str,
+        *,
+        run_id: str,
+        error_code: str = "workspace_creation_failed",
+    ) -> bool:
         try:
             completed = subprocess.run(
                 ["git", "show-ref", "--verify", "--quiet", ref],
@@ -1022,14 +1284,14 @@ class RunWorkspaceManager:
             )
         except OSError as exc:
             raise HarnessError(
-                "workspace_creation_failed",
+                error_code,
                 f"Cannot inspect Git ref {ref}: {exc}",
                 run_id=run_id,
             ) from exc
         if completed.returncode not in {0, 1}:
             detail = completed.stderr.strip() or f"git show-ref exited {completed.returncode}"
             raise HarnessError(
-                "workspace_creation_failed",
+                error_code,
                 f"Cannot inspect Git ref {ref}: {detail}",
                 run_id=run_id,
             )

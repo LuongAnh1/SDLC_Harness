@@ -74,6 +74,13 @@ class RunWorkspaceRecord:
     updated_at: str
     pr_number: int | None = None
     pr_url: str = ""
+    cleanup_reason: str = ""
+    cleanup_started_at: str = ""
+    cleaned_at: str = ""
+    local_branch_deleted: bool = False
+    merge_commit_sha: str = ""
+    pr_state_at_cleanup: str = ""
+    pr_merged_at: str = ""
     version: str = WORKSPACE_VERSION
     workspace_mode: str = WORKSPACE_MODE
 
@@ -94,6 +101,13 @@ class RunWorkspaceRecord:
             "pr_number": self.pr_number,
             "pr_url": self.pr_url,
             "lifecycle": self.lifecycle,
+            "cleanup_reason": self.cleanup_reason,
+            "cleanup_started_at": self.cleanup_started_at,
+            "cleaned_at": self.cleaned_at,
+            "local_branch_deleted": self.local_branch_deleted,
+            "merge_commit_sha": self.merge_commit_sha,
+            "pr_state_at_cleanup": self.pr_state_at_cleanup,
+            "pr_merged_at": self.pr_merged_at,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -112,6 +126,13 @@ class RunWorkspaceRecord:
             "remote": self.remote,
             "pr_number": self.pr_number,
             "pr_url": self.pr_url,
+            "cleanup_reason": self.cleanup_reason,
+            "cleanup_started_at": self.cleanup_started_at,
+            "cleaned_at": self.cleaned_at,
+            "local_branch_deleted": self.local_branch_deleted,
+            "merge_commit_sha": self.merge_commit_sha,
+            "pr_state_at_cleanup": self.pr_state_at_cleanup,
+            "pr_merged_at": self.pr_merged_at,
         }
 
     @classmethod
@@ -166,6 +187,22 @@ class RunWorkspaceRecord:
         pr_number_raw = payload.get("pr_number")
         if pr_number_raw is not None and (type(pr_number_raw) is not int or pr_number_raw <= 0):
             raise HarnessError("run_workspace_invalid", "pr_number must be a positive integer or null.", run_id=run_id)
+        cleanup_reason = str(payload.get("cleanup_reason") or "")
+        if cleanup_reason not in {"", "pr_merged", "run_cancelled"}:
+            raise HarnessError("run_workspace_invalid", f"Invalid cleanup reason: {cleanup_reason}", run_id=run_id)
+        local_branch_deleted = payload.get("local_branch_deleted", False)
+        if type(local_branch_deleted) is not bool:
+            raise HarnessError("run_workspace_invalid", "local_branch_deleted must be boolean.", run_id=run_id)
+        cleanup_started_at = str(payload.get("cleanup_started_at") or "")
+        cleaned_at = str(payload.get("cleaned_at") or "")
+        if lifecycle in {"cleanup_pending", "cleaned"} and not (cleanup_reason and cleanup_started_at):
+            raise HarnessError(
+                "run_workspace_invalid",
+                "Cleanup lifecycle requires cleanup_reason and cleanup_started_at.",
+                run_id=run_id,
+            )
+        if lifecycle == "cleaned" and not cleaned_at:
+            raise HarnessError("run_workspace_invalid", "Cleaned workspace requires cleaned_at.", run_id=run_id)
         return cls(
             run_id=run_id,
             source_ref=str(payload["source_ref"]),
@@ -182,4 +219,11 @@ class RunWorkspaceRecord:
             updated_at=str(payload["updated_at"]),
             pr_number=pr_number_raw,
             pr_url=str(payload.get("pr_url") or ""),
+            cleanup_reason=cleanup_reason,
+            cleanup_started_at=cleanup_started_at,
+            cleaned_at=cleaned_at,
+            local_branch_deleted=local_branch_deleted,
+            merge_commit_sha=str(payload.get("merge_commit_sha") or ""),
+            pr_state_at_cleanup=str(payload.get("pr_state_at_cleanup") or ""),
+            pr_merged_at=str(payload.get("pr_merged_at") or ""),
         )
