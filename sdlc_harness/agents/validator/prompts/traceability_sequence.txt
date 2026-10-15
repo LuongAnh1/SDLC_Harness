@@ -30,6 +30,21 @@ Exit conditions map to:
 * error messages
 * network exception messages
 
+### **Rule E — Exact Target Contract**
+Every `target` must be copied verbatim from an element that exists in the input
+sequence diagram JSON. Valid target forms are:
+* a value from `nodes[].id` or `nodes[].label`;
+* a value from `messages[].message`;
+* a full message in the form `<from>-><to>: <message>`;
+* a value from `controlFlows[].condition`;
+* a control flow in the form `<type> <condition>` when the condition is not empty.
+
+Do not use JSON field names or bare PlantUML control keywords as targets. In
+particular, `nodes`, `messages`, `controlFlows`, `alt`, `else`, `end`, `opt`,
+`loop`, `group`, `break`, `par`, `critical`, and `note` are invalid by
+themselves. If no exact target supports a requirement, return an empty `links`
+array for that requirement. Do not invent or abbreviate a target.
+
 ## **Output Format**
 Same as in prompt 1:
 ```json

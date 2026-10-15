@@ -31,6 +31,7 @@ import subprocess
 
 from ..agents.developer import (
     DeveloperActAgent,
+    DeveloperActLlmError,
     DeveloperActResult,
     build_developer_work_packet,
     refresh_developer_work_packet,
@@ -40,6 +41,7 @@ from ..agents.validator import CodeTraceValidator
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
+    write_phase4_developer_llm_metadata,
     write_phase4_developer_raw_response,
     write_phase4_developer_work_packet,
     write_phase4_github_code_review,
@@ -81,6 +83,17 @@ ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
 ALLOWED_CODE_REVIEW_READY_ACTIONS = ["approve_checkpoint", "get_status", "sync_run", "cancel_run"]
 ALLOWED_CODE_REVIEW_APPROVED_ACTIONS = ["get_status", "sync_run", "cancel_run"]
+
+REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
+    "implementation_repair_limit_exceeded",
+    "validator_evidence_or_mapping_issue",
+    "implementation_traceability_llm_failed",
+}
+CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
+    "requirement_packet": 12000,
+    "design_artifact": 20000,
+    "implementation_plan": 20000,
+}
 
 MAX_QA_REQUIREMENT_CHARS = 6000
 MAX_QA_VERIFICATION_CHARS = 4000
@@ -690,6 +703,32 @@ class PhaseFourWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _code_trace_approved_context(
+        self,
+        *,
+        artifact_paths: dict[str, str],
+        run_id: str,
+    ) -> dict[str, object]:
+        """Load bounded approved artifacts so Validator findings stay grounded."""
+
+        context: dict[str, object] = {}
+        for key, limit in CODE_TRACE_APPROVED_CONTEXT_LIMITS.items():
+            artifact_ref = _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            artifact_path = self._existing_artifact_path(artifact_ref, run_id=run_id)
+            content = artifact_path.read_text(encoding="utf-8", errors="replace")
+            context[key] = {
+                "artifact_ref": key,
+                "artifact_path": artifact_ref,
+                "content": content[:limit],
+                "content_truncated": len(content) > limit,
+            }
+
+        feedback_ref = str(artifact_paths.get("implementation_repair_feedback") or "").strip()
+        if feedback_ref:
+            feedback_path = self._existing_artifact_path(feedback_ref, run_id=run_id)
+            context["prior_validator_feedback"] = _read_json_artifact(feedback_path, run_id=run_id)
+        return context
+
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification Runner and Validator for repair-limit blocked runs."""
 
@@ -698,13 +737,13 @@ class PhaseFourWorkflow:
             last_error = _dict_value(state.get("last_error"))
             if (
                 str(state.get("status")) != "blocked"
-                or last_error.get("error_code") != "implementation_repair_limit_exceeded"
+                or last_error.get("error_code") not in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
             ):
                 raise HarnessError(
                     "implementation_revalidate_not_allowed",
                     (
-                        "Implementation revalidate is only allowed when a Phase 4 run is blocked by "
-                        f"implementation_repair_limit_exceeded: {run_id}"
+                        "Implementation revalidate is only allowed when a Phase 4 run is blocked by a "
+                        f"revalidatable implementation error: {run_id}"
                     ),
                     run_id=run_id,
                 )
@@ -713,13 +752,21 @@ class PhaseFourWorkflow:
     def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
 
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        latest_artifacts = dict(artifact_paths)
         try:
-            artifact_paths = _string_dict(state.get("latest_artifacts"))
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet, allow_dirty=False)
             branch = target_info.current_branch
             result = self.developer.act(work_packet=work_packet)
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="act",
+                version=1,
+                value=result,
+            )
             applied_files = _apply_developer_changes(
                 result=result,
                 work_packet=work_packet,
@@ -742,11 +789,19 @@ class PhaseFourWorkflow:
                 version=1,
             )
         except HarnessError as exc:
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="act",
+                version=1,
+                value=exc,
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
                     "current_phase": "implementation_writing",
                     "status": "blocked",
+                    "latest_artifacts": latest_artifacts,
                     "pending_checkpoint": None,
                     "allowed_next_actions": ["get_status", "cancel_run"],
                     "last_error": exc.to_response(),
@@ -757,7 +812,7 @@ class PhaseFourWorkflow:
             return self._status_response(state, created_new_run=False)
 
         latest_artifacts = {
-            **artifact_paths,
+            **latest_artifacts,
             "code_change_report": report_path,
         }
         state.update(
@@ -878,6 +933,10 @@ class PhaseFourWorkflow:
             trace_result = self.code_trace_validator.validate(
                 target_path=target_info.path,
                 work_packet=work_packet,
+                approved_context=self._code_trace_approved_context(
+                    artifact_paths=artifact_paths,
+                    run_id=run_id,
+                ),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -900,7 +959,7 @@ class PhaseFourWorkflow:
                     "current_phase": "implementation_testing",
                     "status": "blocked",
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(exc.error_code),
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bị chặn khi chạy Validator code trace: {exc.message}",
                 }
@@ -993,7 +1052,7 @@ class PhaseFourWorkflow:
                     "latest_artifacts": latest_artifacts,
                     "quality_reports": quality_reports,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(error_code),
                     "last_error": HarnessError(
                         error_code,
                         trace_result.summary,
@@ -1054,6 +1113,7 @@ class PhaseFourWorkflow:
         latest_artifacts = dict(artifact_paths)
         previous_qa_iterations = _int_value(state.get("qa_repair_iterations"))
         repair_iteration = previous_qa_iterations + 1
+        artifact_version = _next_phase4_artifact_version(self.store, run_id)
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             feedback_path = _required_phase4_artifact(artifact_paths, "qa_repair_feedback", run_id=run_id)
@@ -1068,7 +1128,6 @@ class PhaseFourWorkflow:
                     f"QA repair limit exceeded for run {run_id}: limit={self.settings.qa_repair_limit}.",
                     run_id=run_id,
                 )
-            artifact_version = _next_phase4_artifact_version(self.store, run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
@@ -1091,18 +1150,13 @@ class PhaseFourWorkflow:
                 repair_feedback=qa_feedback,
                 repair_iteration=repair_iteration,
             )
-            if result.raw_response:
-                raw_response_path = write_phase4_developer_raw_response(
-                    store=self.store,
-                    run_id=run_id,
-                    action="qa_repair",
-                    raw_response=result.raw_response,
-                    version=artifact_version,
-                )
-                latest_artifacts = {
-                    **latest_artifacts,
-                    "developer_repair_raw_response": raw_response_path,
-                }
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="qa_repair",
+                version=artifact_version,
+                value=result,
+            )
             applied_files = _apply_developer_changes(
                 result=result,
                 work_packet=work_packet,
@@ -1148,6 +1202,13 @@ class PhaseFourWorkflow:
                 version=artifact_version,
             )
         except HarnessError as exc:
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="qa_repair",
+                version=artifact_version,
+                value=exc,
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1194,6 +1255,10 @@ class PhaseFourWorkflow:
             trace_result = self.code_trace_validator.validate(
                 target_path=target_info.path,
                 work_packet=work_packet,
+                approved_context=self._code_trace_approved_context(
+                    artifact_paths=latest_artifacts,
+                    run_id=run_id,
+                ),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -1542,6 +1607,41 @@ class PhaseFourWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _persist_developer_llm_artifacts(
+        self,
+        *,
+        run_id: str,
+        latest_artifacts: dict[str, str],
+        action: str,
+        version: int,
+        value: DeveloperActResult | DeveloperActLlmError | HarnessError,
+    ) -> dict[str, str]:
+        """Giữ raw output và metadata kể cả khi Developer JSON parse thất bại."""
+
+        if not isinstance(value, (DeveloperActResult, DeveloperActLlmError)):
+            return latest_artifacts
+        result = dict(latest_artifacts)
+        artifact_prefix = "developer_act" if action == "act" else "developer_repair"
+        raw_response = getattr(value, "raw_response", "")
+        if raw_response:
+            result[f"{artifact_prefix}_raw_response"] = write_phase4_developer_raw_response(
+                store=self.store,
+                run_id=run_id,
+                action=action,
+                raw_response=raw_response,
+                version=version,
+            )
+        metadata = getattr(value, "llm_metadata", None)
+        if isinstance(metadata, dict) and metadata:
+            result[f"{artifact_prefix}_llm_metadata"] = write_phase4_developer_llm_metadata(
+                store=self.store,
+                run_id=run_id,
+                action=action,
+                metadata=metadata,
+                version=version,
+            )
+        return result
+
     def _block_qa_error(
         self,
         *,
@@ -1588,6 +1688,7 @@ class PhaseFourWorkflow:
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
         previous_iterations = _int_value(state.get("implementation_repair_iterations"))
+        revalidated_from = str(_dict_value(state.get("last_error")).get("error_code") or "blocked")
         artifact_version = _next_phase4_artifact_version(self.store, run_id)
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
@@ -1626,7 +1727,7 @@ class PhaseFourWorkflow:
                 "target_repo": str(target_info.path),
                 "branch": target_info.current_branch,
                 "repair_iteration": previous_iterations,
-                "revalidated_from": "implementation_repair_limit_exceeded",
+                "revalidated_from": revalidated_from,
                 "developer_work_packet": refreshed_packet_path,
                 **verification_result.to_dict(),
             }
@@ -1648,7 +1749,7 @@ class PhaseFourWorkflow:
                     "status": "blocked",
                     "latest_artifacts": latest_artifacts,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(exc.error_code),
                     "implementation_repair_iterations": previous_iterations,
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bi chan khi revalidate implementation: {exc.message}",
@@ -1682,6 +1783,10 @@ class PhaseFourWorkflow:
             trace_result = self.code_trace_validator.validate(
                 target_path=target_info.path,
                 work_packet=work_packet,
+                approved_context=self._code_trace_approved_context(
+                    artifact_paths=latest_artifacts,
+                    run_id=run_id,
+                ),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -1691,7 +1796,7 @@ class PhaseFourWorkflow:
                 "target_repo": str(target_info.path),
                 "branch": target_info.current_branch,
                 "repair_iteration": previous_iterations,
-                "revalidated_from": "implementation_repair_limit_exceeded",
+                "revalidated_from": revalidated_from,
             }
             trace_path = write_phase4_code_trace_report(
                 store=self.store,
@@ -1707,7 +1812,7 @@ class PhaseFourWorkflow:
                     "status": "blocked",
                     "latest_artifacts": latest_artifacts,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(exc.error_code),
                     "implementation_repair_iterations": previous_iterations,
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bi chan khi Validator revalidate implementation: {exc.message}",
@@ -1807,7 +1912,7 @@ class PhaseFourWorkflow:
             else:
                 error_code = _nonrepairable_code_trace_error_code(trace_result)
                 message = trace_result.summary
-                allowed_actions = ["get_status", "cancel_run"]
+                allowed_actions = _implementation_blocked_actions(error_code)
             quality_reports["implementation_repair"] = {
                 "needed": True,
                 "feedback_artifact": latest_artifacts.get("implementation_repair_feedback"),
@@ -1842,6 +1947,7 @@ class PhaseFourWorkflow:
 
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
+        artifact_version = _next_phase4_artifact_version(self.store, run_id)
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             feedback_path = _required_phase4_artifact(
@@ -1865,7 +1971,6 @@ class PhaseFourWorkflow:
                     ),
                     run_id=run_id,
                 )
-            artifact_version = _next_phase4_artifact_version(self.store, run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
@@ -1888,18 +1993,13 @@ class PhaseFourWorkflow:
                 repair_feedback=repair_feedback,
                 repair_iteration=repair_iteration,
             )
-            if result.raw_response:
-                raw_response_path = write_phase4_developer_raw_response(
-                    store=self.store,
-                    run_id=run_id,
-                    action="repair",
-                    raw_response=result.raw_response,
-                    version=artifact_version,
-                )
-                latest_artifacts = {
-                    **latest_artifacts,
-                    "developer_repair_raw_response": raw_response_path,
-                }
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="repair",
+                version=artifact_version,
+                value=result,
+            )
             applied_files = _apply_developer_changes(
                 result=result,
                 work_packet=work_packet,
@@ -1944,6 +2044,13 @@ class PhaseFourWorkflow:
                 version=artifact_version,
             )
         except HarnessError as exc:
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="repair",
+                version=artifact_version,
+                value=exc,
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1953,7 +2060,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": (
                         ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
-                        if exc.error_code == "implementation_repair_limit_exceeded"
+                        if exc.error_code in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
                         else ["get_status", "cancel_run"]
                     ),
                     "last_error": exc.to_response(),
@@ -1979,7 +2086,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": (
                         ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
-                        if error_code == "implementation_repair_limit_exceeded"
+                        if error_code in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
                         else ["get_status", "cancel_run"]
                     ),
                     "implementation_repair_iterations": repair_iteration,
@@ -1997,6 +2104,10 @@ class PhaseFourWorkflow:
             trace_result = self.code_trace_validator.validate(
                 target_path=target_info.path,
                 work_packet=work_packet,
+                approved_context=self._code_trace_approved_context(
+                    artifact_paths=latest_artifacts,
+                    run_id=run_id,
+                ),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -2022,7 +2133,7 @@ class PhaseFourWorkflow:
                     "status": "blocked",
                     "latest_artifacts": latest_artifacts,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(exc.error_code),
                     "implementation_repair_iterations": repair_iteration,
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bị chặn khi Validator trace lại sau Developer.repair: {exc.message}",
@@ -2136,7 +2247,7 @@ class PhaseFourWorkflow:
                     "latest_artifacts": latest_artifacts,
                     "quality_reports": quality_reports,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "allowed_next_actions": _implementation_blocked_actions(error_code),
                     "implementation_repair_iterations": repair_iteration,
                     "last_error": HarnessError(error_code, message, run_id=run_id).to_response(),
                     "summary_for_user": (
@@ -3051,6 +3162,9 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
         if not isinstance(item, dict):
             return False
         link_type = str(item.get("type") or "").strip()
+        owner = str(item.get("owner") or "developer").strip().lower()
+        if owner != "developer":
+            return False
         if link_type not in repairable_types:
             return False
     return True
@@ -3064,9 +3178,18 @@ def _nonrepairable_code_trace_error_code(trace_result: object) -> str:
         if not isinstance(item, dict):
             continue
         link_type = str(item.get("type") or "").strip()
+        owner = str(item.get("owner") or "").strip().lower()
+        if link_type == "open_requirement_question" or owner == "human":
+            return "requirement_decision_needed"
         if link_type in {"trace_mapping_issue", "evidence_incomplete"}:
             return "validator_evidence_or_mapping_issue"
     return "implementation_traceability_failed"
+
+
+def _implementation_blocked_actions(error_code: str) -> list[str]:
+    if error_code in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES:
+        return list(ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS)
+    return ["get_status", "cancel_run"]
 
 
 def _implementation_repair_feedback(

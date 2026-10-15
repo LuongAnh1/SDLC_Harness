@@ -618,6 +618,30 @@ def write_phase4_developer_raw_response(
     return store.relative(path)
 
 
+def write_phase4_developer_llm_metadata(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    action: str,
+    metadata: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Lưu finish_reason/usage của từng lần gọi Developer structured output."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    safe_action = action.strip().replace(" ", "_") or "developer"
+    path = artifact_dir / f"developer_{safe_action}_llm_metadata_{suffix}.json"
+    payload = {
+        **metadata,
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"developer_{safe_action}_llm_metadata_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def _with_heading(title: str, content: str) -> str:
     """Đảm bảo artifact có heading ổn định dù LLM trả text trần."""
 

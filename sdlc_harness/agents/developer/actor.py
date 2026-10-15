@@ -17,6 +17,21 @@ from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 
 
+class DeveloperActLlmError(HarnessError):
+    """Lỗi structured output có giữ raw response và metadata để debug."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_response: str = "",
+        llm_metadata: dict[str, object] | None = None,
+    ):
+        super().__init__("developer_act_failed", message)
+        self.raw_response = raw_response
+        self.llm_metadata = llm_metadata or {}
+
+
 @dataclass(frozen=True)
 class DeveloperActResult:
     """Kết quả Developer.act đã parse được từ LLM/fake mode."""
@@ -24,6 +39,7 @@ class DeveloperActResult:
     summary: str
     files: list[dict[str, object]]
     raw_response: str = ""
+    llm_metadata: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -43,18 +59,19 @@ class DeveloperActAgent:
 
         if not self.llm_client:
             return _deterministic_developer_act(work_packet)
-        raw = self.llm_client.complete(
+        payload, raw, llm_metadata = _complete_developer_json(
+            llm_client=self.llm_client,
             system=(
                 "You are Developer.act in a TraceDev-style SDLC harness. "
                 "Return JSON only and do not include prose outside JSON."
             ),
             prompt=_developer_act_prompt(work_packet),
         )
-        payload = _parse_developer_act_payload(raw)
         return DeveloperActResult(
             summary=str(payload.get("summary") or "").strip(),
             files=_dict_items(payload.get("files")),
             raw_response=raw,
+            llm_metadata=llm_metadata,
         )
 
     def repair(
@@ -72,7 +89,8 @@ class DeveloperActAgent:
                 summary=f"Fake Developer.repair iteration {repair_iteration} regenerated allowed files.",
                 files=result.files,
             )
-        raw = self.llm_client.complete(
+        payload, raw, llm_metadata = _complete_developer_json(
+            llm_client=self.llm_client,
             system=(
                 "You are Developer.update in a TraceDev-style SDLC harness. "
                 "Repair only code/test files and return JSON only."
@@ -83,11 +101,11 @@ class DeveloperActAgent:
                 repair_iteration=repair_iteration,
             ),
         )
-        payload = _parse_developer_act_payload(raw)
         return DeveloperActResult(
             summary=str(payload.get("summary") or "").strip(),
             files=_dict_items(payload.get("files")),
             raw_response=raw,
+            llm_metadata=llm_metadata,
         )
 
 
@@ -206,6 +224,92 @@ def _parse_developer_act_payload(raw: str) -> dict[str, object]:
         "summary": str(parsed.get("summary") or "").strip(),
         "files": normalized_files,
     }
+
+
+def _complete_developer_json(
+    *,
+    llm_client: Any,
+    system: str,
+    prompt: str,
+) -> tuple[dict[str, object], str, dict[str, object]]:
+    """Yêu cầu JSON mode và retry một lần khi output bị cắt hoặc không parse được."""
+
+    settings = getattr(llm_client, "settings", None)
+    max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
+    completion_method = getattr(llm_client, "complete_with_metadata", None)
+    attempts: list[dict[str, object]] = []
+    raw_attempts: list[str] = []
+    attempt_prompt = prompt
+    last_error = "Developer.act LLM did not return valid JSON."
+
+    for attempt in range(1, 3):
+        if callable(completion_method):
+            completion = completion_method(
+                system=system,
+                prompt=attempt_prompt,
+                json_mode=True,
+                max_tokens=max_tokens,
+            )
+            raw = str(getattr(completion, "content", ""))
+            finish_reason = str(getattr(completion, "finish_reason", "") or "")
+            usage_value = getattr(completion, "usage", {})
+            usage = usage_value if isinstance(usage_value, dict) else {}
+            json_mode_requested = True
+        else:
+            raw = str(llm_client.complete(system=system, prompt=attempt_prompt))
+            finish_reason = ""
+            usage = {}
+            json_mode_requested = False
+
+        raw_attempts.append(raw)
+        attempt_metadata: dict[str, object] = {
+            "attempt": attempt,
+            "finish_reason": finish_reason,
+            "usage": usage,
+            "json_mode_requested": json_mode_requested,
+            "max_tokens": max_tokens,
+        }
+        if finish_reason == "length":
+            last_error = "Developer.act LLM output was truncated (finish_reason=length)."
+            attempt_metadata["parse_status"] = "truncated"
+        else:
+            try:
+                payload = _parse_developer_act_payload(raw)
+            except HarnessError as exc:
+                last_error = exc.message
+                attempt_metadata["parse_status"] = "invalid"
+                attempt_metadata["parse_error"] = exc.message
+            else:
+                attempt_metadata["parse_status"] = "valid"
+                attempts.append(attempt_metadata)
+                return payload, raw, {
+                    "json_mode_requested": json_mode_requested,
+                    "max_tokens": max_tokens,
+                    "selected_attempt": attempt,
+                    "attempts": attempts,
+                }
+        attempts.append(attempt_metadata)
+        attempt_prompt = (
+            prompt
+            + "\n\nFORMAT RECOVERY RETRY\n"
+            + f"The previous attempt was rejected: {last_error}\n"
+            + "Return one complete, parseable JSON object only. Escape every newline and quote inside file content. "
+            + "Include only files required for the approved work or repair feedback; omit unchanged files."
+        )
+
+    raw_response = "\n\n".join(
+        f"=== attempt {index} ===\n{raw}" for index, raw in enumerate(raw_attempts, start=1)
+    )
+    raise DeveloperActLlmError(
+        f"{last_error} Structured output failed after {len(attempts)} attempts.",
+        raw_response=raw_response,
+        llm_metadata={
+            "json_mode_requested": callable(completion_method),
+            "max_tokens": max_tokens,
+            "selected_attempt": None,
+            "attempts": attempts,
+        },
+    )
 
 
 def _deterministic_developer_act(work_packet: dict[str, object]) -> DeveloperActResult:

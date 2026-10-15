@@ -23,6 +23,7 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_timeout_seconds: int
+    llm_structured_max_tokens: int
     design_repair_limit: int
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
@@ -104,6 +105,7 @@ def load_settings(
         "SDLC_LLM_BASE_URL",
         "SDLC_LLM_MODEL",
         "SDLC_LLM_TIMEOUT_SECONDS",
+        "SDLC_LLM_STRUCTURED_MAX_TOKENS",
         "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
@@ -152,6 +154,11 @@ def load_settings(
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
         llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-chat"),
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
+        llm_structured_max_tokens=_int_value(
+            merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"),
+            default=8192,
+            minimum=1024,
+        ),
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_plan_repair_limit=_int_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"),

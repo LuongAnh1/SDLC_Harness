@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import time
@@ -23,6 +24,11 @@ DEFAULT_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
 JAVA_HOME_ENV_KEYS = ("SDLC_JAVA_HOME", "JAVA_HOME")
+FATAL_OUTPUT_MARKERS = (
+    "could not find or load main class",
+    "classnotfoundexception",
+    "invalidpathexception",
+)
 
 
 @dataclass(frozen=True)
@@ -312,6 +318,10 @@ def _classify_result(*, exit_code: int, stdout: str, stderr: str) -> tuple[str, 
     combined = f"{stdout}\n{stderr}".lower()
     if exit_code != 0:
         return "failed", f"Test command exited with code {exit_code}."
+    if re.search(r"(?im)^\s*(?:javac:\s*)?error:", combined) or any(
+        marker in combined for marker in FATAL_OUTPUT_MARKERS
+    ):
+        return "failed", "Test command output contains a fatal compile/runtime error despite exit code 0."
     if "skipped" in combined or "javac not found" in combined or "compiler 'javac' was not found" in combined:
         return "skipped", "Test command reported skipped verification."
     return "passed", "Test command completed successfully."

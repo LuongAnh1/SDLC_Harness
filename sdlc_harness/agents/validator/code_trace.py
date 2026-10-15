@@ -23,6 +23,19 @@ from ...storage.runtime import utc_now_iso
 MAX_SNIPPET_TOTAL_CHARS = 60000
 MAX_SNIPPET_FILE_CHARS = 20000
 NON_REPAIRABLE_LLM_LINK_TYPES = {"trace_mapping_issue", "evidence_incomplete"}
+NON_BLOCKING_MESSAGE_MARKERS = (
+    "no code change required",
+    "which it does",
+    "already covered",
+    "already satisfied",
+)
+
+POLICY_ASSERTION_TERMS = (
+    "case-sensitive",
+    "case sensitive",
+    "case-insensitive",
+    "case insensitive",
+)
 
 
 @dataclass(frozen=True)
@@ -69,7 +82,14 @@ class CodeTraceValidator:
     def __init__(self, llm_client: LlmClient):
         self.llm_client = llm_client
 
-    def validate(self, *, target_path: Path, work_packet: dict[str, object]) -> CodeTraceResult:
+    def validate(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        approved_context: dict[str, object] | None = None,
+    ) -> CodeTraceResult:
+        approved_context = approved_context or {}
         mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
         test_paths = _test_paths(work_packet)
         existing_test_paths = [path for path in test_paths if (target_path / path).is_file()]
@@ -149,19 +169,33 @@ class CodeTraceValidator:
             static_missing_links=missing_links,
             test_paths=existing_test_paths,
         )
-        llm_missing_links = _llm_missing_links(llm_review)
+        llm_missing_links, llm_observations = _normalize_llm_findings(
+            llm_review,
+            approved_context=approved_context,
+        )
+        reported_ok = llm_review.get("ok") is True
+        llm_review["reported_ok"] = reported_ok
+        llm_review["ok"] = not llm_missing_links
+        llm_review["missing_links"] = llm_missing_links
+        llm_review["observations"] = llm_observations
+        llm_review["normalization"] = {
+            "blocking_count": len(llm_missing_links),
+            "observation_count": len(llm_observations),
+            "python_recomputed_ok": True,
+        }
         missing_links.extend(llm_missing_links)
-        llm_ok = llm_review.get("ok") is True
-        ok = static_ok and llm_ok and not llm_missing_links
+        ok = static_ok and not llm_missing_links
         stats = {
             "mapping_count": len(trace_mappings),
             "missing_count": len(missing_links),
             "test_file_count": len(existing_test_paths),
+            "observation_count": len(llm_observations),
         }
         if ok:
             summary = (
                 f"Validator code trace V1 passed with static evidence, LLM graph review, "
-                f"{len(trace_mappings)} mapping(s), and {len(existing_test_paths)} test file(s)."
+                f"{len(trace_mappings)} mapping(s), {len(existing_test_paths)} test file(s), "
+                f"and {len(llm_observations)} non-blocking observation(s)."
             )
         else:
             llm_summary = str(llm_review.get("summary") or "").strip()
@@ -196,7 +230,7 @@ class CodeTraceValidator:
             code_snippets=code_snippets,
         )
         try:
-            raw = self.llm_client.complete(
+            review, llm_metadata = self._complete_review_json(
                 system=(
                     "You are a strict software traceability validator. "
                     "Return only valid JSON."
@@ -208,28 +242,86 @@ class CodeTraceValidator:
                 "implementation_traceability_llm_failed",
                 f"LLM code trace review failed: {exc.message}",
             ) from exc
-        try:
-            review = parse_first_json_object(
-                raw,
-                expected_keys={"ok", "summary", "missing_links", "graph_edges", "risks"},
-            )
-        except json.JSONDecodeError as exc:
-            raise HarnessError(
-                "implementation_traceability_llm_failed",
-                "LLM code trace review did not return a valid JSON object.",
-            ) from exc
-        if not isinstance(review, dict):
-            raise HarnessError(
-                "implementation_traceability_llm_failed",
-                "LLM code trace review JSON must be an object.",
-            )
         review.setdefault("ok", False)
         review.setdefault("summary", "")
         review.setdefault("missing_links", [])
         review.setdefault("graph_edges", [])
         review.setdefault("risks", [])
+        review["llm_metadata"] = llm_metadata
         review["review_context"] = _review_context(review.get("review_context"), code_snippets=code_snippets)
         return review
+
+    def _complete_review_json(self, *, system: str, prompt: str) -> tuple[dict[str, object], dict[str, object]]:
+        """Dùng JSON mode và retry một lần nếu Validator trả payload không parse được."""
+
+        settings = getattr(self.llm_client, "settings", None)
+        max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
+        completion_method = getattr(self.llm_client, "complete_with_metadata", None)
+        attempts: list[dict[str, object]] = []
+        attempt_prompt = prompt
+        last_error = "LLM code trace review did not return a valid JSON object."
+
+        for attempt in range(1, 3):
+            if callable(completion_method):
+                completion = completion_method(
+                    system=system,
+                    prompt=attempt_prompt,
+                    json_mode=True,
+                    max_tokens=max_tokens,
+                )
+                raw = str(getattr(completion, "content", ""))
+                finish_reason = str(getattr(completion, "finish_reason", "") or "")
+                usage_value = getattr(completion, "usage", {})
+                usage = usage_value if isinstance(usage_value, dict) else {}
+                json_mode_requested = True
+            else:
+                raw = str(self.llm_client.complete(system=system, prompt=attempt_prompt))
+                finish_reason = ""
+                usage = {}
+                json_mode_requested = False
+
+            metadata: dict[str, object] = {
+                "attempt": attempt,
+                "finish_reason": finish_reason,
+                "usage": usage,
+                "json_mode_requested": json_mode_requested,
+                "max_tokens": max_tokens,
+            }
+            if finish_reason == "length":
+                last_error = "LLM code trace review output was truncated (finish_reason=length)."
+                metadata["parse_status"] = "truncated"
+            else:
+                try:
+                    review = parse_first_json_object(
+                        raw,
+                        expected_keys={"ok", "summary", "missing_links", "graph_edges", "risks"},
+                    )
+                except json.JSONDecodeError:
+                    metadata["parse_status"] = "invalid"
+                else:
+                    if isinstance(review, dict):
+                        metadata["parse_status"] = "valid"
+                        attempts.append(metadata)
+                        return review, {
+                            "json_mode_requested": json_mode_requested,
+                            "max_tokens": max_tokens,
+                            "selected_attempt": attempt,
+                            "attempts": attempts,
+                        }
+                    metadata["parse_status"] = "invalid"
+                    last_error = "LLM code trace review JSON must be an object."
+            attempts.append(metadata)
+            attempt_prompt = (
+                prompt
+                + "\n\nFORMAT RECOVERY RETRY\n"
+                + f"The previous response was rejected: {last_error}\n"
+                + "Return one complete JSON object that follows expected_json_schema exactly."
+            )
+
+        raise HarnessError(
+            "implementation_traceability_llm_failed",
+            f"{last_error} Structured output failed after {len(attempts)} attempts.",
+        )
 
 
 def _dict_of_lists(value: object) -> dict[str, list[dict[str, Any]]]:
@@ -326,13 +418,19 @@ def _requirement_ref(item: dict[str, object]) -> str:
     return "approved_requirement_packet"
 
 
-def _llm_missing_links(review: dict[str, object]) -> list[dict[str, object]]:
-    """Chuẩn hóa missing links do LLM phát hiện thành cùng schema với static trace."""
+def _normalize_llm_findings(
+    review: dict[str, object],
+    *,
+    approved_context: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Chỉ giữ finding blocking khi có action và trích dẫn approved evidence hợp lệ."""
 
     value = review.get("missing_links")
     if not isinstance(value, list):
-        return []
-    normalized: list[dict[str, object]] = []
+        return [], []
+    approved_text = _approved_grounding_text(approved_context)
+    blocking: list[dict[str, object]] = []
+    observations: list[dict[str, object]] = []
     for item in value:
         if isinstance(item, dict):
             original_type = str(item.get("type") or "").strip()
@@ -342,10 +440,90 @@ def _llm_missing_links(review: dict[str, object]) -> list[dict[str, object]]:
             )
             if original_type and normalized_item["type"] != original_type:
                 normalized_item["llm_type"] = original_type
-            normalized.append(normalized_item)
+            message = str(item.get("message") or "").strip()
+            message_lower = message.casefold()
+            owner = str(item.get("owner") or "developer").strip().lower()
+            action = str(item.get("recommended_action") or "developer_repair").strip().lower()
+            evidence_ref = str(item.get("evidence_ref") or "").strip()
+            evidence_quote = str(item.get("evidence_quote") or "").strip()
+            explicit_blocking = item.get("blocking") is True
+            explicitly_non_blocking = item.get("blocking") is False
+            no_action = owner == "none" or action == "none"
+            self_resolved = any(marker in message_lower for marker in NON_BLOCKING_MESSAGE_MARKERS)
+            grounded = bool(evidence_ref and evidence_quote and _quote_is_grounded(evidence_quote, approved_text))
+
+            normalized_item.update(
+                {
+                    "blocking": explicit_blocking,
+                    "owner": owner,
+                    "recommended_action": action,
+                    "evidence_ref": evidence_ref,
+                    "evidence_quote": evidence_quote,
+                }
+            )
+            if explicitly_non_blocking or no_action or self_resolved:
+                normalized_item["blocking"] = False
+                normalized_item["normalization_reason"] = "model_marked_non_blocking_or_self_resolved"
+                observations.append(normalized_item)
+            elif not explicit_blocking:
+                normalized_item["blocking"] = False
+                normalized_item["normalization_reason"] = "blocking_flag_missing"
+                observations.append(normalized_item)
+            elif not grounded:
+                normalized_item["blocking"] = False
+                normalized_item["normalization_reason"] = "approved_evidence_missing_or_unsupported"
+                observations.append(normalized_item)
+            elif _contains_unsupported_policy_claim(message, approved_text):
+                normalized_item["blocking"] = False
+                normalized_item["normalization_reason"] = "policy_term_absent_from_approved_artifacts"
+                observations.append(normalized_item)
+            elif owner == "human" or action == "human_decision":
+                normalized_item["type"] = "open_requirement_question"
+                blocking.append(normalized_item)
+            else:
+                blocking.append(normalized_item)
         elif str(item).strip():
-            normalized.append({"type": "llm_semantic_gap", "message": str(item).strip()})
-    return normalized
+            observations.append(
+                {
+                    "type": "llm_observation",
+                    "blocking": False,
+                    "owner": "none",
+                    "recommended_action": "none",
+                    "message": str(item).strip(),
+                    "normalization_reason": "unstructured_finding",
+                }
+            )
+    return blocking, observations
+
+
+def _approved_grounding_text(approved_context: dict[str, object]) -> str:
+    parts: list[str] = []
+    for key in ("requirement_packet", "design_artifact", "implementation_plan"):
+        value = approved_context.get(key)
+        if isinstance(value, dict):
+            content = str(value.get("content") or "").strip()
+        else:
+            content = str(value or "").strip()
+        if content:
+            parts.append(content)
+    return _normalized_evidence_text("\n".join(parts))
+
+
+def _quote_is_grounded(quote: str, approved_text: str) -> bool:
+    normalized_quote = _normalized_evidence_text(quote)
+    return bool(normalized_quote and approved_text and normalized_quote in approved_text)
+
+
+def _contains_unsupported_policy_claim(message: str, approved_text: str) -> bool:
+    normalized_message = _normalized_evidence_text(message)
+    return any(
+        term in normalized_message and term not in approved_text
+        for term in POLICY_ASSERTION_TERMS
+    )
+
+
+def _normalized_evidence_text(value: str) -> str:
+    return " ".join(value.casefold().split())
 
 
 def _code_trace_review_prompt(
@@ -384,10 +562,15 @@ def _code_trace_review_prompt(
             "missing_links": [
                 {
                     "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace | trace_mapping_issue | evidence_incomplete",
+                    "blocking": "boolean; true only when code/test/mapping must change before pass",
+                    "owner": "developer | validator | human | none",
+                    "recommended_action": "developer_repair | validator_mapping_fix | human_decision | none",
                     "message": "short string",
                     "requirement_ref": "optional string",
                     "design_element_id": "optional string",
                     "code_ref": "optional string",
+                    "evidence_ref": "approved artifact and section/id",
+                    "evidence_quote": "exact wording already present in this review input",
                 }
             ],
             "risks": ["short string"],
@@ -408,6 +591,12 @@ def _code_trace_review_prompt(
             "Do not require literal methods named true, false, displaySuccessMessage, displayErrorMessage, or displayCancellationMessage.",
             "For mappings with trace_policy=boolean_response or semantic_side_effect, inspect the surrounding branch behavior and tests.",
             "If the only problem is a weak design mapping, return type=trace_mapping_issue instead of asking Developer to change code.",
+            "Python recomputes pass/fail. Set blocking=true only for an actionable unresolved finding.",
+            "Every blocking finding must identify evidence_ref and quote exact wording already visible in this review input.",
+            "Do not infer case-sensitivity, normalization, trimming, or another policy that is absent from this review input.",
+            "Open Questions are unresolved context, not approved constraints. Use owner=human and recommended_action=human_decision when a decision is required.",
+            "If evidence and tests already satisfy a mapping, omit it from missing_links or set blocking=false, owner=none, recommended_action=none.",
+            "Do not turn a prior implementation choice into an approved requirement.",
         ],
     }
     return (

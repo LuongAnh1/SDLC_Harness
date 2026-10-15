@@ -523,3 +523,29 @@ Live DeepSeek run `run_live_qa_repair_20261014_03` trên runtime/target repo cop
 Slice 4.8B đã mở `code_review_ready`, và Slice 4.9A-D đã hoàn tất workspace
 isolation, adoption, cleanup cùng Code Review approval. Phase 5 request-change
 vẫn chưa mở.
+
+## Validator Grounding Và Finding Normalization - 2026-10-15
+
+Sau live run `run_20261015_140851_8b28c346`, Validator code trace được siết lại
+để tránh feedback drift giữa các vòng repair:
+
+- Requirement packet, design artifact và implementation plan đã duyệt chỉ được
+  đọc cục bộ bởi Python để kiểm tra bằng chứng; nội dung đầy đủ không được thêm
+  vào request gửi ra LLM.
+- Mỗi finding LLM phải khai báo `blocking`, `owner`, `recommended_action`,
+  `evidence_ref` và `evidence_quote`.
+- Python tính lại kết quả pass/block. Finding thiếu cờ blocking, không có action,
+  tự xác nhận đã thỏa, hoặc không có câu dẫn chứng trong artifact đã duyệt sẽ
+  được giữ ở `observations` và không chặn workflow.
+- Một policy như case sensitivity chỉ được chặn khi policy đó có trong artifact
+  đã duyệt. Policy nằm trong Open Questions không được biến thành constraint.
+- Finding do Developer sửa vẫn đi vào repair loop. Câu hỏi cần human quyết định
+  dùng `requirement_decision_needed`; lỗi mapping/evidence của Validator dùng
+  `validator_evidence_or_mapping_issue` và có thể chạy
+  `revalidate-implementation` sau khi logic Validator được sửa.
+- Validator structured output dùng JSON mode, lưu metadata attempt/finish reason
+  và retry một lần khi payload bị cắt hoặc không parse được.
+
+Thay đổi này sửa lỗi E2E-V1-005: Validator từng yêu cầu exact match phân biệt hoa
+thường dù requirement ghi tiêu chí duplicate là câu hỏi còn mở, đồng thời từng
+đếm một finding “No code change required” như missing link blocking.

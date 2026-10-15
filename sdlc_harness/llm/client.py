@@ -7,12 +7,22 @@ OpenAI.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 import json
 import urllib.error
 import urllib.request
 
 from ..core.config import Settings
 from ..core.errors import HarnessError
+
+
+@dataclass(frozen=True)
+class LlmCompletion:
+    """Nội dung cùng metadata cần để chẩn đoán output bị cắt hoặc sai schema."""
+
+    content: str
+    finish_reason: str = ""
+    usage: dict[str, object] = field(default_factory=dict)
 
 
 class LlmClient:
@@ -24,16 +34,40 @@ class LlmClient:
     def complete(self, *, system: str, prompt: str) -> str:
         """Sinh text từ LLM hoặc fake output dùng cho unit/smoke test."""
 
+        return self.complete_with_metadata(system=system, prompt=prompt).content
+
+    def complete_with_metadata(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> LlmCompletion:
+        """Sinh completion và giữ finish_reason/usage cho structured-output flow."""
+
         if self.settings.llm_mode == "fake":
-            return fake_completion(prompt)
+            return LlmCompletion(content=fake_completion(prompt), finish_reason="fake")
         if self.settings.llm_mode in {"deepseek", "openai_compatible"}:
-            return self._call_chat_completions(system=system, prompt=prompt)
+            return self._call_chat_completions(
+                system=system,
+                prompt=prompt,
+                json_mode=json_mode,
+                max_tokens=max_tokens,
+            )
         raise HarnessError(
             "requirement_refiner_failed",
             f"Unsupported LLM mode: {self.settings.llm_mode}",
         )
 
-    def _call_chat_completions(self, *, system: str, prompt: str) -> str:
+    def _call_chat_completions(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> LlmCompletion:
         """Gọi API Chat Completions tương thích OpenAI bằng stdlib."""
 
         if not self.settings.llm_api_key:
@@ -50,6 +84,10 @@ class LlmClient:
             ],
             "temperature": 0.1,
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         request = urllib.request.Request(
             url,
             data=json.dumps(payload).encode("utf-8"),
@@ -76,13 +114,21 @@ class LlmClient:
 
         try:
             data = json.loads(raw)
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+            choice = data["choices"][0]
+            content = choice["message"]["content"]
+            finish_reason = str(choice.get("finish_reason") or "")
+            usage_value = data.get("usage")
+            usage = usage_value if isinstance(usage_value, dict) else {}
+        except (AttributeError, KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
             raise HarnessError(
                 "requirement_refiner_failed",
                 "LLM response did not match Chat Completions schema.",
             ) from exc
-        return strip_code_fence(str(content)).strip()
+        return LlmCompletion(
+            content=strip_code_fence(str(content)).strip(),
+            finish_reason=finish_reason,
+            usage=usage,
+        )
 
 
 def strip_code_fence(text: str) -> str:

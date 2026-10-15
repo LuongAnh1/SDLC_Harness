@@ -72,8 +72,12 @@ Chạy smoke test không tốn API bằng fake LLM:
 
 ```bash
 python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC1 --requested-by manual --llm-mode fake
+python -m sdlc_harness.cli start-or-get-run --dataset eTour --use-case UC2 --requested-by manual --llm-mode fake
 python -m sdlc_harness.cli get-status --run-id <run_id> --llm-mode fake
 ```
+
+Fixture UC2 là **Insert Cultural Heritage**, lấy từ bộ eTour của TraceDev để chạy
+một source mới độc lập với run UC1/SDLC-1 trước đó.
 
 Khi muốn gọi DeepSeek thật, copy `.env.example` thành `.env`, điền `SDLC_LLM_API_KEY`, đặt `SDLC_LLM_MODE=deepseek`, rồi bỏ `--llm-mode fake` hoặc truyền `--llm-mode deepseek`.
 

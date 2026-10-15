@@ -239,3 +239,10 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 > sang Ready for review, vẫn OPEN/chưa merge; Jira comment `10104` và Confluence
 > page `2129921` đã nhận trạng thái sau approval. Regression gần nhất: SDLC
 > Harness `192 passed`, Niko Agent `299 passed`.
+>
+> Cập nhật E2E-V1-005 ngày 2026-10-15: Validator code trace đã được sửa để
+> phân loại rõ blocking finding và observation, đối chiếu evidence cục bộ với
+> requirement/design/plan đã duyệt, không gửi thêm toàn bộ artifact ra LLM, và
+> không cho phép feedback repair trở thành requirement mới. Các run bị block bởi
+> `validator_evidence_or_mapping_issue` hoặc lỗi structured output có thể chạy
+> `revalidate-implementation` sau khi logic Validator được sửa.
