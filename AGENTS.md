@@ -139,12 +139,13 @@ Niko không trực tiếp kéo use case/Jira/dataset cho workflow SDLC. Niko g�
 ## Niko Integration Boundary
 
 Niko_Agent là conversational/control harness. SDLC_Harness là nơi sở hữu pipeline
-SDLC Phase 1/2/3: source intake từ fixture/Jira, Requirement Refiner, Designer,
-Validator, implementation planning checkpoint, runtime state, artifact và tool
-sync. Phase 3 chỉ sinh/kiểm `implementation_plan_v1` và dừng ở
-`waiting_implementation_plan_review`; Phase 4 mới tạo code/test/Draft PR. Khi
-Niko gọi repo này, contract phải là CLI JSON ổn định; không in log tự do ra
-stdout.
+SDLC: source intake từ fixture/Jira, Requirement Refiner, Designer, Validator,
+Developer, QA/Tester, runtime state, artifact và tool sync. Phase 3 chỉ sinh/kiểm
+`implementation_plan_v1` và dừng ở `waiting_implementation_plan_review`. Phase 4
+hiện đã triển khai code/test, Validator code trace và QA repair loop tới
+`qa_tested`; commit/Draft PR, sync code-review checkpoint và
+`code_review_ready` là lát kế tiếp. Khi Niko gọi repo này, contract phải là CLI
+JSON ổn định; không in log tự do ra stdout.
 
 Không chuyển logic đọc Jira, ghi artifact, sync Confluence/Jira hoặc validate
 requirement packet sang Niko. Nếu cần trả thêm dữ liệu cho Telegram, mở rộng

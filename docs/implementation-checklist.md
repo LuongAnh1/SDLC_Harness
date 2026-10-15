@@ -147,9 +147,9 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
 - [ ] Nếu compile/unit fail trước khi có trace feedback, feedback quay về Developer
   thay vì block ngay.
 - [ ] Nếu approved design mâu thuẫn/không triển khai được, block hoặc reopen design checkpoint có human approval; không tự sửa design trong Phase 4.
-- [ ] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace
+- [x] QA/Tester Agent kiểm acceptance/system behavior từ use case sau khi unit/trace
   baseline đã pass ổn định sau repair loop nếu có.
-- [ ] Sinh `qa_test_report_v1.md` trước khi mở checkpoint code review.
+- [x] Sinh `qa_test_report_v1.md` trước khi mở checkpoint code review.
 - [ ] Tạo Draft PR thật trên GitHub.
 - [ ] Sync PR/test/trace summary về Jira và Confluence.
 - [ ] State chuyển sang `code_review_ready` chỉ sau khi unit/trace/QA pass, Draft PR được tạo và sync Phase 4 xong.
@@ -192,12 +192,13 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 > `waiting_implementation_plan_review`, artifact cuối `implementation_plan_v4`,
 > sync Jira/Confluence `synced`.
 >
-> Cập nhật 2026-10-14: Phase 4 hiện đã chạy tới `implementation_traced`: duyệt
+> Cập nhật 2026-10-14: Phase 4 hiện đã chạy tới `qa_tested`: duyệt
 > implementation plan thành DeveloperWorkPacket, tạo branch target repo,
 > Developer.act sinh/apply code, Verification Runner pass compile/unit test,
 > Validator code trace hybrid rule + LLM, Developer.repair loop, refresh packet
 > trước mỗi repair và `revalidate-implementation` cho run từng bị block vì repair
-> limit. Các mục còn lại trước khi khóa Phase 4 là compile/unit feedback quay về
-> Developer khi fail sớm, nhánh block/reopen design khi design nền sai, QA/Tester
-> Agent, `qa_test_report_v1.md`, commit/Draft PR thật, sync Phase 4 và
-> `code_review_ready`.
+> limit. QA/Tester đã sinh và execute acceptance test thật; live DeepSeek đã xác
+> nhận vòng QA fail -> Developer repair -> Runner -> Validator -> QA pass. Các mục
+> còn lại trước khi khóa Phase 4 là compile/unit feedback quay về Developer khi
+> fail sớm, nhánh block/reopen design khi design nền sai, QA `skipped` hardening,
+> commit/Draft PR thật, sync Phase 4 và `code_review_ready`.

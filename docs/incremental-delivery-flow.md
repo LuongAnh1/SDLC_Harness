@@ -89,7 +89,11 @@ Output:
   test_report_v{n}
   requirement_design_code_trace_v{n}
   implementation_repair_feedback_v{n} nếu cần
-  status=implementation_traced khi compile/unit + trace pass
+  qa_generated_tests_v{n}
+  qa_test_execution_v{n}
+  qa_test_report_v{n}
+  qa_repair_feedback_v{n} nếu cần
+  status=qa_tested khi compile/unit + trace + QA pass
 ```
 
 Slice này dùng target test repo GitHub tách khỏi `SDLC_Harness`. Jira vẫn là
@@ -97,14 +101,15 @@ issue nguồn nên không tạo GitHub Issue mới. GitHub dùng cho branch, com
 Draft PR, code review và test/CI signal nếu có.
 
 Trạng thái hiện tại của Slice 4 đã có code change thật, branch thật, Verification
-Runner, Validator code trace hybrid rule + LLM, Developer repair loop và lệnh
-`revalidate-implementation` cho run từng bị block vì repair limit. Lát này mới
-khóa tới `implementation_traced`.
+Runner, Validator code trace hybrid rule + LLM, Developer repair loop, lệnh
+`revalidate-implementation`, QA-generated acceptance test và vòng QA repair lớn.
+Live DeepSeek đã chứng minh lỗi acceptance được đưa về Developer, sau đó chạy lại
+Runner -> Validator -> QA và hội tụ tới `qa_tested`.
 
-Điều kiện cuối của Phase 4 vẫn chưa xong: QA/Tester Agent, commit, Draft PR thật,
-sync PR/test/trace summary về Jira/Confluence và `status=code_review_ready`. Các
-bước đó phải được triển khai thành lát riêng, không ghi đè vào kết quả
-`implementation_traced`.
+Điều kiện cuối của Phase 4 vẫn chưa xong: commit target branch, Draft PR thật,
+sync PR/test/trace/QA summary về Jira/Confluence và
+`status=code_review_ready`. Các bước đó phải được triển khai thành lát riêng,
+không ghi đè vào kết quả `qa_tested`.
 
 ## Slice 5 - Sửa Tại Checkpoint
 

@@ -110,7 +110,10 @@ Niko -> continue_run(run_id)
 Harness -> Developer.act -> Verification Runner -> Validator code trace
 Harness -> nếu trace thiếu link code/test: Developer.repair -> revalidate trong giới hạn cấu hình
 Harness -> implementation_traced khi compile/unit + trace pass
-Niko -> báo kết quả code/test/trace, chưa báo PR nếu QA/PR chưa mở
+Harness -> QA sinh/chạy acceptance test
+Harness -> nếu QA fail: Developer.repair -> Runner -> Validator -> QA trong giới hạn cấu hình
+Harness -> qa_tested khi acceptance/system behavior pass
+Niko -> báo kết quả code/test/trace/QA, chưa báo PR nếu GitHub sync chưa chạy
 ```
 
 Trong Phase 3, `implementation_plan_v{n}` có thể tăng version nếu Validator hybrid
@@ -118,11 +121,12 @@ phát hiện semantic gap và `Developer.repair_plan` còn lượt sửa theo
 `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`. Chỉ version pass rule + LLM review mới
 được sync lên Jira/Confluence.
 
-Trong Phase 4 hiện tại, harness đã chạy được tới `implementation_traced`: tạo
-branch, sinh/apply code thật, chạy Verification Runner, Validator code trace
-hybrid rule + LLM, và repair/revalidate khi code/test còn thiếu link. QA/Tester
-Agent, commit, Draft PR và sync Phase 4 vẫn là các lát sau; không coi
-`implementation_traced` là `code_review_ready`.
+Trong Phase 4 hiện tại, harness đã chạy được tới `qa_tested`: tạo branch,
+sinh/apply code thật, chạy Verification Runner, Validator code trace hybrid rule
++ LLM, repair/revalidate khi code/test còn thiếu link, rồi để QA sinh và execute
+acceptance test. Nếu QA fail vì behavior, vòng lớn quay lại Developer -> Runner ->
+Validator -> QA. Commit, Draft PR và sync code-review checkpoint vẫn là lát sau;
+không coi `implementation_traced` hoặc `qa_tested` là `code_review_ready`.
 
 ## Tool Plane
 

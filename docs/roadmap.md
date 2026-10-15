@@ -152,9 +152,14 @@ Kết quả mong muốn:
 - Có Developer repair loop cho trace fail do code/test thiếu trước khi QA/Tester chạy;
   mỗi vòng repair refresh `developer_work_packet_v{n}`, ghi artifact v2/v3, chạy
   lại Verification Runner rồi Validator.
-- Sau lát hiện tại, state có thể đạt `implementation_traced` khi compile/unit + trace pass.
-- Chưa có `qa_test_report_v1.md`, `tool_sync_report_v4.json`, commit/Draft PR thật hoặc
-  Niko báo PR link cho đến khi các lát QA/PR/sync Phase 4 được triển khai.
+- Có QA/Tester Agent sinh acceptance/system test, bắt buộc execute test vừa sinh
+  và ghi `qa_generated_tests_v{n}.json`, `qa_test_execution_v{n}.md`,
+  `qa_test_report_v{n}.md`.
+- Có vòng repair lớn QA -> Developer -> Verification Runner -> Validator -> QA;
+  live DeepSeek đã hội tụ tới `qa_tested` sau một lỗi acceptance thật.
+- Sau lát hiện tại, state có thể đạt `qa_tested` khi compile/unit, trace và QA pass.
+- Chưa có `tool_sync_report_v4.json`, commit/Draft PR thật hoặc Niko báo PR link
+  cho đến khi lát GitHub/sync code review được triển khai.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -300,3 +305,11 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 > repo hiện tại, chạy lại Verification Runner và Validator, rồi chỉ mở lại
 > `implementation_repair_needed` nếu vẫn còn gap repairable và còn lượt. QA/Tester
 > Agent, commit/Draft PR và sync Phase 4 vẫn là các lát kế tiếp.
+
+> Cập nhật 2026-10-14: Slice 4.7A/4.7B đã triển khai QA/Tester Agent sinh test,
+> apply test vào target repo và bắt buộc execute từng class QA sau baseline test.
+> Live DeepSeek `run_live_qa_repair_20261014_03` đã chứng minh nhánh acceptance
+> fail -> `qa_repair_needed` -> Developer repair -> Verification Runner ->
+> Validator -> QA pass, kết thúc ở `qa_tested`. Lát kế tiếp là commit/push target
+> branch, tạo Draft PR, sync Jira/Confluence và mở checkpoint
+> `code_review_ready`; QA `skipped` còn là hardening test riêng.

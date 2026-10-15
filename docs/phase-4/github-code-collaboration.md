@@ -43,9 +43,11 @@ script compile và chạy test harness thật. Nếu máy thiếu JDK hoặc tes
 không đủ điều kiện, report phải ghi `skipped`/`failed` rõ ràng, không được coi là
 pass.
 
-Tính đến Slice 4.6, target repo có thể đang dirty trên branch feature vì
-Developer.act/repair đã apply code để live test. Commit và Draft PR chưa được mở
-cho đến lát GitHub sync sau QA/Tester.
+Tính đến Slice 4.7B, target repo có thể đang dirty trên branch feature vì
+Developer.act/repair và QA/Tester đã apply code/test để live test. Workflow chỉ
+được vào lát GitHub sync khi state là `qa_tested`, nghĩa là Verification Runner,
+Validator code trace và QA acceptance/system test đều đã pass. Commit và Draft PR
+chưa được mở tự động trước mốc này.
 
 ## Branch, Commit Và PR
 
