@@ -1,5 +1,17 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Niko Slice N4.1: Get-Status Compatibility
+
+Đã bổ sung response-time normalization cho run cũ ở `code_review_ready` có
+checkpoint `code_review`. `get-status` nay luôn trả action
+`approve_checkpoint` cùng wording Draft -> Ready hiện hành, trong khi file state
+giữ nguyên và không có GitHub/Jira/Confluence side effect.
+
+Contract CLI Code Review cũng được khóa bằng test: success trả JSON stdout với
+exit `0`; `HarnessError` trả JSON stdout với exit `1` và giữ `error_code/run_id`.
+Kết quả kiểm thử: `tests/test_phase1.py` có 34 test pass; full regression có 192
+test pass; `git diff --check` pass. Không chạy live approval trong slice này.
+
 ## 2026-10-15 - Slice 4.9D: Code Review Approval
 
 Đã nối `approve-checkpoint` tại state `code_review_ready` vào Phase 4. Workflow

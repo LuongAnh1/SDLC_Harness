@@ -385,6 +385,69 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIn("summary_for_user", status)
         self.assertIn("quality_reports", status)
 
+    def test_get_status_normalizes_legacy_code_review_ready_without_mutating_state(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_20261013_160421_f661babf"
+        legacy_state = {
+            "ok": True,
+            "run_id": run_id,
+            "source_ref": "jira_issue:SDLC-1",
+            "current_phase": "code_review",
+            "status": "code_review_ready",
+            "pending_checkpoint": {
+                "checkpoint_id": f"checkpoint_code_review_{run_id}",
+                "type": "code_review",
+                "pull_request_url": "https://github.com/example/target/pull/1",
+            },
+            "allowed_next_actions": ["get_status", "sync_run", "cancel_run"],
+            "summary_for_user": "Legacy summary without approval action.",
+        }
+        workflow.store.write_state(legacy_state)
+        state_path = workflow.store.state_path(run_id)
+        persisted_before = state_path.read_text(encoding="utf-8")
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(
+            response["allowed_next_actions"],
+            ["approve_checkpoint", "get_status", "sync_run", "cancel_run"],
+        )
+        self.assertIn("Draft PR: https://github.com/example/target/pull/1", response["summary_for_user"])
+        self.assertIn("Ready for review", response["summary_for_user"])
+        self.assertEqual(state_path.read_text(encoding="utf-8"), persisted_before)
+
+    def test_get_status_keeps_current_code_review_ready_contract_without_mutating_state(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_20261015_150000_c0decafe"
+        current_summary = (
+            f"Checkpoint Code Review đã sẵn sàng cho run {run_id}. "
+            "Draft PR: https://github.com/example/target/pull/2. "
+            "Anh có thể approve checkpoint để chuyển Draft PR thành Ready for review."
+        )
+        current_state = {
+            "ok": True,
+            "run_id": run_id,
+            "source_ref": "jira_issue:SDLC-2",
+            "current_phase": "code_review",
+            "status": "code_review_ready",
+            "pending_checkpoint": {
+                "checkpoint_id": f"checkpoint_code_review_{run_id}",
+                "type": "code_review",
+                "pull_request_url": "https://github.com/example/target/pull/2",
+            },
+            "allowed_next_actions": ["approve_checkpoint", "get_status", "sync_run", "cancel_run"],
+            "summary_for_user": current_summary,
+        }
+        workflow.store.write_state(current_state)
+        state_path = workflow.store.state_path(run_id)
+        persisted_before = state_path.read_text(encoding="utf-8")
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(response["allowed_next_actions"], current_state["allowed_next_actions"])
+        self.assertEqual(response["summary_for_user"], current_summary)
+        self.assertEqual(state_path.read_text(encoding="utf-8"), persisted_before)
+
     def test_get_status_returns_run_not_found(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
         with self.assertRaises(HarnessError) as ctx:
@@ -405,6 +468,65 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertFalse(payload["ok"])
         self.assertEqual(payload["error_code"], "run_not_found")
+
+    def test_cli_code_review_approval_success_is_json_with_zero_exit(self) -> None:
+        run_id = "run_20261015_150000_c0decafe"
+        response = {
+            "ok": True,
+            "run_id": run_id,
+            "status": "code_review_approved",
+            "pending_checkpoint": None,
+            "allowed_next_actions": ["get_status", "sync_run", "cancel_run"],
+        }
+        stdout = io.StringIO()
+
+        with patch("sdlc_harness.interfaces.cli.CheckpointApprovalWorkflow") as workflow_type:
+            workflow_type.return_value.approve_checkpoint.return_value = response
+            with contextlib.redirect_stdout(stdout):
+                code = cli_main(
+                    [
+                        "approve-checkpoint",
+                        "--run-id",
+                        run_id,
+                        "--runtime-root",
+                        str(self.runtime_root),
+                    ]
+                )
+
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(stdout.getvalue()), response)
+        workflow_type.return_value.approve_checkpoint.assert_called_once_with(
+            run_id=run_id,
+            checkpoint_id=None,
+        )
+
+    def test_cli_code_review_approval_business_error_keeps_json_contract(self) -> None:
+        run_id = "run_20261015_150000_c0decafe"
+        stdout = io.StringIO()
+        failure = HarnessError(
+            "github_pr_identity_mismatch",
+            "Pull request identity does not match the run workspace.",
+            run_id=run_id,
+        )
+
+        with patch("sdlc_harness.interfaces.cli.CheckpointApprovalWorkflow") as workflow_type:
+            workflow_type.return_value.approve_checkpoint.side_effect = failure
+            with contextlib.redirect_stdout(stdout):
+                code = cli_main(
+                    [
+                        "approve-checkpoint",
+                        "--run-id",
+                        run_id,
+                        "--runtime-root",
+                        str(self.runtime_root),
+                    ]
+                )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 1)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["error_code"], "github_pr_identity_mismatch")
+        self.assertEqual(payload["run_id"], run_id)
 
     def test_cli_sync_run_reads_existing_run(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)

@@ -29,6 +29,8 @@ ALLOWED_REQUIREMENT_ACTIONS = [
     "get_status",
 ]
 
+ALLOWED_CODE_REVIEW_READY_ACTIONS = ["approve_checkpoint", "get_status", "sync_run", "cancel_run"]
+
 
 class PhaseOneWorkflow:
     """Điều phối Phase 1 từ fixture/Jira tới checkpoint requirement.
@@ -245,7 +247,7 @@ class PhaseOneWorkflow:
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         """Chuẩn hóa JSON response cho cả start và get-status."""
 
-        return {
+        response = {
             "ok": True,
             "created_new_run": created_new_run,
             "source_ref": state.get("source_ref"),
@@ -262,3 +264,22 @@ class PhaseOneWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
         }
+        checkpoint = response.get("pending_checkpoint")
+        if (
+            response.get("status") == "code_review_ready"
+            and isinstance(checkpoint, dict)
+            and checkpoint.get("type") == "code_review"
+        ):
+            run_id = str(response.get("run_id") or "")
+            pull_request_url = str(checkpoint.get("pull_request_url") or "").strip()
+            if pull_request_url:
+                draft_pr_summary = f"Draft PR: {pull_request_url}. "
+            else:
+                draft_pr_summary = "Draft PR đã được tạo. "
+            response["allowed_next_actions"] = list(ALLOWED_CODE_REVIEW_READY_ACTIONS)
+            response["summary_for_user"] = (
+                f"Checkpoint Code Review đã sẵn sàng cho run {run_id}. "
+                f"{draft_pr_summary}"
+                "Anh có thể approve checkpoint để chuyển Draft PR thành Ready for review."
+            )
+        return response
