@@ -33,6 +33,10 @@ Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code
 - [x] Tạo sync report mock.
 - [x] Có lệnh/API `get-status(run_id)`.
 - [x] Niko có thể đọc status qua CLI JSON; đã tích hợp trực tiếp trong `Niko_Agent`.
+- [ ] Chặn approval khi Requirement Packet còn open question ảnh hưởng business
+  rule/acceptance; mở checkpoint clarification và lưu decision provenance trước
+  khi sang Design. Chi tiết:
+  `docs/maintenance/2026-10-15-e2e-v1-follow-up-backlog.md`.
 
 ### Phase 1 Gate - Real Jira/Confluence Sync
 
@@ -155,6 +159,10 @@ Checklist chi tiết nằm ở `docs/phase-4/phase-4-checklist.md`.
   Confluence; re-sync giữ nguyên external ID.
 - [x] State chỉ chuyển sang `code_review_ready` sau khi unit/trace/QA pass, Draft
   PR tồn tại và sync Phase 4 thành công.
+- [ ] Tự phát hiện capability/giới hạn output của model, tính structured-output
+  budget theo context còn lại và giữ config fallback khi discovery không khả
+  dụng. Chi tiết:
+  `docs/maintenance/2026-10-15-e2e-v1-follow-up-backlog.md`.
 - [x] Live run chứng minh chuỗi Requirement Refiner -> Designer/Validator ->
   Developer/Verification Runner/Validator/QA Tester -> Draft PR trong phạm vi một
   use case; live sync Code Review cũng đã đạt `code_review_ready`.

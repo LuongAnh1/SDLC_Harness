@@ -549,3 +549,14 @@ Sau live run `run_20261015_140851_8b28c346`, Validator code trace được siế
 Thay đổi này sửa lỗi E2E-V1-005: Validator từng yêu cầu exact match phân biệt hoa
 thường dù requirement ghi tiêu chí duplicate là câu hỏi còn mở, đồng thời từng
 đếm một finding “No code change required” như missing link blocking.
+
+## Backlog Sau E2E V1 - 2026-10-15
+
+Hai vấn đề workflow vẫn được giữ mở trong
+`../maintenance/2026-10-15-e2e-v1-follow-up-backlog.md`:
+
+- Requirement Intake cần chặn ở checkpoint clarification khi Open Questions còn
+  chứa quyết định ảnh hưởng business rule/acceptance, đồng thời lưu decision
+  provenance trước khi Design chạy.
+- Structured LLM output cần capability discovery, budget theo context và
+  provider-safe fallback để tránh JSON bị cắt do giới hạn output token.
