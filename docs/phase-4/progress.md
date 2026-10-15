@@ -1,5 +1,23 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Slice 4.9C: Workspace Lifecycle Và Cleanup
+
+Đã thêm CLI `cleanup-run-workspace --run-id` và lifecycle
+`active -> cleanup_pending -> cleaned`. Cleanup chỉ được mở khi GitHub xác nhận PR
+đã merge bởi human hoặc run đã mang trạng thái `cancelled`; worktree dirty bị
+chặn và V1 không có force. Trước khi dọn, Harness chứng minh commit còn ở remote
+base hoặc đúng remote branch, sau đó remove/prune worktree rồi xóa local ref bằng
+expected SHA. Remote branch không bị xóa.
+
+Artifact giữ reason/timestamp/PR merge audit; retry từ `cleanup_pending` hội tụ
+theo trạng thái Git thực tế và lần gọi sau `cleaned` là idempotent. Cleanup không
+đổi phase/status/checkpoint của workflow. Test Git cục bộ bao phủ merged,
+cancelled, dirty, missing recovery copy, partial failure/retry và JSON CLI.
+
+Kết quả: workspace suite `42 passed`, full regression `182 passed`. Live evidence
+read-only xác nhận PR #1 vẫn `OPEN/Draft`, worktree sạch và nguyên vẹn; chưa chạy
+cleanup live vì run chưa đủ điều kiện. Việc tiếp theo là Slice 4.9D Draft -> Ready.
+
 ## 2026-10-15 - Slice 4.9B: Legacy Run Adoption
 
 Đã thêm CLI `adopt-run-workspace --run-id` và GitHub PR reader chỉ đọc để xác
@@ -14,8 +32,8 @@ và giữ nguyên HEAD `088416465cc7139255aafa120a0b5bb8f17cb971`. Draft PR #1 v
 OPEN/Draft, run vẫn `code_review_ready`. Lần gọi thứ hai trả `adopted=false`, xác
 nhận idempotency. Full regression sau thay đổi: `174 passed`.
 
-Việc tiếp theo: Slice 4.9C thêm lifecycle/cleanup explicit; sau đó Slice 4.9D mới
-mở human approval để chuyển Draft PR thành Ready for review, không merge.
+Phần lifecycle/cleanup sau mục này đã hoàn thành trong Slice 4.9C ở trên. Slice
+4.9D mới mở human approval để chuyển Draft PR thành Ready for review, không merge.
 
 ## 2026-10-15 - Slice 4.9A3: Phase 3/4 Dùng Run Workspace End-to-End
 

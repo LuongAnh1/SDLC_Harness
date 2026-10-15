@@ -42,12 +42,12 @@ thay đổi commit đã review.
 Mục đích: worktree được giữ đủ lâu cho review/Phase 5 nhưng có đường dọn an toàn,
 không tích tụ vô hạn hoặc xóa nhầm code.
 
-- [ ] Có CLI `cleanup-run-workspace --run-id` trả JSON ổn định.
-- [ ] Chỉ cleanup khi PR đã merged bởi human hoặc run đã cancelled.
-- [ ] Dirty worktree bị chặn; V1 không có force cleanup.
-- [ ] Remove worktree và prune registry trước khi xóa local branch.
-- [ ] Không xóa remote branch.
-- [ ] Ghi lifecycle `cleaned` và giữ audit metadata trong runtime.
+- [x] Có CLI `cleanup-run-workspace --run-id` trả JSON ổn định.
+- [x] Chỉ cleanup khi PR đã merged bởi human hoặc run đã cancelled.
+- [x] Dirty worktree bị chặn; V1 không có force cleanup.
+- [x] Remove worktree và prune registry trước khi xóa local branch.
+- [x] Không xóa remote branch.
+- [x] Ghi lifecycle `cleaned` và giữ audit metadata trong runtime.
 
 ## Slice 4.9D - Code Review Approval
 
@@ -87,7 +87,7 @@ Mục đích: chứng minh isolation hoạt động cả khi resume, chạy xen 
 - [x] Legacy adoption giữ nguyên commit và PR #1.
 - [ ] Phase 5 repair cập nhật cùng branch/PR.
 - [ ] Approve gọi Draft -> Ready nhưng không merge.
-- [ ] Cleanup từ chối run chưa merged/cancelled và từ chối dirty worktree.
+- [x] Cleanup từ chối run chưa merged/cancelled và từ chối dirty worktree.
 - [x] Full regression Phase 1-4 pass sau migration.
 
 ## Nhật Ký Slice 4.9B
@@ -128,8 +128,8 @@ cắt, tránh trạng thái nửa canonical repo, nửa worktree.
 - [x] Jira/Confluence chỉ nhận artifact ref, branch/commit/PR; không nhận local path.
 - [x] Test dùng bare remote cục bộ; không gọi LLM thật, không sync tool thật và
   không đụng live run/Draft PR hiện có.
-- [ ] Legacy adoption vẫn thuộc Slice 4.9B; run/PR cũ chưa tự được nhận nuôi.
-- [ ] Cleanup vẫn thuộc Slice 4.9C.
+- [x] Legacy adoption đã hoàn thành trong Slice 4.9B.
+- [x] Cleanup đã hoàn thành trong Slice 4.9C.
 
 Kết quả kiểm thử: workspace suite `15 passed`; full regression `167 passed`.
 
@@ -144,5 +144,30 @@ toàn trước khi thay đường dẫn repo của workflow đang chạy.
   hai run, dirty canonical repo, `.codegraph`, conflict, identity drift và lỗi
   persistence.
 - [x] Nối engine vào Phase 3/4 trong Slice 4.9A3.
-- [ ] Adopt live run/Draft PR cũ; đây vẫn là Slice 4.9B và chưa được phép làm ở A2.
+- [x] Adopt live run/Draft PR cũ đã hoàn thành riêng trong Slice 4.9B.
+
+## Nhật Ký Slice 4.9C
+
+### 2026-10-15 - Lifecycle Và Cleanup An Toàn
+
+Mục đích: dọn worktree/local branch sau khi run kết thúc mà không làm mất commit
+chưa có bản sao phục hồi và không trao quyền xóa remote cho Harness.
+
+- [x] `cleanup-run-workspace --run-id` dùng registry lock rồi per-run lock.
+- [x] PR path yêu cầu live PR ở `MERGED`, đúng number/URL/branch/head/base và có
+  `mergedAt` cùng merge commit; cancelled path không gọi GitHub.
+- [x] Trước cleanup, merged HEAD phải là ancestor của remote base; cancelled HEAD
+  phải được remote branch giữ đúng SHA.
+- [x] Artifact chuyển `active -> cleanup_pending -> cleaned`; retry từ trạng thái
+  pending đối chiếu worktree/ref thực tế và không hỏi GitHub lần hai.
+- [x] Worktree dirty bị chặn; `.codegraph/` chỉ được dọn khi là dữ liệu generated,
+  không phải tracked path hay symlink.
+- [x] Worktree được remove/prune trước khi local ref bị xóa bằng expected SHA.
+- [x] Remote branch không bị xóa; workflow phase/checkpoint không bị thay đổi.
+- [x] PR #1 live được kiểm tra read-only vẫn `OPEN/Draft`, `mergedAt=null`; worktree
+  vẫn sạch và nguyên vẹn nên chưa đủ điều kiện cleanup.
+
+Kết quả kiểm thử: workspace suite `42 passed`; full regression `182 passed`.
+Việc tiếp theo: Slice 4.9D chuyển Draft PR thành Ready for review sau human approve,
+không merge và vẫn giữ workspace cho Phase 5.
 

@@ -346,5 +346,5 @@ và request-change Phase 5. Checklist chi tiết nằm tại
   - [x] A2: Git worktree creation engine, resolver và integration test cục bộ.
   - [x] A3: chuyển toàn bộ Phase 3/4 entrypoint sang run workspace.
 - [x] Triển khai Slice 4.9B adopt legacy run.
-- [ ] Triển khai Slice 4.9C lifecycle/cleanup.
+- [x] Triển khai Slice 4.9C lifecycle/cleanup.
 - [ ] Triển khai Slice 4.9D Code Review approval.

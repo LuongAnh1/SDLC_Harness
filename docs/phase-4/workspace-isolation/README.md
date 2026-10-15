@@ -137,6 +137,22 @@ Lệnh chỉ được chạy khi:
 Nếu workspace dirty hoặc trạng thái PR/run không hợp lệ, cleanup fail closed.
 Không có `--force` trong V1.
 
+Khi đủ điều kiện, artifact được ghi `cleanup_pending` trước khi có side effect:
+
+```text
+verify eligibility + recovery copy
+  -> lifecycle=cleanup_pending
+  -> remove worktree
+  -> git worktree prune
+  -> delete local branch bằng expected HEAD
+  -> lifecycle=cleaned + audit metadata
+```
+
+Nếu tiến trình dừng giữa chừng, chạy lại cùng lệnh sẽ tiếp tục từ Git state thực
+tế. `cleaned` là idempotent. Cleanup không đổi workflow phase/status/checkpoint.
+PR merged phải có HEAD nằm trong remote base vừa fetch; run cancelled phải còn
+remote branch trỏ đúng recorded HEAD.
+
 ## Ranh Giới V1
 
 - Một target repository cấu hình cho workflow, nhiều worktree theo run.
@@ -179,6 +195,7 @@ Slice 4.9A3 đã nối creation engine vào workflow:
 - canonical repo có thể đổi branch mà run vẫn resume đúng workspace.
 
 Slice 4.9B đã hoàn thành CLI adoption, fail-closed guard, rollback và live
-migration run/PR #1. Phần còn mở là 4.9C cleanup và 4.9D chuyển Draft PR thành
-Ready for review.
+migration run/PR #1. Slice 4.9C đã hoàn thành cleanup CLI, lifecycle/audit,
+recovery proof, dirty guard và retry idempotent. Phần còn mở là 4.9D chuyển Draft
+PR thành Ready for review.
 

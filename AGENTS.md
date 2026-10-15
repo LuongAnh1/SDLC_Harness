@@ -147,7 +147,9 @@ Canonical repo chỉ dùng để fetch/quản lý worktree, không được chec
 workflow. Slice 4.9B đã thêm `adopt-run-workspace` và nhận nuôi run legacy/PR #1;
 canonical checkout đã về `main`, còn branch cũ nằm trong worktree riêng với HEAD
 và Draft PR không đổi. `get-status` chỉ trả workspace identity gọn và không lộ
-local path.
+local path. Slice 4.9C đã thêm `cleanup-run-workspace`: chỉ dọn sau human merge
+hoặc khi run đã `cancelled`, chặn dirty worktree, giữ audit metadata và không xóa
+remote branch. Retry từ `cleanup_pending` phải hội tụ an toàn.
 
 Cleanup chỉ qua lệnh explicit sau human merge hoặc cancel, không xóa remote
 branch. Harness được phép chuyển

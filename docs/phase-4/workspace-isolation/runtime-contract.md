@@ -23,6 +23,13 @@ nguồn sự thật.
   "pr_number": 1,
   "pr_url": "<GitHub PR URL>",
   "lifecycle": "active",
+  "cleanup_reason": "",
+  "cleanup_started_at": "",
+  "cleaned_at": "",
+  "local_branch_deleted": false,
+  "merge_commit_sha": "",
+  "pr_state_at_cleanup": "",
+  "pr_merged_at": "",
   "created_at": "<UTC ISO timestamp>",
   "updated_at": "<UTC ISO timestamp>"
 }
@@ -58,7 +65,7 @@ content, repo-relative paths và branch/commit identity phù hợp với nhiệm
 
 ## Ensure Workspace Contract
 
-Workspace manager hiện có năm API nội bộ:
+Workspace manager hiện có sáu API nội bộ:
 
 - `create_for_run(run_id)`: tạo mới hoặc trả lại workspace hợp lệ đã có;
 - `resolve(run_id)`: xác minh identity nhưng không giữ action lock;
@@ -69,6 +76,9 @@ Workspace manager hiện có năm API nội bộ:
 - `adopt_legacy_run(run_id, ...)`: xác minh runtime/GitHub/Git identity rồi gắn
   nguyên branch cũ vào worktree của run; trả thêm cờ cho biết adoption mới hay
   lần gọi idempotent.
+- `cleanup_run(run_id, ...)`: xác minh merge/cancel và recovery copy, ghi
+  `cleanup_pending`, dọn worktree/local ref rồi ghi `cleaned`; retry an toàn nếu
+  tiến trình dừng giữa chừng.
 
 Từ Slice 4.9A3, design approval gọi `create_for_run` trước khi lập implementation
 plan. Phase 3/4 dùng `locked_workspace` cho action đọc/sửa/publish code; không
@@ -119,6 +129,15 @@ Xác minh merged/cancelled và clean worktree, remove worktree, prune registry v
 đánh dấu `lifecycle=cleaned`. Không xóa remote branch. Local branch chỉ được xóa
 sau khi worktree đã remove và điều kiện lifecycle hợp lệ.
 
+PR path yêu cầu live PR khớp number/URL/branch/head/base, có state `MERGED`,
+`mergedAt` và merge commit. Recorded HEAD phải là ancestor của remote base vừa
+fetch. Cancelled path không gọi GitHub nhưng remote branch phải giữ đúng recorded
+HEAD. Local ref được xóa bằng expected SHA; nếu ref đã dịch chuyển, cleanup dừng.
+
+Response thành công có `cleaned=true` ở lần dọn đầu, `cleaned=false` khi artifact
+đã ở lifecycle `cleaned`, cùng `cleanup_reason`, workspace summary, PR audit và
+workflow status hiện tại. Cleanup không tự chuyển phase/checkpoint.
+
 Các lệnh trả JSON stdout ổn định để Niko có thể gọi sau này; debug log không được
 trộn vào stdout.
 
@@ -140,6 +159,7 @@ trộn vào stdout.
 | `workspace_creation_partial` | Tạo workspace lỗi và rollback bảo thủ không thể hoàn tất; cần người kiểm tra thủ công. |
 | `workspace_adoption_failed` | Legacy branch/run/PR identity không đủ rõ để adopt. |
 | `workspace_cleanup_not_allowed` | Run/PR chưa đạt điều kiện cleanup. |
+| `workspace_cleanup_failed` | Cleanup đã được yêu cầu nhưng không đọc được evidence hoặc một Git/filesystem step thất bại; kiểm lifecycle để retry. |
 
 Mọi lỗi identity đều fail closed và không mutate repository.
 
