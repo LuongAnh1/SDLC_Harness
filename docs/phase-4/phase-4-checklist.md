@@ -341,7 +341,10 @@ và request-change Phase 5. Checklist chi tiết nằm tại
 - [x] Chốt run hiện tại/PR #1 được adopt, không chạy lại từ đầu.
 - [x] Chốt explicit cleanup sau human merge hoặc cancel; không xóa remote branch.
 - [x] Chốt invariant Harness chỉ Draft -> Ready, human luôn tự merge.
-- [ ] Triển khai Slice 4.9A workspace manager và guards.
+- [x] Hoàn tất Slice 4.9A workspace manager và guards end-to-end.
+  - [x] A1: schema, naming, config và advisory locks.
+  - [x] A2: Git worktree creation engine, resolver và integration test cục bộ.
+  - [x] A3: chuyển toàn bộ Phase 3/4 entrypoint sang run workspace.
 - [ ] Triển khai Slice 4.9B adopt legacy run.
 - [ ] Triển khai Slice 4.9C lifecycle/cleanup.
 - [ ] Triển khai Slice 4.9D Code Review approval.

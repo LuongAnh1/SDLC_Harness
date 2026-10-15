@@ -28,14 +28,16 @@ lại.
 
 ## 3. Target Repo Guard
 
-Mục đích: Phase 4 có nơi code an toàn; Phase 3 chỉ kiểm tra và ghi target vào
-plan, chưa tạo branch/commit/PR.
+Mục đích: Phase 4 có nơi code an toàn; Phase 3 khóa code lineage bằng
+branch/worktree riêng nhưng chưa sửa source/test, commit/push hoặc tạo PR.
 
 - [x] Có target repo path/remote ban đầu: `D:\Dự án cá nhân\Do_an_II\SDLC_Target_eTour` / `LuongAnh1/SDLC_Target_eTour`.
 - [x] Có config target repo path/remote trong SDLC Harness runtime/config.
 - [x] Có guard không thao tác nhầm repo `SDLC_Harness`.
 - [x] Có guard worktree dirty trước khi mở plan checkpoint.
 - [x] Plan ghi rõ target repo/base branch/planned branch.
+- [x] Duyệt design tạo `run_workspace_v1` từ remote base SHA đã fetch.
+- [x] Canonical repo không bị checkout hoặc dùng làm working directory của run.
 
 ## 4. Developer.plan
 
@@ -48,7 +50,8 @@ mù và không tự sửa graph.
 - [x] Plan có bảng mapping design element -> planned code target.
 - [x] Plan có test intent hoặc test command dự kiến.
 - [x] Plan có assumptions/open questions và out-of-scope.
-- [x] Plan không tạo branch, commit hoặc sửa file trong target repo.
+- [x] Plan dùng branch/worktree đã tạo cho run nhưng không commit hoặc sửa
+  source/test trong Phase 3.
 
 ## 5. Validator.review_plan
 
@@ -80,7 +83,8 @@ Mục đích: plan được đẩy sang đúng tool review, còn GitHub để Ph
 - [x] Re-sync không tạo comment/page trùng nếu report v3 đã có external id.
 - [x] Nếu Jira comment v3 bị xóa thủ công, re-sync tự tạo comment mới.
 - [x] Partial failure không xóa artifact local.
-- [x] Không tạo GitHub branch/commit/PR trong Phase 3.
+- [x] Không commit/push/tạo GitHub PR trong Phase 3; local run branch chỉ khóa
+  workspace identity cho plan và Phase 4.
 
 ## 7. Workflow State Và Niko Reporting
 
@@ -120,9 +124,10 @@ Mục đích: Phase 3 phải chạy được từ terminal trước khi live qua
 Mục đích: Developer.plan không chỉ đoán file từ graph, mà đọc target repo bằng
 CodeGraph để lập plan có evidence, implementation steps và proposed files rõ hơn.
 
-- [x] Phase 3 yêu cầu target repo có `.codegraph/`.
-- [x] Thiếu `.codegraph/` thì block bằng `target_repo_codegraph_missing`.
-- [x] Có lệnh setup riêng `prepare-target-repo --init-codegraph`; `approve-checkpoint` không tự init.
+- [x] Phase 3 tự chuẩn bị `.codegraph/` trong run worktree trước khi collect context.
+- [x] CodeGraph init/collect lỗi thì block bằng error contract rõ ràng.
+- [x] Có lệnh setup riêng `prepare-target-repo --init-codegraph` cho debug thủ
+  công, nhưng run mới không phụ thuộc lệnh này.
 - [x] Dirty guard bỏ qua state `.codegraph/` nhưng vẫn chặn thay đổi source/test/docs.
 - [x] Developer.plan nhận `repo_context` từ CodeGraph.
 - [x] Developer LLM sinh `repo_evidence`, `implementation_steps`, `proposed_files`.

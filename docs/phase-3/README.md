@@ -103,8 +103,8 @@ Phase 3 sync plan, không sync code:
 
 - Confluence lưu implementation plan đầy đủ để review dài.
 - Jira nhận comment ngắn: plan đã tạo/chờ duyệt, kèm link Confluence và `run_id`.
-- GitHub target repo chỉ được kiểm tra/nhắc trong plan; chưa tạo branch, commit
-  hoặc PR.
+- GitHub target repo được fetch để tạo branch/worktree riêng cho run trước khi
+  lập plan; Phase 3 chưa sửa source/test, chưa commit/push và chưa tạo PR.
 - Confluence page render các phần review chính từ
   `implementation_plan_structured_v1.json`: decision needed, execution steps,
   code targets, test plan, validator summary và assumptions/open questions.
@@ -158,7 +158,8 @@ phép sửa target repo.
 Jira issue SDLC-1
   -> requirement/design checkpoint trên Confluence
   -> implementation plan checkpoint trên Confluence
-  -> Phase 4 mới tạo GitHub Draft PR
+  -> Phase 3 tạo run workspace và implementation plan
+  -> Phase 4 dùng workspace đó để tạo GitHub Draft PR
 ```
 
 Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi mới chạy
@@ -167,7 +168,8 @@ Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi 
 ## Không Làm Trong Phase 3
 
 - Không tạo GitHub Issue mới.
-- Không tạo branch/commit/Draft PR.
+- Không sửa source/test, commit, push hoặc tạo Draft PR; branch/worktree riêng
+  đã được tạo để khóa đúng code lineage cho run.
 - Không sinh hoặc sửa code.
 - Không chạy Tester/code trace.
 - Không merge PR tự động.
@@ -186,21 +188,16 @@ Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi 
 
 ## Smart Developer V1: CodeGraph Preflight Và Data Boundary
 
-Smart Developer V1 dùng CodeGraph làm nguồn hiểu target repo chính. Target repo
-phải có `.codegraph/` trước khi duyệt design checkpoint sang Phase 3. Lệnh
-`approve-checkpoint` không tự chạy `codegraph init`, vì init là thao tác tạo
-state trong target repo và có thể làm dirty worktree. Nếu thiếu `.codegraph/`,
-workflow sẽ block với `target_repo_codegraph_missing`.
+Smart Developer V1 dùng CodeGraph làm nguồn hiểu target repo chính. Khi human
+duyệt design checkpoint, Phase 3 tạo run worktree từ remote base đã chốt rồi tự
+chạy bước chuẩn bị CodeGraph trong worktree đó. Nếu CodeGraph init/collect thất
+bại, workflow block với lỗi preflight tương ứng; canonical repo không bị ghi
+metadata hoặc checkout branch khác.
 
-Lệnh chuẩn bị riêng:
-
-```bash
-rtk python -m sdlc_harness.cli prepare-target-repo --init-codegraph
-```
-
-Dirty guard của Phase 3 được phép bỏ qua state sinh bởi `.codegraph/`, nhưng vẫn
-chặn mọi thay đổi source/test/docs khác. Phase 3 vì vậy vẫn chỉ đọc repo, sinh
-implementation plan và sync checkpoint; chưa tạo branch, chưa sửa code, chưa PR.
+Lệnh `prepare-target-repo --init-codegraph` vẫn hữu ích để chẩn đoán thủ công,
+nhưng không còn là prerequisite cho run mới. Dirty guard bỏ qua metadata
+`.codegraph/` trong run worktree nhưng vẫn chặn thay đổi source/test/docs ngoài
+workflow. Phase 3 chỉ đọc code, sinh/sync plan; Phase 4 mới sửa code và mở PR.
 
 Lưu ý bảo mật V1: để Developer LLM lập plan thông minh, SDLC Harness tạm thời gửi
 CodeGraph evidence/source snippets của target repo vào prompt DeepSeek. Đây là

@@ -5,8 +5,9 @@ Phase 4 bắt đầu sau khi human/Niko duyệt checkpoint
 code thật trong target repo, chạy test/validation, kiểm trace requirement ->
 design -> code -> test, rồi mở Draft PR để human review.
 
-Phase 4 mới là nơi GitHub trở thành tool sync chính. Phase 3 chỉ chuẩn bị plan và
-kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
+Phase 4 mới là nơi GitHub trở thành tool sync chính. Phase 3 tạo branch/worktree
+riêng cho run để lập plan nhưng không sửa code; Phase 4 dùng lại đúng workspace
+đó để tạo code, commit và Draft PR.
 
 ## Trạng Thái Hiện Tại
 
@@ -27,10 +28,11 @@ Draft PR thật. Slice 4.8B cũng đã được live-test cho bước
 `code_review_published -> code_review_ready`; re-sync cập nhật đúng Jira comment
 và Confluence page cũ thay vì tạo bản trùng.
 
-Trước khi mở approve Code Review và Phase 5, Slice 4.9 phải thay cơ chế một
-working directory dùng chung bằng worktree-per-run. Contract triển khai nằm tại
-`workspace-isolation/README.md`; checklist riêng chưa được tick vì code workspace
-manager, lock, adoption và cleanup chưa tồn tại.
+Slice 4.9A3 đã thay cơ chế một working directory dùng chung bằng
+worktree-per-run cho toàn bộ Phase 3/4. Contract nằm tại
+`workspace-isolation/README.md`: mọi action code resolve cùng workspace theo
+`run_id`, giữ per-run lock và fail closed khi identity lệch. Legacy adoption và
+cleanup vẫn chưa tồn tại; approve Code Review chỉ được mở sau 4.9B/4.9C.
 
 ## Slice 4.1 Đã Chốt
 
@@ -40,13 +42,14 @@ Slice đầu của Phase 4 hiện chỉ làm bước chuyển tiếp an toàn:
 approve_checkpoint(run_id)
 -> kiểm tra run đang ở waiting_implementation_plan_review
 -> đọc implementation_plan_structured_v{n}
--> kiểm target repo vẫn sạch và có CodeGraph index
+-> resolve workspace đã tạo ở Phase 3 và kiểm identity/CodeGraph
 -> ghi developer_work_packet_v1.json
 -> status=implementation_ready
 ```
 
-Slice này chưa tạo branch, chưa sửa code, chưa commit và chưa mở PR. Mục đích
-là biến implementation plan đã được duyệt thành input máy đọc được cho
+Ở contract lịch sử của Slice 4.1, bước này chưa tạo branch. Từ A3, branch/worktree
+đã được Phase 3 tạo trước đó; approve plan chỉ resolve workspace, chưa sửa code,
+chưa commit và chưa mở PR. Mục đích là biến implementation plan đã được duyệt thành input máy đọc được cho
 Developer.act ở slice tiếp theo, thay vì để Developer parse Markdown hoặc
 Confluence.
 
@@ -57,8 +60,8 @@ Slice 4.2 chạy tiếp từ `implementation_ready`:
 ```text
 continue-run(run_id)
 -> đọc developer_work_packet_v1.json
--> kiểm target repo sạch
--> tạo/checkout planned branch
+-> giữ lock và resolve đúng run workspace
+-> kiểm worktree sạch
 -> Developer.act sinh changed_files_json_v1
 -> validate file nằm trong allowed_paths
 -> apply file vào target repo

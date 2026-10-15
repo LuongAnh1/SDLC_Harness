@@ -111,6 +111,7 @@ Các file quan trọng:
 - `sources/`: fixture/dataset/Jira loaders. Niko không đọc source trực tiếp.
 - `storage/`: `.runtime` state store và active-run index.
 - `artifacts/`: artifact writers.
+- `workspaces/`: workspace identity, branch/path policy và lock theo `run_id`.
 - `sync/`: mock/real tool sync adapters.
 - `core/`, `llm/`: config/errors chung và LLM provider client.
 
@@ -136,6 +137,14 @@ Trước Code Review approval và Phase 5, triển khai contract trong
 run suffix. Canonical target repo chỉ dùng để fetch/quản lý worktree; Developer,
 Runner, Validator và QA phải resolve workspace theo `run_id`, không dùng current
 branch của canonical repo làm nguồn sự thật.
+
+Slice 4.9A1/A2 đã có schema `run_workspace_v1`, naming có run suffix, config
+`SDLC_TARGET_WORKTREE_ROOT`, JSON atomic, OS advisory lock và Git worktree
+creation engine. Slice 4.9A3 đã nối engine vào Phase 3/4: design approval tạo
+workspace, tự chuẩn bị CodeGraph trong worktree; Developer, Runner, Validator,
+QA, revalidate và publisher đều resolve cùng workspace dưới per-run lock.
+Canonical repo chỉ dùng để fetch/quản lý worktree, không được checkout để chạy
+workflow. `get-status` chỉ trả workspace identity gọn và không lộ local path.
 
 Run hiện tại/PR #1 cần được adopt mà không đổi HEAD. Cleanup chỉ qua lệnh explicit
 sau human merge hoặc cancel, không xóa remote branch. Harness được phép chuyển

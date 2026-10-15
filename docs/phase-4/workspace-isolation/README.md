@@ -4,16 +4,16 @@ Tài liệu này chốt kiến trúc quản lý target repository trước khi m
 approval và Phase 5. Mục tiêu là mỗi workflow run luôn đọc/sửa đúng code của nó,
 không phụ thuộc branch đang được checkout trong một working directory dùng chung.
 
-## Vấn Đề Hiện Tại
+## Vấn Đề Đã Được A3 Khóa Cho Run Mới
 
-Phase 4 hiện chỉ checkout `planned_branch` khi bắt đầu `Developer.act`. Các bước
-sau như Verification Runner, Validator, Developer repair và QA đọc branch đang
-được checkout tại thời điểm chạy. Nếu một run khác đổi branch giữa hai lần
-`continue-run`, run cũ có thể đọc hoặc sửa nhầm code.
+Cơ chế cũ checkout `planned_branch` trong canonical repo khiến Runner,
+Validator, repair và QA có thể đọc nhầm branch khi nhiều run xen kẽ. Từ Slice
+4.9A3, design approval tạo branch/worktree riêng có run suffix; mọi action Phase
+3/4 resolve artifact đó và giữ per-run lock. Canonical repo không còn là working
+directory của workflow.
 
-Tên branch hiện cũng chỉ dựa trên Jira issue/use case. Một run mới của cùng
-source có thể checkout lại branch cũ thay vì bắt đầu từ base sạch. Vì vậy cơ chế
-hiện tại chỉ an toàn khi vận hành tuần tự một run và không phù hợp với Phase 5.
+Run/PR sinh trước A3 chưa có ownership artifact nên vẫn fail closed. Chúng chỉ
+được tiếp tục sau cơ chế adopt legacy của Slice 4.9B, không tự nối vào branch cũ.
 
 ## Kiến Trúc Đã Chốt
 
@@ -143,4 +143,40 @@ Không có `--force` trong V1.
 - Không tự merge PR.
 - Không tự adopt branch cũ khi thiếu bằng chứng run/PR duy nhất.
 - Không xử lý nhiều repository trong cùng một run ở slice này.
+
+## Trạng Thái Triển Khai
+
+Slice 4.9A1 đã hoàn thành phần foundation:
+
+- schema và persistence cho `run_workspace_v1.json`;
+- branch naming có source slug và run suffix;
+- `SDLC_TARGET_WORKTREE_ROOT` với default sibling;
+- global registry lock và per-run lock bằng advisory lock của hệ điều hành;
+- static resolver fail closed cho run/source/path/branch/base/remote mismatch.
+
+Slice 4.9A2 đã hoàn thành creation engine độc lập:
+
+- `create_for_run(run_id)` fetch `origin/<base_branch>`, chốt `base_sha`, rồi tạo
+  branch/worktree riêng có run suffix;
+- creation idempotent khi artifact và Git identity của cùng run còn hợp lệ;
+- `resolve()` và `locked_workspace()` xác minh path, branch, remote, HEAD và Git
+  worktree registry trước khi trao workspace cho caller;
+- runtime state lưu tham chiếu artifact và snapshot identity tối thiểu;
+- lỗi trước khi có ownership artifact chỉ rollback khi worktree còn sạch và HEAD
+  vẫn ở `base_sha`; trường hợp không chứng minh được thì fail bằng
+  `workspace_creation_partial` thay vì force-delete;
+- integration test dùng bare remote cục bộ, không chạm GitHub hoặc live run.
+
+Slice 4.9A3 đã nối creation engine vào workflow:
+
+- design approval tạo workspace rồi tự chuẩn bị CodeGraph tại worktree;
+- implementation plan và DeveloperWorkPacket ghi identity branch/base/workspace;
+- Developer, Runner, Validator, QA, repair, revalidate và publisher cùng dùng
+  `locked_workspace(run_id)`;
+- publication refresh HEAD cùng PR identity vào artifact/state;
+- status và tool sync không phát tán machine-local worktree path;
+- canonical repo có thể đổi branch mà run vẫn resume đúng workspace.
+
+Phần còn mở là 4.9B adopt legacy run/PR, 4.9C cleanup và 4.9D chuyển Draft PR
+thành Ready for review. A3 không tự động chạm live run hoặc PR cũ.
 

@@ -1,5 +1,38 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Slice 4.9A3: Phase 3/4 Dùng Run Workspace End-to-End
+
+Đã nối creation engine vào design approval và chuyển toàn bộ đường chạy code của
+Phase 4 sang worktree theo `run_id`. Developer, Verification Runner, Validator,
+QA, repair, revalidate, GitHub publisher và Code Review re-sync đều chạy dưới
+per-run lock; current branch của canonical repo không còn là nguồn sự thật.
+
+DeveloperWorkPacket snapshot workspace identity. Sau publish, manager refresh
+`head_sha`, PR number/URL vào `run_workspace_v1.json` và state. Jira/Confluence
+chỉ nhận artifact ref cùng branch/commit/PR identity, không nhận machine-local
+path. Run cũ chưa có workspace fail closed và chờ Slice 4.9B adoption; A3 không
+chạm live run/Draft PR hiện có.
+
+Kết quả kiểm thử: workspace suite `15 passed`; full regression Phase 1-4
+`167 passed`. Không gọi LLM thật, không sync Jira/Confluence/GitHub thật và không
+chạm live run/Draft PR hiện có.
+
+## 2026-10-15 - Slice 4.9A2: Git Worktree Creation Engine
+
+Đã triển khai engine độc lập để tạo workspace riêng theo `run_id`: fetch remote
+base, chốt SHA, tạo branch/worktree có run suffix, ghi artifact/state, resolve
+Git identity và giữ per-run action lock. Rollback chỉ chạy khi worktree vẫn sạch
+và HEAD chưa rời base; không dùng force-delete.
+
+Integration test dùng bare remote cục bộ đã khóa fetch SHA mới nhất,
+idempotency, hai run không dùng chung branch/path, dirty/remote/path/branch guard,
+`.codegraph` allowance, identity drift và rollback khi persistence lỗi. Tại thời
+điểm kết thúc A2, engine chưa nối vào Phase 3/4; phần đó sau này đã hoàn thành ở
+A3 phía trên. Live run/Draft PR cũ vẫn chưa được adopt.
+
+Kết quả kiểm thử sau slice: `160 passed`; không gọi LLM thật, không sync tool và
+không chạm live run/Draft PR hiện có.
+
 ## 2026-10-15 - Tài Liệu Slice 4.9: Run Workspace Isolation
 
 Đã chốt tài liệu prerequisite trước Code Review approval và Phase 5:
@@ -13,8 +46,8 @@
 - approve chỉ chuyển Draft PR thành Ready for review, còn merge luôn do human;
 - request-change Phase 5 giữ nguyên workspace/branch/PR của run.
 
-Tài liệu nằm tại `docs/phase-4/workspace-isolation/`. Code Slice 4.9A-4.9D chưa
-được triển khai và checklist tương ứng vẫn để trống.
+Tài liệu nằm tại `docs/phase-4/workspace-isolation/`. Đây là ghi chép tại thời
+điểm contract mới được chốt; hiện A1-A3 đã triển khai, còn 4.9B-4.9D vẫn để mở.
 
 ## 2026-10-13 - Slice 4.1: Approve Plan To DeveloperWorkPacket
 

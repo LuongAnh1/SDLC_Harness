@@ -35,7 +35,7 @@ cancelled
 | State | Ý nghĩa | Ai kích hoạt bước tiếp theo |
 | --- | --- | --- |
 | `implementation_ready` | Implementation plan đã được duyệt và `developer_work_packet_v1.json` đã sẵn sàng; chưa sửa code. | Harness slice tiếp theo |
-| `implementation_writing` | Đang thao tác target repo, tạo branch và code change. | Harness |
+| `implementation_writing` | Đang thao tác run worktree đã tạo từ Phase 3 và sinh code change. | Harness |
 | `implementation_written` | Code change đã được apply vào target repo; chưa test/commit/PR. | Harness slice tiếp theo |
 | `implementation_testing` | Umbrella state hiện tại cho compile/unit test, Validator code trace, Developer repair loop khi compile/unit/trace fail, và QA/Tester acceptance/system test sau khi trace ổn. | Harness |
 | `implementation_repair_needed` | Validator code trace fail vì code/test thiếu link có thể sửa; `implementation_repair_feedback_v{n}.json` đã sẵn sàng để `continue-run` gọi Developer.repair. | Harness |
@@ -287,7 +287,7 @@ Checkpoint `code_review` nghĩa là human cần review PR/code/test report. Nó 
 có nghĩa PR đã được merge. Slice 4.8B chưa xử lý approve/request-change, vì vậy
 hai action đó không được quảng bá trước khi slice tiếp theo triển khai contract.
 
-## Run Workspace Artifact Dự Kiến Cho Slice 4.9
+## Run Workspace Artifact Từ Slice 4.9A3
 
 Trước Phase 5, `run_workspace_v1.json` phải trở thành nguồn sự thật cho worktree,
 branch, base SHA, head SHA, remote và PR identity của run. Mọi bước đọc/sửa code
@@ -301,8 +301,8 @@ workspace.lifecycle=active | cleanup_pending | cleaned
 ```
 
 Chi tiết schema, lock và error contract nằm trong
-`workspace-isolation/runtime-contract.md`. Phần này hiện là kế hoạch, chưa phải
-runtime behavior đã triển khai.
+`workspace-isolation/runtime-contract.md`. Với run mới, đây là runtime behavior
+đã triển khai; legacy run chưa có artifact phải chờ cơ chế adoption của 4.9B.
 
 ## Last Sync Phase 4
 

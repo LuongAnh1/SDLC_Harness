@@ -3,6 +3,14 @@
 Tài liệu này ghi lại tiến độ triển khai Phase 3 theo từng lát nhỏ để tránh nhầm
 giữa phần đã chạy được và phần vẫn nằm trong kế hoạch.
 
+## 2026-10-15 - Slice 4.9A3 cập nhật ownership của Phase 3
+
+Design approval nay tạo branch/worktree riêng cho run trước khi Developer.plan
+đọc repository. CodeGraph được tự chuẩn bị trong worktree; implementation plan
+ghi workspace mode/ref, branch và base SHA. Phase 3 vẫn không sửa source/test,
+không commit/push và không tạo PR. Các ghi chép cũ bên dưới nói “chưa tạo branch”
+là lịch sử trước A3 và đã được supersede bởi contract này.
+
 ## 2026-10-13 - Slice 1: mở Phase 3 và sinh implementation plan
 
 Mục tiêu của lát này là nối design checkpoint đã duyệt sang Phase 3, sinh
