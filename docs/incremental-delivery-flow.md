@@ -106,10 +106,11 @@ Runner, Validator code trace hybrid rule + LLM, Developer repair loop, lệnh
 Live DeepSeek đã chứng minh lỗi acceptance được đưa về Developer, sau đó chạy lại
 Runner -> Validator -> QA và hội tụ tới `qa_tested`.
 
-Điều kiện cuối của Phase 4 vẫn chưa xong: commit target branch, Draft PR thật,
-sync PR/test/trace/QA summary về Jira/Confluence và
-`status=code_review_ready`. Các bước đó phải được triển khai thành lát riêng,
-không ghi đè vào kết quả `qa_tested`.
+Phase 4 đã hoàn tất đường chạy từ `qa_tested` tới commit/branch, Draft PR,
+sync PR/test/trace/QA về Jira/Confluence, checkpoint `code_review_ready` và human
+approval chuyển Draft PR thành Ready for review. Controlled live smoke đã hội tụ
+tới `code_review_approved`; PR vẫn OPEN và chưa merge. Merge tiếp tục do human,
+còn request-change thuộc Slice 5.
 
 ## Slice 5 - Sửa Tại Checkpoint
 

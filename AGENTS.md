@@ -173,9 +173,9 @@ publication, rồi sync bằng chứng PR/test/trace/QA sang Jira và Confluence
 checkpoint `code_review_ready`. Slice 4.9D đã mở approval trong SDLC_Harness:
 `approve-checkpoint` chỉ chuyển đúng Draft PR của run thành Ready for review,
 ghi artifact approval riêng và sync trạng thái `code_review_approved`; merge
-luôn do human. Request-change vẫn thuộc Phase 5. Niko chưa quảng bá Phase 4
-continue/sync/approval trên Telegram cho tới khi có intent/formatter test tương
-ứng. Khi Niko gọi repo này, contract
+luôn do human. Request-change vẫn thuộc Phase 5. Niko hiện đã mở Phase 4
+continue/sync và Code Review approval có feature gate trên Telegram; integration
+fixture và controlled live smoke đã pass. Khi Niko gọi repo này, contract
 phải là CLI JSON ổn định; không in log tự do ra stdout.
 
 Các lệnh CLI có side effect mặc định dùng `--sync-mode mock`. Caller phải truyền

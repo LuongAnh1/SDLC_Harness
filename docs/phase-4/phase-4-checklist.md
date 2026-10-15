@@ -351,3 +351,5 @@ và request-change Phase 5. Checklist chi tiết nằm tại
   - [x] Draft -> Ready idempotent với PR/workspace identity guard.
   - [x] Artifact approval riêng và Jira/Confluence approved sync có retry.
   - [x] Guard/test chứng minh không merge hoặc bật auto-merge.
+  - [x] Controlled live smoke qua Niko Telegram: PR #1 Ready, vẫn OPEN/unmerged;
+    Jira comment `10104` và Confluence page `2129921` được cập nhật tại chỗ.

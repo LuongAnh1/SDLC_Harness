@@ -763,3 +763,26 @@ Lần `sync-run --sync-mode real` thứ hai:
 Kết luận: Slice 4.8B đã pass code test và live test. Bước tiếp theo mới thiết kế
 human approve/request-change cho Code Review checkpoint; 4.8B không giả lập hai
 action này khi contract chưa tồn tại.
+
+## 2026-10-15 - Slice 4.9D: Controlled Live Code Review Approval
+
+Run thật `run_20261013_160421_f661babf` được approve qua đường Telegram → Niko →
+SDLC_Harness với `--sync-mode real`. Preflight xác nhận checkpoint `code_review`,
+workspace branch `feature/sdlc-1-implementation`, HEAD
+`088416465cc7139255aafa120a0b5bb8f17cb971` và GitHub PR #1 đang OPEN/Draft.
+
+Kết quả:
+
+- state chuyển `code_review_ready -> code_review_approved`;
+- GitHub PR #1 chuyển Draft → Ready, vẫn OPEN, chưa merge và HEAD không đổi;
+- artifact `sync/github_code_review_approval_v1.json` ghi identity trước/sau;
+- Jira cập nhật đúng comment `10104` và Confluence cập nhật đúng page `2129921`;
+- không tạo target trùng, `last_sync.status=synced`, `last_error=null`;
+- Niko ghi đủ queued, started, finished và result-delivered rồi trả final Telegram;
+- approval flag được tắt lại sau smoke.
+
+Test ngay trước live: Niko integration/formatter `14 passed`; SDLC GitHub approval
+và Code Review sync `16 passed`. Merge PR vẫn do human thực hiện trực tiếp trên
+GitHub; request-change tiếp tục thuộc Phase 5.
+
+Post-live full regression: SDLC_Harness `192 passed`; Niko `299 passed`.
