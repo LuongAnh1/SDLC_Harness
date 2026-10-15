@@ -1,8 +1,9 @@
-﻿"""Lưu trạng thái workflow Phase 1 bằng file JSON.
+﻿"""Lưu trạng thái và JSON artifact của workflow bằng file local.
 
 Runtime store cố tình đơn giản: mỗi run có folder riêng, state nằm trong
-`state.json`, còn index active run dùng để `start-or-get-run` idempotent theo
-source_ref. Khi cần scale mới chuyển sang SQLite/API service.
+`state.json`, artifact nằm trong `artifacts/`, còn index active run dùng để
+`start-or-get-run` idempotent theo source_ref. Các lần ghi JSON dùng temp file và
+atomic replace; khi cần scale mới chuyển sang SQLite/API service.
 """
 
 from __future__ import annotations
@@ -47,6 +48,13 @@ class RuntimeStore:
 
     def state_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "state.json"
+
+    def artifact_path(self, run_id: str, filename: str) -> Path:
+        """Trả đường dẫn artifact cố định và chặn filename thoát thư mục run."""
+
+        if not filename or Path(filename).name != filename:
+            raise HarnessError("runtime_write_failed", f"Invalid artifact filename: {filename}", run_id=run_id)
+        return self.run_dir(run_id) / "artifacts" / filename
 
     def relative(self, path: Path) -> str:
         """Đường dẫn relative để JSON không lộ path tuyệt đối của máy anh."""
@@ -106,12 +114,27 @@ class RuntimeStore:
             raise HarnessError("runtime_write_failed", str(exc), run_id=run_id) from exc
         self._write_json(self.state_path(run_id), state)
 
+    def write_json_artifact(self, run_id: str, filename: str, data: dict[str, object]) -> Path:
+        """Ghi JSON artifact bằng cùng cơ chế atomic với workflow state."""
+
+        path = self.artifact_path(run_id, filename)
+        self._write_json(path, data)
+        return path
+
     def _write_json(self, path: Path, data: dict[str, object]) -> None:
+        temp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temp_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            temp_path.replace(path)
         except OSError as exc:
             raise HarnessError("runtime_write_failed", str(exc)) from exc
+        finally:
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
 
 
 def utc_now_iso() -> str:

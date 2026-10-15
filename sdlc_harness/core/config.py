@@ -37,6 +37,7 @@ class Settings:
     confluence_sync_space_id: str
     confluence_sync_parent_page_id: str
     target_repo_path: Path
+    target_worktree_root: Path
     target_repo_remote: str
     target_base_branch: str
     implementation_branch_prefix: str
@@ -117,6 +118,7 @@ def load_settings(
         "CONFLUENCE_SYNC_SPACE_ID",
         "CONFLUENCE_SYNC_PARENT_PAGE_ID",
         "SDLC_TARGET_REPO_PATH",
+        "SDLC_TARGET_WORKTREE_ROOT",
         "SDLC_TARGET_REPO_REMOTE",
         "SDLC_TARGET_BASE_BRANCH",
         "SDLC_IMPLEMENTATION_BRANCH_PREFIX",
@@ -133,6 +135,15 @@ def load_settings(
     target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_eTour")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
+    target_repo_path = target_repo_path.resolve()
+    worktree_root_raw = merged.get("SDLC_TARGET_WORKTREE_ROOT", "").strip()
+    target_worktree_root = (
+        Path(worktree_root_raw)
+        if worktree_root_raw
+        else target_repo_path.parent / f"{target_repo_path.name}-worktrees"
+    )
+    if not target_worktree_root.is_absolute():
+        target_worktree_root = root_path / target_worktree_root
     return Settings(
         repo_root=root_path,
         runtime_root=runtime_path,
@@ -166,7 +177,8 @@ def load_settings(
         confluence_sync_enabled=_bool_value(merged.get("CONFLUENCE_SYNC_ENABLED")),
         confluence_sync_space_id=merged.get("CONFLUENCE_SYNC_SPACE_ID", ""),
         confluence_sync_parent_page_id=merged.get("CONFLUENCE_SYNC_PARENT_PAGE_ID", ""),
-        target_repo_path=target_repo_path.resolve(),
+        target_repo_path=target_repo_path,
+        target_worktree_root=target_worktree_root.resolve(),
         target_repo_remote=merged.get(
             "SDLC_TARGET_REPO_REMOTE",
             "https://github.com/LuongAnh1/SDLC_Target_eTour.git",
