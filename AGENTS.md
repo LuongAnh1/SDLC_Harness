@@ -142,8 +142,8 @@ Niko_Agent là conversational/control harness. SDLC_Harness là nơi sở hữu 
 SDLC: source intake từ fixture/Jira, Requirement Refiner, Designer, Validator,
 Developer, QA/Tester, runtime state, artifact và tool sync. Phase 3 chỉ sinh/kiểm
 `implementation_plan_v1` và dừng ở `waiting_implementation_plan_review`. Phase 4
-hiện đã triển khai code/test, Validator code trace và QA repair loop tới
-`qa_tested`; commit/Draft PR, sync code-review checkpoint và
+hiện đã triển khai code/test, Validator code trace, QA repair loop và GitHub
+publication tới `code_review_published`; Jira/Confluence sync và
 `code_review_ready` là lát kế tiếp. Khi Niko gọi repo này, contract phải là CLI
 JSON ổn định; không in log tự do ra stdout.
 

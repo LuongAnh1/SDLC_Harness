@@ -105,8 +105,10 @@ Ranh giới hiện tại:
   hybrid rule + LLM, repair theo `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`, sync
   Jira/Confluence sau khi pass và chờ `waiting_implementation_plan_review`;
   Phase 4 tạo code/test, chạy Validator và QA/Tester trước khi mở Draft PR. Hiện
-  workflow đã được kiểm chứng tới `qa_tested`; commit/Draft PR và sync checkpoint
-  code review là lát kế tiếp. Niko đọc JSON status để báo checkpoint hiện tại,
+  workflow đã được live-test tới `code_review_published`: commit/push và Draft PR
+  idempotent đã chạy thật; Jira/Confluence sync để mở checkpoint
+  `code_review_ready` là lát kế tiếp. Niko đọc JSON status để báo checkpoint hiện
+  tại,
   `blocked` và `last_sync`.
 
 <!-- SDLC_NIKO_SYNC_END -->

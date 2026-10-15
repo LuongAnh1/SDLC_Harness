@@ -557,3 +557,30 @@ Kiểm thử trước live:
   workflow từ `code_review_published`;
 - `tests/test_phase4.py`: 43 test pass;
 - full suite và live GitHub publication sẽ được ghi tiếp sau khi chạy.
+
+## 2026-10-15 - Slice 4.8A: Live GitHub Publication
+
+Run thật: `run_20261013_160421_f661babf`.
+
+Kết quả lần đầu:
+
+- state chuyển `qa_tested -> code_review_published`;
+- target branch `feature/sdlc-1-implementation` được push;
+- commit `088416465cc7139255aafa120a0b5bb8f17cb971` có subject
+  `SDLC-1 Implement approved use case` và trailer `SDLC-Run`;
+- tạo Draft PR `#1`: `https://github.com/LuongAnh1/SDLC_Target_eTour/pull/1`;
+- publication manifest gồm 14 file source/test/verification đúng evidence;
+- target working tree sạch sau publication;
+- `github_code_review_v1.json` ghi đầy đủ branch, commit, push và PR.
+
+Kiểm tra idempotency bằng lần chạy thứ hai:
+
+- state vẫn là `code_review_published`;
+- commit SHA không đổi và tổng commit vẫn là `3`;
+- GitHub vẫn chỉ có một Draft PR mở cho branch;
+- artifact ghi `commit.operation=reused` và
+  `pull_request.operation=updated`.
+
+Kết quả test trước live: toàn bộ `130/130` unittest pass. Slice 4.8A được khóa;
+Slice 4.8B còn sync PR/test/trace summary về Jira/Confluence và tạo checkpoint
+`code_review_ready` cho Niko/human review.

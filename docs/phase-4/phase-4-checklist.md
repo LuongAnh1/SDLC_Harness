@@ -40,9 +40,9 @@ Mục đích: code sinh ra có nơi lưu trữ/review thật, tách khỏi repo 
 
 - [x] Tạo branch theo issue/run.
 - [x] Không thao tác khi target repo dirty.
-- [ ] Commit có issue key.
-- [ ] Không tạo GitHub Issue.
-- [ ] Có Draft PR thật; mock/local report chỉ được đánh dấu là chưa khóa Phase 4.
+- [x] Commit có issue key.
+- [x] Không tạo GitHub Issue.
+- [x] Có Draft PR thật; mock/local report chỉ được đánh dấu là chưa khóa Phase 4.
 
 ## 4. Developer.act
 
@@ -173,8 +173,8 @@ thực tế doanh nghiệp.
 Mục đích: context implementation được đẩy sang GitHub và sync ngược về Jira/
 Confluence bởi SDLC Harness.
 
-- [ ] Tạo hoặc cập nhật Draft PR trên GitHub.
-- [ ] PR description có Jira link, Confluence link, `run_id`, summary, tests và trace.
+- [x] Tạo hoặc cập nhật Draft PR trên GitHub.
+- [x] PR description có Jira link, Confluence link, `run_id`, summary, tests và trace.
 - [ ] Sync Jira comment với PR link/status.
 - [ ] Sync Confluence code review checkpoint.
 - [ ] Ghi `tool_sync_report_v4.json` với `phase=code_review`.
@@ -195,6 +195,8 @@ Verification Runner, Validator hoặc QA/Tester.
 - [x] Ghi state trung gian `qa_tested` sau khi QA/Tester pass.
 - [x] Ghi state trung gian `qa_repair_needed` khi QA/Tester fail do code/test có
   thể sửa.
+- [x] Ghi state trung gian `code_review_published` sau commit/push/Draft PR và
+  trước Jira/Confluence sync.
 - [ ] Ghi state cuối `code_review_ready` khi pass.
 - [x] `latest_artifacts` trỏ tới `test_report` mới nhất sau Verification Runner.
 - [x] `latest_artifacts` trỏ tới report/trace mới nhất sau Validator code trace.
@@ -242,7 +244,7 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [ ] Unit test QA/Tester report `skipped`.
 - [x] Unit test blocked khi QA fail quá giới hạn repair.
 - [x] Unit test sync mock/local GitHub report.
-- [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
+- [x] Live GitHub PR create/update bằng GitHub CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
 - [x] Live compile/runtime test target repo sau Developer.act pass khi ép JDK 21
   vào PATH tạm: `All tests passed`.
@@ -303,6 +305,9 @@ Confluence checkpoint vào cùng một lát.
 - [x] Cho phép chạy lại `code_review_published` theo hướng idempotent.
 - [x] Unit test local bare remote + fake GitHub CLI cho create/update idempotency.
 - [x] Unit test workflow `qa_tested -> code_review_published` và retry partial failure.
-- [ ] Live test thật trên `run_20261013_160421_f661babf`.
-- [ ] Xác nhận chạy lại không tạo commit hoặc Draft PR trùng.
+- [x] Live test thật trên `run_20261013_160421_f661babf`: commit
+  `088416465cc7139255aafa120a0b5bb8f17cb971`, Draft PR `#1`.
+- [x] Xác nhận chạy lại không tạo commit hoặc Draft PR trùng: commit count giữ
+  nguyên `3`, artifact ghi `commit.operation=reused` và
+  `pull_request.operation=updated`.
 - [ ] Slice 4.8B sync Jira/Confluence và mở `code_review_ready`.

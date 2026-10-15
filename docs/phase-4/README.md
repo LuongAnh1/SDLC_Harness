@@ -10,8 +10,8 @@ kiểm target repo; Phase 4 mới tạo branch, commit và Draft PR.
 
 ## Trạng Thái Hiện Tại
 
-Phase 4 đã khóa tới Slice 4.7B và trạng thái trung gian `qa_tested`: Developer.act
-sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
+Phase 4 đã khóa tới Slice 4.8A và trạng thái trung gian `code_review_published`.
+Developer.act sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
 rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có giới hạn:
 
 - vòng nhỏ Validator -> Developer qua `SDLC_IMPLEMENTATION_REPAIR_LIMIT`;
@@ -21,8 +21,8 @@ Verification Runner hiện bắt buộc execute từng Java class do QA vừa si
 command baseline. Việc chỉ compile file QA hoặc chạy một unit-test class cũ không
 còn được tính là QA pass.
 
-Slice 4.8A đã được triển khai để commit target repo, push branch và tạo/cập nhật
-Draft PR. Mốc trung gian của lát này là `code_review_published`; nó vẫn chưa phải
+Slice 4.8A đã được live-test để commit target repo, push branch và tạo/cập nhật
+Draft PR thật. Mốc trung gian là `code_review_published`; nó vẫn chưa phải
 `code_review_ready`. Slice 4.8B còn phải sync code-review checkpoint về Jira và
 Confluence rồi mới mở checkpoint cho human/Niko review.
 
@@ -433,5 +433,6 @@ Live DeepSeek run `run_live_qa_repair_20261014_03` trên runtime/target repo cop
 - Baseline verification pass, Validator rule + LLM pass, QA sinh/chạy lại class.
 - State cuối `qa_tested`, `qa_repair_iterations=1`, `last_error=null`.
 
-Slice 4.7B vẫn không commit hoặc mở PR. Lát tiếp theo là GitHub commit/Draft PR và
-sync code-review checkpoint để chuyển sang `code_review_ready`.
+Đoạn trên là mốc lịch sử của Slice 4.7B. Slice 4.8A sau đó đã publish Draft PR
+thật; lát tiếp theo chỉ còn sync code-review checkpoint về Jira/Confluence để
+chuyển sang `code_review_ready`.
