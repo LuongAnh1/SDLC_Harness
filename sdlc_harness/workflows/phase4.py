@@ -43,6 +43,7 @@ from ..artifacts.writers import (
     write_phase4_developer_raw_response,
     write_phase4_developer_work_packet,
     write_phase4_github_code_review,
+    write_phase4_github_code_review_approval,
     write_phase4_github_pr_body,
     write_phase4_qa_execution_report,
     write_phase4_qa_generated_tests,
@@ -57,7 +58,12 @@ from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
-from ..sync.github import GitHubCodeReviewPublisher, GitHubPublishError, github_repository_from_remote
+from ..sync.github import (
+    GitHubCodeReviewApprover,
+    GitHubCodeReviewPublisher,
+    GitHubPublishError,
+    github_repository_from_remote,
+)
 from ..sync.runner import sync_code_review_checkpoint
 from ..verification import VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
@@ -73,6 +79,8 @@ ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
+ALLOWED_CODE_REVIEW_READY_ACTIONS = ["approve_checkpoint", "get_status", "sync_run", "cancel_run"]
+ALLOWED_CODE_REVIEW_APPROVED_ACTIONS = ["get_status", "sync_run", "cancel_run"]
 
 MAX_QA_REQUIREMENT_CHARS = 6000
 MAX_QA_VERIFICATION_CHARS = 4000
@@ -94,7 +102,100 @@ class PhaseFourWorkflow:
         self.code_trace_validator = CodeTraceValidator(self.llm_client)
         self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
+        self.github_approver = GitHubCodeReviewApprover()
         self.workspace_manager = RunWorkspaceManager(settings)
+
+    def approve_code_review_checkpoint(
+        self,
+        *,
+        run_id: str,
+        checkpoint_id: str | None = None,
+    ) -> dict[str, object]:
+        """Duyệt Code Review bằng Draft -> Ready; merge vẫn do human."""
+
+        state = self.store.read_state(run_id)
+        self._require_code_review_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        with self.workspace_manager.locked_workspace(run_id) as workspace:
+            state = self.store.read_state(run_id)
+            self._require_code_review_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+            artifact_paths = _string_dict(state.get("latest_artifacts"))
+            github_report_path = _required_phase4_artifact(
+                artifact_paths,
+                "github_code_review",
+                run_id=run_id,
+            )
+            github_report = _read_json_artifact(
+                self._existing_artifact_path(github_report_path, run_id=run_id),
+                run_id=run_id,
+            )
+            published_pr = _dict_value(github_report.get("pull_request"))
+            pr_number = workspace.pr_number
+            if (
+                pr_number is None
+                or published_pr.get("number") != pr_number
+                or str(published_pr.get("url") or "") != workspace.pr_url
+            ):
+                raise HarnessError(
+                    "github_pr_identity_mismatch",
+                    "Published PR identity does not match the run workspace.",
+                    run_id=run_id,
+                )
+            try:
+                approval = self.github_approver.approve(
+                    target_path=Path(workspace.worktree_path),
+                    repository=github_repository_from_remote(workspace.remote),
+                    pr_number=pr_number,
+                    expected_branch=workspace.branch,
+                    expected_head_sha=workspace.head_sha,
+                    expected_base_branch=self.settings.target_base_branch,
+                    run_id=run_id,
+                )
+            except HarnessError as exc:
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "last_error": exc.to_response(),
+                        "summary_for_user": (
+                            f"Chưa thể chuyển Draft PR sang Ready cho run {run_id}: {exc.message}"
+                        ),
+                    }
+                )
+                self.store.write_state(state)
+                raise
+
+            approval_path = write_phase4_github_code_review_approval(
+                store=self.store,
+                run_id=run_id,
+                report=approval,
+            )
+            artifact_paths["github_code_review_approval"] = approval_path
+            quality_reports = _dict_value(state.get("quality_reports"))
+            approved_pr = _dict_value(approval.get("pull_request"))
+            quality_reports["code_review_approval"] = {
+                "ok": True,
+                "status": "ready_for_review",
+                "operation": approval.get("operation"),
+                "pr_url": approved_pr.get("url"),
+                "draft": approved_pr.get("isDraft"),
+                "approved_at": approval.get("approved_at"),
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_approval",
+                    "status": "code_review_approval_syncing",
+                    "latest_artifacts": artifact_paths,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"PR của run {run_id} đã Ready for review; đang đồng bộ trạng thái approval."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._sync_code_review_locked(run_id=run_id, review_status="code_review_approved")
 
     def approve_implementation_plan_checkpoint(
         self,
@@ -437,7 +538,12 @@ class PhaseFourWorkflow:
         with self.workspace_manager.locked_workspace(run_id):
             return self._sync_code_review_locked(run_id=run_id)
 
-    def _sync_code_review_locked(self, *, run_id: str) -> dict[str, object]:
+    def _sync_code_review_locked(
+        self,
+        *,
+        run_id: str,
+        review_status: str | None = None,
+    ) -> dict[str, object]:
         """Sync Code Review khi caller đang giữ per-run lock."""
 
         state = self.store.read_state(run_id)
@@ -447,6 +553,9 @@ class PhaseFourWorkflow:
             "code_review_syncing",
             "code_review_sync_failed",
             "code_review_ready",
+            "code_review_approval_syncing",
+            "code_review_approval_sync_failed",
+            "code_review_approved",
         }:
             raise HarnessError(
                 "sync_not_ready",
@@ -454,6 +563,22 @@ class PhaseFourWorkflow:
                 run_id=run_id,
             )
         artifact_paths = _string_dict(state.get("latest_artifacts"))
+        if review_status is None:
+            review_status = (
+                "code_review_approved"
+                if status in {
+                    "code_review_approval_syncing",
+                    "code_review_approval_sync_failed",
+                    "code_review_approved",
+                }
+                else "code_review_ready"
+            )
+        if review_status not in {"code_review_ready", "code_review_approved"}:
+            raise HarnessError(
+                "code_review_status_invalid",
+                f"Unsupported Code Review sync status: {review_status}",
+                run_id=run_id,
+            )
         for key in (
             "github_code_review",
             "test_report",
@@ -462,6 +587,8 @@ class PhaseFourWorkflow:
             "qa_test_report",
         ):
             _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+        if review_status == "code_review_approved":
+            _required_phase4_artifact(artifact_paths, "github_code_review_approval", run_id=run_id)
 
         last_sync = sync_code_review_checkpoint(
             store=self.store,
@@ -469,6 +596,7 @@ class PhaseFourWorkflow:
             run_id=run_id,
             source_ref=str(state.get("source_ref") or ""),
             artifact_paths=artifact_paths,
+            review_status=review_status,
         )
         sync_ok = str(last_sync.get("status") or "") in {"synced", "mock_synced"}
         github_report_path = artifact_paths["github_code_review"]
@@ -477,7 +605,24 @@ class PhaseFourWorkflow:
             run_id=run_id,
         )
         pull_request = _dict_value(github_report.get("pull_request"))
-        if sync_ok:
+        if sync_ok and review_status == "code_review_approved":
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_approved",
+                    "status": "code_review_approved",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_APPROVED_ACTIONS,
+                    "last_sync": last_sync,
+                    "last_error": None,
+                    "summary_for_user": (
+                        f"Code Review của run {run_id} đã được duyệt. "
+                        f"PR đã Ready for review: {pull_request.get('url', '')}. "
+                        "Harness không merge; anh tiếp tục review và merge trực tiếp trên GitHub."
+                    ),
+                }
+            )
+        elif sync_ok:
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -490,13 +635,34 @@ class PhaseFourWorkflow:
                         "artifact_path": github_report_path,
                         "pull_request_url": str(pull_request.get("url") or ""),
                     },
-                    "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_READY_ACTIONS,
                     "last_sync": last_sync,
                     "last_error": None,
                     "summary_for_user": (
                         f"Checkpoint Code Review đã sẵn sàng cho run {run_id}. "
                         f"Draft PR: {pull_request.get('url', '')}. "
-                        "Slice này chỉ mở review; approve/request-change sẽ được triển khai ở slice sau."
+                        "Anh có thể approve checkpoint để chuyển Draft PR thành Ready for review."
+                    ),
+                }
+            )
+        elif review_status == "code_review_approved":
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_approval",
+                    "status": "code_review_approval_sync_failed",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_SYNC_ACTIONS,
+                    "last_sync": last_sync,
+                    "last_error": {
+                        "ok": False,
+                        "error_code": "code_review_approval_sync_failed",
+                        "message": f"Code Review approval sync status={last_sync.get('status')}",
+                        "run_id": run_id,
+                    },
+                    "summary_for_user": (
+                        f"PR của run {run_id} đã Ready nhưng Jira/Confluence chưa sync đủ; "
+                        f"sync status={last_sync.get('status')}. Dùng sync-run để retry."
                     ),
                 }
             )
@@ -1981,6 +2147,42 @@ class PhaseFourWorkflow:
             )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _require_code_review_checkpoint(
+        self,
+        state: dict[str, object],
+        *,
+        run_id: str,
+        checkpoint_id: str | None,
+    ) -> None:
+        """Chỉ cho phép human approve đúng checkpoint Code Review hiện hành."""
+
+        if str(state.get("status")) != "code_review_ready":
+            raise HarnessError(
+                "checkpoint_not_current",
+                f"Run is not waiting for Code Review approval: {run_id}",
+                run_id=run_id,
+            )
+        checkpoint = _dict_value(state.get("pending_checkpoint"))
+        if not checkpoint:
+            raise HarnessError(
+                "no_pending_checkpoint",
+                f"Run does not have a pending checkpoint: {run_id}",
+                run_id=run_id,
+            )
+        if checkpoint.get("type") != "code_review":
+            raise HarnessError(
+                "checkpoint_not_current",
+                f"Pending checkpoint is not a Code Review checkpoint: {run_id}",
+                run_id=run_id,
+            )
+        current_checkpoint_id = str(checkpoint.get("checkpoint_id") or "")
+        if checkpoint_id and checkpoint_id != current_checkpoint_id:
+            raise HarnessError(
+                "checkpoint_not_current",
+                f"Checkpoint is not current: {checkpoint_id}",
+                run_id=run_id,
+            )
 
     def _require_implementation_plan_checkpoint(
         self,

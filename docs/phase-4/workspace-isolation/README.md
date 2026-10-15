@@ -196,6 +196,7 @@ Slice 4.9A3 đã nối creation engine vào workflow:
 
 Slice 4.9B đã hoàn thành CLI adoption, fail-closed guard, rollback và live
 migration run/PR #1. Slice 4.9C đã hoàn thành cleanup CLI, lifecycle/audit,
-recovery proof, dirty guard và retry idempotent. Phần còn mở là 4.9D chuyển Draft
-PR thành Ready for review.
+recovery proof, dirty guard và retry idempotent. Slice 4.9D đã hoàn thành approval
+Draft -> Ready, audit artifact và Jira/Confluence retry sync. Live approval PR #1
+chưa chạy.
 

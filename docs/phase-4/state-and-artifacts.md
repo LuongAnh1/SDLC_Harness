@@ -21,6 +21,8 @@ waiting_implementation_plan_review
   -> code_review_published
   -> code_review_syncing
   -> code_review_ready
+  -> code_review_approval_syncing
+  -> code_review_approved
 ```
 
 State phụ:
@@ -45,7 +47,10 @@ cancelled
 | `code_review_published` | Commit/branch/Draft PR đã publish; Jira/Confluence Code Review checkpoint chưa sync. | Harness |
 | `code_review_syncing` | Harness đang sync hoặc retry Jira/Confluence; nếu lỗi chuyển `code_review_sync_failed`. | Harness |
 | `code_review_sync_failed` | GitHub/QA/Validator evidence vẫn còn nhưng Atlassian sync chưa đủ; `sync-run` có thể retry. | Harness hoặc human |
-| `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng để human review. | Niko + human |
+| `code_review_ready` | Draft PR, test report, trace report, QA report và sync report đã sẵn sàng; human có thể approve checkpoint để mở review. | Niko + human |
+| `code_review_approval_syncing` | PR đã Ready for review; Harness đang sync trạng thái approval sang Jira/Confluence. | Harness |
+| `code_review_approval_sync_failed` | PR vẫn Ready và approval artifact còn nguyên nhưng Atlassian sync chưa đủ; `sync-run` chỉ retry sync. | Harness hoặc human |
+| `code_review_approved` | Human đã approve checkpoint, PR đang Ready for review; human tiếp tục review/merge trực tiếp trên GitHub. | Human |
 | `blocked` | Thiếu plan/design, trace fail, GitHub/test lỗi cần can thiệp. | Niko + human |
 | `cancelled` | Run bị dừng có chủ đích. | Human/Niko |
 
@@ -61,6 +66,8 @@ cancelled
 | `requirement_design_code_trace_v{n}.json` | Trace requirement -> design -> file/class/function/test, gồm static evidence và LLM graph review bắt buộc. |
 | `implementation_repair_feedback_v{n}.json` | Feedback máy đọc được từ Validator cho Developer repair code/test; chỉ xuất hiện khi trace fail có thể sửa ở code/test. |
 | `qa_test_report_v1.md` | Artifact bắt buộc trước `code_review_ready`: QA/Tester Agent kiểm acceptance/system-level behavior từ compact packet gồm use case, code hiện tại, Verification Runner report và trace summary; không thay thế unit test report. |
+| `github_code_review_v1.json` | Evidence publication gồm commit, branch và Draft PR identity. |
+| `github_code_review_approval_v1.json` | Audit riêng của thao tác Draft -> Ready, gồm PR identity trước/sau và thời điểm approval. |
 | `tool_sync_report_v4.json` | Kết quả sync GitHub/Jira/Confluence của Phase 4. |
 
 Artifact dùng version như các phase trước. Nếu repair/rerun code xảy ra trong
@@ -278,14 +285,31 @@ quality_reports.implementation_traceability
 quality_reports.qa_acceptance
 pending_checkpoint.type=code_review
 pending_checkpoint.artifact_ref=github_code_review_v1
-allowed_next_actions=[get_status, sync_run, cancel_run]
+allowed_next_actions=[approve_checkpoint, get_status, sync_run, cancel_run]
 last_sync.phase=code_review
 summary_for_user
 ```
 
 Checkpoint `code_review` nghĩa là human cần review PR/code/test report. Nó không
-có nghĩa PR đã được merge. Slice 4.8B chưa xử lý approve/request-change, vì vậy
-hai action đó không được quảng bá trước khi slice tiếp theo triển khai contract.
+có nghĩa PR đã được merge. Slice 4.9D cho phép approve checkpoint để chuyển Draft
+PR sang Ready; request-change vẫn chưa được quảng bá trước Phase 5.
+
+Sau Code Review approval và sync thành công:
+
+```text
+current_phase=code_review_approved
+status=code_review_approved
+latest_artifacts.github_code_review_approval
+quality_reports.code_review_approval.ok=true
+pending_checkpoint=null
+allowed_next_actions=[get_status, sync_run, cancel_run]
+last_sync.review_status=code_review_approved
+workspace.lifecycle=active
+```
+
+Nếu Jira/Confluence sync lỗi sau khi PR đã Ready, state là
+`code_review_approval_sync_failed`; approval artifact và workspace được giữ để
+`sync-run` retry mà không gọi lại thao tác GitHub.
 
 ## Run Workspace Artifact Từ Slice 4.9A3
 
@@ -339,6 +363,15 @@ sync/github_code_review_v1.json
 
 Artifact này là evidence của GitHub publication, chưa phải bằng chứng Jira và
 Confluence đã được sync.
+
+Sau human approval, Slice 4.9D ghi riêng:
+
+```text
+sync/github_code_review_approval_v1.json
+```
+
+Artifact publication không bị ghi đè. `tool_sync_report_v4.json` trỏ tới approval
+artifact khi `checkpoint.status=code_review_approved`.
 
 ## Blocked State
 

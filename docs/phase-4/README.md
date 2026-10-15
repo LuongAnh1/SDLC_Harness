@@ -11,8 +11,10 @@ riêng cho run để lập plan nhưng không sửa code; Phase 4 dùng lại đ
 
 ## Trạng Thái Hiện Tại
 
-Phase 4 đã khóa code/unit test tới Slice 4.8B. Sau khi Draft PR được publish,
-Harness sync evidence về Jira/Confluence và mở checkpoint `code_review_ready`.
+Phase 4 đã hoàn tất Slice 4.9D ở mức code và regression test. Sau khi Draft PR
+được publish, Harness sync evidence về Jira/Confluence, mở checkpoint
+`code_review_ready`, rồi human approval có thể chuyển PR sang Ready for review
+và sync trạng thái `code_review_approved`.
 Developer.act sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
 rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có giới hạn:
 
@@ -34,7 +36,8 @@ worktree-per-run cho toàn bộ Phase 3/4. Contract nằm tại
 `run_id`, giữ per-run lock và fail closed khi identity lệch. Slice 4.9B đã nhận
 nuôi run/PR legacy vào worktree riêng mà không đổi HEAD. Slice 4.9C đã triển khai
 cleanup explicit sau human merge/cancel, không force và không xóa remote branch.
-Approve Code Review Draft -> Ready vẫn thuộc Slice 4.9D.
+Slice 4.9D đã triển khai Draft -> Ready, artifact approval riêng và retry sync
+Jira/Confluence mà không chạy lại thao tác GitHub.
 
 ## Slice 4.1 Đã Chốt
 
@@ -249,6 +252,10 @@ approve_checkpoint(run_id)
 -> status=code_review_published
 -> sync PR/test/trace summary về Jira và Confluence ở Slice 4.8B
 -> status=code_review_ready
+-> human approve checkpoint
+-> chuyển đúng Draft PR thành Ready for review
+-> sync trạng thái approved về Jira/Confluence
+-> status=code_review_approved
 ```
 
 ## Slice 4.8A - GitHub Publication
@@ -294,6 +301,24 @@ target bằng marker. Nhiều target cùng marker hoặc nhiều legacy page ph�
 
 Jira source loader loại cả marker mới và heading checkpoint legacy do Harness tạo.
 Nhờ vậy output của run cũ không quay ngược vào source packet của run mới.
+
+## Slice 4.9D - Code Review Approval
+
+```text
+code_review_ready + pending_checkpoint.type=code_review
+-> giữ per-run workspace lock và xác minh publication/workspace identity
+-> đọc live PR, yêu cầu OPEN/unmerged và đúng number/head/base/head SHA
+-> nếu Draft: gh pr ready; nếu đã Ready: idempotent
+-> đọc lại PR và xác minh isDraft=false
+-> ghi github_code_review_approval_v1.json
+-> sync Jira/Confluence với review_status=code_review_approved
+-> status=code_review_approved
+```
+
+Nếu GitHub đã Ready nhưng Atlassian sync lỗi, state chuyển
+`code_review_approval_sync_failed`. `sync-run` chỉ retry Jira/Confluence từ
+approval artifact, không gọi lại GitHub operation. Worktree vẫn ở lifecycle
+`active`; Harness không có code path merge hoặc auto-merge.
 
 Nếu code không cover design, compile/unit test fail không có repair path, QA fail
 quá giới hạn, hoặc trace code-test thiếu nghiêm trọng, workflow phải `blocked`
@@ -375,6 +400,7 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
 .runtime/runs/<run_id>/sync/github_pr_body_v1.md
 .runtime/runs/<run_id>/sync/github_code_review_v1.json
+.runtime/runs/<run_id>/sync/github_code_review_approval_v1.json
 ```
 
 Khi run đạt `qa_tested`, state phải có:
@@ -416,7 +442,7 @@ quality_reports.implementation_traceability
 quality_reports.qa_acceptance
 last_sync.phase=code_review
 pending_checkpoint.type=code_review
-allowed_next_actions=[get_status, sync_run, cancel_run]
+allowed_next_actions=[approve_checkpoint, get_status, sync_run, cancel_run]
 summary_for_user
 ```
 
@@ -424,9 +450,20 @@ Checkpoint `code_review` nghĩa là human cần review PR/code/test/trace/QA rep
 Nó không có nghĩa PR đã được merge. Nếu thiếu `qa_test_report_v1.md` hoặc QA chưa
 pass/được block rõ ràng, workflow chưa được coi là `code_review_ready`.
 
-Approve checkpoint ở lát sau chỉ được chuyển Draft PR thành Ready for review và
-sync trạng thái; merge luôn do human thực hiện trực tiếp trên GitHub. Request
-change thuộc Phase 5 và phải tiếp tục trên đúng worktree/branch/PR của run.
+Approve checkpoint chuyển Draft PR thành Ready for review và sync trạng thái;
+merge luôn do human thực hiện trực tiếp trên GitHub. Request change thuộc Phase 5
+và phải tiếp tục trên đúng worktree/branch/PR của run.
+
+Sau approval thành công, state có:
+
+```text
+current_phase=code_review_approved
+status=code_review_approved
+latest_artifacts.github_code_review_approval
+pending_checkpoint=null
+allowed_next_actions=[get_status, sync_run, cancel_run]
+last_sync.review_status=code_review_approved
+```
 
 CLI side-effect mặc định `--sync-mode mock`, kể cả `.env` đang để real. Muốn ghi
 Jira/Confluence thật phải truyền rõ `--sync-mode real`; Niko làm việc này qua
@@ -478,7 +515,7 @@ Live DeepSeek run `run_live_qa_repair_20261014_03` trên runtime/target repo cop
 - Baseline verification pass, Validator rule + LLM pass, QA sinh/chạy lại class.
 - State cuối `qa_tested`, `qa_repair_iterations=1`, `last_error=null`.
 
-Đoạn trên là mốc lịch sử của Slice 4.7B. Slice 4.8A sau đó đã publish Draft PR và
-Slice 4.8B đã sync code-review checkpoint về Jira/Confluence để chuyển sang
-`code_review_ready`. Bước kế tiếp là Slice 4.9 worktree-per-run trước khi mở
-approve Code Review và Phase 5.
+Đoạn trên là mốc lịch sử của Slice 4.7B. Slice 4.8A sau đó đã publish Draft PR,
+Slice 4.8B đã mở `code_review_ready`, và Slice 4.9A-D đã hoàn tất workspace
+isolation, adoption, cleanup cùng Code Review approval. Phase 5 request-change
+vẫn chưa mở.

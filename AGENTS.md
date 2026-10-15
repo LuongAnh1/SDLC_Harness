@@ -170,9 +170,12 @@ Developer, QA/Tester, runtime state, artifact và tool sync. Phase 3 chỉ sinh/
 `implementation_plan_v1` và dừng ở `waiting_implementation_plan_review`. Phase 4
 hiện đã triển khai code/test, Validator code trace, QA repair loop và GitHub
 publication, rồi sync bằng chứng PR/test/trace/QA sang Jira và Confluence để mở
-checkpoint `code_review_ready`. Việc approve/request-change checkpoint Code
-Review thuộc lát sau và chỉ mở sau Slice 4.9 workspace isolation. Approve chỉ
-được chuyển Draft PR thành Ready for review; merge luôn do human. Khi Niko gọi repo này, contract
+checkpoint `code_review_ready`. Slice 4.9D đã mở approval trong SDLC_Harness:
+`approve-checkpoint` chỉ chuyển đúng Draft PR của run thành Ready for review,
+ghi artifact approval riêng và sync trạng thái `code_review_approved`; merge
+luôn do human. Request-change vẫn thuộc Phase 5. Niko chưa quảng bá Phase 4
+continue/sync/approval trên Telegram cho tới khi có intent/formatter test tương
+ứng. Khi Niko gọi repo này, contract
 phải là CLI JSON ổn định; không in log tự do ra stdout.
 
 Các lệnh CLI có side effect mặc định dùng `--sync-mode mock`. Caller phải truyền

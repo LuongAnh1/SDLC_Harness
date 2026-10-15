@@ -128,8 +128,12 @@ def sync_code_review_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    review_status: str = "code_review_ready",
 ) -> dict[str, object]:
     """Sync checkpoint Code Review bằng mock, real hoặc cả hai."""
+
+    if review_status not in {"code_review_ready", "code_review_approved"}:
+        raise ValueError(f"Unsupported Code Review status: {review_status}")
 
     if settings.sync_mode == "mock":
         return mock_sync_code_review_checkpoint(
@@ -137,6 +141,7 @@ def sync_code_review_checkpoint(
             run_id=run_id,
             source_ref=source_ref,
             artifact_paths=artifact_paths,
+            review_status=review_status,
         )
     if settings.sync_mode == "both":
         mock_sync_code_review_checkpoint(
@@ -144,6 +149,7 @@ def sync_code_review_checkpoint(
             run_id=run_id,
             source_ref=source_ref,
             artifact_paths=artifact_paths,
+            review_status=review_status,
         )
     return real_sync_code_review_checkpoint(
         store=store,
@@ -151,4 +157,5 @@ def sync_code_review_checkpoint(
         run_id=run_id,
         source_ref=source_ref,
         artifact_paths=artifact_paths,
+        review_status=review_status,
     )

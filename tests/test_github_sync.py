@@ -10,13 +10,16 @@ import unittest
 from unittest.mock import patch
 
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.github import (
+    GitHubCodeReviewApprover,
     GitHubCodeReviewPublisher,
     GitHubCodeReviewResult,
     GitHubPullRequestReader,
     GitHubPublishError,
 )
+from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
 
@@ -58,6 +61,37 @@ class FakeGh:
         raise AssertionError(f"Unexpected gh command: {args}")
 
 
+class FakeReadyGh:
+    """Giả lập read/ready PR nhưng chặn mọi thao tác merge ngoài contract."""
+
+    def __init__(self) -> None:
+        self.pull_request = {
+            "number": 7,
+            "url": "https://github.com/example/target/pull/7",
+            "state": "OPEN",
+            "isDraft": True,
+            "headRefName": "feature/sdlc-1-implementation",
+            "headRefOid": "a" * 40,
+            "baseRefName": "main",
+            "baseRefOid": "b" * 40,
+            "mergedAt": None,
+            "mergeCommit": None,
+        }
+        self.ready_calls = 0
+        self.commands: list[list[str]] = []
+
+    def __call__(self, args: list[str], cwd: Path) -> str:
+        del cwd
+        self.commands.append(args)
+        if args[:2] == ["pr", "view"]:
+            return json.dumps(self.pull_request)
+        if args[:2] == ["pr", "ready"]:
+            self.ready_calls += 1
+            self.pull_request["isDraft"] = False
+            return ""
+        raise AssertionError(f"Unexpected gh command: {args}")
+
+
 class RecordingPublisher:
     def __init__(self) -> None:
         self.calls: list[dict[str, object]] = []
@@ -89,6 +123,35 @@ class RecordingPublisher:
                 },
             }
         )
+
+
+class RecordingApprover:
+    """Double cho workflow test, trả PR Ready đúng identity mà không gọi GitHub."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def approve(self, **kwargs: object) -> dict[str, object]:
+        self.calls.append(dict(kwargs))
+        return {
+            "version": "github_code_review_approval_v1",
+            "phase": "code_review_approval",
+            "status": "ready_for_review",
+            "operation": "marked_ready",
+            "repository": kwargs["repository"],
+            "run_id": kwargs["run_id"],
+            "pull_request_before": {
+                "number": kwargs["pr_number"],
+                "url": "https://github.com/example/target/pull/7",
+                "isDraft": True,
+            },
+            "pull_request": {
+                "number": kwargs["pr_number"],
+                "url": "https://github.com/example/target/pull/7",
+                "isDraft": False,
+            },
+            "approved_at": "2026-10-15T12:00:00Z",
+        }
 
 
 class FailingPublisher:
@@ -147,6 +210,59 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertIn("mergedAt", calls[0][0][-1])
         self.assertIn("mergeCommit", calls[0][0][-1])
         self.assertEqual(calls[0][1], self.root)
+
+    def test_approver_marks_draft_ready_idempotently_without_merge(self) -> None:
+        fake_gh = FakeReadyGh()
+        approver = GitHubCodeReviewApprover(gh_runner=fake_gh)
+        kwargs = {
+            "target_path": self.root,
+            "repository": "example/target",
+            "pr_number": 7,
+            "expected_branch": "feature/sdlc-1-implementation",
+            "expected_head_sha": "a" * 40,
+            "expected_base_branch": "main",
+            "run_id": "run_20261015_120000_a1b2c3d4",
+        }
+
+        first = approver.approve(**kwargs)
+        second = approver.approve(**kwargs)
+
+        self.assertEqual(first["operation"], "marked_ready")
+        self.assertEqual(second["operation"], "already_ready")
+        self.assertFalse(first["pull_request"]["isDraft"])
+        self.assertEqual(fake_gh.ready_calls, 1)
+        self.assertTrue(all(command[:2] in (["pr", "view"], ["pr", "ready"]) for command in fake_gh.commands))
+        self.assertFalse(any("merge" in command or "auto-merge" in command for command in fake_gh.commands))
+
+    def test_approver_rejects_pr_identity_or_lifecycle_mismatch_before_ready(self) -> None:
+        cases = (
+            ("number", 8, "github_pr_identity_mismatch"),
+            ("headRefName", "feature/other", "github_pr_identity_mismatch"),
+            ("headRefOid", "c" * 40, "github_pr_identity_mismatch"),
+            ("baseRefName", "develop", "github_pr_identity_mismatch"),
+            ("state", "CLOSED", "github_pr_not_open"),
+            ("mergedAt", "2026-10-15T12:00:00Z", "github_pr_not_open"),
+        )
+
+        for field, value, error_code in cases:
+            with self.subTest(field=field):
+                fake_gh = FakeReadyGh()
+                fake_gh.pull_request[field] = value
+                approver = GitHubCodeReviewApprover(gh_runner=fake_gh)
+
+                with self.assertRaises(HarnessError) as context:
+                    approver.approve(
+                        target_path=self.root,
+                        repository="example/target",
+                        pr_number=7,
+                        expected_branch="feature/sdlc-1-implementation",
+                        expected_head_sha="a" * 40,
+                        expected_base_branch="main",
+                        run_id="run_20261015_120000_a1b2c3d4",
+                    )
+
+                self.assertEqual(context.exception.error_code, error_code)
+                self.assertEqual(fake_gh.ready_calls, 0)
 
     def test_publisher_commits_pushes_and_updates_same_draft_pr(self) -> None:
         target, remote = self._target_with_bare_remote()
@@ -268,6 +384,98 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(report["status"], "partial_failed")
         self.assertEqual(report["commit"]["sha"], "abc123")
         self.assertEqual(report["push"]["status"], "pushed")
+
+    def test_approval_dispatch_writes_artifact_syncs_status_and_keeps_workspace(self) -> None:
+        settings, store, run_id, workflow, ready = self._ready_code_review_workflow()
+        approver = RecordingApprover()
+        workflow.github_approver = approver
+        workspace_before = RunWorkspaceManager(settings).resolve(run_id)
+
+        with patch("sdlc_harness.workflows.approval.PhaseFourWorkflow", return_value=workflow):
+            with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+                response = CheckpointApprovalWorkflow(settings).approve_checkpoint(
+                    run_id=run_id,
+                    checkpoint_id=ready["pending_checkpoint"]["checkpoint_id"],
+                )
+
+        self.assertEqual(response["status"], "code_review_approved")
+        self.assertIsNone(response["pending_checkpoint"])
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "sync_run", "cancel_run"])
+        self.assertEqual(len(approver.calls), 1)
+        approval_path = Path(str(response["latest_artifacts"]["github_code_review_approval"]))
+        if not approval_path.is_absolute():
+            approval_path = settings.repo_root / approval_path
+        approval = json.loads(approval_path.read_text(encoding="utf-8"))
+        self.assertEqual(approval["version"], "github_code_review_approval_v1")
+        self.assertEqual(approval["operation"], "marked_ready")
+        self.assertFalse(approval["pull_request"]["isDraft"])
+        sync_report = json.loads((store.run_dir(run_id) / "sync" / "tool_sync_report_v4.json").read_text(encoding="utf-8"))
+        self.assertEqual(sync_report["checkpoint"]["status"], "code_review_approved")
+        self.assertEqual(sync_report["checkpoint"]["artifact_path"], store.relative(approval_path))
+        workspace_after = RunWorkspaceManager(settings).resolve(run_id)
+        self.assertEqual(workspace_after.lifecycle, "active")
+        self.assertEqual(workspace_after.branch, workspace_before.branch)
+        self.assertEqual(workspace_after.head_sha, workspace_before.head_sha)
+
+    def test_approval_sync_retry_does_not_repeat_github_ready(self) -> None:
+        settings, _, run_id, workflow, ready = self._ready_code_review_workflow()
+        approver = RecordingApprover()
+        workflow.github_approver = approver
+        failed_sync = {
+            "phase": "code_review",
+            "status": "partial_failed",
+            "mode": "real",
+            "review_status": "code_review_approved",
+            "report": "sync/tool_sync_report_v4.json",
+            "targets": [],
+        }
+        passed_sync = {
+            "phase": "code_review",
+            "status": "synced",
+            "mode": "real",
+            "review_status": "code_review_approved",
+            "report": "sync/tool_sync_report_v4.json",
+            "targets": [],
+        }
+
+        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=failed_sync):
+            with patch("sdlc_harness.workflows.approval.PhaseFourWorkflow", return_value=workflow):
+                with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+                    failed = CheckpointApprovalWorkflow(settings).approve_checkpoint(
+                        run_id=run_id,
+                        checkpoint_id=ready["pending_checkpoint"]["checkpoint_id"],
+                    )
+        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=passed_sync):
+            approved = workflow.sync_code_review(run_id=run_id)
+
+        self.assertEqual(failed["status"], "code_review_approval_sync_failed")
+        self.assertIn("github_code_review_approval", failed["latest_artifacts"])
+        self.assertEqual(approved["status"], "code_review_approved")
+        self.assertEqual(len(approver.calls), 1)
+
+    def test_approval_rejects_stale_checkpoint_before_github_call(self) -> None:
+        _, _, run_id, workflow, _ = self._ready_code_review_workflow()
+        approver = RecordingApprover()
+        workflow.github_approver = approver
+
+        with self.assertRaises(HarnessError) as context:
+            workflow.approve_code_review_checkpoint(
+                run_id=run_id,
+                checkpoint_id="checkpoint_code_review_stale",
+            )
+
+        self.assertEqual(context.exception.error_code, "checkpoint_not_current")
+        self.assertEqual(approver.calls, [])
+
+    def _ready_code_review_workflow(self):
+        settings, store, run_id = self._workflow_fixture()
+        workflow = PhaseFourWorkflow(settings)
+        workflow.github_publisher = RecordingPublisher()
+        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+            workflow.continue_run(run_id=run_id)
+        ready = workflow.continue_run(run_id=run_id)
+        self.assertEqual(ready["status"], "code_review_ready")
+        return settings, store, run_id, workflow, ready
 
     def _workflow_fixture(self):
         target, remote = self._init_workflow_target()

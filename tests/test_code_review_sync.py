@@ -120,6 +120,71 @@ class CodeReviewSyncTest(unittest.TestCase):
             self.assertEqual(ids["github"], "7")
         self.assertFalse(any(method == "POST" for method, _, _ in calls))
 
+    def test_real_sync_updates_existing_targets_for_approved_review(self) -> None:
+        settings, store, run_id, artifacts = self._fixture(sync_mode="real")
+        approval_path = store.run_dir(run_id) / "sync" / "github_code_review_approval_v1.json"
+        approval_path.write_text(
+            json.dumps(
+                {
+                    "version": "github_code_review_approval_v1",
+                    "status": "ready_for_review",
+                    "operation": "marked_ready",
+                    "pull_request": {
+                        "number": 7,
+                        "url": "https://github.com/example/target/pull/7",
+                        "isDraft": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        artifacts["github_code_review_approval"] = store.relative(approval_path)
+        calls: list[tuple[str, str, dict[str, object] | None]] = []
+
+        def fake_request(method: str, url: str, payload: dict[str, object] | None):
+            calls.append((method, url, payload))
+            if method == "GET" and "/wiki/api/v2/pages?" in url:
+                return {"results": [{"id": "20004", "title": "SDLC Harness - SDLC-1 - Code Review Checkpoint"}]}
+            if method == "GET" and url.endswith("/wiki/api/v2/pages/20004"):
+                return {"id": "20004", "version": {"number": 4}}
+            if method == "PUT" and url.endswith("/wiki/api/v2/pages/20004"):
+                return {"id": "20004", "_links": {"webui": "/spaces/SDLC/pages/20004/Code-Review"}}
+            if method == "GET" and "/comment?maxResults=100" in url:
+                return {
+                    "comments": [
+                        {
+                            "id": "10004",
+                            "body": self._adf("SDLC-HARNESS-CHECKPOINT::code_review::jira_issue:SDLC-1"),
+                        }
+                    ]
+                }
+            if method == "PUT" and url.endswith("/comment/10004"):
+                return {"id": "10004"}
+            self.fail(f"Unexpected request: {method} {url}")
+
+        result = real_sync_code_review_checkpoint(
+            store=store,
+            settings=settings,
+            run_id=run_id,
+            source_ref="jira_issue:SDLC-1",
+            artifact_paths=artifacts,
+            review_status="code_review_approved",
+            request_json=fake_request,
+        )
+
+        self.assertEqual(result["status"], "synced")
+        self.assertEqual(result["review_status"], "code_review_approved")
+        ids = {target["tool"]: target["external_id"] for target in result["targets"]}
+        self.assertEqual(ids["jira"], "10004")
+        self.assertEqual(ids["confluence"], "20004")
+        self.assertEqual(ids["github"], "7")
+        self.assertFalse(any(method == "POST" for method, _, _ in calls))
+        updated_payloads = [payload for method, _, payload in calls if method == "PUT" and payload]
+        self.assertTrue(updated_payloads)
+        self.assertTrue(all("code_review_approved" in json.dumps(payload) for payload in updated_payloads))
+        report = json.loads((store.run_dir(run_id) / "sync" / "tool_sync_report_v4.json").read_text(encoding="utf-8"))
+        self.assertEqual(report["checkpoint"]["artifact_path"], artifacts["github_code_review_approval"])
+
     def test_ambiguous_remote_checkpoint_fails_closed(self) -> None:
         settings, store, run_id, artifacts = self._fixture(sync_mode="real", confluence=False)
 
@@ -225,7 +290,10 @@ class CodeReviewSyncTest(unittest.TestCase):
         self.assertIn("github_code_review", failed["latest_artifacts"])
         self.assertEqual(ready["status"], "code_review_ready")
         self.assertEqual(ready["pending_checkpoint"]["type"], "code_review")
-        self.assertEqual(ready["allowed_next_actions"], ["get_status", "sync_run", "cancel_run"])
+        self.assertEqual(
+            ready["allowed_next_actions"],
+            ["approve_checkpoint", "get_status", "sync_run", "cancel_run"],
+        )
 
     def _fixture(self, *, sync_mode: str, confluence: bool = True):
         settings = load_settings(

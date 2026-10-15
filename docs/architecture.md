@@ -121,12 +121,13 @@ phát hiện semantic gap và `Developer.repair_plan` còn lượt sửa theo
 `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`. Chỉ version pass rule + LLM review mới
 được sync lên Jira/Confluence.
 
-Trong Phase 4 hiện tại, harness đã chạy được tới `qa_tested`: tạo branch,
-sinh/apply code thật, chạy Verification Runner, Validator code trace hybrid rule
-+ LLM, repair/revalidate khi code/test còn thiếu link, rồi để QA sinh và execute
-acceptance test. Nếu QA fail vì behavior, vòng lớn quay lại Developer -> Runner ->
-Validator -> QA. Commit, Draft PR và sync code-review checkpoint vẫn là lát sau;
-không coi `implementation_traced` hoặc `qa_tested` là `code_review_ready`.
+Phase 4 hiện đã chạy từ implementation plan tới Code Review approval: tạo
+worktree/branch theo run, sinh/apply code, chạy Verification Runner, Validator
+code trace hybrid rule + LLM, QA acceptance, publish Draft PR và sync checkpoint
+Jira/Confluence. Human approval chuyển đúng Draft PR thành Ready for review, ghi
+`github_code_review_approval_v1.json`, sync trạng thái `code_review_approved` và
+giữ worktree active. Harness không merge hoặc bật auto-merge; request-change vẫn
+thuộc Phase 5.
 
 ## Tool Plane
 

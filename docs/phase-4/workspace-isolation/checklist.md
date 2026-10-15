@@ -53,13 +53,13 @@ không tích tụ vô hạn hoặc xóa nhầm code.
 
 Mục đích: human approval đóng Phase 4 mà không trao quyền merge cho Harness.
 
-- [ ] Approve chỉ hợp lệ tại `pending_checkpoint.type=code_review`.
-- [ ] Approve chuyển Draft PR thành Ready for review bằng GitHub API/CLI.
-- [ ] State chuyển `code_review_ready -> code_review_approved`.
-- [ ] Jira/Confluence được sync trạng thái approved/ready.
-- [ ] Worktree tiếp tục được giữ sau approval.
-- [ ] Không có code path merge hoặc bật auto-merge.
-- [ ] Merge luôn do human thao tác trực tiếp trên GitHub.
+- [x] Approve chỉ hợp lệ tại `pending_checkpoint.type=code_review`.
+- [x] Approve chuyển Draft PR thành Ready for review bằng GitHub API/CLI.
+- [x] State chuyển `code_review_ready -> code_review_approved`.
+- [x] Jira/Confluence được sync trạng thái approved/ready.
+- [x] Worktree tiếp tục được giữ sau approval.
+- [x] Không có code path merge hoặc bật auto-merge.
+- [x] Merge luôn do human thao tác trực tiếp trên GitHub.
 
 ## Phase 5 Prerequisite - Request Change
 
@@ -86,7 +86,7 @@ Mục đích: chứng minh isolation hoạt động cả khi resume, chạy xen 
   trước các entrypoint Phase 4 chạm code.
 - [x] Legacy adoption giữ nguyên commit và PR #1.
 - [ ] Phase 5 repair cập nhật cùng branch/PR.
-- [ ] Approve gọi Draft -> Ready nhưng không merge.
+- [x] Approve gọi Draft -> Ready nhưng không merge.
 - [x] Cleanup từ chối run chưa merged/cancelled và từ chối dirty worktree.
 - [x] Full regression Phase 1-4 pass sau migration.
 
@@ -167,7 +167,23 @@ chưa có bản sao phục hồi và không trao quyền xóa remote cho Harness
 - [x] PR #1 live được kiểm tra read-only vẫn `OPEN/Draft`, `mergedAt=null`; worktree
   vẫn sạch và nguyên vẹn nên chưa đủ điều kiện cleanup.
 
-Kết quả kiểm thử: workspace suite `42 passed`; full regression `182 passed`.
-Việc tiếp theo: Slice 4.9D chuyển Draft PR thành Ready for review sau human approve,
-không merge và vẫn giữ workspace cho Phase 5.
+Kết quả kiểm thử tại mốc 4.9C: workspace suite `42 passed`; full regression
+`182 passed`. Slice 4.9D bên dưới đã hoàn tất Draft -> Ready mà không merge và
+vẫn giữ workspace cho Phase 5.
+
+## Nhật Ký Slice 4.9D
+
+### 2026-10-15 - Draft PR Thành Ready For Review
+
+- [x] GitHub approver đọc PR trước/sau, xác minh OPEN/unmerged và đúng
+  number/branch/head SHA/base branch.
+- [x] PR đã Ready được xử lý idempotent; identity mismatch không gọi `gh pr ready`.
+- [x] Workflow ghi `github_code_review_approval_v1.json` riêng và chuyển state
+  sang `code_review_approved` sau khi sync thành công.
+- [x] Lỗi Jira/Confluence giữ approval, chuyển sang trạng thái retryable và
+  `sync-run` không chạy lại GitHub operation.
+- [x] Test kiểm worktree vẫn active và không có command merge/auto-merge.
+
+Kết quả kiểm thử: GitHub/Code Review suite `16 passed`; full regression
+`188 passed`. Live approval PR #1 chưa chạy.
 

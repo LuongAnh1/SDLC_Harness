@@ -556,6 +556,27 @@ def write_phase4_github_code_review(
     return store.relative(path)
 
 
+def write_phase4_github_code_review_approval(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi audit Draft -> Ready riêng, không ghi đè publication artifact."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    path = sync_dir / f"github_code_review_approval_v{version}.json"
+    payload = {
+        **report,
+        "version": f"github_code_review_approval_v{version}",
+        "updated_at": utc_now_iso(),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def write_phase4_repair_feedback(
     *,
     store: RuntimeStore,

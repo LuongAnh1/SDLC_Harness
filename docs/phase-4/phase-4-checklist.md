@@ -347,4 +347,7 @@ và request-change Phase 5. Checklist chi tiết nằm tại
   - [x] A3: chuyển toàn bộ Phase 3/4 entrypoint sang run workspace.
 - [x] Triển khai Slice 4.9B adopt legacy run.
 - [x] Triển khai Slice 4.9C lifecycle/cleanup.
-- [ ] Triển khai Slice 4.9D Code Review approval.
+- [x] Triển khai Slice 4.9D Code Review approval.
+  - [x] Draft -> Ready idempotent với PR/workspace identity guard.
+  - [x] Artifact approval riêng và Jira/Confluence approved sync có retry.
+  - [x] Guard/test chứng minh không merge hoặc bật auto-merge.

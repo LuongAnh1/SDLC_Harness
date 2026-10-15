@@ -165,13 +165,13 @@ Mục đích: cô lập code lineage theo run trước khi cho phép request-cha
 nằm tại `docs/phase-4/workspace-isolation/`.
 
 - [x] Viết kiến trúc, runtime contract, migration và checklist worktree-per-run.
-- [ ] Tạo `run_workspace_v1.json` và workspace manager.
-- [ ] Mọi action Phase 4 resolve đúng worktree theo `run_id`.
-- [ ] Branch mới chứa run suffix và bắt đầu từ `origin/main` vừa fetch.
-- [ ] Adopt run hiện tại/PR #1 mà không đổi HEAD.
-- [ ] Thêm explicit cleanup cho merged/cancelled run; không xóa remote branch.
-- [ ] Approve Code Review chỉ chuyển Draft PR thành Ready for review.
-- [ ] Có guard/test chứng minh Harness không merge hoặc bật auto-merge.
+- [x] Tạo `run_workspace_v1.json` và workspace manager.
+- [x] Mọi action Phase 4 resolve đúng worktree theo `run_id`.
+- [x] Branch mới chứa run suffix và bắt đầu từ `origin/main` vừa fetch.
+- [x] Adopt run hiện tại/PR #1 mà không đổi HEAD.
+- [x] Thêm explicit cleanup cho merged/cancelled run; không xóa remote branch.
+- [x] Approve Code Review chỉ chuyển Draft PR thành Ready for review.
+- [x] Có guard/test chứng minh Harness không merge hoặc bật auto-merge.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -222,3 +222,9 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 > còn lại trước khi khóa Phase 4 là compile/unit feedback quay về Developer khi
 > fail sớm, nhánh block/reopen design khi design nền sai, QA `skipped` hardening,
 > commit/Draft PR thật, sync Phase 4 và `code_review_ready`.
+>
+> Cập nhật 2026-10-15: Slice 4.9A-D đã hoàn tất ở mức code và test. Approval
+> kiểm PR/workspace identity, chuyển Draft sang Ready theo hướng idempotent, ghi
+> `github_code_review_approval_v1.json`, sync Jira/Confluence và retry sync mà
+> không chạy lại GitHub operation. Full regression: `188 passed`. Live approval
+> PR #1 chưa chạy; merge vẫn do human trực tiếp trên GitHub.

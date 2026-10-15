@@ -336,6 +336,7 @@ def mock_sync_code_review_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    review_status: str = "code_review_ready",
 ) -> dict[str, object]:
     """Tạo mock checkpoint Code Review mà không chạm Jira/Confluence thật."""
 
@@ -349,16 +350,24 @@ def mock_sync_code_review_checkpoint(
     pull_request = github.get("pull_request", {})
     commit = github.get("commit", {})
     previous_targets = _previous_targets(report_path)
+    approved = review_status == "code_review_approved"
+    pr_label = "Ready PR" if approved else "Draft PR"
+    next_action = (
+        "Human reviews and merges the PR directly on GitHub."
+        if approved
+        else "Human approves the checkpoint to mark the Draft PR ready for review."
+    )
 
     jira_comment_path.write_text(
         f"""# Mock Jira Comment - Code Review Checkpoint
 
 Run: `{run_id}`
 Source: `{source_ref}`
-Status: `code_review_ready`
-Draft PR: `{pull_request.get('url', '')}`
+Status: `{review_status}`
+{pr_label}: `{pull_request.get('url', '')}`
 Branch: `{github.get('branch', '')}`
 Commit: `{commit.get('sha', '')}`
+Next action: {next_action}
 """,
         encoding="utf-8",
     )
@@ -367,7 +376,8 @@ Commit: `{commit.get('sha', '')}`
 
 Run: `{run_id}`
 Source: `{source_ref}`
-Draft PR: `{pull_request.get('url', '')}`
+Status: `{review_status}`
+{pr_label}: `{pull_request.get('url', '')}`
 
 Evidence:
 - Verification: `{artifact_paths['test_report']}`
@@ -404,6 +414,11 @@ Evidence:
             "path": store.relative(confluence_page_path),
         },
     ]
+    checkpoint_path = (
+        artifact_paths.get("github_code_review_approval", "")
+        if approved
+        else github_path
+    )
     report = {
         "version": "tool_sync_report_v4",
         "phase": "code_review",
@@ -412,8 +427,9 @@ Evidence:
         "targets": targets,
         "checkpoint": {
             "type": "code_review",
-            "artifact_ref": _artifact_ref(github_path),
-            "artifact_path": github_path,
+            "status": review_status,
+            "artifact_ref": _artifact_ref(checkpoint_path),
+            "artifact_path": checkpoint_path,
         },
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -423,6 +439,7 @@ Evidence:
         "phase": "code_review",
         "status": "mock_synced",
         "mode": "mock",
+        "review_status": review_status,
         "report": store.relative(report_path),
         "targets": targets,
     }

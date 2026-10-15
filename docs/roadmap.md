@@ -161,11 +161,11 @@ Kết quả mong muốn:
   `github_code_review_v1.json`.
 - Slice 4.8B đã có `tool_sync_report_v4.json`, Jira/Confluence Code Review
   checkpoint và state `code_review_ready`; live re-sync giữ nguyên remote ID.
-- Slice 4.9 là prerequisite bắt buộc trước approve/request-change: mỗi run có
-  Git worktree, branch và lock riêng; run hiện tại/PR #1 được adopt mà không đổi
-  HEAD. Checklist nằm tại `docs/phase-4/workspace-isolation/checklist.md`.
-- Sau workspace isolation, approve Code Review chỉ chuyển Draft PR thành Ready
-  for review và sync trạng thái. Merge luôn do human; request-change mở Phase 5.
+- Slice 4.9A-C đã hoàn tất worktree/branch/lock theo run, legacy adoption và
+  cleanup explicit; run hiện tại/PR #1 được adopt mà không đổi HEAD.
+- Slice 4.9D đã triển khai approve Code Review: chỉ chuyển Draft PR thành Ready
+  for review, ghi artifact approval và sync trạng thái `code_review_approved`.
+  Merge luôn do human; request-change mở Phase 5.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

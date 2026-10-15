@@ -52,6 +52,7 @@ _IMPLEMENTATION_PLAN_ARTIFACT_KEYS = {
 }
 _CODE_REVIEW_ARTIFACT_KEYS = {
     "github_code_review",
+    "github_code_review_approval",
     "test_report",
     "requirement_design_code_trace",
     "qa_test_execution",
@@ -418,6 +419,7 @@ def real_sync_code_review_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    review_status: str = "code_review_ready",
     request_json: JsonRequester | None = None,
 ) -> dict[str, object]:
     """Sync checkpoint review code sau khi GitHub Draft PR đã publish thành công."""
@@ -463,6 +465,7 @@ def real_sync_code_review_checkpoint(
                 run_id,
                 source_ref,
                 artifact_paths,
+                review_status=review_status,
                 previous_page_id=previous_page_id,
             )
         except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
@@ -489,6 +492,7 @@ def real_sync_code_review_checkpoint(
                 source_ref,
                 artifact_paths,
                 confluence_url=confluence_url,
+                review_status=review_status,
                 previous_comment_id=previous_comment_id,
             )
         except Exception as exc:  # noqa: BLE001 - lookup remote phải thành report.
@@ -517,8 +521,17 @@ def real_sync_code_review_checkpoint(
         "targets": targets,
         "checkpoint": {
             "type": "code_review",
-            "artifact_ref": _artifact_ref(artifact_paths.get("github_code_review", "")),
-            "artifact_path": artifact_paths.get("github_code_review", ""),
+            "status": review_status,
+            "artifact_ref": _artifact_ref(
+                artifact_paths.get("github_code_review_approval", "")
+                if review_status == "code_review_approved"
+                else artifact_paths.get("github_code_review", "")
+            ),
+            "artifact_path": (
+                artifact_paths.get("github_code_review_approval", "")
+                if review_status == "code_review_approved"
+                else artifact_paths.get("github_code_review", "")
+            ),
         },
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -528,6 +541,7 @@ def real_sync_code_review_checkpoint(
         "phase": "code_review",
         "status": status,
         "mode": "real",
+        "review_status": review_status,
         "report": store.relative(report_path),
         "targets": [
             {
@@ -713,6 +727,7 @@ def _sync_jira_code_review_comment(
     artifact_paths: dict[str, str],
     *,
     confluence_url: str,
+    review_status: str,
     previous_comment_id: str | None,
 ) -> dict[str, object]:
     issue_key = _jira_issue_key(settings, source_ref)
@@ -728,6 +743,7 @@ def _sync_jira_code_review_comment(
                 source_ref=source_ref,
                 artifact_paths=artifact_paths,
                 confluence_url=confluence_url,
+                review_status=review_status,
             )
         }
         response, operation = _upsert_jira_comment(
@@ -1001,6 +1017,7 @@ def _sync_confluence_code_review_page(
     source_ref: str,
     artifact_paths: dict[str, str],
     *,
+    review_status: str,
     previous_page_id: str | None,
 ) -> dict[str, object]:
     operation = "updated" if previous_page_id else "created"
@@ -1012,7 +1029,13 @@ def _sync_confluence_code_review_page(
             raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
 
         title = _checkpoint_title(source_ref, "code_review")
-        body = _confluence_code_review_storage_body(store, run_id, source_ref, artifact_paths)
+        body = _confluence_code_review_storage_body(
+            store,
+            run_id,
+            source_ref,
+            artifact_paths,
+            review_status=review_status,
+        )
         if previous_page_id:
             current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
             version = int(current.get("version", {}).get("number", 1)) + 1
@@ -1258,19 +1281,27 @@ def _jira_code_review_comment_body(
     source_ref: str,
     artifact_paths: dict[str, str],
     confluence_url: str,
+    review_status: str,
 ) -> dict[str, object]:
     context = _code_review_context(store, artifact_paths)
+    approved = review_status == "code_review_approved"
+    pr_label = "Ready PR" if approved else "Draft PR"
+    next_action = (
+        "Human reviews and merges the PR directly on GitHub; Harness never merges or enables auto-merge."
+        if approved
+        else "Human approves this checkpoint to mark the Draft PR ready for review."
+    )
     summary_items = [
         f"Run: {run_id}",
         f"Source: {source_ref}",
-        "Status: code_review_ready",
-        f"Draft PR: {context['pr_url']}",
+        f"Status: {review_status}",
+        f"{pr_label}: {context['pr_url']}",
         f"Branch: {context['branch']}",
         f"Commit: {context['commit_sha']}",
         f"Verification: {context['verification']}",
         f"Validator trace: {context['trace']}",
         f"QA acceptance: {context['qa']}",
-        "Next action: human reviews the Draft PR; approval/change handling is added in the next slice.",
+        f"Next action: {next_action}",
     ]
     if confluence_url:
         summary_items.append(f"Confluence review page: {confluence_url}")
@@ -1543,8 +1574,22 @@ def _confluence_code_review_storage_body(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    *,
+    review_status: str,
 ) -> str:
     context = _code_review_context(store, artifact_paths)
+    approved = review_status == "code_review_approved"
+    publication_description = (
+        "The Draft PR was approved by a human and is now Ready for review."
+        if approved
+        else "The implementation was published as a Draft PR and is waiting for human approval."
+    )
+    review_boundary = (
+        "Human review and merge continue directly on GitHub. SDLC_Harness never merges or enables auto-merge."
+        if approved
+        else "Human approval may only convert the Draft PR to Ready for review; merge remains a direct GitHub action."
+    )
+    pr_label = "Ready PR" if approved else "Draft PR"
     artifact_rows = "\n".join(
         "<tr>"
         f"<td><strong>{escape(_artifact_label(name))}</strong></td>"
@@ -1556,24 +1601,24 @@ def _confluence_code_review_storage_body(
     return f"""
 <!-- {escape(_checkpoint_marker(source_ref, "code_review"))} -->
 <h1>{escape(_checkpoint_title(source_ref, "code_review"))}</h1>
-<p>This checkpoint is generated after code passed local verification, Validator traceability review, and QA acceptance, then was published as a Draft PR.</p>
+<p>This checkpoint is generated after code passed local verification, Validator traceability review, and QA acceptance. {escape(publication_description)}</p>
 <h2>Review Target</h2>
 <table>
 <tbody>
 <tr><th>Run</th><td><code>{escape(run_id)}</code></td></tr>
 <tr><th>Source</th><td><code>{escape(source_ref)}</code></td></tr>
-<tr><th>Status</th><td><strong>code_review_ready</strong></td></tr>
+<tr><th>Status</th><td><strong>{escape(review_status)}</strong></td></tr>
 <tr><th>Repository</th><td><code>{escape(str(context['repository']))}</code></td></tr>
 <tr><th>Branch</th><td><code>{escape(str(context['branch']))}</code></td></tr>
 <tr><th>Commit</th><td><a href="{escape(str(context['commit_url']))}"><code>{escape(str(context['commit_sha']))}</code></a></td></tr>
-<tr><th>Draft PR</th><td><a href="{escape(str(context['pr_url']))}">{escape(str(context['pr_url']))}</a></td></tr>
+<tr><th>{escape(pr_label)}</th><td><a href="{escape(str(context['pr_url']))}">{escape(str(context['pr_url']))}</a></td></tr>
 <tr><th>Verification</th><td>{escape(str(context['verification']))}</td></tr>
 <tr><th>Validator trace</th><td>{escape(str(context['trace']))}</td></tr>
 <tr><th>QA acceptance</th><td>{escape(str(context['qa']))}</td></tr>
 </tbody>
 </table>
 <h2>Review Boundary</h2>
-<p>Human review starts from the Draft PR. This slice opens the checkpoint only; approve and request-change transitions are intentionally deferred to the next slice.</p>
+<p>{escape(review_boundary)}</p>
 <h2>Evidence Artifacts</h2>
 <table>
 <tbody>
@@ -1589,6 +1634,12 @@ def _code_review_context(store: RuntimeStore, artifact_paths: dict[str, str]) ->
     trace = _read_json_artifact(store, artifact_paths, "requirement_design_code_trace")
     pull_request = github.get("pull_request")
     pull_request = pull_request if isinstance(pull_request, dict) else {}
+    approval_path = artifact_paths.get("github_code_review_approval", "")
+    if approval_path:
+        approval = _read_json_artifact(store, artifact_paths, "github_code_review_approval")
+        approved_pull_request = approval.get("pull_request")
+        if isinstance(approved_pull_request, dict):
+            pull_request = approved_pull_request
     commit = github.get("commit")
     commit = commit if isinstance(commit, dict) else {}
     trace_stats = trace.get("stats")

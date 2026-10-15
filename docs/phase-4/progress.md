@@ -1,5 +1,24 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Slice 4.9D: Code Review Approval
+
+Đã nối `approve-checkpoint` tại state `code_review_ready` vào Phase 4. Workflow
+giữ per-run lock, xác minh publication/workspace/live PR cùng number, branch,
+head SHA và base branch, rồi gọi `gh pr ready` khi PR còn Draft. PR đã Ready được
+xử lý idempotent; PR closed, merged hoặc lệch identity fail closed trước mutation.
+
+Approval ghi `github_code_review_approval_v1.json` riêng, giữ nguyên publication
+artifact, rồi cập nhật Jira/Confluence với `review_status=code_review_approved`.
+Nếu Atlassian sync lỗi sau khi GitHub đã Ready, state chuyển
+`code_review_approval_sync_failed`; `sync-run` retry mà không gọi lại GitHub.
+Worktree vẫn active và không có code path merge/auto-merge.
+
+Kết quả kiểm thử: GitHub/Code Review suite `16 passed`; full regression
+`188 passed`; `git diff --check` pass. Xác minh live chỉ đọc sau implementation:
+run `run_20261013_160421_f661babf` vẫn `code_review_ready`, workspace `active`;
+PR #1 vẫn `OPEN/Draft`, head `088416465cc7139255aafa120a0b5bb8f17cb971`,
+base `main`. Chưa chạy live approval.
+
 ## 2026-10-15 - Slice 4.9C: Workspace Lifecycle Và Cleanup
 
 Đã thêm CLI `cleanup-run-workspace --run-id` và lifecycle
@@ -14,9 +33,10 @@ theo trạng thái Git thực tế và lần gọi sau `cleaned` là idempotent.
 đổi phase/status/checkpoint của workflow. Test Git cục bộ bao phủ merged,
 cancelled, dirty, missing recovery copy, partial failure/retry và JSON CLI.
 
-Kết quả: workspace suite `42 passed`, full regression `182 passed`. Live evidence
-read-only xác nhận PR #1 vẫn `OPEN/Draft`, worktree sạch và nguyên vẹn; chưa chạy
-cleanup live vì run chưa đủ điều kiện. Việc tiếp theo là Slice 4.9D Draft -> Ready.
+Kết quả tại mốc 4.9C: workspace suite `42 passed`, full regression `182 passed`.
+Live evidence read-only xác nhận PR #1 vẫn `OPEN/Draft`, worktree sạch và nguyên
+vẹn; chưa chạy cleanup live vì run chưa đủ điều kiện. Slice 4.9D sau đó đã hoàn
+tất ở mức code/test như mục phía trên.
 
 ## 2026-10-15 - Slice 4.9B: Legacy Run Adoption
 
@@ -32,8 +52,8 @@ và giữ nguyên HEAD `088416465cc7139255aafa120a0b5bb8f17cb971`. Draft PR #1 v
 OPEN/Draft, run vẫn `code_review_ready`. Lần gọi thứ hai trả `adopted=false`, xác
 nhận idempotency. Full regression sau thay đổi: `174 passed`.
 
-Phần lifecycle/cleanup sau mục này đã hoàn thành trong Slice 4.9C ở trên. Slice
-4.9D mới mở human approval để chuyển Draft PR thành Ready for review, không merge.
+Phần lifecycle/cleanup sau mục này đã hoàn thành trong Slice 4.9C; approval
+Draft -> Ready đã hoàn thành trong Slice 4.9D ở trên, không merge.
 
 ## 2026-10-15 - Slice 4.9A3: Phase 3/4 Dùng Run Workspace End-to-End
 
@@ -82,7 +102,8 @@ không chạm live run/Draft PR hiện có.
 - request-change Phase 5 giữ nguyên workspace/branch/PR của run.
 
 Tài liệu nằm tại `docs/phase-4/workspace-isolation/`. Đây là ghi chép tại thời
-điểm contract mới được chốt; hiện A1-A3 đã triển khai, còn 4.9B-4.9D vẫn để mở.
+điểm contract mới được chốt; các mục 4.9B-D sau đó đã hoàn thành như nhật ký phía
+trên.
 
 ## 2026-10-13 - Slice 4.1: Approve Plan To DeveloperWorkPacket
 

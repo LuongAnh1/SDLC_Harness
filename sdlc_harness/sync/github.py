@@ -74,6 +74,131 @@ class GitHubPullRequestReader:
             ) from exc
 
 
+class GitHubCodeReviewApprover:
+    """Chuyển đúng Draft PR của run sang Ready for review, không merge."""
+
+    def __init__(self, gh_runner: GhRunner | None = None):
+        self._gh_runner = gh_runner or _run_gh
+        self._reader = GitHubPullRequestReader(self._gh_runner)
+
+    def approve(
+        self,
+        *,
+        target_path: Path,
+        repository: str,
+        pr_number: int,
+        expected_branch: str,
+        expected_head_sha: str,
+        expected_base_branch: str,
+        run_id: str,
+    ) -> dict[str, object]:
+        """Đánh dấu PR Ready và đọc lại GitHub để xác minh hậu điều kiện."""
+
+        before = self._reader.read(
+            target_path=target_path,
+            repository=repository,
+            pr_number=pr_number,
+            run_id=run_id,
+            error_code="github_pr_ready_failed",
+        )
+        self._require_expected_pr(
+            before,
+            pr_number=pr_number,
+            expected_branch=expected_branch,
+            expected_head_sha=expected_head_sha,
+            expected_base_branch=expected_base_branch,
+            run_id=run_id,
+        )
+        if before.get("isDraft") is True:
+            try:
+                self._gh_runner(
+                    ["pr", "ready", str(pr_number), "--repo", repository],
+                    target_path,
+                )
+            except HarnessError as exc:
+                raise HarnessError(
+                    "github_pr_ready_failed",
+                    f"Cannot mark GitHub pull request ready: {exc.message}",
+                    run_id=run_id,
+                ) from exc
+            operation = "marked_ready"
+        elif before.get("isDraft") is False:
+            operation = "already_ready"
+        else:
+            raise HarnessError(
+                "github_pr_ready_failed",
+                "GitHub pull request did not return a boolean isDraft value.",
+                run_id=run_id,
+            )
+
+        after = self._reader.read(
+            target_path=target_path,
+            repository=repository,
+            pr_number=pr_number,
+            run_id=run_id,
+            error_code="github_pr_ready_failed",
+        )
+        self._require_expected_pr(
+            after,
+            pr_number=pr_number,
+            expected_branch=expected_branch,
+            expected_head_sha=expected_head_sha,
+            expected_base_branch=expected_base_branch,
+            run_id=run_id,
+        )
+        if after.get("isDraft") is not False:
+            raise HarnessError(
+                "github_pr_ready_failed",
+                "GitHub pull request is still a draft after approval.",
+                run_id=run_id,
+            )
+        return {
+            "version": "github_code_review_approval_v1",
+            "phase": "code_review_approval",
+            "status": "ready_for_review",
+            "operation": operation,
+            "repository": repository,
+            "run_id": run_id,
+            "pull_request_before": before,
+            "pull_request": after,
+            "approved_at": utc_now_iso(),
+        }
+
+    @staticmethod
+    def _require_expected_pr(
+        pull_request: dict[str, object],
+        *,
+        pr_number: int,
+        expected_branch: str,
+        expected_head_sha: str,
+        expected_base_branch: str,
+        run_id: str,
+    ) -> None:
+        """Fail closed nếu GitHub PR không còn thuộc đúng workspace của run."""
+
+        if str(pull_request.get("state") or "").upper() != "OPEN" or pull_request.get("mergedAt"):
+            raise HarnessError(
+                "github_pr_not_open",
+                "GitHub pull request must be open and unmerged before approval.",
+                run_id=run_id,
+            )
+        actual_number = pull_request.get("number")
+        actual_head = str(pull_request.get("headRefName") or "")
+        actual_head_sha = str(pull_request.get("headRefOid") or "")
+        actual_base = str(pull_request.get("baseRefName") or "")
+        if (
+            actual_number != pr_number
+            or actual_head != expected_branch
+            or actual_head_sha.lower() != expected_head_sha.lower()
+            or actual_base != expected_base_branch
+        ):
+            raise HarnessError(
+                "github_pr_identity_mismatch",
+                "GitHub pull request identity no longer matches the run workspace.",
+                run_id=run_id,
+            )
+
+
 class GitHubPublishError(HarnessError):
     """Lỗi publication kèm progress để retry không lặp commit/PR."""
 
