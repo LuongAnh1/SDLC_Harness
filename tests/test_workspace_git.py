@@ -1,9 +1,9 @@
-"""Kiểm thử engine và isolation Git worktree bằng remote cục bộ.
+"""Kiểm thử creation/adoption và isolation Git worktree bằng remote cục bộ.
 
-Suite này khóa các bất biến của Slice 4.9A2/A3: mỗi run có branch/worktree riêng,
+Suite khóa các bất biến của Slice 4.9A2/A3 và 4.9B: mỗi run có workspace riêng,
 base SHA lấy sau khi fetch remote, identity được xác minh fail-closed, hai run
 không ghi chéo file và rollback không xóa workspace nếu không chứng minh được nó
-còn nguyên trạng thái mới tạo. Suite không chạm GitHub thật.
+còn nguyên trạng thái mới tạo/nhận nuôi. Suite không chạm GitHub thật.
 """
 
 from __future__ import annotations
@@ -101,6 +101,61 @@ class WorkspaceGitTests(unittest.TestCase):
         _git(self.seed, "push", "origin", "main")
         return _git(self.seed, "rev-parse", "HEAD")
 
+    def _prepare_legacy_run(self) -> tuple[str, str, dict[str, object]]:
+        branch = "feature/sdlc-1-implementation"
+        _git(self.canonical, "checkout", "-b", branch)
+        (self.canonical / "legacy.txt").write_text("legacy code\n", encoding="utf-8")
+        _git(self.canonical, "add", "legacy.txt")
+        _git(self.canonical, "commit", "-m", "legacy implementation")
+        _git(self.canonical, "push", "-u", "origin", branch)
+        head_sha = _git(self.canonical, "rev-parse", "HEAD")
+        base_sha = _git(self.canonical, "rev-parse", "origin/main")
+        publication = {
+            "version": "github_code_review_v1",
+            "status": "published",
+            "repository": "example/target",
+            "remote": str(self.remote.resolve()),
+            "base_branch": "main",
+            "branch": branch,
+            "issue_key": "SDLC-1",
+            "run_id": self.run_id,
+            "commit": {"sha": head_sha},
+            "push": {"status": "pushed", "branch": branch},
+            "pull_request": {
+                "number": 1,
+                "url": "https://github.com/example/target/pull/1",
+                "isDraft": True,
+                "headRefName": branch,
+                "baseRefName": "main",
+            },
+        }
+        sync_dir = self.store.run_dir(self.run_id) / "sync"
+        sync_dir.mkdir(parents=True, exist_ok=True)
+        publication_path = sync_dir / "github_code_review_v1.json"
+        publication_path.write_text(json.dumps(publication), encoding="utf-8")
+        self.store.write_state(
+            {
+                "ok": True,
+                "run_id": self.run_id,
+                "source_ref": "jira_issue:SDLC-1",
+                "current_phase": "code_review",
+                "status": "code_review_ready",
+                "latest_artifacts": {"github_code_review": self.store.relative(publication_path)},
+                "pending_checkpoint": {"type": "code_review"},
+            }
+        )
+        pull_request = {
+            "number": 1,
+            "url": "https://github.com/example/target/pull/1",
+            "state": "OPEN",
+            "isDraft": True,
+            "headRefName": branch,
+            "headRefOid": head_sha,
+            "baseRefName": "main",
+            "baseRefOid": base_sha,
+        }
+        return branch, head_sha, pull_request
+
     def test_create_fetches_remote_and_preserves_canonical_checkout(self) -> None:
         canonical_branch = _git(self.canonical, "branch", "--show-current")
         canonical_head = _git(self.canonical, "rev-parse", "HEAD")
@@ -131,6 +186,130 @@ class WorkspaceGitTests(unittest.TestCase):
         with self.manager.locked_workspace(self.run_id) as locked:
             self.assertEqual(locked, first)
             self.assertEqual(_git(Path(locked.worktree_path), "rev-parse", "HEAD"), locked.head_sha)
+
+    def test_adopt_legacy_run_preserves_head_state_and_is_idempotent(self) -> None:
+        branch, head_sha, pull_request = self._prepare_legacy_run()
+        reader_calls: list[tuple[str, int, Path]] = []
+
+        def read_pr(repository: str, number: int, target_path: Path) -> dict[str, object]:
+            reader_calls.append((repository, number, target_path))
+            return pull_request
+
+        record, adopted = self.manager.adopt_legacy_run(self.run_id, pull_request_reader=read_pr)
+
+        self.assertTrue(adopted)
+        self.assertEqual(record.provisioning_mode, "adopted_legacy")
+        self.assertEqual(record.branch, branch)
+        self.assertEqual(record.head_sha, head_sha)
+        self.assertEqual(_git(self.canonical, "branch", "--show-current"), "main")
+        self.assertEqual(_git(Path(record.worktree_path), "branch", "--show-current"), branch)
+        self.assertEqual(_git(Path(record.worktree_path), "rev-parse", "HEAD"), head_sha)
+        self.assertEqual(reader_calls, [("example/target", 1, self.canonical.resolve())])
+        state = self.store.read_state(self.run_id)
+        self.assertEqual(state["status"], "code_review_ready")
+        self.assertEqual(state["pending_checkpoint"], {"type": "code_review"})
+        self.assertEqual(state["workspace"]["head_sha"], head_sha)
+
+        def unexpected_reader(repository: str, number: int, target_path: Path) -> dict[str, object]:
+            self.fail("Idempotent adoption must not query GitHub again.")
+
+        repeated, adopted_again = self.manager.adopt_legacy_run(
+            self.run_id,
+            pull_request_reader=unexpected_reader,
+        )
+        self.assertFalse(adopted_again)
+        self.assertEqual(repeated, record)
+        matching = [
+            path
+            for path, entry in self.manager._worktree_registry(self.canonical, run_id=self.run_id).items()
+            if entry.get("branch") == f"refs/heads/{branch}"
+        ]
+        self.assertEqual(matching, [Path(record.worktree_path).resolve()])
+
+    def test_adopt_legacy_run_rejects_pr_mismatch_without_mutation(self) -> None:
+        branch, _, pull_request = self._prepare_legacy_run()
+        pull_request["headRefOid"] = "f" * 40
+
+        with self.assertRaises(HarnessError) as ctx:
+            self.manager.adopt_legacy_run(
+                self.run_id,
+                pull_request_reader=lambda repository, number, target_path: pull_request,
+            )
+
+        self.assertEqual(ctx.exception.error_code, "workspace_adoption_failed")
+        self.assertEqual(_git(self.canonical, "branch", "--show-current"), branch)
+        self.assertFalse(self.manager.expected_worktree_path(self.run_id).exists())
+        self.assertFalse(self.manager.artifact_path(self.run_id).exists())
+
+    def test_adopt_legacy_run_rejects_missing_publication_without_mutation(self) -> None:
+        self.store.write_state(
+            {
+                "ok": True,
+                "run_id": self.run_id,
+                "source_ref": "jira_issue:SDLC-1",
+                "current_phase": "code_review",
+                "status": "code_review_ready",
+                "latest_artifacts": {
+                    "github_code_review": self.store.relative(
+                        self.store.run_dir(self.run_id) / "sync" / "github_code_review_v1.json"
+                    )
+                },
+                "pending_checkpoint": {"type": "code_review"},
+            }
+        )
+
+        with self.assertRaises(HarnessError) as ctx:
+            self.manager.adopt_legacy_run(
+                self.run_id,
+                pull_request_reader=lambda repository, number, target_path: {},
+            )
+
+        self.assertEqual(ctx.exception.error_code, "workspace_adoption_failed")
+        self.assertEqual(_git(self.canonical, "branch", "--show-current"), "main")
+        self.assertFalse(self.manager.expected_worktree_path(self.run_id).exists())
+        self.assertFalse(self.manager.artifact_path(self.run_id).exists())
+
+    def test_adopt_legacy_run_rolls_back_when_artifact_write_fails(self) -> None:
+        branch, _, pull_request = self._prepare_legacy_run()
+        failure = HarnessError("runtime_write_failed", "simulated artifact failure", run_id=self.run_id)
+
+        with patch.object(self.manager.store, "write_json_artifact", side_effect=failure):
+            with self.assertRaises(HarnessError) as ctx:
+                self.manager.adopt_legacy_run(
+                    self.run_id,
+                    pull_request_reader=lambda repository, number, target_path: pull_request,
+                )
+
+        self.assertEqual(ctx.exception.error_code, "workspace_adoption_failed")
+        self.assertEqual(_git(self.canonical, "branch", "--show-current"), branch)
+        self.assertFalse(self.manager.expected_worktree_path(self.run_id).exists())
+        self.assertFalse(self.manager.artifact_path(self.run_id).exists())
+
+    def test_adopt_legacy_run_keeps_owned_workspace_when_state_write_fails(self) -> None:
+        _, head_sha, pull_request = self._prepare_legacy_run()
+        failure = HarnessError("runtime_write_failed", "simulated state failure", run_id=self.run_id)
+
+        with patch.object(self.manager.store, "write_state", side_effect=failure):
+            with self.assertRaises(HarnessError) as ctx:
+                self.manager.adopt_legacy_run(
+                    self.run_id,
+                    pull_request_reader=lambda repository, number, target_path: pull_request,
+                )
+
+        self.assertEqual(ctx.exception.error_code, "workspace_adoption_failed")
+        self.assertTrue(self.manager.artifact_path(self.run_id).is_file())
+        self.assertTrue(self.manager.expected_worktree_path(self.run_id).is_dir())
+        self.assertEqual(_git(self.manager.expected_worktree_path(self.run_id), "rev-parse", "HEAD"), head_sha)
+
+        recovered, adopted = self.manager.adopt_legacy_run(
+            self.run_id,
+            pull_request_reader=lambda repository, number, target_path: self.fail(
+                "Recovery from an owned workspace must not query GitHub again."
+            ),
+        )
+        self.assertFalse(adopted)
+        self.assertEqual(recovered.head_sha, head_sha)
+        self.assertEqual(self.store.read_state(self.run_id)["workspace"]["head_sha"], head_sha)
 
     def test_refresh_locked_records_new_head_and_pull_request_identity(self) -> None:
         record = self.manager.create_for_run(self.run_id)

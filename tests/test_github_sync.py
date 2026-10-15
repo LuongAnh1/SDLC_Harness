@@ -1,4 +1,4 @@
-"""Kiểm GitHub publication và điểm nối `qa_tested -> code_review_published`."""
+"""Kiểm GitHub PR reader, publication và điểm nối sang Code Review."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.github import (
     GitHubCodeReviewPublisher,
     GitHubCodeReviewResult,
+    GitHubPullRequestReader,
     GitHubPublishError,
 )
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
@@ -113,6 +114,35 @@ class GitHubSyncTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_pull_request_reader_requests_full_workspace_identity(self) -> None:
+        calls: list[tuple[list[str], Path]] = []
+        expected = {
+            "number": 7,
+            "url": "https://github.com/example/target/pull/7",
+            "state": "OPEN",
+            "isDraft": True,
+            "headRefName": "feature/example",
+            "headRefOid": "a" * 40,
+            "baseRefName": "main",
+            "baseRefOid": "b" * 40,
+        }
+
+        def fake_gh(args: list[str], cwd: Path) -> str:
+            calls.append((args, cwd))
+            return json.dumps(expected)
+
+        result = GitHubPullRequestReader(gh_runner=fake_gh).read(
+            target_path=self.root,
+            repository="example/target",
+            pr_number=7,
+            run_id="run_20261015_120000_a1b2c3d4",
+        )
+
+        self.assertEqual(result, expected)
+        self.assertEqual(calls[0][0][:3], ["pr", "view", "7"])
+        self.assertIn("headRefOid", calls[0][0][-1])
+        self.assertEqual(calls[0][1], self.root)
 
     def test_publisher_commits_pushes_and_updates_same_draft_pr(self) -> None:
         target, remote = self._target_with_bare_remote()
