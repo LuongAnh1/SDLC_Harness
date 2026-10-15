@@ -15,13 +15,13 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 là implementation planning checkpoint: sau khi design được duyệt, Harness tạo Git worktree/branch riêng cho run, tự chuẩn bị CodeGraph trong worktree, sinh implementation plan có version, chạy Validator hybrid rule + LLM, sync plan lên Jira/Confluence và dừng ở `waiting_implementation_plan_review`. Phase 4 tạo code/test thật trong chính workspace đó, chạy Verification Runner, Validator code trace hybrid rule + LLM và QA-generated acceptance test; cả vòng repair nhỏ lẫn vòng repair lớn đã được live-test bằng DeepSeek tới state `qa_tested`. Slice 4.8A đã triển khai publication manifest, commit/push và Draft PR idempotent tới trạng thái `code_review_published`; Slice 4.8B đã sync PR/test/trace/QA evidence về Jira và Confluence, hỗ trợ re-sync theo remote identity ổn định và mở checkpoint `code_review_ready`. CLI mặc định mock; real sync phải được chọn rõ. Slice 4.9A3 đã nối worktree-per-run xuyên suốt Phase 3/4 và không còn dùng current branch của canonical repo làm nguồn sự thật. Slice 4.9B đã nhận nuôi thành công run/PR legacy mà không đổi HEAD; Slice 4.9C đã thêm lifecycle cleanup explicit, audit và retry an toàn. Việc tiếp theo là 4.9D chuyển Draft PR thành Ready for review, không merge.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 là implementation planning checkpoint: sau khi design được duyệt, Harness tạo Git worktree/branch riêng cho run, tự chuẩn bị CodeGraph trong worktree, sinh implementation plan có version, chạy Validator hybrid rule + LLM, sync plan lên Jira/Confluence và dừng ở `waiting_implementation_plan_review`. Phase 4 tạo code/test thật trong chính workspace đó, chạy Verification Runner, Validator code trace hybrid rule + LLM và QA-generated acceptance test; cả vòng repair nhỏ lẫn vòng repair lớn đã được live-test bằng DeepSeek tới state `qa_tested`. Slice 4.8A đã triển khai publication manifest, commit/push và Draft PR idempotent tới trạng thái `code_review_published`; Slice 4.8B đã sync PR/test/trace/QA evidence về Jira và Confluence, hỗ trợ re-sync theo remote identity ổn định và mở checkpoint `code_review_ready`. CLI mặc định mock; real sync phải được chọn rõ. Slice 4.9A3 đã nối worktree-per-run xuyên suốt Phase 3/4 và không còn dùng current branch của canonical repo làm nguồn sự thật. Slice 4.9B đã nhận nuôi thành công run/PR legacy mà không đổi HEAD; Slice 4.9C đã thêm lifecycle cleanup explicit, audit và retry an toàn. Slice 4.9D đã được chạy live qua Niko: Draft PR #1 chuyển sang Ready for review, run đạt `code_review_approved`, Jira/Confluence nhận trạng thái mới và PR vẫn OPEN/chưa merge. Phase 5 `request_change` là hướng triển khai tiếp theo.
 
 
 ## Cấu Trúc Package
 
 - `sdlc_harness/interfaces/`: CLI/entrypoint công khai để Niko gọi. `sdlc_harness/cli.py` chỉ là wrapper giữ compatibility cho `python -m sdlc_harness.cli`.
-- `sdlc_harness/workflows/`: workflow graph theo phase, hiện có Phase 1/2 và Phase 3 planning checkpoint.
+- `sdlc_harness/workflows/`: workflow graph Phase 1-4, từ requirement/design/planning tới code, verification, QA, publication và Code Review approval.
 - `sdlc_harness/agents/requirements/`: Requirement Refiner, formal use case Validator, requirement packet Validator và prompt templates copy/adapt từ TraceDev.
 - `sdlc_harness/sources/`: loader cho fixture/dataset/Jira source sau này.
 - `sdlc_harness/storage/`: runtime state store và active-run index.
@@ -85,7 +85,7 @@ python -m unittest discover -s tests -p "test*.py" -v
 
 
 <!-- SDLC_NIKO_SYNC_START -->
-## Phase 1 Runtime Snapshot
+## Runtime Snapshot
 
 SDLC_Harness hiện là repo sở hữu pipeline Phase 1 cho hướng Agent Harness SDLC:
 đọc use case từ fixture hoặc Jira, chuẩn hóa thành formal use case và
@@ -108,9 +108,10 @@ Ranh giới hiện tại:
   hybrid rule + LLM, repair theo `SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT`, sync
   Jira/Confluence sau khi pass và chờ `waiting_implementation_plan_review`;
   Phase 4 tạo code/test, chạy Validator và QA/Tester trước khi mở Draft PR. Hiện
-  workflow đã được live-test tới `code_review_ready`: commit/push và Draft PR
-  idempotent đã chạy thật, sau đó Jira/Confluence nhận Code Review checkpoint với
-  PR/test/trace/QA evidence. Niko đọc JSON status để báo checkpoint hiện tại,
+  workflow đã được live-test qua Niko tới `code_review_approved`: commit/push và
+  Draft PR idempotent đã chạy thật, PR được chuyển sang Ready for review, sau đó
+  Jira/Confluence nhận Code Review checkpoint với PR/test/trace/QA evidence.
+  Harness không merge PR. Niko đọc JSON status để báo checkpoint hiện tại,
   `blocked` và `last_sync`.
 
 <!-- SDLC_NIKO_SYNC_END -->

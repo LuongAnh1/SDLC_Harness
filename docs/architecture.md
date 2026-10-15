@@ -129,6 +129,12 @@ Jira/Confluence. Human approval chuyển đúng Draft PR thành Ready for review
 giữ worktree active. Harness không merge hoặc bật auto-merge; request-change vẫn
 thuộc Phase 5.
 
+Contract Niko hiện hành gồm `start`, `get_status`, approve checkpoint Phase 1-3,
+`continue_run`, `sync_run` và Code Review approval có feature gate. Niko chỉ gửi
+action kèm `run_id` và `sync_mode`, rồi format JSON status trả về; Niko không
+checkout branch, quản lý worktree, ghi artifact hay gọi GitHub/Jira/Confluence
+thay Harness.
+
 ## Tool Plane
 
 | Tool plane | Vai trò |

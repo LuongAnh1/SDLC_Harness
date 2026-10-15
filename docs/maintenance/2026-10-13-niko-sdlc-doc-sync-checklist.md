@@ -1,5 +1,9 @@
 # Checklist đồng bộ tài liệu với Niko
 
+> **Trạng thái tài liệu:** snapshot lịch sử ngày 2026-10-13 cho contract Phase
+> 1-3. Xem [báo cáo đồng bộ sau Phase 4](2026-10-15-niko-sdlc-phase4-doc-sync.md)
+> để biết trạng thái hiện hành.
+
 Ngày tạo: 2026-10-13
 
 ## Mục tiêu

@@ -198,5 +198,5 @@ Slice 4.9B đã hoàn thành CLI adoption, fail-closed guard, rollback và live
 migration run/PR #1. Slice 4.9C đã hoàn thành cleanup CLI, lifecycle/audit,
 recovery proof, dirty guard và retry idempotent. Slice 4.9D đã hoàn thành approval
 Draft -> Ready, audit artifact và Jira/Confluence retry sync. Live approval PR #1
-chưa chạy.
+đã chạy qua Niko; PR vẫn OPEN/chưa merge và run đạt `code_review_approved`.
 

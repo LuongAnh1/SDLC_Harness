@@ -166,6 +166,9 @@ Kết quả mong muốn:
 - Slice 4.9D đã triển khai approve Code Review: chỉ chuyển Draft PR thành Ready
   for review, ghi artifact approval và sync trạng thái `code_review_approved`.
   Merge luôn do human; request-change mở Phase 5.
+- Controlled live smoke qua Niko đã đưa run `run_20261013_160421_f661babf` tới
+  `code_review_approved`; PR #1 vẫn OPEN/chưa merge, Jira comment `10104` và
+  Confluence page `2129921` đã nhận trạng thái sau approval.
 
 ## Phase 5 - Sửa Tại Checkpoint
 
@@ -207,7 +210,11 @@ Mục đích: xử lý quan hệ chéo giữa use case.
 - Chạy regression/trace check cho nhóm liên quan.
 
 
+## Nhật Ký Mốc Lịch Sử
 
+> Các khối cập nhật bên dưới là snapshot theo thời điểm và được giữ để truy vết.
+> Trạng thái hiện hành nằm trong các phase ở phía trên và trong
+> [báo cáo đồng bộ ngày 2026-10-15](maintenance/2026-10-15-niko-sdlc-phase4-doc-sync.md).
 
 > Cập nhật 2026-10-13: Phase 1 hiện đã có đường chạy thật từ Jira issue,
 > Requirement Refiner, validator/repair loop và sync Jira/Confluence. Niko gọi

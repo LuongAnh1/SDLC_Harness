@@ -185,5 +185,8 @@ vẫn giữ workspace cho Phase 5.
 - [x] Test kiểm worktree vẫn active và không có command merge/auto-merge.
 
 Kết quả kiểm thử: GitHub/Code Review suite `16 passed`; full regression
-`188 passed`. Live approval PR #1 chưa chạy.
+ban đầu `188 passed`. Controlled live approval sau đó đã chạy qua Niko: PR #1
+chuyển sang Ready for review, vẫn OPEN/chưa merge; run đạt
+`code_review_approved`. Post-live full regression: SDLC Harness `192 passed`,
+Niko Agent `299 passed`.
 

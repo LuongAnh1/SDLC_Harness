@@ -11,10 +11,14 @@ riêng cho run để lập plan nhưng không sửa code; Phase 4 dùng lại đ
 
 ## Trạng Thái Hiện Tại
 
-Phase 4 đã hoàn tất Slice 4.9D ở mức code và regression test. Sau khi Draft PR
-được publish, Harness sync evidence về Jira/Confluence, mở checkpoint
-`code_review_ready`, rồi human approval có thể chuyển PR sang Ready for review
-và sync trạng thái `code_review_approved`.
+Phase 4 đã hoàn tất Slice 4.9D ở mức code, regression và controlled live smoke
+qua Niko. Sau khi Draft PR được publish, Harness sync evidence về
+Jira/Confluence, mở checkpoint `code_review_ready`, rồi human approval chuyển
+đúng PR sang Ready for review và sync trạng thái `code_review_approved`.
+
+Live smoke dùng run `run_20261013_160421_f661babf`: GitHub PR #1 vẫn OPEN và
+chưa merge, Jira comment `10104` và Confluence page `2129921` đã nhận bản sync
+sau approval. Merge tiếp tục do project owner thực hiện trực tiếp trên GitHub.
 Developer.act sinh/apply code, Verification Runner chạy compile/unit, Validator kiểm trace bằng
 rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có giới hạn:
 

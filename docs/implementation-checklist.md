@@ -207,6 +207,11 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 - [ ] Khi một use case đổi, liệt kê use case có thể bị ảnh hưởng.
 - [ ] Chạy regression/trace check cho nhóm liên quan.
 
+## Nhật Ký Mốc Lịch Sử
+
+> Các cập nhật bên dưới giữ nguyên trạng thái tại thời điểm ghi. Mốc hiện hành là
+> bản cập nhật cuối cùng ngày 2026-10-15.
+
 > Cập nhật 2026-10-13: Phase 3 đã pass live qua Telegram/Niko với run
 > `run_20261013_160421_f661babf`. Run dừng ở
 > `waiting_implementation_plan_review`, artifact cuối `implementation_plan_v4`,
@@ -228,3 +233,9 @@ Mục đích: mở rộng từ một use case độc lập sang quan hệ chéo.
 > `github_code_review_approval_v1.json`, sync Jira/Confluence và retry sync mà
 > không chạy lại GitHub operation. Full regression: `188 passed`. Live approval
 > PR #1 chưa chạy; merge vẫn do human trực tiếp trên GitHub.
+>
+> Cập nhật hiện hành 2026-10-15: controlled live smoke đã chạy qua Niko cho run
+> `run_20261013_160421_f661babf`. Run đạt `code_review_approved`; PR #1 đã chuyển
+> sang Ready for review, vẫn OPEN/chưa merge; Jira comment `10104` và Confluence
+> page `2129921` đã nhận trạng thái sau approval. Regression gần nhất: SDLC
+> Harness `192 passed`, Niko Agent `299 passed`.
