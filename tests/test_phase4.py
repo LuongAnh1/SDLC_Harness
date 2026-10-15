@@ -593,7 +593,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "qa_testing")
         self.assertEqual(response["status"], "qa_tested")
-        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("qa_generated_tests", response["latest_artifacts"])
         self.assertIn("qa_test_execution", response["latest_artifacts"])
         self.assertIn("qa_test_report", response["latest_artifacts"])

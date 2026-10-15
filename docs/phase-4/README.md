@@ -21,9 +21,10 @@ Verification Runner hiện bắt buộc execute từng Java class do QA vừa si
 command baseline. Việc chỉ compile file QA hoặc chạy một unit-test class cũ không
 còn được tính là QA pass.
 
-Mốc này vẫn chưa phải `code_review_ready`. Công việc còn lại của happy path là
-commit target repo, tạo/cập nhật Draft PR và sync code-review checkpoint về
-GitHub/Jira/Confluence.
+Slice 4.8A đã được triển khai để commit target repo, push branch và tạo/cập nhật
+Draft PR. Mốc trung gian của lát này là `code_review_published`; nó vẫn chưa phải
+`code_review_ready`. Slice 4.8B còn phải sync code-review checkpoint về Jira và
+Confluence rồi mới mở checkpoint cho human/Niko review.
 
 ## Slice 4.1 Đã Chốt
 
@@ -233,10 +234,33 @@ approve_checkpoint(run_id)
 -> nếu approved design mâu thuẫn hoặc không triển khai được: blocked/reopen design có human approval, không tự sửa design âm thầm
 -> QA/Tester Agent kiểm acceptance/system behavior từ use case khi baseline compile/unit/trace đã pass ổn định
 -> nếu QA fail: feedback về Developer, rồi chạy lại unit test -> Validator -> QA trong giới hạn cấu hình
--> tạo Draft PR trên GitHub
--> sync PR/test/trace summary về Jira và Confluence
+-> publish an toàn đúng publication manifest lên GitHub
+-> status=code_review_published
+-> sync PR/test/trace summary về Jira và Confluence ở Slice 4.8B
 -> status=code_review_ready
 ```
+
+## Slice 4.8A - GitHub Publication
+
+Slice này chỉ sở hữu code collaboration lane:
+
+```text
+qa_tested
+-> dựng publication manifest từ Developer allowed_paths, QA test files và
+   verification support scripts
+-> từ chối mọi file dirty nằm ngoài manifest
+-> stage đúng từng path, không dùng git add -A
+-> tạo hoặc tái sử dụng commit có trailer SDLC-Run
+-> push planned branch
+-> tạo Draft PR mới hoặc cập nhật đúng Draft PR đang mở
+-> ghi github_pr_body_v1.md và github_code_review_v1.json
+-> status=code_review_published
+```
+
+Nếu commit/push/PR lỗi sau khi đã hoàn thành một phần, workflow giữ evidence trong
+`github_code_review_v1.json`, chuyển sang `code_review_publish_failed` và cho phép
+`continue_run` retry. Chạy lại từ `code_review_published` cũng là idempotent: không
+tạo commit hay PR trùng.
 
 Nếu code không cover design, compile/unit test fail không có repair path, QA fail
 quá giới hạn, hoặc trace code-test thiếu nghiêm trọng, workflow phải `blocked`
@@ -316,6 +340,8 @@ unit test, Validator kiểm lại trace, rồi QA test lại.
 .runtime/runs/<run_id>/artifacts/requirement_design_code_trace_v1.json
 .runtime/runs/<run_id>/artifacts/implementation_repair_feedback_v1.json
 .runtime/runs/<run_id>/artifacts/qa_test_report_v1.md
+.runtime/runs/<run_id>/sync/github_pr_body_v1.md
+.runtime/runs/<run_id>/sync/github_code_review_v1.json
 ```
 
 Khi run đạt `qa_tested`, state phải có:

@@ -218,8 +218,8 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
 - [x] Unit test blocked khi target repo dirty trước Developer.act.
 - [x] Unit test `continue-run` từ `implementation_written` sang `implementation_tested`.
 - [x] Unit test Verification Runner `passed/failed/skipped`.
-- [ ] Unit test branch/commit/PR payload formatting.
-- [ ] Unit test PR description chứa đủ link/context.
+- [x] Unit test branch/commit/PR payload formatting.
+- [x] Unit test PR description chứa đủ link/context.
 - [x] Unit test test report `passed/failed/skipped`.
 - [x] Unit test trace requirement-design-code-test.
 - [x] Unit test repair-needed khi trace fail do thiếu test/source/code evidence.
@@ -241,7 +241,7 @@ Mục đích: Phase 4 phải chạy được từ terminal trước khi live qua
   lỗi output không sạch từ LLM.
 - [ ] Unit test QA/Tester report `skipped`.
 - [x] Unit test blocked khi QA fail quá giới hạn repair.
-- [ ] Unit test sync mock/local GitHub report.
+- [x] Unit test sync mock/local GitHub report.
 - [ ] Unit test real GitHub PR create/update nếu dùng GitHub API/CLI thật.
 - [ ] Smoke test CLI từ run Phase 3 thật sang `implementation_ready` cho Slice 4.1.
 - [x] Live compile/runtime test target repo sau Developer.act pass khi ép JDK 21
@@ -287,3 +287,22 @@ without opening GitHub PR/sync yet.
 - [x] QA fail after the repair limit blocks with `qa_repair_limit_exceeded`.
 - [x] Verification Runner executes every Java class listed in the newly applied QA test files; a baseline script that only compiles them cannot produce a false pass.
 - [x] Live DeepSeek repair evidence: the required QA class failed on cancel deleting the item, Developer repaired production/test code, Validator passed, and the regenerated QA class passed.
+
+## GitHub Slice 4.8A Update - 2026-10-15
+
+Mục đích: publish đúng code/test đã qua QA lên GitHub mà chưa trộn Jira/
+Confluence checkpoint vào cùng một lát.
+
+- [x] Dựng publication manifest từ Developer allowed paths, QA-generated tests
+  và verification support scripts.
+- [x] Chặn file dirty ngoài manifest; không dùng `git add -A`.
+- [x] Tạo/tái sử dụng commit có issue key và trailer `SDLC-Run`.
+- [x] Push planned branch và tạo/cập nhật đúng Draft PR đang mở.
+- [x] Ghi `github_pr_body_v1.md` và `github_code_review_v1.json`.
+- [x] Giữ partial evidence và trạng thái retryable `code_review_publish_failed`.
+- [x] Cho phép chạy lại `code_review_published` theo hướng idempotent.
+- [x] Unit test local bare remote + fake GitHub CLI cho create/update idempotency.
+- [x] Unit test workflow `qa_tested -> code_review_published` và retry partial failure.
+- [ ] Live test thật trên `run_20261013_160421_f661babf`.
+- [ ] Xác nhận chạy lại không tạo commit hoặc Draft PR trùng.
+- [ ] Slice 4.8B sync Jira/Confluence và mở `code_review_ready`.

@@ -519,6 +519,43 @@ def write_phase4_qa_repair_feedback(
     return store.relative(path)
 
 
+def write_phase4_github_pr_body(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    body: str,
+    version: int = 1,
+) -> str:
+    """Ghi nội dung Draft PR để GitHub CLI dùng qua `--body-file`."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    path = sync_dir / f"github_pr_body_v{version}.md"
+    path.write_text(body.rstrip() + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
+def write_phase4_github_code_review(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    report: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Ghi evidence commit/push/Draft PR trước khi sync Jira/Confluence."""
+
+    sync_dir = store.run_dir(run_id) / "sync"
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    path = sync_dir / f"github_code_review_v{version}.json"
+    payload = {
+        **report,
+        "version": f"github_code_review_v{version}",
+        "updated_at": utc_now_iso(),
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def write_phase4_repair_feedback(
     *,
     store: RuntimeStore,

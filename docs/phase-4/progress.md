@@ -537,3 +537,23 @@ Live run `run_live_qa_repair_20261014_03`:
 
 Việc tiếp theo: commit/Draft PR thật và sync checkpoint code review để mở
 `code_review_ready`. Live `skipped` case còn là hardening test riêng.
+
+## 2026-10-15 - Slice 4.8A: GitHub Publication (Trước Live Test)
+
+Đã triển khai:
+
+- adapter GitHub sở hữu commit, push và Draft PR;
+- publication manifest chỉ cho phép source/test thuộc Developer packet, QA test
+  files và verification support scripts;
+- commit có trailer `SDLC-Run` và được tái sử dụng khi retry;
+- Draft PR được tạo mới hoặc cập nhật theo head/base branch, không tạo trùng;
+- partial failure giữ evidence trong `github_code_review_v1.json`;
+- workflow chuyển `qa_tested -> code_review_published`, còn Jira/Confluence sync
+  và `code_review_ready` được giữ cho Slice 4.8B.
+
+Kiểm thử trước live:
+
+- `tests/test_github_sync.py`: 4 test pass trước khi bổ sung regression chạy lại
+  workflow từ `code_review_published`;
+- `tests/test_phase4.py`: 43 test pass;
+- full suite và live GitHub publication sẽ được ghi tiếp sau khi chạy.

@@ -1,4 +1,4 @@
-"""Workflow Phase 4: implementation plan -> code/test/trace/QA repair.
+"""Workflow Phase 4: implementation plan -> code/test/trace/QA -> Draft PR.
 
 Module này điều phối Phase 4 sau khi implementation plan đã được human duyệt:
 đóng gói DeveloperWorkPacket, cho Developer.act ghi code vào target repo, chạy
@@ -9,6 +9,10 @@ Validator và chỉ pass khi trace đạt `implementation_traced`. Sau đó QA s
 acceptance tests; nếu test fail do code/test, workflow có thể giao feedback lại
 Developer.repair rồi chạy lại Runner -> Validator -> QA.
 
+Khi QA pass, lát GitHub publication chỉ stage các file có trong work packet,
+QA-generated tests hoặc verification support path đã được tham chiếu. Commit,
+push và Draft PR được lưu thành artifact riêng trước khi Jira/Confluence sync.
+
 `revalidate_implementation` là đường vận hành riêng cho run từng bị block vì
 repair limit: nó kiểm lại code hiện tại bằng logic Validator mới mà không tự
 gọi Developer sửa thêm.
@@ -17,6 +21,7 @@ gọi Developer sửa thêm.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 from ..agents.developer import (
     DeveloperActAgent,
@@ -31,6 +36,8 @@ from ..artifacts.writers import (
     write_phase4_code_trace_report,
     write_phase4_developer_raw_response,
     write_phase4_developer_work_packet,
+    write_phase4_github_code_review,
+    write_phase4_github_pr_body,
     write_phase4_qa_execution_report,
     write_phase4_qa_generated_tests,
     write_phase4_qa_raw_response,
@@ -44,6 +51,7 @@ from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
+from ..sync.github import GitHubCodeReviewPublisher, GitHubPublishError, github_repository_from_remote
 from ..verification import VerificationRunner
 from .phase3 import (
     _dirty_status_without_codegraph,
@@ -63,7 +71,8 @@ ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_r
 ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
 ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_QA_TESTED_ACTIONS = ["get_status", "cancel_run"]
+ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 
 MAX_QA_REQUIREMENT_CHARS = 6000
 MAX_QA_VERIFICATION_CHARS = 4000
@@ -73,7 +82,7 @@ MAX_QA_TRACE_SAMPLE_EDGES = 20
 
 
 class PhaseFourWorkflow:
-    """Điều phối các lát Phase 4 từ plan đã duyệt tới code trace pass."""
+    """Điều phối Phase 4 từ plan đã duyệt tới QA và publish code review."""
 
     def __init__(self, settings: Settings):
         self.settings = settings
@@ -84,6 +93,7 @@ class PhaseFourWorkflow:
         self.verification_runner = VerificationRunner()
         self.code_trace_validator = CodeTraceValidator(self.llm_client)
         self.qa_tester = QaTesterAgent(self.llm_client)
+        self.github_publisher = GitHubCodeReviewPublisher()
 
     def approve_implementation_plan_checkpoint(
         self,
@@ -215,11 +225,156 @@ class PhaseFourWorkflow:
             return self._continue_implementation_repair(state=state, run_id=run_id)
         if status == "qa_repair_needed":
             return self._continue_qa_repair(state=state, run_id=run_id)
+        if status in {"qa_tested", "code_review_publish_failed", "code_review_published"}:
+            return self._continue_code_review_publish(state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
             run_id=run_id,
         )
+
+    def _continue_code_review_publish(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Commit/push code đã qua QA và tạo hoặc cập nhật Draft PR."""
+
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        latest_artifacts = dict(artifact_paths)
+        report_path = ""
+        try:
+            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            qa_generated_path = _required_phase4_artifact(artifact_paths, "qa_generated_tests", run_id=run_id)
+            for key in (
+                "code_change_report",
+                "test_report",
+                "requirement_design_code_trace",
+                "qa_test_execution",
+                "qa_test_report",
+            ):
+                _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            qa_quality = _dict_value(_dict_value(state.get("quality_reports")).get("qa_acceptance"))
+            if qa_quality.get("ok") is not True:
+                raise HarnessError(
+                    "github_publish_qa_not_passed",
+                    "Draft PR requires a passed QA acceptance report.",
+                    run_id=run_id,
+                )
+
+            work_packet = _read_json_artifact(
+                self._existing_artifact_path(packet_path, run_id=run_id),
+                run_id=run_id,
+            )
+            qa_generated = _read_json_artifact(
+                self._existing_artifact_path(qa_generated_path, run_id=run_id),
+                run_id=run_id,
+            )
+            target_info = self._validate_target_repo(allow_dirty=True)
+            target_repository = _dict_value(work_packet.get("target_repository"))
+            branch = str(target_repository.get("planned_branch") or "").strip()
+            if not branch:
+                raise HarnessError(
+                    "github_publish_branch_missing",
+                    "DeveloperWorkPacket has no planned branch for GitHub publication.",
+                    run_id=run_id,
+                )
+            base_branch = str(target_repository.get("base_branch") or self.settings.target_base_branch).strip()
+            issue_key = str(work_packet.get("issue_key") or _issue_key_from_state(state)).strip()
+            repository = github_repository_from_remote(self.settings.target_repo_remote)
+            publication_paths = _code_review_publication_paths(
+                work_packet=work_packet,
+                qa_generated=qa_generated,
+                run_id=run_id,
+            )
+            pr_title = f"[{issue_key}] Implement approved use case"
+            pr_body = _code_review_pr_body(
+                state=state,
+                run_id=run_id,
+                issue_key=issue_key,
+                artifact_paths=artifact_paths,
+                qa_generated=qa_generated,
+            )
+            body_path = write_phase4_github_pr_body(store=self.store, run_id=run_id, body=pr_body)
+            latest_artifacts["github_pr_body"] = body_path
+            result = self.github_publisher.publish(
+                target_path=target_info.path,
+                expected_remote=self.settings.target_repo_remote,
+                repository=repository,
+                branch=branch,
+                base_branch=base_branch,
+                issue_key=issue_key,
+                run_id=run_id,
+                publication_paths=publication_paths,
+                pr_title=pr_title,
+                pr_body_path=self.store.repo_root / body_path,
+            )
+            report = result.to_dict()
+            report_path = write_phase4_github_code_review(store=self.store, run_id=run_id, report=report)
+            latest_artifacts["github_code_review"] = report_path
+            pull_request = _dict_value(report.get("pull_request"))
+            quality_reports = {
+                **_dict_value(state.get("quality_reports")),
+                "code_review_publication": {
+                    "ok": True,
+                    "status": "published",
+                    "commit_sha": _dict_value(report.get("commit")).get("sha"),
+                    "pr_url": pull_request.get("url"),
+                    "draft": pull_request.get("isDraft"),
+                },
+            }
+        except GitHubPublishError as exc:
+            if exc.partial_result:
+                report_path = write_phase4_github_code_review(
+                    store=self.store,
+                    run_id=run_id,
+                    report={**exc.partial_result, "status": "partial_failed", "error": exc.to_response()},
+                )
+                latest_artifacts["github_code_review"] = report_path
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_publishing",
+                    "status": "code_review_publish_failed",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS,
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"GitHub code-review publication lỗi cho run {run_id}: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "code_review_publishing",
+                    "status": "code_review_publish_failed",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS,
+                    "last_error": exc.to_response(),
+                    "summary_for_user": f"Không thể chuẩn bị GitHub code review cho run {run_id}: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "code_review_publishing",
+                "status": "code_review_published",
+                "latest_artifacts": latest_artifacts,
+                "quality_reports": quality_reports,
+                "pending_checkpoint": None,
+                "allowed_next_actions": ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS,
+                "last_error": None,
+                "summary_for_user": (
+                    f"Đã commit, push branch và publish Draft PR cho run {run_id}: "
+                    f"{pull_request.get('url', '')}. Chưa sync checkpoint code review về Jira/Confluence."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification Runner and Validator for repair-limit blocked runs."""
@@ -2192,6 +2347,132 @@ def _qa_repair_feedback(
             "format": output_contract.get("format"),
         },
     }
+
+
+def _code_review_publication_paths(
+    *,
+    work_packet: dict[str, object],
+    qa_generated: dict[str, object],
+    run_id: str,
+) -> list[str]:
+    """Lập manifest file từ evidence của Developer, QA và Verification Runner."""
+
+    paths = {_normalize_publication_path(path, run_id=run_id) for path in _allowed_paths(work_packet)}
+    for test_file in _dict_items(qa_generated.get("test_files")):
+        paths.add(_normalize_publication_path(str(test_file.get("path") or ""), run_id=run_id))
+    for value in _nested_strings(work_packet):
+        for match in re.finditer(r"(?<![A-Za-z0-9_.-])(scripts/[A-Za-z0-9_./-]+\.(?:ps1|sh|bat|cmd))", value):
+            paths.add(_normalize_publication_path(match.group(1), run_id=run_id))
+    clean = sorted(path for path in paths if path)
+    if not clean:
+        raise HarnessError(
+            "github_publish_manifest_empty",
+            "No Developer, QA, or verification paths were found for GitHub publication.",
+            run_id=run_id,
+        )
+    return clean
+
+
+def _code_review_pr_body(
+    *,
+    state: dict[str, object],
+    run_id: str,
+    issue_key: str,
+    artifact_paths: dict[str, str],
+    qa_generated: dict[str, object],
+) -> str:
+    """Tạo PR body ngắn, trace được về tool và quality gates đã pass."""
+
+    quality = _dict_value(state.get("quality_reports"))
+    trace = _dict_value(quality.get("implementation_traceability"))
+    qa = _dict_value(quality.get("qa_acceptance"))
+    jira_url = _sync_target_url(state, "jira")
+    confluence_url = _sync_target_url(state, "confluence")
+    scenarios = _dict_items(qa_generated.get("scenarios"))
+    risks = _string_items(qa_generated.get("risks"))
+    lines = [
+        "## SDLC Harness Run",
+        "",
+        f"- Run: `{run_id}`",
+        f"- Jira issue: [{issue_key}]({jira_url})" if jira_url else f"- Jira issue: `{issue_key}`",
+        f"- Confluence checkpoint: [Implementation plan]({confluence_url})"
+        if confluence_url
+        else "- Confluence checkpoint: unavailable",
+        "",
+        "## Implementation Evidence",
+        "",
+        f"- Code change report: `{artifact_paths.get('code_change_report', '')}`",
+        f"- Verification report: `{artifact_paths.get('test_report', '')}`",
+        f"- Requirement/design/code trace: `{artifact_paths.get('requirement_design_code_trace', '')}`",
+        f"- QA execution: `{artifact_paths.get('qa_test_execution', '')}`",
+        f"- QA report: `{artifact_paths.get('qa_test_report', '')}`",
+        "",
+        "## Quality Gates",
+        "",
+        "- Compile/unit verification: passed",
+        (
+            "- Validator traceability: passed "
+            f"({trace.get('stats', {}).get('mapping_count', 0) if isinstance(trace.get('stats'), dict) else 0} mappings, "
+            f"confidence={trace.get('llm_confidence', '')})"
+        ),
+        f"- QA acceptance/system tests: passed ({qa.get('scenario_count', len(scenarios))} scenarios)",
+        "",
+        "## QA Scenarios",
+        "",
+    ]
+    if scenarios:
+        lines.extend(f"- {str(item.get('name') or '').strip()}" for item in scenarios[:12])
+    else:
+        lines.append("- See QA report artifact.")
+    lines.extend(["", "## Known Risks", ""])
+    if risks:
+        lines.extend(f"- {risk}" for risk in risks[:10])
+    else:
+        lines.append("- No additional QA risk was recorded.")
+    lines.extend(["", "This Draft PR was published by SDLC_Harness after QA passed."])
+    return "\n".join(lines)
+
+
+def _sync_target_url(state: dict[str, object], tool: str) -> str:
+    last_sync = _dict_value(state.get("last_sync"))
+    for target in _dict_items(last_sync.get("targets")):
+        if str(target.get("tool") or "") == tool and str(target.get("status") or "") == "synced":
+            return str(target.get("url") or "").strip()
+    return ""
+
+
+def _nested_strings(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(_nested_strings(item))
+        return result
+    if isinstance(value, list):
+        result = []
+        for item in value:
+            result.extend(_nested_strings(item))
+        return result
+    return []
+
+
+def _normalize_publication_path(raw_path: str, *, run_id: str) -> str:
+    path = raw_path.strip().replace("\\", "/").lstrip("/")
+    if (
+        not path
+        or path == ".."
+        or path.startswith("../")
+        or "/../" in path
+        or path.startswith(".git/")
+        or re.match(r"^[A-Za-z]:", path)
+    ):
+        raise HarnessError(
+            "github_publish_unsafe_path",
+            f"Unsafe publication path: {raw_path}",
+            run_id=run_id,
+        )
+    return path
 
 def _required_phase4_artifact(artifact_paths: dict[str, str], key: str, *, run_id: str) -> str:
     value = artifact_paths.get(key, "")

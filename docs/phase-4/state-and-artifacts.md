@@ -99,9 +99,37 @@ status=implementation_tested
 latest_artifacts.code_change_report
 latest_artifacts.test_report
 pending_checkpoint=null
-allowed_next_actions=[get_status, cancel_run]
+allowed_next_actions=[continue_run, get_status, cancel_run]
 summary_for_user
 ```
+
+Sau Slice 4.8A publish GitHub thành công, nhưng trước khi sync Jira/Confluence:
+
+```text
+current_phase=code_review_publishing
+status=code_review_published
+latest_artifacts.github_pr_body
+latest_artifacts.github_code_review
+quality_reports.code_review_publication.ok=true
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+summary_for_user
+```
+
+Nếu commit/push/Draft PR chỉ hoàn thành một phần:
+
+```text
+current_phase=code_review_publishing
+status=code_review_publish_failed
+latest_artifacts.github_code_review
+last_error.error_code=github_*
+pending_checkpoint=null
+allowed_next_actions=[continue_run, get_status, cancel_run]
+```
+
+`continue_run` từ cả `code_review_publish_failed` và `code_review_published` đều
+chạy lại publication theo hướng idempotent. Commit được tìm lại bằng trailer
+`SDLC-Run: <run_id>`; Draft PR được tìm theo repository/head/base branch.
 
 Sau Slice 4.4 nếu Validator code trace hybrid rule + LLM pass. Nếu trace fail do
 code/test thiếu, Slice 4.5 phải repair trước và quay lại Verification Runner ->
@@ -264,6 +292,16 @@ targets=[
 
 Target GitHub cần ghi branch, commit và PR URL nếu tạo được. Target Jira và
 Confluence ghi comment/page đã được cập nhật để trỏ về PR.
+
+Trước `tool_sync_report_v4.json`, Slice 4.8A ghi riêng:
+
+```text
+sync/github_pr_body_v1.md
+sync/github_code_review_v1.json
+```
+
+Artifact này là evidence của GitHub publication, chưa phải bằng chứng Jira và
+Confluence đã được sync.
 
 ## Blocked State
 

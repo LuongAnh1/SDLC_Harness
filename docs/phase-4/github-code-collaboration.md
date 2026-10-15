@@ -101,3 +101,22 @@ Sau khi có PR:
 Sync phải idempotent như Phase 1/2: nếu đã có external id do harness tạo, re-sync
 cập nhật artifact cũ thay vì tạo trùng comment/page.
 
+## Slice 4.8A Đã Triển Khai
+
+Publication không stage toàn bộ working tree. Harness dựng manifest từ:
+
+- `DeveloperWorkPacket.output_contract.allowed_paths`;
+- các file acceptance/system test do QA sinh;
+- script hỗ trợ verification được work packet gọi trực tiếp.
+
+Nếu target repo có file dirty ngoài manifest, publication dừng với
+`github_publish_unexpected_changes`. Khi manifest hợp lệ, Harness stage từng path,
+tạo commit có trailer `SDLC-Run: <run_id>`, push planned branch và tạo/cập nhật
+Draft PR bằng GitHub CLI đã đăng nhập.
+
+Hai artifact local là `github_pr_body_v1.md` và
+`github_code_review_v1.json`. Chạy lại cùng run không tạo commit/PR thứ hai: commit
+được tái sử dụng theo trailer và Draft PR đang mở được cập nhật. Jira/Confluence
+sync và checkpoint `code_review_ready` thuộc Slice 4.8B, không được suy diễn chỉ
+từ việc Draft PR đã tồn tại.
+
