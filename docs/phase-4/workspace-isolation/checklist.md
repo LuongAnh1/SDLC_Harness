@@ -29,13 +29,13 @@ thuộc branch hiện tại của canonical repo.
 Mục đích: đưa run/PR hiện tại vào kiến trúc mới mà không sinh lại code hoặc làm
 thay đổi commit đã review.
 
-- [ ] Có CLI `adopt-run-workspace --run-id` trả JSON ổn định.
-- [ ] Xác minh runtime, branch, remote, HEAD và PR head cùng một identity.
-- [ ] Adopt run `run_20261013_160421_f661babf` và Draft PR #1.
-- [ ] HEAD SHA trước/sau adoption không đổi.
-- [ ] `get-status` vẫn là `code_review_ready` sau adoption.
-- [ ] Adoption lặp lại idempotent, không tạo worktree thứ hai.
-- [ ] Ambiguous/missing identity trả `workspace_adoption_failed` và không mutate.
+- [x] Có CLI `adopt-run-workspace --run-id` trả JSON ổn định.
+- [x] Xác minh runtime, branch, remote, HEAD và PR head cùng một identity.
+- [x] Adopt run `run_20261013_160421_f661babf` và Draft PR #1.
+- [x] HEAD SHA trước/sau adoption không đổi.
+- [x] `get-status` vẫn là `code_review_ready` sau adoption.
+- [x] Adoption lặp lại idempotent, không tạo worktree thứ hai.
+- [x] Ambiguous/missing identity trả `workspace_adoption_failed` và không mutate.
 
 ## Slice 4.9C - Lifecycle Và Cleanup
 
@@ -84,11 +84,33 @@ Mục đích: chứng minh isolation hoạt động cả khi resume, chạy xen 
 - [x] Hai action đồng thời của cùng run bị per-run lock chặn.
 - [x] Mismatch workspace artifact/work packet và path/branch/remote bị chặn
   trước các entrypoint Phase 4 chạm code.
-- [ ] Legacy adoption giữ nguyên commit và PR #1.
+- [x] Legacy adoption giữ nguyên commit và PR #1.
 - [ ] Phase 5 repair cập nhật cùng branch/PR.
 - [ ] Approve gọi Draft -> Ready nhưng không merge.
 - [ ] Cleanup từ chối run chưa merged/cancelled và từ chối dirty worktree.
 - [x] Full regression Phase 1-4 pass sau migration.
+
+## Nhật Ký Slice 4.9B
+
+### 2026-10-15 - Adopt Legacy Run Và Draft PR #1
+
+Mục đích: đưa run cũ vào worktree-per-run mà không sinh lại artifact/code, không
+đổi commit đã review và không sửa trạng thái Draft PR.
+
+- [x] CLI kiểm tra runtime publication, local/remote branch và GitHub PR identity
+  trước khi tạo worktree.
+- [x] Checkout canonical sạch được chuyển từ legacy branch về `main`.
+- [x] Branch `feature/sdlc-1-implementation` được gắn vào worktree riêng của run.
+- [x] HEAD trước/sau giữ nguyên `088416465cc7139255aafa120a0b5bb8f17cb971`.
+- [x] PR #1 vẫn `OPEN`, `Draft` và giữ cùng head/base OID.
+- [x] Run vẫn `code_review_ready`; checkpoint, `last_sync` và các artifact cũ
+  không bị thay đổi ngoài việc bổ sung workspace reference.
+- [x] Verification script chạy ngay trong adopted worktree báo `All tests passed`;
+  worktree vẫn sạch và HEAD không đổi.
+- [x] Chạy lại lệnh trả `adopted=false` và không tạo worktree lần hai.
+- [x] Test mismatch và persistence failure chứng minh fail closed/rollback an toàn.
+
+Kết quả kiểm thử: test adoption/workspace/GitHub pass; full regression `174 passed`.
 
 ## Nhật Ký Slice 4.9A
 

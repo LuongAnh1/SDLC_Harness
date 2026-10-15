@@ -1,5 +1,22 @@
 # Phase 4 Progress
 
+## 2026-10-15 - Slice 4.9B: Legacy Run Adoption
+
+Đã thêm CLI `adopt-run-workspace --run-id` và GitHub PR reader chỉ đọc để xác
+minh runtime publication, remote, base/head OID, branch, Draft state và local Git
+cùng một identity. Workspace manager thực hiện adoption dưới registry lock và
+per-run lock, fail closed bằng `workspace_adoption_failed`, rollback checkout và
+worktree chưa có ownership khi persistence lỗi.
+
+Live run `run_20261013_160421_f661babf` đã được adopt thành công. Canonical target
+repo hiện ở `main`; branch `feature/sdlc-1-implementation` nằm trong worktree riêng
+và giữ nguyên HEAD `088416465cc7139255aafa120a0b5bb8f17cb971`. Draft PR #1 vẫn
+OPEN/Draft, run vẫn `code_review_ready`. Lần gọi thứ hai trả `adopted=false`, xác
+nhận idempotency. Full regression sau thay đổi: `174 passed`.
+
+Việc tiếp theo: Slice 4.9C thêm lifecycle/cleanup explicit; sau đó Slice 4.9D mới
+mở human approval để chuyển Draft PR thành Ready for review, không merge.
+
 ## 2026-10-15 - Slice 4.9A3: Phase 3/4 Dùng Run Workspace End-to-End
 
 Đã nối creation engine vào design approval và chuyển toàn bộ đường chạy code của

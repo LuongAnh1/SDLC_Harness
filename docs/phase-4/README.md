@@ -31,8 +31,9 @@ và Confluence page cũ thay vì tạo bản trùng.
 Slice 4.9A3 đã thay cơ chế một working directory dùng chung bằng
 worktree-per-run cho toàn bộ Phase 3/4. Contract nằm tại
 `workspace-isolation/README.md`: mọi action code resolve cùng workspace theo
-`run_id`, giữ per-run lock và fail closed khi identity lệch. Legacy adoption và
-cleanup vẫn chưa tồn tại; approve Code Review chỉ được mở sau 4.9B/4.9C.
+`run_id`, giữ per-run lock và fail closed khi identity lệch. Slice 4.9B đã nhận
+nuôi run/PR legacy vào worktree riêng mà không đổi HEAD. Cleanup vẫn thuộc 4.9C;
+approve Code Review chỉ được mở sau khi lifecycle guard này hoàn thành.
 
 ## Slice 4.1 Đã Chốt
 

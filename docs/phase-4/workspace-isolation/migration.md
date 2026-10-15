@@ -45,12 +45,25 @@ Jira/Confluence. Nó chỉ thay đổi nơi local workflow thao tác code.
 - Verification Runner read-only cho kết quả tương đương report gần nhất.
 - `get-status` trả workspace identity nhưng vẫn giữ `code_review_ready`.
 
-Nếu bước verify cuối thất bại, giữ artifact chẩn đoán và không tự xóa branch/PR.
-Việc remove worktree lỗi phải là thao tác cleanup/recovery explicit.
+Nếu lỗi xảy ra sau khi ownership artifact đã được ghi, giữ worktree/artifact để
+lần chạy sau reconcile an toàn; không tự xóa branch/PR.
 
 ## Rollback
 
-Rollback adoption chỉ remove worktree khi worktree sạch. Runtime artifact được
-đánh dấu `lifecycle=adoption_failed`; không checkout branch lại canonical repo,
-không reset commit và không xóa remote branch.
+Trước khi ownership artifact được ghi, rollback chỉ remove worktree khi worktree
+vẫn sạch và HEAD còn đúng commit đã xác minh. Nếu canonical repo ban đầu đang giữ
+legacy branch, rollback sẽ checkout lại branch đó sau khi remove worktree. Không
+reset commit, không xóa local/remote branch và không dùng force.
+
+## Kết Quả Live Adoption 2026-10-15
+
+- Run: `run_20261013_160421_f661babf`.
+- Canonical checkout sau adoption: `main` tại
+  `b47cbd5992b063cb7efbfb69f40d13073de62bf5`.
+- Worktree của run giữ branch `feature/sdlc-1-implementation` tại
+  `088416465cc7139255aafa120a0b5bb8f17cb971`.
+- GitHub PR #1 vẫn mở, vẫn Draft và giữ nguyên head/base OID.
+- State vẫn `code_review_ready`; lần chạy adoption thứ hai trả `adopted=false`.
+- `scripts/test.ps1` chạy trong adopted worktree báo `All tests passed`; worktree
+  vẫn sạch và HEAD vẫn là `088416465cc7139255aafa120a0b5bb8f17cb971`.
 

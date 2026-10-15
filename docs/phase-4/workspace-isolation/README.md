@@ -12,8 +12,9 @@ Validator, repair và QA có thể đọc nhầm branch khi nhiều run xen kẽ
 3/4 resolve artifact đó và giữ per-run lock. Canonical repo không còn là working
 directory của workflow.
 
-Run/PR sinh trước A3 chưa có ownership artifact nên vẫn fail closed. Chúng chỉ
-được tiếp tục sau cơ chế adopt legacy của Slice 4.9B, không tự nối vào branch cũ.
+Run/PR sinh trước A3 chỉ được tiếp tục qua lệnh adopt explicit của Slice 4.9B,
+không tự nối vào branch cũ. Run legacy hiện tại và Draft PR #1 đã được adopt,
+giữ nguyên HEAD/PR identity và vẫn ở checkpoint `code_review_ready`.
 
 ## Kiến Trúc Đã Chốt
 
@@ -177,6 +178,7 @@ Slice 4.9A3 đã nối creation engine vào workflow:
 - status và tool sync không phát tán machine-local worktree path;
 - canonical repo có thể đổi branch mà run vẫn resume đúng workspace.
 
-Phần còn mở là 4.9B adopt legacy run/PR, 4.9C cleanup và 4.9D chuyển Draft PR
-thành Ready for review. A3 không tự động chạm live run hoặc PR cũ.
+Slice 4.9B đã hoàn thành CLI adoption, fail-closed guard, rollback và live
+migration run/PR #1. Phần còn mở là 4.9C cleanup và 4.9D chuyển Draft PR thành
+Ready for review.
 

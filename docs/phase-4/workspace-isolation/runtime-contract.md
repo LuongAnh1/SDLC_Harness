@@ -58,7 +58,7 @@ content, repo-relative paths và branch/commit identity phù hợp với nhiệm
 
 ## Ensure Workspace Contract
 
-Workspace manager hiện có bốn API nội bộ:
+Workspace manager hiện có năm API nội bộ:
 
 - `create_for_run(run_id)`: tạo mới hoặc trả lại workspace hợp lệ đã có;
 - `resolve(run_id)`: xác minh identity nhưng không giữ action lock;
@@ -66,6 +66,9 @@ Workspace manager hiện có bốn API nội bộ:
   đọc/sửa code của caller;
 - `refresh_locked(record, ...)`: cập nhật `head_sha` và PR identity sau Git
   mutation khi caller vẫn đang giữ lock.
+- `adopt_legacy_run(run_id, ...)`: xác minh runtime/GitHub/Git identity rồi gắn
+  nguyên branch cũ vào worktree của run; trả thêm cờ cho biết adoption mới hay
+  lần gọi idempotent.
 
 Từ Slice 4.9A3, design approval gọi `create_for_run` trước khi lập implementation
 plan. Phase 3/4 dùng `locked_workspace` cho action đọc/sửa/publish code; không
@@ -103,6 +106,12 @@ là lỗi identity, không phải tín hiệu để Harness sửa repo âm thầ
 Dùng một lần cho legacy run đã có branch/PR trước khi worktree isolation tồn tại.
 Lệnh phải idempotent: nếu artifact và worktree hợp lệ đã tồn tại, trả status hiện
 tại mà không tạo worktree thứ hai.
+
+Lần adoption đầu trả `adopted=true`; các lần xác minh lại trả `adopted=false`.
+Lệnh chỉ chấp nhận run tại `code_review_ready` có Draft PR mở và yêu cầu runtime
+publication, local branch, remote branch cùng live PR chia sẻ một HEAD. Nếu
+canonical checkout đang giữ legacy branch, lệnh yêu cầu working tree sạch, chuyển
+canonical về configured base branch rồi mới gắn branch cũ vào worktree.
 
 ### `cleanup-run-workspace --run-id <run_id>`
 

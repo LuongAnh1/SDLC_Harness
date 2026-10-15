@@ -144,10 +144,13 @@ creation engine. Slice 4.9A3 đã nối engine vào Phase 3/4: design approval t
 workspace, tự chuẩn bị CodeGraph trong worktree; Developer, Runner, Validator,
 QA, revalidate và publisher đều resolve cùng workspace dưới per-run lock.
 Canonical repo chỉ dùng để fetch/quản lý worktree, không được checkout để chạy
-workflow. `get-status` chỉ trả workspace identity gọn và không lộ local path.
+workflow. Slice 4.9B đã thêm `adopt-run-workspace` và nhận nuôi run legacy/PR #1;
+canonical checkout đã về `main`, còn branch cũ nằm trong worktree riêng với HEAD
+và Draft PR không đổi. `get-status` chỉ trả workspace identity gọn và không lộ
+local path.
 
-Run hiện tại/PR #1 cần được adopt mà không đổi HEAD. Cleanup chỉ qua lệnh explicit
-sau human merge hoặc cancel, không xóa remote branch. Harness được phép chuyển
+Cleanup chỉ qua lệnh explicit sau human merge hoặc cancel, không xóa remote
+branch. Harness được phép chuyển
 Draft PR thành Ready for review nhưng không bao giờ merge hoặc bật auto-merge.
 
 

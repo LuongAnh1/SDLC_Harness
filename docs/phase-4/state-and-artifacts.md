@@ -302,7 +302,9 @@ workspace.lifecycle=active | cleanup_pending | cleaned
 
 Chi tiết schema, lock và error contract nằm trong
 `workspace-isolation/runtime-contract.md`. Với run mới, đây là runtime behavior
-đã triển khai; legacy run chưa có artifact phải chờ cơ chế adoption của 4.9B.
+đã triển khai. Legacy run hiện tại đã được nhận nuôi qua CLI explicit của 4.9B;
+run cũ khác vẫn phải fail closed nếu chưa có artifact hoặc không chứng minh được
+runtime/GitHub/Git identity duy nhất.
 
 ## Last Sync Phase 4
 
