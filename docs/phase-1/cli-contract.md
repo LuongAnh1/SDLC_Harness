@@ -206,3 +206,31 @@ trong test mà không sửa file cấu hình thật. Các lệnh có side effect
 `--sync-mode mock`, kể cả `.env` ghi `SDLC_SYNC_MODE=real`; muốn sync thật phải
 truyền `--sync-mode real` rõ ràng.
 
+## CLI Contract V2 - Planned
+
+V2 bổ sung action:
+
+```bash
+python -m sdlc_harness.cli answer-clarification \
+  --run-id <run_id> \
+  --question-id Q-1 \
+  --answer "<human answer>" \
+  --answered-by telegram:<id> \
+  --sync-mode mock
+```
+
+`get-status` giữ các field V1 và bổ sung:
+
+```text
+requirement_contract_version
+latest_artifacts.requirement_model
+latest_artifacts.requirement_decisions
+pending_checkpoint.current_question
+pending_checkpoint.remaining_blocking_count
+```
+
+Khi `status=waiting_requirement_clarification`, action hợp lệ là
+`answer_clarification`, `get_status`, `sync_run`, `cancel_run`; không có
+`approve_checkpoint`. Wire shape, idempotency và error codes đầy đủ nằm tại
+`requirement-v2/clarification-workflow.md`.
+

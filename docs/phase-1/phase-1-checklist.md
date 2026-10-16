@@ -108,3 +108,18 @@ Mục đích: Phase 1 thật sự chạy được từ terminal.
 - Live test đầu tiên sau schema mới bị validator chặn đúng lỗi `connection interruption/cancel` nằm trong Acceptance Criteria.
 - Đã thêm repair loop cho requirement packet để model có cơ hội tự sửa theo `ValidationReport` trước khi trả lỗi ra bot.
 - Cần rerun live `start-from-jira` hoặc qua Niko để anh review artifact thật sau repair loop.
+
+## Requirement Model V2 Và Clarification - Planned
+
+Thiết kế xử lý xung đột formal/packet và blocking Open Questions nằm tại
+`requirement-v2/`. Checklist triển khai chi tiết nằm trong
+`requirement-v2/checklist.md`.
+
+- [ ] Tạo canonical `requirement_model_v2` có stable IDs/evidence/decisions.
+- [ ] Sinh Requirement Packet và Formal Use Case bằng deterministic renderer.
+- [ ] Thêm main/alternative/exception flow riêng trong Formal V2.
+- [ ] Thêm Python blocking policy và state `waiting_requirement_clarification`.
+- [ ] Thêm `answer-clarification` cùng decision provenance và artifact revision.
+- [ ] Chặn requirement approval khi còn blocking question.
+- [ ] Thêm V1/V2 dual-read và rollout chỉ cho run mới.
+- [ ] Chạy controlled smoke UC2 qua Niko tới Design.

@@ -149,3 +149,24 @@ SDLC Harness sở hữu tất cả artifact Phase 1. Niko chỉ đọc summary/s
 `formal_use_case_v1.txt` là artifact máy đọc theo grammar TraceDev. Nó dùng các keyword `UsecaseName`, `Description`, `Actors`, `Entry Conditions`, `Flow of Events`, `Exit Conditions`, `Quality Requirement` để Designer/Validator có input ổn định.
 
 `formal_check_report_v1.json` lưu kết quả kiểm tra grammar tối thiểu và cờ `repaired` để biết Requirement Refiner có phải gọi repair prompt hay không.
+
+## Artifact Contract V2 - Planned
+
+Thiết kế V2 không tiếp tục để Formal Use Case và Requirement Packet là hai
+semantic output độc lập. Run V2 dùng:
+
+```text
+requirement_model_v2_r<n>.json           # canonical
+requirement_packet_v2_r<n>.md            # deterministic review projection
+formal_use_case_v2_r<n>.txt              # deterministic trace/compat projection
+requirement_decisions_v2_r<n>.json       # decision audit projection
+```
+
+`latest_artifacts` trỏ tới revision hiện tại, còn revision cũ bất biến để audit.
+Mỗi requirement/flow/question/evidence/decision có stable ID. Confirmed statement
+phải được grounded bằng source evidence hoặc human decision. Field thiếu dùng
+`unknown` và question reference, không dùng domain inference.
+
+Schema, ID rules và projection contract nằm tại
+`requirement-v2/requirement-model-v2.md`. Contract này chưa được coi là runtime
+hiện hành trước khi checklist V2 pass.

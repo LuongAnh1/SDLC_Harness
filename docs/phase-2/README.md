@@ -33,6 +33,22 @@ approve_checkpoint(run_id)
 -> nếu fail vì requirement thiếu/nhập nhằng: state=blocked để human xử lý lại requirement
 ```
 
+## Requirement V2 Input - Planned
+
+Với run `requirement_contract_version=v2`, Phase 2 phải đọc
+`requirement_model_v2_r<n>.json` đã duyệt làm nguồn sự thật. Requirement Packet
+và Formal Use Case V2 chỉ là projection review/trace, không được ghi đè canonical
+JSON khi nội dung khác nhau. Reader Phase 2 phải dual-read:
+
+```text
+V1 -> requirement_packet_v1 + formal_use_case_v1
+V2 -> requirement_model_v2_r<n> canonical + projections để review/debug
+```
+
+Stable requirement IDs từ V2 phải được giữ khi tạo requirement graph và
+requirement-design trace. Chi tiết migration nằm tại
+`../phase-1/requirement-v2/migration-and-rollout.md`.
+
 ## Ba Vai Trò AI Trong Phase 2
 
 ### Requirement Refiner

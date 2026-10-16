@@ -2,6 +2,10 @@
 
 Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về từ fixture local hoặc Jira issue, chuẩn hóa thành **formal use case** theo tinh thần TraceDev, sinh **requirement packet** cho người duyệt, kiểm tra bằng Validator, đồng bộ mock hoặc real tool, rồi trả trạng thái cho Niko đọc.
 
+Luồng bên dưới là contract V1 đang chạy. Requirement Model V2 và clarification
+checkpoint đã được chốt ở mức thiết kế trong `requirement-v2/`, nhưng chưa thay
+contract runtime cho tới khi checklist V2 hoàn tất.
+
 Luồng Phase 1:
 
 ```text
@@ -54,6 +58,8 @@ Phase 1 cần chứng minh:
 - `real-sync-implementation.md`: kế hoạch triển khai sync thật Jira/Confluence
   Cloud trước khi khóa Phase 1.
 - `phase-1-checklist.md`: checklist triển khai code Phase 1.
+- `requirement-v2/README.md`: thiết kế canonical requirement model, xử lý xung
+  đột formal/packet và clarification cho Open Questions.
 
 ## Đầu Ra Bắt Buộc
 
@@ -135,4 +141,21 @@ quality/non-functional requirements. `Source Evidence` chỉ dùng nguồn gốc
 model sinh ra làm bằng chứng.
 
 Quy ước đuôi file: prompt/artifact formal use case dùng `.txt` vì là grammar máy đọc; prompt/artifact requirement packet dùng `.md` vì hướng tới checkpoint người duyệt.
+
+## Requirement V2 Đã Chốt Ở Mức Thiết Kế
+
+V2 đổi thứ tự và quyền ưu tiên artifact:
+
+```text
+source
+-> requirement_model_v2_r<n>.json (canonical)
+-> Python grounding/blocking validation
+-> clarification từng câu nếu còn blocking question
+-> requirement_packet_v2_r<n>.md + formal_use_case_v2_r<n>.txt (projection)
+-> requirement approval
+```
+
+Formal V2 có block riêng cho main/alternative/exception flow và không được dùng
+để ghi đè canonical JSON. Run V1 giữ nguyên; V2 chỉ áp dụng cho run mới sau khi
+rollout gate pass. Xem `requirement-v2/README.md` và `requirement-v2/checklist.md`.
 

@@ -183,3 +183,22 @@ Nếu use case đã có active run, SDLC Harness trả run hiện tại. Niko kh
 | State file lỗi JSON | `state_corrupted` |
 
 Khi lỗi, CLI vẫn trả JSON với `ok=false`.
+
+## Flow V2 - Planned
+
+Run được tạo với `requirement_contract_version=v2` sẽ dùng flow đã chốt tại
+`requirement-v2/clarification-workflow.md`:
+
+```text
+load source
+-> Requirement Refiner sinh structured requirement model
+-> validate schema/evidence/references và tính effective_blocking bằng Python
+-> nếu còn blocking question: waiting_requirement_clarification
+-> answer-clarification từng câu, ghi decision và revision mới
+-> hết blocking question: render packet/formal projections
+-> waiting_requirement_approval
+```
+
+Clarification là state hợp lệ, không phải validator failure. Validator repair chỉ
+sửa output sai schema/grounding; nó không tự trả lời câu hỏi nghiệp vụ. Approval
+bị chặn cho tới khi canonical model không còn blocking question mở.

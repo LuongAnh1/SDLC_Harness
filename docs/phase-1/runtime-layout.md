@@ -87,6 +87,31 @@ tool_sync_report_v1.json
 
 Phase 1 chỉ tạo version `v1`. Version `v2` bắt đầu quan trọng ở Phase 5 khi có sửa tại checkpoint.
 
+## Runtime Layout V2 - Planned
+
+Requirement V2 tách schema version khỏi artifact revision và tạo revision ngay
+trong Phase 1 khi human trả lời clarification:
+
+```text
+.runtime/runs/<run_id>/
+  state.json
+  artifacts/
+    use_case_packet_v1.md
+    requirement_model_v2_r1.json
+    requirement_packet_v2_r1.md
+    formal_use_case_v2_r1.txt
+    requirement_decisions_v2_r1.json
+    requirement_model_v2_r2.json
+    requirement_packet_v2_r2.md
+    formal_use_case_v2_r2.txt
+    requirement_decisions_v2_r2.json
+```
+
+Run V2 ghi `requirement_contract_version=v2`; run thiếu field này được hiểu là
+V1. `latest_artifacts` trỏ tới revision mới nhất và không ghi đè revision cũ.
+Quy ước `_v2_r<n>` chỉ áp dụng cho Requirement V2; artifact V1 hiện tại giữ
+nguyên tên để không phá run lịch sử.
+
 ## Git Policy
 
 `.runtime/` không commit. Chỉ commit docs, fixture, source code và tests.

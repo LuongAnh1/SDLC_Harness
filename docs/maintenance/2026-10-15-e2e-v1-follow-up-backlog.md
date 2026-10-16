@@ -56,7 +56,8 @@ formal_use_case_v{n+1}.txt      # khi quyết định làm thay đổi formal us
 - Câu trả lời qua Niko được lưu và trace tới requirement cập nhật.
 - Phase sau không tạo thêm policy trái với quyết định đã duyệt.
 
-Trạng thái: **Open - ưu tiên cao trước lần E2E use case tiếp theo**.
+Trạng thái: **Planned - thiết kế đã chốt tại
+`docs/phase-1/requirement-v2/`; code/test chưa triển khai**.
 
 ## 2. Output Token Của Model Có Thể Cắt Structured Output
 

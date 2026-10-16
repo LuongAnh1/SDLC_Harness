@@ -36,7 +36,8 @@ Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code
 - [ ] Chặn approval khi Requirement Packet còn open question ảnh hưởng business
   rule/acceptance; mở checkpoint clarification và lưu decision provenance trước
   khi sang Design. Chi tiết:
-  `docs/maintenance/2026-10-15-e2e-v1-follow-up-backlog.md`.
+  `docs/phase-1/requirement-v2/README.md` và
+  `docs/phase-1/requirement-v2/checklist.md`.
 
 ### Phase 1 Gate - Real Jira/Confluence Sync
 

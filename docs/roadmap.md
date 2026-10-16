@@ -42,6 +42,12 @@ Kết quả mong muốn:
 - Có sync report.
 - Niko có thể hỏi status và báo người dùng duyệt.
 
+Nâng cấp Requirement V2 đã được chốt ở mức thiết kế tại
+`docs/phase-1/requirement-v2/`: structured JSON là canonical artifact, Open
+Questions có blocking policy/decision provenance, Niko hỏi từng câu trước
+requirement approval, và Formal/Markdown được render từ cùng model. V2 chỉ áp
+dụng cho run mới sau rollout gate; implementation hiện chưa bắt đầu.
+
 ## Phase 2 - Requirement Packet Đến Design
 
 Mục đích: sau khi người dùng duyệt requirement, tạo design artifact và checkpoint tiếp theo.
