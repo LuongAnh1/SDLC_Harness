@@ -1,0 +1,90 @@
+{
+  "schema_version": "requirement_model_v2",
+  "revision": 1,
+  "run_id": "run_test_uc2",
+  "source": {
+    "source_ref": "dataset_use_case:eTour:UC2",
+    "artifact_ref": "use_case_packet_v1",
+    "fingerprint": "sha256:test-uc2"
+  },
+  "use_case": {
+    "id": "UC-1",
+    "name": "InsertCulturalHeritage",
+    "goal": {
+      "id": "GOAL-1",
+      "text": "Inserts a new cultural object in the system.",
+      "status": "explicit",
+      "evidence_refs": ["E-1"],
+      "open_question_refs": []
+    },
+    "actors": [
+      {
+        "id": "ACT-1",
+        "name": "Agency Operator",
+        "status": "explicit",
+        "evidence_refs": ["E-2"],
+        "open_question_refs": []
+      }
+    ]
+  },
+  "preconditions": [
+    {
+      "id": "PRE-1",
+      "text": "The agency has logged.",
+      "status": "explicit",
+      "evidence_refs": ["E-3"],
+      "open_question_refs": []
+    }
+  ],
+  "flows": {
+    "main": [
+      {"id": "MF-1", "actor": "ACT-1", "action": "Activate the feature for the insertion of a new cultural good.", "target": null, "evidence_refs": ["E-4"], "open_question_refs": []},
+      {"id": "MF-2", "actor": "System", "action": "Displays the corresponding form.", "target": null, "evidence_refs": ["E-5"], "open_question_refs": []},
+      {"id": "MF-3", "actor": "ACT-1", "action": "Fill out the form with the data of the cultural and submit.", "target": null, "evidence_refs": ["E-6"], "open_question_refs": []},
+      {"id": "MF-4", "actor": "System", "action": "Verify the data entered and asks for confirmation of the transaction.", "target": null, "evidence_refs": ["E-7"], "open_question_refs": []},
+      {"id": "MF-5", "actor": "ACT-1", "action": "Confirm the operation.", "target": null, "evidence_refs": ["E-8"], "open_question_refs": []},
+      {"id": "MF-6", "actor": "System", "action": "Memorize your new cultural good.", "target": null, "evidence_refs": ["E-9"], "open_question_refs": []}
+    ],
+    "alternatives": [
+      {"id": "AF-1", "trigger": "Agency Operator cancels the operation.", "steps": [], "outcome": null, "evidence_refs": ["E-10"], "open_question_refs": ["Q-1"]}
+    ],
+    "exceptions": [
+      {"id": "EF-1", "trigger": "The data is invalid or insufficient.", "steps": ["The system activates the use case Errored."], "outcome": null, "evidence_refs": ["E-7"], "open_question_refs": ["Q-2"]},
+      {"id": "EF-2", "trigger": "Interruption of the connection to the server ETOUR.", "steps": [], "outcome": null, "evidence_refs": ["E-11"], "open_question_refs": ["Q-3"]}
+    ]
+  },
+  "postconditions": [
+    {"id": "POST-1", "text": "The system shall notify the proper inclusion of the cultural.", "status": "explicit", "evidence_refs": ["E-12"], "open_question_refs": []}
+  ],
+  "business_rules": [
+    {"id": "BR-1", "text": "The system requirements will not accept duplicates cultural heritage.", "status": "explicit", "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]}
+  ],
+  "acceptance_criteria": [
+    {"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-4"], "verifies": ["BR-1"]}
+  ],
+  "quality_requirements": [],
+  "assumptions": [],
+  "open_questions": [
+    {"id": "Q-1", "question": "What happens after the operator cancels the operation?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["AF-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-10"]},
+    {"id": "Q-2", "question": "What is the observable outcome after invalid or insufficient data?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-7"]},
+    {"id": "Q-3", "question": "What happens after connection interruption?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-2"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-11"]},
+    {"id": "Q-4", "question": "Which identity fields determine whether two cultural heritage records are duplicates?", "category": "data_identity", "proposed_blocking": false, "effective_blocking": false, "affects": ["BR-1", "AC-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-13"]}
+  ],
+  "decisions": [],
+  "evidence": [
+    {"id": "E-1", "source_ref": "dataset_use_case:eTour:UC2", "location": "description", "quote": "Inserts a new cultural object in the system."},
+    {"id": "E-2", "source_ref": "dataset_use_case:eTour:UC2", "location": "actor", "quote": "Participating Actor: initialization Agency Operator"},
+    {"id": "E-3", "source_ref": "dataset_use_case:eTour:UC2", "location": "entry conditions", "quote": "Entry Operator conditions: The agency has logged."},
+    {"id": "E-4", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 1", "quote": "Activate the feature for the insertion of a new cultural good."},
+    {"id": "E-5", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 2", "quote": "Displays the corresponding form."},
+    {"id": "E-6", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 3", "quote": "Fill out the form with the data of the cultural and submit."},
+    {"id": "E-7", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 4", "quote": "Verify the data entered and asks for confirmation of the transaction. Where the data is invalid or insufficient, the system activates the use case Errored."},
+    {"id": "E-8", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 5", "quote": "Confirm the operation."},
+    {"id": "E-9", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 6", "quote": "Memorize your new cultural good."},
+    {"id": "E-10", "source_ref": "dataset_use_case:eTour:UC2", "location": "alternative", "quote": "Operator Agency cancels the operation."},
+    {"id": "E-11", "source_ref": "dataset_use_case:eTour:UC2", "location": "exception", "quote": "Interruption of the connection to the server ETOUR."},
+    {"id": "E-12", "source_ref": "dataset_use_case:eTour:UC2", "location": "exit conditions", "quote": "The system shall notify the proper inclusion of the cultural."},
+    {"id": "E-13", "source_ref": "dataset_use_case:eTour:UC2", "location": "quality requirements", "quote": "The system requirements will not accept duplicates cultural heritage."}
+  ],
+  "validation": {"status": "invalid", "errors": []}
+}

@@ -82,6 +82,7 @@ trả lời đã đủ để đóng question hay chưa.
 2. `clarification-workflow.md`: state machine và CLI/status contract.
 3. `migration-and-rollout.md`: tương thích V1/V2 và rollout.
 4. `checklist.md`: thứ tự triển khai, test và controlled smoke.
+5. `progress.md`: nhật ký code, kiểm tra, lỗi phát sinh và việc tiếp theo.
 
 ## Điều Kiện Khóa Thiết Kế
 

@@ -14,13 +14,13 @@ triển khai chỉ vì tài liệu đã được viết.
 
 ## 2. Canonical Model Và Validator
 
-- [ ] Tạo type/schema cho `requirement_model_v2` và revision naming.
-- [ ] Tạo stable ID/reference validator.
-- [ ] Kiểm evidence quote thuộc source snapshot.
-- [ ] Cấm confirmed statement thiếu evidence/decision.
-- [ ] Áp blocking policy bằng Python và phát hiện dependency cycle.
-- [ ] Phân biệt main, alternative và exception flow.
-- [ ] Chặn assumption bị dùng như confirmed constraint.
+- [x] Tạo type/schema cho `requirement_model_v2` và revision naming.
+- [x] Tạo stable ID/reference validator.
+- [x] Kiểm evidence quote thuộc source snapshot.
+- [x] Cấm confirmed statement thiếu evidence/decision.
+- [x] Áp blocking policy bằng Python và phát hiện dependency cycle.
+- [x] Phân biệt main, alternative và exception flow.
+- [x] Chặn assumption bị dùng như confirmed constraint.
 
 ## 3. Refiner Và Projections
 
@@ -28,7 +28,7 @@ triển khai chỉ vì tài liệu đã được viết.
   độc lập.
 - [ ] Bỏ chỉ dẫn infer từ domain knowledge cho confirmed requirement.
 - [ ] Bounded repair chỉ sửa schema/grounding/reference violation.
-- [ ] Render `requirement_packet_v2_r<n>.md` deterministically.
+- [x] Render `requirement_packet_v2_r<n>.md` deterministically.
 - [ ] Render/parse `formal_use_case_v2_r<n>.txt` với alternative/exception và
   `UNKNOWN_FROM_SOURCE [Q-id]`.
 - [ ] Cross-projection validator so ID/content với canonical model.
@@ -58,9 +58,9 @@ triển khai chỉ vì tài liệu đã được viết.
 ## 6. Test Và Acceptance
 
 - [ ] Source thiếu business value/quality tạo question, không tạo nội dung đoán.
-- [ ] UC2 giữ invalid data, cancel và connection failure ngoài Main Flow.
-- [ ] Duplicate rule và duplicate criterion được biểu diễn tách biệt.
-- [ ] LLM gắn non-blocking nhưng category hard-blocking bị Python nâng thành blocking.
+- [x] UC2 giữ invalid data, cancel và connection failure ngoài Main Flow.
+- [x] Duplicate rule và duplicate criterion được biểu diễn tách biệt.
+- [x] LLM gắn non-blocking nhưng category hard-blocking bị Python nâng thành blocking.
 - [ ] Non-blocking question không chặn approval và được render như assumption.
 - [ ] Answer đủ/thiếu, answer lặp, answer khác, wrong question và wrong state có
   kết quả đúng contract.

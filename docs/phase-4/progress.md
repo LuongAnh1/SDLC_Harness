@@ -786,3 +786,37 @@ và Code Review sync `16 passed`. Merge PR vẫn do human thực hiện trực t
 GitHub; request-change tiếp tục thuộc Phase 5.
 
 Post-live full regression: SDLC_Harness `192 passed`; Niko `299 passed`.
+
+## Đồng Bộ Test Code Trace Contract - 2026-10-16
+
+Full suite trong lúc triển khai Requirement V2 đã lộ 6 failure ở các test code
+trace/repair-limit/revalidate. Production validator đã được harden để chỉ giữ
+finding blocking khi LLM trả đủ:
+
+- `blocking=true`;
+- owner và recommended action;
+- `evidence_ref` cùng `evidence_quote` có trong approved context.
+
+Hai fake `RejectingCodeTraceLlm` và `TraceMappingIssueCodeTraceLlm` vẫn dùng
+contract cũ. Finding của chúng bị hạ thành observation, làm workflow đi tiếp từ
+`implementation_traced` sang QA thay vì vào repair/block như test mong đợi.
+
+Đã cập nhật fake payload:
+
+- semantic gap: owner `developer`, action `developer_repair`, evidence từ
+  Requirement Packet;
+- mapping issue: owner `validator`, action `validator_mapping_fix`, evidence từ
+  Design Artifact.
+
+Kết quả kiểm tra cuối:
+
+```bash
+rtk python -m pytest tests/test_phase4.py -q
+# 46 passed
+
+rtk python -m pytest -q
+# 206 passed
+```
+
+Không nới policy production; thay đổi chỉ đồng bộ test fixture với contract đang
+được runtime áp dụng.

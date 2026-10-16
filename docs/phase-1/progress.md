@@ -172,3 +172,13 @@ vòng Designer/Validator theo tinh thần TraceDev:
 - Designer update design theo quality report khi còn missing links.
 - SDLC_Harness lưu artifact/state/checkpoint sau từng vòng để Niko đọc status.
 
+## Requirement V2 Slice 1 - 2026-10-16
+
+- Đã thêm canonical model, Python validator/blocking policy và deterministic
+  renderer độc lập cho Requirement V2.
+- Đã thêm fixture UC2 và 14 test tập trung; toàn bộ test này pass.
+- Regression Phase 1 có 34 test pass.
+- Full suite ban đầu lộ 6 test Phase 4 dùng fake Code Trace contract cũ; đã
+  cập nhật fixture với blocking/owner/action/grounded evidence. Kết quả cuối:
+  Phase 4 `46 passed`, full suite `206 passed`.
+- Chưa nối V2 vào Requirement Refiner, workflow/runtime hoặc Niko.

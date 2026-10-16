@@ -98,9 +98,14 @@ class RejectingCodeTraceLlm:
                 "missing_links": [
                     {
                         "type": "missing_behavior",
+                        "blocking": True,
+                        "owner": "developer",
+                        "recommended_action": "developer_repair",
                         "message": "Delete confirmation is not convincingly covered by code/test evidence.",
                         "requirement_ref": "approved_requirement_packet",
                         "design_element_id": "sequence:delete_cultural_heritage_main",
+                        "evidence_ref": "requirement_packet:Source Evidence",
+                        "evidence_quote": "Asks confirmation",
                     }
                 ],
                 "risks": ["Code file exists but behavior evidence is weak."],
@@ -119,8 +124,13 @@ class TraceMappingIssueCodeTraceLlm:
                 "missing_links": [
                     {
                         "type": "trace_mapping_issue",
+                        "blocking": True,
+                        "owner": "validator",
+                        "recommended_action": "validator_mapping_fix",
                         "message": "Sequence boolean response is not a code symbol.",
                         "design_element_id": "sequence:sequence_diagram_1:16",
+                        "evidence_ref": "design_artifact:Sequence Diagrams",
+                        "evidence_quote": "Service --> Boundary: success",
                     }
                 ],
                 "risks": ["Validator evidence/mapping issue."],
