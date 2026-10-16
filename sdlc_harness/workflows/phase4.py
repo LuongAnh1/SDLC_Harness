@@ -81,7 +81,12 @@ ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cance
 ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = [
+    "continue_run",
+    "revalidate_implementation",
+    "get_status",
+    "cancel_run",
+]
 ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
 ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -89,6 +94,11 @@ ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
 ALLOWED_CODE_REVIEW_READY_ACTIONS = ["approve_checkpoint", "get_status", "sync_run", "cancel_run"]
 ALLOWED_CODE_REVIEW_APPROVED_ACTIONS = ["get_status", "sync_run", "cancel_run"]
+IMPLEMENTATION_AUTOMATION_STATUSES = {
+    "implementation_written",
+    "implementation_tested",
+    "implementation_repair_needed",
+}
 
 REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "implementation_repair_limit_exceeded",
@@ -376,7 +386,6 @@ class PhaseFourWorkflow:
             )
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
-
         packet_path = write_phase4_developer_work_packet(
             store=self.store,
             run_id=run_id,
@@ -492,51 +501,75 @@ class PhaseFourWorkflow:
             ) from exc
 
     def continue_run(self, *, run_id: str) -> dict[str, object]:
-        """Chạy bước Phase 4 tiếp theo theo state hiện tại của run."""
+        """Chạy đúng một transition Phase 4; dùng cho test và thao tác nội bộ."""
 
         with self.workspace_manager.locked_workspace(run_id):
-            state = self.store.read_state(run_id)
-            status = str(state.get("status"))
-            if status == "implementation_ready":
-                return self._continue_developer_act(state=state, run_id=run_id)
-            if status in {"implementation_executing", "implementation_paused"}:
-                execution = _dict_value(state.get("developer_execution"))
-                if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                    return self._continue_qa_repair(state=state, run_id=run_id)
-                if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
-                    return self._continue_implementation_repair(state=state, run_id=run_id)
-                return self._continue_developer_act(state=state, run_id=run_id)
-            if status == "blocked" and self._legacy_developer_retry_allowed(state):
-                return self._continue_developer_act(state=state, run_id=run_id)
-            if status == "blocked" and repair_scope_mismatch_retry_allowed(state):
-                execution = _dict_value(state.get("developer_execution"))
-                if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                    return self._continue_qa_repair(state=state, run_id=run_id)
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            if status == "blocked" and self._legacy_verification_repair_allowed(state):
-                prepared = self._prepare_legacy_verification_repair(state=state, run_id=run_id)
-                if str(prepared.get("status")) == "implementation_repair_needed":
-                    return self._continue_implementation_repair(state=prepared, run_id=run_id)
-                return self._status_response(prepared, created_new_run=False)
-            if status == "implementation_written":
-                return self._continue_verification(state=state, run_id=run_id)
-            if status == "implementation_tested":
-                return self._continue_code_trace(state=state, run_id=run_id)
-            if status == "implementation_traced":
-                return self._continue_qa_test(state=state, run_id=run_id)
-            if status == "implementation_repair_needed":
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            if status == "qa_repair_needed":
+            return self._continue_run_locked(run_id=run_id)
+
+    def continue_until_implementation_checkpoint(self, *, run_id: str) -> dict[str, object]:
+        """Tự chạy Developer -> Verification -> Validator tới checkpoint hoặc trạng thái chặn."""
+
+        # One implementation/repair slice can require Developer, Verification,
+        # and Validator transitions before the next slice is known.
+        max_transitions = max(8, self.settings.implementation_repair_limit * 3 + 5)
+        with self.workspace_manager.locked_workspace(run_id):
+            for _ in range(max_transitions):
+                response = self._continue_run_locked(run_id=run_id)
+                status = str(response.get("status") or "")
+                if status not in IMPLEMENTATION_AUTOMATION_STATUSES:
+                    return response
+        raise HarnessError(
+            "implementation_automation_limit_exceeded",
+            f"Implementation automation exceeded {max_transitions} transitions for run {run_id}.",
+            run_id=run_id,
+        )
+
+    def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
+        """Dispatch một transition khi caller đang giữ per-run workspace lock."""
+
+        state = self.store.read_state(run_id)
+        status = str(state.get("status"))
+        if status == "implementation_ready":
+            return self._continue_developer_act(state=state, run_id=run_id)
+        if status in {"implementation_executing", "implementation_paused"}:
+            execution = _dict_value(state.get("developer_execution"))
+            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
                 return self._continue_qa_repair(state=state, run_id=run_id)
-            if status in {"qa_tested", "code_review_publish_failed"}:
-                return self._continue_code_review_publish(state=state, run_id=run_id)
-            if status == "code_review_published":
-                return self._continue_code_review_sync(state=state, run_id=run_id)
-            raise HarnessError(
-                "run_not_continuable",
-                f"Run is not ready for the next Phase 4 step: {run_id}",
-                run_id=run_id,
-            )
+            if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
+                return self._continue_implementation_repair(state=state, run_id=run_id)
+            return self._continue_developer_act(state=state, run_id=run_id)
+        if status == "blocked" and self._legacy_developer_retry_allowed(state):
+            return self._continue_developer_act(state=state, run_id=run_id)
+        if status == "blocked" and repair_scope_mismatch_retry_allowed(state):
+            execution = _dict_value(state.get("developer_execution"))
+            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
+                return self._continue_qa_repair(state=state, run_id=run_id)
+            return self._continue_implementation_repair(state=state, run_id=run_id)
+        if status == "blocked" and self._legacy_verification_repair_allowed(state):
+            prepared = self._prepare_legacy_verification_repair(state=state, run_id=run_id)
+            if str(prepared.get("status")) == "implementation_repair_needed":
+                return self._continue_implementation_repair(state=prepared, run_id=run_id)
+            return self._status_response(prepared, created_new_run=False)
+        if status == "implementation_written":
+            return self._continue_verification(state=state, run_id=run_id)
+        if status == "implementation_tested":
+            return self._continue_code_trace(state=state, run_id=run_id)
+        if status == "implementation_traced":
+            return self._continue_qa_test(state=state, run_id=run_id)
+        if status == "implementation_repair_needed":
+            return self._continue_implementation_repair(state=state, run_id=run_id)
+        if status == "qa_repair_needed":
+            return self._continue_qa_repair(state=state, run_id=run_id)
+        if status in {"qa_tested", "code_review_publish_failed"}:
+            return self._continue_code_review_publish(state=state, run_id=run_id)
+        if status == "code_review_published":
+            return self._continue_code_review_sync(state=state, run_id=run_id)
+        raise HarnessError(
+            "run_not_continuable",
+            f"Run is not ready for the next Phase 4 step: {run_id}",
+            run_id=run_id,
+        )
+
 
     def _continue_code_review_publish(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Commit/push code đã qua QA và tạo hoặc cập nhật Draft PR."""
@@ -899,20 +932,22 @@ class PhaseFourWorkflow:
         return context
 
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
-        """Re-run Verification Runner and Validator for repair-limit blocked runs."""
+        """Re-run Verification and Validator for a blocked or disputed Validator result."""
 
         with self.workspace_manager.locked_workspace(run_id):
             state = self.store.read_state(run_id)
             last_error = _dict_value(state.get("last_error"))
-            if (
-                str(state.get("status")) != "blocked"
-                or last_error.get("error_code") not in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
-            ):
+            blocked_revalidation = (
+                str(state.get("status")) == "blocked"
+                and last_error.get("error_code") in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
+            )
+            repair_feedback_revalidation = str(state.get("status") or "") == "implementation_repair_needed"
+            if not blocked_revalidation and not repair_feedback_revalidation:
                 raise HarnessError(
                     "implementation_revalidate_not_allowed",
                     (
-                        "Implementation revalidate is only allowed when a Phase 4 run is blocked by a "
-                        f"revalidatable implementation error: {run_id}"
+                        "Implementation revalidate is only allowed for a revalidatable Phase 4 block or "
+                        f"pending Validator repair feedback: {run_id}"
                     ),
                     run_id=run_id,
                 )
@@ -978,7 +1013,7 @@ class PhaseFourWorkflow:
                         "developer_execution": {"mode": "act", **progress},
                         "summary_for_user": (
                             f"Developer tool loop đã hoàn thành {progress.get('completed_items', 0)}/"
-                            f"{progress.get('total_items', 0)} work item cho run {run_id}."
+                            f"{progress.get('total_items', 0)} execution task cho run {run_id}."
                         ),
                     }
                 )
@@ -988,14 +1023,6 @@ class PhaseFourWorkflow:
                 run_id=run_id,
                 work_packet=work_packet,
                 target_path=target_info.path,
-                self_check=(
-                    lambda: self.verification_runner.run(
-                        target_path=target_info.path,
-                        work_packet=work_packet,
-                    )
-                    if self.settings.llm_mode != "fake"
-                    else None
-                ),
                 on_progress=record_progress,
             )
             latest_artifacts.update(
@@ -1063,6 +1090,33 @@ class PhaseFourWorkflow:
             )
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
+        except Exception as exc:  # Last-resort state recovery for executor defects.
+            error = HarnessError(
+                "developer_execution_internal_error",
+                f"Unexpected Developer executor failure ({type(exc).__name__}): {exc}",
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_writing",
+                    "status": "implementation_paused",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS,
+                    "last_error": error.to_response(),
+                    "developer_execution": {
+                        **_dict_value(state.get("developer_execution")),
+                        "mode": "act",
+                        "status": "paused",
+                    },
+                    "summary_for_user": (
+                        f"Developer tool loop đã tạm dừng an toàn cho run {run_id} vì lỗi executor nội bộ."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
 
         latest_artifacts["code_change_report"] = report_path
         quality_reports = {
@@ -1088,7 +1142,7 @@ class PhaseFourWorkflow:
                 "developer_execution": {"mode": "act", **result.progress},
                 "summary_for_user": (
                     f"Developer tool loop đã hoàn thành {result.progress.get('completed_items', 0)}/"
-                    f"{result.progress.get('total_items', 0)} work item cho run {run_id} trên branch `{branch}`. "
+                    f"{result.progress.get('total_items', 0)} execution task cho run {run_id} trên branch `{branch}`. "
                     "Code chưa commit và chưa mở PR; bước tiếp theo là Verification Runner."
                 ),
             }
@@ -1157,7 +1211,6 @@ class PhaseFourWorkflow:
             )
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
-
         latest_artifacts = {
             **latest_artifacts,
             "code_change_report": report_path,
@@ -1698,7 +1751,7 @@ class PhaseFourWorkflow:
                             },
                             "summary_for_user": (
                                 f"Developer QA repair đã hoàn thành {progress.get('completed_items', 0)}/"
-                                f"{progress.get('total_items', 0)} work item cho run {run_id}."
+                                f"{progress.get('total_items', 0)} execution task cho run {run_id}."
                             ),
                         }
                     )
@@ -2662,7 +2715,7 @@ class PhaseFourWorkflow:
                             },
                             "summary_for_user": (
                                 f"Developer repair đã hoàn thành {progress.get('completed_items', 0)}/"
-                                f"{progress.get('total_items', 0)} work item cho run {run_id}."
+                                f"{progress.get('total_items', 0)} execution task cho run {run_id}."
                             ),
                         }
                     )
@@ -2675,14 +2728,6 @@ class PhaseFourWorkflow:
                     repair_feedback=repair_feedback,
                     repair_iteration=repair_iteration,
                     repair_scope="implementation",
-                    self_check=(
-                        lambda: self.verification_runner.run(
-                            target_path=target_info.path,
-                            work_packet=work_packet,
-                        )
-                        if self.settings.llm_mode != "fake"
-                        else None
-                    ),
                     on_progress=record_repair_progress,
                 )
                 latest_artifacts.update(
@@ -2803,6 +2848,34 @@ class PhaseFourWorkflow:
                     ),
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bị chặn khi Developer.repair xử lý feedback: {exc.message}",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+        except Exception as exc:  # Last-resort state recovery for executor defects.
+            error = HarnessError(
+                "developer_execution_internal_error",
+                f"Unexpected Developer executor failure ({type(exc).__name__}): {exc}",
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_repair",
+                    "status": "implementation_paused",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS,
+                    "last_error": error.to_response(),
+                    "developer_execution": {
+                        **_dict_value(state.get("developer_execution")),
+                        "mode": "implementation_repair",
+                        "repair_iteration": locals().get("repair_iteration", 0),
+                        "status": "paused",
+                    },
+                    "summary_for_user": (
+                        f"Developer repair đã tạm dừng an toàn cho run {run_id} vì lỗi executor nội bộ."
+                    ),
                 }
             )
             self.store.write_state(state)
@@ -3125,6 +3198,11 @@ class PhaseFourWorkflow:
             allowed_next_actions.insert(0, "continue_run")
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
+        if (
+            str(state.get("status") or "") == "implementation_repair_needed"
+            and "revalidate_implementation" not in allowed_next_actions
+        ):
+            allowed_next_actions.insert(1 if allowed_next_actions else 0, "revalidate_implementation")
         return {
             "ok": True,
             "created_new_run": created_new_run,
@@ -4187,8 +4265,11 @@ def _verification_repair_feedback(
         "severity": "repair_required",
         "summary": result.reason,
         "required_action": (
-            "Developer must repair the compile/unit-test failure within allowed_paths, then rerun "
-            "Verification Runner and Validator code trace. Requirement and approved design must not be edited."
+            "Developer must use the code currently in the worktree and repair the reported compile/unit-test "
+            "failure within allowed_paths. Make the smallest coherent cross-file fix needed for the reported "
+            "Verification command to pass; the harness will rerun Verification afterward. Preserve existing test "
+            "assertions unless approved requirements or design prove that the test is incorrect. Do not edit the "
+            "requirement or approved design and do not work on unrelated design-completeness findings in this pass."
         ),
         "target_repo": target_repo,
         "branch": branch,
@@ -4288,6 +4369,14 @@ def _implementation_repair_feedback(
     missing_links = getattr(trace_result, "missing_links", [])
     if not isinstance(missing_links, list):
         missing_links = []
+    actionable_messages = [
+        str(item.get("message") or "").strip()
+        for item in missing_links
+        if isinstance(item, dict) and str(item.get("message") or "").strip()
+    ]
+    developer_summary = f"Validator reported {len(missing_links)} actionable blocking link(s)."
+    if actionable_messages:
+        developer_summary += " " + " | ".join(actionable_messages)
     output_contract = _dict_value(work_packet.get("output_contract"))
     return {
         "version": f"implementation_repair_feedback_v{feedback_version}",
@@ -4299,10 +4388,13 @@ def _implementation_repair_feedback(
         "repair_scope": "code_or_test",
         "feedback_source": "validator_code_trace",
         "severity": "repair_required",
-        "summary": getattr(trace_result, "summary", ""),
+        "summary": developer_summary,
         "required_action": (
-            "Developer must repair code/test within allowed_paths, then rerun Verification Runner "
-            "and Validator code trace. Requirement and approved design must not be edited in this slice."
+            "Verification has passed. Developer must choose and implement one coherent bounded slice of the missing "
+            "files, symbols, behaviors, tests, or trace links reported by Validator, using only allowed_paths and "
+            "the current worktree. Other missing links may remain for a later iteration. The harness will rerun "
+            "Verification and then Validator against the accumulated worktree. Do not edit the requirement or "
+            "approved design."
         ),
         "target_repo": target_repo,
         "branch": branch,
@@ -4311,8 +4403,8 @@ def _implementation_repair_feedback(
         "llm_review": {
             "ok": llm_review.get("ok"),
             "confidence": llm_review.get("confidence"),
-            "summary": llm_review.get("summary"),
-            "risks": llm_review.get("risks", []),
+            "summary": developer_summary,
+            "risks": [],
         },
         "developer_constraints": {
             "allowed_paths": output_contract.get("allowed_paths", []),

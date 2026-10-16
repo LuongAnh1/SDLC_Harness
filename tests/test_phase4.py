@@ -773,8 +773,10 @@ class PhaseFourTest(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_written")
+        self.assertEqual(payload["status"], "implementation_traced")
         self.assertIn("code_change_report", payload["latest_artifacts"])
+        self.assertIn("test_report", payload["latest_artifacts"])
+        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
 
     def test_continue_run_runs_verification_after_implementation_written(self) -> None:
         written = self._create_phase4_written_run()
@@ -1106,8 +1108,9 @@ class PhaseFourTest(unittest.TestCase):
 
         payload = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_tested")
+        self.assertEqual(payload["status"], "implementation_traced")
         self.assertIn("test_report", payload["latest_artifacts"])
+        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
 
     def test_continue_run_marks_repair_needed_when_code_trace_missing_test_file(self) -> None:
         tested = self._create_phase4_tested_run()

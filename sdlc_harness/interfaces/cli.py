@@ -169,7 +169,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         return phase_one.sync_run(run_id=args.run_id)
     if args.command == "continue-run":
         workflow = PhaseFourWorkflow(settings)
-        return workflow.continue_run(run_id=args.run_id)
+        return workflow.continue_until_implementation_checkpoint(run_id=args.run_id)
     if args.command == "revalidate-implementation":
         workflow = PhaseFourWorkflow(settings)
         return workflow.revalidate_implementation(run_id=args.run_id)

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ...core.errors import HarnessError
@@ -192,6 +193,7 @@ class CodeTraceValidator:
             trace_mappings=trace_mappings,
             static_missing_links=missing_links,
             test_paths=existing_test_paths,
+            approved_context=approved_context,
         )
         llm_missing_links, llm_observations = _normalize_llm_findings(
             llm_review,
@@ -246,6 +248,7 @@ class CodeTraceValidator:
         trace_mappings: list[dict[str, object]],
         static_missing_links: list[dict[str, object]],
         test_paths: list[str],
+        approved_context: dict[str, object],
     ) -> dict[str, object]:
         """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
 
@@ -256,6 +259,7 @@ class CodeTraceValidator:
             static_missing_links=static_missing_links,
             code_refs=_code_refs(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
             code_snippets=code_snippets,
+            approved_context=approved_context,
         )
         try:
             review, llm_metadata = self._complete_review_json(
@@ -626,6 +630,35 @@ def _normalize_llm_findings(
                 normalized_item["blocking"] = False
                 normalized_item["normalization_reason"] = "policy_term_absent_from_approved_artifacts"
                 observations.append(normalized_item)
+            elif _finding_order_contradicts_evidence(message, evidence_quote):
+                normalized_item["blocking"] = False
+                normalized_item["owner"] = "validator"
+                normalized_item["recommended_action"] = "validator_mapping_fix"
+                normalized_item["normalization_reason"] = "finding_order_contradicts_approved_evidence"
+                observations.append(normalized_item)
+            elif _finding_equates_intermediate_state_with_terminal_success(
+                message,
+                evidence_quote,
+                approved_text,
+            ):
+                normalized_item["blocking"] = False
+                normalized_item["owner"] = "validator"
+                normalized_item["recommended_action"] = "validator_mapping_fix"
+                normalized_item["normalization_reason"] = (
+                    "finding_equates_intermediate_state_with_terminal_success"
+                )
+                observations.append(normalized_item)
+            elif _finding_blocks_on_intermediate_representation_only(
+                message,
+                evidence_quote,
+            ):
+                normalized_item["blocking"] = False
+                normalized_item["owner"] = "validator"
+                normalized_item["recommended_action"] = "validator_mapping_fix"
+                normalized_item["normalization_reason"] = (
+                    "intermediate_representation_without_missing_behavior"
+                )
+                observations.append(normalized_item)
             elif owner == "human" or action == "human_decision":
                 normalized_item["type"] = "open_requirement_question"
                 blocking.append(normalized_item)
@@ -671,6 +704,140 @@ def _contains_unsupported_policy_claim(message: str, approved_text: str) -> bool
     )
 
 
+def _finding_order_contradicts_evidence(message: str, evidence_quote: str) -> bool:
+    """Reject an order claim when its cited approved quote shows the reverse order."""
+
+    anchors = list(
+        re.finditer(
+            r"\b(?:approved|requires?|required|must|should|expected)\b",
+            message,
+            flags=re.IGNORECASE,
+        )
+    )
+    if not anchors:
+        return False
+    expected_operations = _ordered_call_tokens(message[anchors[-1].start() :])
+    evidence_operations = _ordered_call_tokens(evidence_quote)
+    common = [operation for operation in expected_operations if operation in evidence_operations]
+    common = list(dict.fromkeys(common))
+    if len(common) < 2:
+        return False
+    evidence_common = list(dict.fromkeys(operation for operation in evidence_operations if operation in common))
+    return evidence_common[: len(common)] != common
+
+
+def _ordered_call_tokens(value: str) -> list[str]:
+    """Extract qualified call names while preserving their textual order."""
+
+    return [
+        re.sub(r"\s+", "", match.group(1)).casefold()
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\s*\(", value)
+    ]
+
+
+def _finding_equates_intermediate_state_with_terminal_success(
+    message: str,
+    evidence_quote: str,
+    approved_text: str,
+) -> bool:
+    """Reject a claim that turns an approved intermediate state into terminal success."""
+
+    normalized_message = _normalized_evidence_text(message)
+    normalized_quote = _normalized_evidence_text(evidence_quote)
+    if not normalized_message or not normalized_quote or not approved_text:
+        return False
+
+    success_claims = (
+        "as a success result",
+        "as success result",
+        "must return success",
+        "should return success",
+        "must be success",
+        "should be success",
+        "success=true",
+        "success = true",
+    )
+    intermediate_markers = (
+        "valid",
+        "pending",
+        "awaiting",
+        "requestconfirmation",
+        "request confirmation",
+        "confirmation required",
+        "in progress",
+        "processing",
+    )
+    terminal_markers = (
+        "result(success",
+        "successfully inserted",
+        "successfully stored",
+        "successfully saved",
+        "success notification",
+    )
+    if not any(claim in normalized_message for claim in success_claims):
+        return False
+    if not any(marker in normalized_quote for marker in intermediate_markers):
+        return False
+    if any(marker in normalized_quote for marker in terminal_markers):
+        return False
+
+    quote_index = approved_text.find(normalized_quote)
+    if quote_index < 0:
+        return False
+    approved_after_quote = approved_text[quote_index + len(normalized_quote) :]
+    return any(marker in approved_after_quote for marker in terminal_markers)
+
+
+def _finding_blocks_on_intermediate_representation_only(
+    message: str,
+    evidence_quote: str,
+) -> bool:
+    """Keep representation debt non-blocking when the approved transition still occurs."""
+
+    normalized_message = _normalized_evidence_text(message)
+    normalized_quote = _normalized_evidence_text(evidence_quote)
+    if not normalized_message or not normalized_quote:
+        return False
+
+    intermediate_markers = (
+        "valid",
+        "pending",
+        "awaiting",
+        "requestconfirmation",
+        "request confirmation",
+        "confirmation required",
+        "in progress",
+        "processing",
+    )
+    representation_markers = (
+        "issuccess() is false",
+        "issuccess is false",
+        "failure-typed result",
+        "failure typed result",
+        "result type semantics",
+        "factory semantics",
+        "string-matching",
+        "string matching",
+        "literal message",
+    )
+    missing_behavior_markers = (
+        "does not request confirmation",
+        "never requests confirmation",
+        "confirmation is not requested",
+        "cannot confirm",
+        "does not reach confirm",
+        "never reaches confirm",
+        "prevents confirmation",
+    )
+    if not any(marker in normalized_quote for marker in intermediate_markers):
+        return False
+    if "success" in normalized_quote:
+        return False
+    if any(marker in normalized_message for marker in missing_behavior_markers):
+        return False
+    return any(marker in normalized_message for marker in representation_markers)
+
+
 def _normalized_evidence_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
@@ -682,13 +849,16 @@ def _code_trace_review_prompt(
     static_missing_links: list[dict[str, object]],
     code_refs: list[dict[str, object]],
     code_snippets: list[dict[str, object]],
+    approved_context: dict[str, object],
 ) -> str:
     """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
 
     review_input = {
         "task": "Code Trace LLM Review v1",
         "instruction": (
-            "Review whether the implemented code/test contents cover the approved requirement/design graph. "
+            "Review whether the accumulated worktree completely covers the approved requirement/design graph and "
+            "implementation plan. Check every approved planned file, symbol, behavior, test intent, and trace link; "
+            "a compilable partial implementation must not pass merely because its current slice is internally valid. "
             "Rule-based evidence is not enough; inspect responsibilities, target names, control flow, assertions, "
             "coverage intent, and weak links. Return ok=false when files/symbols exist but the behavior or tests "
             "do not satisfy the approved design. Use trace_mapping_issue when the trace mapping itself is weak or "
@@ -727,24 +897,34 @@ def _code_trace_review_prompt(
         "developer_work_packet_summary": {
             "run_id": work_packet.get("run_id"),
             "issue_key": work_packet.get("issue_key"),
-            "implementation_steps": work_packet.get("implementation_steps"),
-            "design_mappings_by_file": work_packet.get("design_mappings_by_file"),
+            "implementation_step_count": _collection_size(work_packet.get("implementation_steps")),
+            "design_mapping_file_count": _collection_size(work_packet.get("design_mappings_by_file")),
             "requirement_contract": work_packet.get("requirement_contract"),
             "canonical_requirements": work_packet.get("canonical_requirements"),
-            "requirement_coverage": work_packet.get("requirement_coverage"),
+            "requirement_coverage_count": _collection_size(work_packet.get("requirement_coverage")),
         },
+        "approved_behavior_contracts": _approved_behavior_contracts(work_packet),
+        "approved_sequence_evidence": _approved_sequence_evidence(approved_context),
         "static_trace_mappings": trace_mappings,
         "static_missing_links": static_missing_links,
         "code_refs": code_refs,
         "code_snippets": code_snippets,
         "egress_confirmation": "Project owner explicitly approved sending source/test snippets to the LLM provider for Validator review.",
         "validator_rules": [
+            "Return a blocking Developer finding for every approved planned file or symbol that is still absent from the accumulated worktree.",
+            "Evaluate completeness across the full approved plan, not only files changed by the latest Developer slice.",
             "If a code_snippet has content_truncated=false, do not claim that file evidence is truncated.",
             "Do not require literal methods named true, false, displaySuccessMessage, displayErrorMessage, or displayCancellationMessage.",
             "For mappings with trace_policy=boolean_response or semantic_side_effect, inspect the surrounding branch behavior and tests.",
             "If the only problem is a weak design mapping, return type=trace_mapping_issue instead of asking Developer to change code.",
             "Python recomputes pass/fail. Set blocking=true only for an actionable unresolved finding.",
             "Every blocking finding must identify evidence_ref and quote exact wording already visible in this review input.",
+            "The evidence_quote must directly support the approved behavior claimed in the finding message. When comparing actual and approved call order, quote wording that states the expected approved order and preserve that exact order.",
+            "Treat approved_behavior_contracts and approved_sequence_evidence as authoritative. Never infer message order or behavior from a sequence/design reference ID by itself.",
+            "For a multi-step workflow, evaluate the complete approved path across all participating methods before claiming that behavior is absent. A later confirm, commit, persist, save, or finalize method may own the terminal side effect and terminal success result.",
+            "Do not equate valid, pending, awaiting-confirmation, or in-progress with terminal success. Do not require success=true from an intermediate response unless the approved evidence explicitly defines that response as terminal success.",
+            "Do not return a blocking Developer finding solely because an intermediate state uses a generic failure/non-success result, a factory name, or a literal message when the code still performs the approved observable transition. If the approved artifacts do not require an explicit status field or factory and the downstream component recognizes the state and performs the transition, report the representation or string-coupling concern as blocking=false with owner=validator and recommended_action=validator_mapping_fix.",
+            "When a happy-path test is missing but the implementation path exists, report missing_test_assertion rather than missing_behavior and cite the canonical acceptance criterion or postcondition that requires the successful path.",
             "Do not infer case-sensitivity, normalization, trimming, or another policy that is absent from this review input.",
             "Open Questions are unresolved context, not approved constraints. Use owner=human and recommended_action=human_decision when a decision is required.",
             "If evidence and tests already satisfy a mapping, omit it from missing_links or set blocking=false, owner=none, recommended_action=none.",
@@ -756,6 +936,38 @@ def _code_trace_review_prompt(
         "Return only valid JSON. Do not wrap the JSON in markdown.\n\n"
         f"{json.dumps(review_input, ensure_ascii=False, indent=2)}"
     )
+
+
+def _collection_size(value: object) -> int:
+    if isinstance(value, (dict, list, tuple, set)):
+        return len(value)
+    return 0
+
+
+def _approved_behavior_contracts(work_packet: dict[str, object]) -> list[dict[str, object]]:
+    """Keep approved implementation behavior prominent without duplicating mappings."""
+
+    return [
+        {
+            "order": step.get("order"),
+            "title": step.get("title"),
+            "description": step.get("description"),
+        }
+        for step in _dict_items(work_packet.get("implementation_steps"))
+    ]
+
+
+def _approved_sequence_evidence(approved_context: dict[str, object]) -> list[str]:
+    """Expose ordered diagram messages; IDs alone do not describe their semantics."""
+
+    design = approved_context.get("design_artifact")
+    content = str(design.get("content") or "") if isinstance(design, dict) else str(design or "")
+    lines: list[str] = []
+    for raw_line in content.splitlines():
+        line = raw_line.strip()
+        if line and any(arrow in line for arrow in (" -> ", " --> ", " --x ")):
+            lines.append(line)
+    return lines[:120]
 
 
 def _code_refs(
