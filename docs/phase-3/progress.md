@@ -28,7 +28,8 @@ frozen canonical requirement
 - Validator có `requirement_coverage_issues` và mode rule/hybrid theo contract;
 - repair plan luôn dựng lại coverage bằng Python;
 - Markdown/Confluence hiển thị Requirement Coverage;
-- bỏ gate trước Phase 3 và đặt gate `requirement_v2_phase4_not_ready` tại Phase 4.
+- bỏ gate trước Phase 3 và từng đặt gate `requirement_v2_phase4_not_ready` tại Phase 4;
+  gate này đã được Slice 4C thay bằng canonical input validation.
 
 Boundary còn giữ: Phase 4 chưa consume canonical V2 work packet; Niko/Telegram và
 live Jira smoke không thuộc slice này. Default contract vẫn là V1.

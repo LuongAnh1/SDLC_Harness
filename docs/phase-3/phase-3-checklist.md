@@ -153,6 +153,7 @@ CodeGraph để lập plan có evidence, implementation steps và proposed files
 - [x] Validator V2 hard-gate ID thiếu/trùng/tự bịa, target ngoài trace, thiếu code target hoặc test intent.
 - [x] Markdown và Confluence render Requirement Coverage.
 - [x] State/response giữ `requirement_contract_version=v2` tại `waiting_implementation_plan_review`.
-- [x] Gate V2 được chuyển sang Phase 4 với `requirement_v2_phase4_not_ready` và không mutate state.
+- [x] Gate tạm V2 từng được chuyển sang Phase 4; Slice 4C đã thay bằng validation
+  `requirement_v2_phase4_input_invalid` trước mutation.
 - [x] V1 regression tiếp tục dùng contract mặc định và schema artifact hiện có.
 - [ ] Về sau bổ sung redact/filter hoặc local model để tránh gửi source snippets nhạy cảm ra LLM ngoài.

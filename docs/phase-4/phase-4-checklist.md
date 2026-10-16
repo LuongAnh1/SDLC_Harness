@@ -353,3 +353,19 @@ và request-change Phase 5. Checklist chi tiết nằm tại
   - [x] Guard/test chứng minh không merge hoặc bật auto-merge.
   - [x] Controlled live smoke qua Niko Telegram: PR #1 Ready, vẫn OPEN/unmerged;
     Jira comment `10104` và Confluence page `2129921` được cập nhật tại chỗ.
+
+## Slice 4C - Requirement V2 Phase 4
+
+- [x] Validate frozen canonical contract và Phase 3 coverage trước mutation.
+- [x] Thêm canonical requirements, coverage và projection theo file vào Developer work packet.
+- [x] Chặn Developer output dùng stable ID ngoài coverage đã duyệt.
+- [x] Sinh một Code Trace mapping cho mỗi canonical stable ID.
+- [x] Bắt QA scenarios phủ đúng toàn bộ canonical stable ID set.
+- [x] Giữ stable IDs qua repair/revalidation nhờ immutable work packet fields.
+- [x] Hiển thị contract revision và coverage trên PR/Jira/Confluence Code Review.
+- [x] Giữ V1 regression và public CLI/state/action contract.
+- [x] Automated V2 E2E đi hết `implementation_ready -> code_review_approved`.
+- [x] Automated V2 Developer/code-trace repair và QA repair giữ nguyên contract
+  revision cùng canonical stable ID set.
+- [x] Mock và real Jira/Confluence Code Review hiển thị danh sách stable IDs cụ thể.
+- [ ] Controlled live smoke V2 với DeepSeek/Jira/GitHub trước khi đổi default.

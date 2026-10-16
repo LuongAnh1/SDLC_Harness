@@ -48,11 +48,15 @@ class CodeTraceResult:
     missing_links: list[dict[str, object]]
     stats: dict[str, int]
     llm_review: dict[str, object]
+    requirement_contract: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        contract = self.requirement_contract or {"version": "v1", "revision": 0}
+        mode = "hybrid_rule_llm_code_trace_v2" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         return {
             "version": "requirement_design_code_trace_v1",
-            "mode": "hybrid_rule_llm_code_trace_v1",
+            "mode": mode,
+            "requirement_contract": contract,
             "created_at": utc_now_iso(),
             "ok": self.ok,
             "summary": self.summary,
@@ -64,9 +68,13 @@ class CodeTraceResult:
         }
 
     def to_quality_report(self) -> dict[str, object]:
+        contract = self.requirement_contract or {"version": "v1", "revision": 0}
+        mode = "hybrid_rule_llm_code_trace_v2" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         return {
             "ok": self.ok,
-            "mode": "hybrid_rule_llm_code_trace_v1",
+            "mode": mode,
+            "requirement_contract_version": contract.get("version", "v1"),
+            "requirement_revision": contract.get("revision", 0),
             "summary": self.summary,
             "stats": self.stats,
             "missing_count": len(self.missing_links),
@@ -90,6 +98,15 @@ class CodeTraceValidator:
         approved_context: dict[str, object] | None = None,
     ) -> CodeTraceResult:
         approved_context = approved_context or {}
+        requirement_contract = _dict_value(work_packet.get("requirement_contract"))
+        v2 = requirement_contract.get("version") == "v2"
+        if v2:
+            approved_context = {
+                **approved_context,
+                "canonical_requirements": {
+                    "content": json.dumps(work_packet.get("canonical_requirements"), ensure_ascii=False),
+                },
+            }
         mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
         test_paths = _test_paths(work_packet)
         existing_test_paths = [path for path in test_paths if (target_path / path).is_file()]
@@ -97,7 +114,14 @@ class CodeTraceValidator:
         trace_mappings: list[dict[str, object]] = []
         missing_links: list[dict[str, object]] = []
 
-        if not mappings_by_file:
+        if v2:
+            trace_mappings, coverage_missing = _v2_trace_mappings(
+                target_path=target_path,
+                work_packet=work_packet,
+                existing_test_paths=existing_test_paths,
+            )
+            missing_links.extend(coverage_missing)
+        elif not mappings_by_file:
             missing_links.append(
                 {
                     "type": "missing_design_mappings",
@@ -121,7 +145,7 @@ class CodeTraceValidator:
                 }
             )
 
-        for raw_source_path, design_items in mappings_by_file.items():
+        for raw_source_path, design_items in ([] if v2 else mappings_by_file.items()):
             for item in design_items:
                 source_path = _normalized_source_file(raw_source_path, item)
                 source_file = target_path / source_path
@@ -190,17 +214,20 @@ class CodeTraceValidator:
             "missing_count": len(missing_links),
             "test_file_count": len(existing_test_paths),
             "observation_count": len(llm_observations),
+            "requirement_count": len(_dict_items(work_packet.get("canonical_requirements"))) if v2 else 0,
+            "requirements_covered": len(trace_mappings) if v2 else 0,
         }
+        trace_label = "V2" if v2 else "V1"
         if ok:
             summary = (
-                f"Validator code trace V1 passed with static evidence, LLM graph review, "
+                f"Validator code trace {trace_label} passed with static evidence, LLM graph review, "
                 f"{len(trace_mappings)} mapping(s), {len(existing_test_paths)} test file(s), "
                 f"and {len(llm_observations)} non-blocking observation(s)."
             )
         else:
             llm_summary = str(llm_review.get("summary") or "").strip()
             detail = f" LLM review: {llm_summary}" if llm_summary else ""
-            summary = f"Validator code trace V1 found {len(missing_links)} missing link(s).{detail}"
+            summary = f"Validator code trace {trace_label} found {len(missing_links)} missing link(s).{detail}"
         return CodeTraceResult(
             ok=ok,
             summary=summary,
@@ -208,6 +235,7 @@ class CodeTraceValidator:
             missing_links=missing_links,
             stats=stats,
             llm_review=llm_review,
+            requirement_contract=requirement_contract,
         )
 
     def _review_with_llm(
@@ -324,6 +352,117 @@ class CodeTraceValidator:
         )
 
 
+def _v2_trace_mappings(
+    *,
+    target_path: Path,
+    work_packet: dict[str, object],
+    existing_test_paths: list[str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Build one deterministic code-trace row for each canonical stable requirement ID."""
+
+    canonical = _dict_items(work_packet.get("canonical_requirements"))
+    coverage = _dict_items(work_packet.get("requirement_coverage"))
+    expected = {
+        str(item.get("id") or "").strip(): str(item.get("content") or "").strip()
+        for item in canonical
+        if str(item.get("id") or "").strip()
+    }
+    actual_ids = [str(item.get("requirement_id") or "").strip() for item in coverage]
+    if not expected or len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected):
+        raise HarnessError(
+            "code_trace_requirement_coverage_invalid",
+            "DeveloperWorkPacket must contain each canonical stable requirement ID exactly once.",
+        )
+    mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
+    design_by_id = {
+        str(item.get("design_element_id") or "").strip(): item
+        for items in mappings_by_file.values()
+        for item in items
+        if str(item.get("design_element_id") or "").strip()
+    }
+    trace_mappings: list[dict[str, object]] = []
+    missing_links: list[dict[str, object]] = []
+    for item in coverage:
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        content = str(item.get("content") or "").strip()
+        targets = _string_items(item.get("planned_code_targets"))
+        design_ids = _string_items(item.get("design_element_ids"))
+        test_intents = _string_items(item.get("test_intents"))
+        if content != expected[requirement_id] or not targets or not design_ids or not test_intents:
+            raise HarnessError(
+                "code_trace_requirement_coverage_invalid",
+                f"Requirement coverage is incomplete or stale for {requirement_id}.",
+            )
+        evidence: list[dict[str, object]] = []
+        for target in targets:
+            raw_source_path = target.split("#", 1)[0].strip().replace("\\", "/")
+            design_item = next(
+                (
+                    design_by_id[design_id]
+                    for design_id in design_ids
+                    if design_id in design_by_id
+                    and str(design_by_id[design_id].get("planned_code_target") or "").strip() == target
+                ),
+                {"planned_code_target": target},
+            )
+            source_path = _normalized_source_file(raw_source_path, design_item)
+            source_file = target_path / source_path
+            source_exists = source_file.is_file()
+            source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
+            raw_symbol = _symbol_from_target(target)
+            symbol = _normalized_symbol(raw_symbol, design_item)
+            symbol_found = source_exists and (not symbol or symbol in source_text)
+            evidence.append(
+                {
+                    "planned_code_target": target,
+                    "source_file": source_path,
+                    "source_exists": source_exists,
+                    "symbol": symbol,
+                    "raw_symbol": raw_symbol,
+                    "symbol_found": symbol_found,
+                }
+            )
+            if not source_exists:
+                missing_links.append(
+                    {
+                        "type": "missing_source_file",
+                        "requirement_ref": requirement_id,
+                        "source_file": source_path,
+                        "message": f"Canonical requirement {requirement_id} has no source-file evidence.",
+                    }
+                )
+            elif symbol and not symbol_found:
+                missing_links.append(
+                    {
+                        "type": "missing_code_symbol",
+                        "requirement_ref": requirement_id,
+                        "source_file": source_path,
+                        "symbol": symbol,
+                        "message": f"Canonical requirement {requirement_id} has no planned symbol evidence.",
+                    }
+                )
+        trace_mappings.append(
+            {
+                "requirement_ref": requirement_id,
+                "requirement_content": content,
+                "design_element_ids": design_ids,
+                "design_targets": _string_items(item.get("design_targets")),
+                "planned_code_targets": targets,
+                "code_evidence": evidence,
+                "source_file": str(evidence[0].get("source_file") or "") if evidence else "",
+                "symbol": str(evidence[0].get("symbol") or "") if evidence else "",
+                "symbol_found": all(bool(value.get("symbol_found")) for value in evidence),
+                "test_intents": test_intents,
+                "test_files": existing_test_paths,
+                "test_covered": bool(existing_test_paths),
+                "evidence_status": "covered"
+                if evidence and all(bool(value.get("symbol_found")) for value in evidence) and existing_test_paths
+                else "missing",
+            }
+        )
+    return trace_mappings, missing_links
+
+
 def _dict_of_lists(value: object) -> dict[str, list[dict[str, Any]]]:
     if not isinstance(value, dict):
         return {}
@@ -335,6 +474,16 @@ def _dict_of_lists(value: object) -> dict[str, list[dict[str, Any]]]:
         if normalized:
             result[str(key).strip().replace("\\", "/")] = normalized
     return result
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _test_paths(work_packet: dict[str, object]) -> list[str]:
@@ -498,7 +647,7 @@ def _normalize_llm_findings(
 
 def _approved_grounding_text(approved_context: dict[str, object]) -> str:
     parts: list[str] = []
-    for key in ("requirement_packet", "design_artifact", "implementation_plan"):
+    for key in ("canonical_requirements", "requirement_packet", "design_artifact", "implementation_plan"):
         value = approved_context.get(key)
         if isinstance(value, dict):
             content = str(value.get("content") or "").strip()
@@ -580,6 +729,9 @@ def _code_trace_review_prompt(
             "issue_key": work_packet.get("issue_key"),
             "implementation_steps": work_packet.get("implementation_steps"),
             "design_mappings_by_file": work_packet.get("design_mappings_by_file"),
+            "requirement_contract": work_packet.get("requirement_contract"),
+            "canonical_requirements": work_packet.get("canonical_requirements"),
+            "requirement_coverage": work_packet.get("requirement_coverage"),
         },
         "static_trace_mappings": trace_mappings,
         "static_missing_links": static_missing_links,
@@ -617,21 +769,23 @@ def _code_refs(
     refs: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
     for item in mappings:
-        path = str(item.get("source_file") or "").strip().replace("\\", "/")
-        symbol = str(item.get("symbol") or "").strip()
-        key = (path, symbol)
-        if not path or key in seen:
-            continue
-        seen.add(key)
-        refs.append(
-            {
-                "path": path,
-                "kind": "source",
-                "exists": (target_path / path).is_file(),
-                "symbol": symbol,
-                "symbol_found": item.get("symbol_found") is True,
-            }
-        )
+        evidence = _dict_items(item.get("code_evidence")) or [item]
+        for value in evidence:
+            path = str(value.get("source_file") or "").strip().replace("\\", "/")
+            symbol = str(value.get("symbol") or "").strip()
+            key = (path, symbol)
+            if not path or key in seen:
+                continue
+            seen.add(key)
+            refs.append(
+                {
+                    "path": path,
+                    "kind": "source",
+                    "exists": (target_path / path).is_file(),
+                    "symbol": symbol,
+                    "symbol_found": value.get("symbol_found") is True,
+                }
+            )
     for path in test_paths:
         refs.append({"path": path, "kind": "test", "exists": (target_path / path).is_file()})
     return refs
@@ -675,9 +829,11 @@ def _code_snippets(
 def _snippet_paths(*, mappings: list[dict[str, object]], test_paths: list[str]) -> list[str]:
     counts: dict[str, int] = {}
     for item in mappings:
-        path = str(item.get("source_file") or "").strip().replace("\\", "/")
-        if path:
-            counts[path] = counts.get(path, 0) + 1
+        evidence = _dict_items(item.get("code_evidence")) or [item]
+        for value in evidence:
+            path = str(value.get("source_file") or "").strip().replace("\\", "/")
+            if path:
+                counts[path] = counts.get(path, 0) + 1
     for path in test_paths:
         counts[path] = max(counts.get(path, 0), 1)
     return sorted(counts, key=lambda path: _snippet_priority(path, counts.get(path, 0), test_paths))

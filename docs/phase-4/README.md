@@ -560,3 +560,15 @@ Hai vấn đề workflow vẫn được giữ mở trong
   provenance trước khi Design chạy.
 - Structured LLM output cần capability discovery, budget theo context và
   provider-safe fallback để tránh JSON bị cắt do giới hạn output token.
+
+## Requirement V2 Support - 2026-10-16
+
+Phase 4 dual-read Requirement V1/V2. Với V2, approval implementation plan kiểm
+lại frozen canonical revision và coverage trước khi tạo work packet. Stable IDs
+được giữ trong Developer output, code trace và QA scenarios; Python chặn ID thiếu,
+trùng hoặc nằm ngoài contract. Code Review evidence hiển thị contract revision và
+số canonical requirements đã được phủ.
+
+Artifact filename/version công khai vẫn giữ V1 để không phá caller hiện tại.
+`requirement_contract.version` và mode V2 bên trong artifact quyết định semantics.
+Default requirement contract vẫn là V1 cho tới khi controlled live smoke V2 pass.

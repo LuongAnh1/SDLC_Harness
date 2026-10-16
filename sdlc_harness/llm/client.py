@@ -171,7 +171,7 @@ def fake_completion(prompt: str) -> str:
     if "Code Trace LLM Review v1" in prompt:
         return fake_code_trace_review()
     if "QA Tester Generate Acceptance Tests v1" in prompt:
-        return fake_qa_generated_tests()
+        return fake_qa_generated_tests(prompt)
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
@@ -629,8 +629,23 @@ def fake_code_trace_review() -> str:
     )
 
 
-def fake_qa_generated_tests() -> str:
+def fake_qa_generated_tests(prompt: str = "") -> str:
     """Fake QA-generated tests so Phase 4 can execute the QA slice deterministically."""
+
+    requirement_ids: list[str] = []
+    marker = "QA Generation Packet:"
+    if marker in prompt:
+        try:
+            packet = json.loads(prompt.split(marker, 1)[1].strip())
+        except json.JSONDecodeError:
+            packet = {}
+        canonical = packet.get("canonical_requirements") if isinstance(packet, dict) else None
+        if isinstance(canonical, list):
+            requirement_ids = [
+                str(item.get("id") or "").strip()
+                for item in canonical
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            ]
 
     return json.dumps(
         {
@@ -661,6 +676,7 @@ public final class DeleteCulturalHeritageQaAcceptanceTest {
                     "expected_result": "Selected heritage is marked deleted after confirmation.",
                     "test_file": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java",
                     "risk": "",
+                    "requirement_ids": requirement_ids,
                 }
             ],
             "risks": [],

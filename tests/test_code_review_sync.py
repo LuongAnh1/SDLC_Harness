@@ -119,6 +119,10 @@ class CodeReviewSyncTest(unittest.TestCase):
             self.assertEqual(ids["confluence"], "20004")
             self.assertEqual(ids["github"], "7")
         self.assertFalse(any(method == "POST" for method, _, _ in calls))
+        rendered = json.dumps([payload for _, _, payload in calls if payload], ensure_ascii=False)
+        self.assertIn("v2 revision 3", rendered)
+        self.assertIn("2/2 stable IDs", rendered)
+        self.assertIn("REQ-1, REQ-2", rendered)
 
     def test_real_sync_updates_existing_targets_for_approved_review(self) -> None:
         settings, store, run_id, artifacts = self._fixture(sync_mode="real")
@@ -324,7 +328,20 @@ class CodeReviewSyncTest(unittest.TestCase):
         payloads = {
             "test_report": "# Test Report\n\nStatus: passed\n",
             "requirement_design_code_trace": json.dumps(
-                {"ok": True, "stats": {"mapping_count": 12, "missing_count": 0}}
+                {
+                    "ok": True,
+                    "requirement_contract": {"version": "v2", "revision": 3},
+                    "stats": {
+                        "mapping_count": 12,
+                        "missing_count": 0,
+                        "requirement_count": 2,
+                        "requirements_covered": 2,
+                    },
+                    "mappings": [
+                        {"requirement_ref": "REQ-1"},
+                        {"requirement_ref": "REQ-2"},
+                    ],
+                }
             ),
             "qa_test_execution": "# QA Execution\n\nStatus: passed\n",
             "qa_test_report": "# QA Report\n\nSummary: 8 acceptance scenarios passed.\n",

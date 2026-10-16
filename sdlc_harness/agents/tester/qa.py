@@ -37,6 +37,7 @@ class QaGeneratedTestSuite:
     risks: list[str]
     raw_response: str = ""
     generation_context: dict[str, object] | None = None
+    requirement_contract: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -47,6 +48,7 @@ class QaGeneratedTestSuite:
             "scenarios": self.scenarios,
             "risks": self.risks,
             "generation_context": self.generation_context or {},
+            "requirement_contract": self.requirement_contract or {"version": "v1", "revision": 0},
         }
 
 
@@ -61,15 +63,19 @@ class QaTestResult:
     risks: list[str]
     raw_response: str = ""
     review_context: dict[str, object] | None = None
+    requirement_contract: dict[str, object] | None = None
 
     @property
     def ok(self) -> bool:
         return self.status == "pass"
 
     def to_dict(self) -> dict[str, object]:
+        contract = self.requirement_contract or {"version": "v1", "revision": 0}
+        mode = "qa_generated_acceptance_tests_v2" if contract.get("version") == "v2" else "qa_generated_acceptance_tests_v1"
         return {
             "version": "qa_test_report_v1",
-            "mode": "qa_generated_acceptance_tests_v1",
+            "mode": mode,
+            "requirement_contract": contract,
             "status": self.status,
             "ok": self.ok,
             "summary": self.summary,
@@ -80,13 +86,26 @@ class QaTestResult:
         }
 
     def to_quality_report(self) -> dict[str, object]:
+        requirement_ids = sorted(
+            {
+                requirement_id
+                for scenario in self.scenarios
+                for requirement_id in _string_items(scenario.get("requirement_ids"))
+            }
+        )
+        contract = self.requirement_contract or {"version": "v1", "revision": 0}
+        mode = "qa_generated_acceptance_tests_v2" if contract.get("version") == "v2" else "qa_generated_acceptance_tests_v1"
         return {
             "ok": self.ok,
             "status": self.status,
-            "mode": "qa_generated_acceptance_tests_v1",
+            "mode": mode,
+            "requirement_contract_version": contract.get("version", "v1"),
+            "requirement_revision": contract.get("revision", 0),
             "summary": self.summary,
             "scenario_count": len(self.scenarios),
             "risk_count": len(self.risks),
+            "requirement_ids": requirement_ids,
+            "requirements_covered": len(requirement_ids),
         }
 
 
@@ -100,7 +119,9 @@ class QaTesterAgent:
         """Sinh acceptance/system tests bằng LLM hoặc deterministic fallback."""
 
         if not self.llm_client:
-            return _deterministic_generated_tests(context)
+            generated = _deterministic_generated_tests(context)
+            _require_v2_scenario_coverage(generated.scenarios, context=context)
+            return generated
         raw = self.llm_client.complete(
             system=(
                 "You are QA/Tester in a TraceDev-style SDLC harness. "
@@ -109,14 +130,17 @@ class QaTesterAgent:
             prompt=_qa_generation_prompt(context),
         )
         payload = _parse_generated_tests_payload(raw)
-        return QaGeneratedTestSuite(
+        generated = QaGeneratedTestSuite(
             summary=str(payload.get("summary") or "").strip(),
             test_files=_dict_items(payload.get("test_files")),
             scenarios=_dict_items(payload.get("scenarios")),
             risks=_string_items(payload.get("risks")),
             raw_response=raw,
             generation_context=_dict_value(context.get("context_budget")),
+            requirement_contract=_dict_value(context.get("requirement_contract")),
         )
+        _require_v2_scenario_coverage(generated.scenarios, context=context)
+        return generated
 
 
 def _qa_generation_prompt(context: dict[str, object]) -> str:
@@ -143,7 +167,8 @@ Return JSON only with this shape:
       "name": "scenario name",
       "expected_result": "observable acceptance result",
       "test_file": "src/test/java/.../SomeAcceptanceTest.java",
-      "risk": "short risk or empty string"
+      "risk": "short risk or empty string",
+      "requirement_ids": ["PRE-1", "MF-1"]
     }}
   ],
   "risks": ["short risk item"]
@@ -154,6 +179,7 @@ Rules:
 - Every test path must be under src/test/java/ and end with .java.
 - Prefer the target repo's existing lightweight test style. If no framework is visible, write a plain Java class with a main method and throw IllegalStateException on failure.
 - Do not modify production files.
+- For Requirement V2, every scenario must list canonical stable requirement_ids and the scenario union must cover every canonical requirement exactly from the packet.
 - Do not request requirement/design changes in this slice; report them as risks.
 - Keep the JSON compact. Do not include markdown fences.
 
@@ -171,7 +197,10 @@ def _parse_generated_tests_payload(raw: str) -> dict[str, object]:
             raw_response=raw,
         ) from exc
     test_files = _normalized_test_files(parsed.get("test_files"), raw_response=raw)
-    scenarios = _dict_items(parsed.get("scenarios"))
+    scenarios = [
+        {**item, "requirement_ids": _string_items(item.get("requirement_ids"))}
+        for item in _dict_items(parsed.get("scenarios"))
+    ]
     if not scenarios:
         raise QaTesterLlmError(
             "QA/Tester LLM returned no scenarios.",
@@ -253,6 +282,11 @@ public final class DeleteCulturalHeritageQaAcceptanceTest {
     }
 }
 """
+    requirement_ids = [
+        str(item.get("id") or "").strip()
+        for item in _dict_items(context.get("canonical_requirements"))
+        if str(item.get("id") or "").strip()
+    ]
     return QaGeneratedTestSuite(
         summary=f"Fake QA generated acceptance tests for run {run_id} and {issue_key or 'source'}.",
         test_files=[
@@ -268,11 +302,44 @@ public final class DeleteCulturalHeritageQaAcceptanceTest {
                 "expected_result": "Selected heritage is marked deleted after confirmation.",
                 "test_file": path,
                 "risk": "",
+                "requirement_ids": requirement_ids,
             }
         ],
         risks=[],
         generation_context=_dict_value(context.get("context_budget")),
+        requirement_contract=_dict_value(context.get("requirement_contract")),
     )
+
+
+def _require_v2_scenario_coverage(
+    scenarios: list[dict[str, object]],
+    *,
+    context: dict[str, object],
+) -> None:
+    contract = _dict_value(context.get("requirement_contract"))
+    if contract.get("version") != "v2":
+        return
+    expected = {
+        str(item.get("id") or "").strip()
+        for item in _dict_items(context.get("canonical_requirements"))
+        if str(item.get("id") or "").strip()
+    }
+    actual: set[str] = set()
+    for item in scenarios:
+        scenario_ids = _string_items(item.get("requirement_ids"))
+        if not scenario_ids:
+            raise HarnessError(
+                "qa_requirement_coverage_invalid",
+                "Every Requirement V2 QA scenario must reference at least one canonical stable ID.",
+            )
+        actual.update(scenario_ids)
+    if not expected or actual != expected:
+        missing = sorted(expected - actual)
+        invented = sorted(actual - expected)
+        raise HarnessError(
+            "qa_requirement_coverage_invalid",
+            f"QA scenarios must cover the canonical stable IDs exactly; missing={missing}, invented={invented}.",
+        )
 
 
 def _dict_items(value: object) -> list[dict[str, object]]:

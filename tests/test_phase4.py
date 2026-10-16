@@ -22,7 +22,7 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.verification import VerificationResult, VerificationRunner
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
-from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
+from sdlc_harness.workflows.phase4 import PhaseFourWorkflow, _apply_developer_changes, _code_review_pr_body
 
 
 class OutOfScopeDeveloper:
@@ -232,6 +232,32 @@ class InvalidQaLlm:
         return '{"status": "pass", "summary": "cut off before scenarios"'
 
 
+class MissingRequirementQaLlm:
+    def complete(self, *, system: str, prompt: str) -> str:
+        return json.dumps(
+            {
+                "summary": "incomplete coverage",
+                "test_files": [
+                    {
+                        "path": "src/test/java/com/sdlc/etour/heritage/V2AcceptanceTest.java",
+                        "content": "package com.sdlc.etour.heritage; public final class V2AcceptanceTest {}",
+                        "scenarios": ["one"],
+                    }
+                ],
+                "scenarios": [
+                    {
+                        "name": "one",
+                        "expected_result": "one",
+                        "test_file": "src/test/java/com/sdlc/etour/heritage/V2AcceptanceTest.java",
+                        "risk": "",
+                        "requirement_ids": ["REQ-1"],
+                    }
+                ],
+                "risks": [],
+            }
+        )
+
+
 class SequenceVerificationRunner:
     def __init__(self, statuses: list[str]):
         self.statuses = list(statuses)
@@ -404,6 +430,136 @@ class PhaseFourTest(unittest.TestCase):
         grouped = packet["design_mappings_by_file"]
         self.assertTrue(any(path.startswith("src/main/java/") for path in grouped))
         self.assertTrue(any(item["exists"] for item in packet["proposed_files"]))
+
+    def test_v2_developer_rejects_invented_requirement_id(self) -> None:
+        path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
+        packet = {
+            "requirement_contract": {"version": "v2", "revision": 1},
+            "canonical_requirements": [{"id": "REQ-1", "content": "Keep heritage data."}],
+            "requirement_coverage_by_file": {
+                path: [{"requirement_id": "REQ-1", "content": "Keep heritage data."}]
+            },
+            "output_contract": {"allowed_paths": [path]},
+        }
+        result = DeveloperActResult(
+            summary="invalid stable ID",
+            files=[
+                {
+                    "path": path,
+                    "operation": "update",
+                    "content": "package com.sdlc.etour.heritage; public final class CulturalHeritage {}",
+                    "reason": "test",
+                    "covered_design_elements": [],
+                    "covered_requirement_ids": ["REQ-INVENTED"],
+                }
+            ],
+        )
+
+        with self.assertRaises(HarnessError) as caught:
+            _apply_developer_changes(
+                result=result,
+                work_packet=packet,
+                target_path=self.target_repo,
+                run_id="run-v2",
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_act_requirement_coverage_invalid")
+
+    def test_v2_code_trace_emits_one_mapping_per_stable_requirement(self) -> None:
+        source_path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
+        test_path = "src/test/java/com/sdlc/etour/heritage/CulturalHeritageTest.java"
+        packet = {
+            "run_id": "run-v2",
+            "issue_key": "SDLC-2",
+            "requirement_contract": {"version": "v2", "revision": 3},
+            "canonical_requirements": [{"id": "REQ-1", "content": "Keep heritage data."}],
+            "requirement_coverage": [
+                {
+                    "requirement_id": "REQ-1",
+                    "content": "Keep heritage data.",
+                    "design_targets": ["CulturalHeritage"],
+                    "design_element_ids": ["class:CulturalHeritage"],
+                    "planned_code_targets": [source_path],
+                    "test_intents": ["Verify heritage data."],
+                }
+            ],
+            "design_mappings_by_file": {
+                source_path: [
+                    {
+                        "design_element_id": "class:CulturalHeritage",
+                        "design_element_type": "class",
+                        "design_element_name": "CulturalHeritage",
+                        "planned_code_target": source_path,
+                    }
+                ]
+            },
+            "proposed_files": [{"path": test_path}],
+        }
+
+        result = CodeTraceValidator(CapturingCodeTraceLlm()).validate(
+            target_path=self.target_repo,
+            work_packet=packet,
+        )
+
+        payload = result.to_dict()
+        self.assertTrue(result.ok)
+        self.assertEqual(payload["mode"], "hybrid_rule_llm_code_trace_v2")
+        self.assertEqual(payload["requirement_contract"]["revision"], 3)
+        self.assertEqual([item["requirement_ref"] for item in payload["mappings"]], ["REQ-1"])
+        self.assertEqual(payload["stats"]["requirements_covered"], 1)
+
+    def test_v2_qa_requires_exact_stable_requirement_coverage(self) -> None:
+        context = {
+            "requirement_contract": {"version": "v2", "revision": 1},
+            "canonical_requirements": [
+                {"id": "REQ-1", "content": "First"},
+                {"id": "REQ-2", "content": "Second"},
+            ],
+        }
+
+        with self.assertRaises(HarnessError) as caught:
+            QaTesterAgent(MissingRequirementQaLlm()).generate_tests(context=context)
+
+        self.assertEqual(caught.exception.error_code, "qa_requirement_coverage_invalid")
+
+        generated = QaTesterAgent().generate_tests(context=context)
+        covered = {
+            requirement_id
+            for scenario in generated.scenarios
+            for requirement_id in scenario["requirement_ids"]
+        }
+        self.assertEqual(covered, {"REQ-1", "REQ-2"})
+
+    def test_v2_pr_body_reports_contract_and_stable_id_coverage(self) -> None:
+        body = _code_review_pr_body(
+            state={
+                "quality_reports": {
+                    "implementation_traceability": {
+                        "requirement_contract_version": "v2",
+                        "requirement_revision": 4,
+                        "stats": {"mapping_count": 2, "requirement_count": 2, "requirements_covered": 2},
+                        "llm_confidence": 0.9,
+                    },
+                    "qa_acceptance": {
+                        "scenario_count": 1,
+                        "requirement_ids": ["REQ-1", "REQ-2"],
+                    },
+                }
+            },
+            run_id="run-v2",
+            issue_key="SDLC-2",
+            artifact_paths={"requirement_design_code_trace": "trace.json"},
+            qa_generated={
+                "scenarios": [
+                    {"name": "canonical flow", "requirement_ids": ["REQ-1", "REQ-2"]}
+                ],
+                "risks": [],
+            },
+        )
+
+        self.assertIn("Requirement contract: `v2` revision `4`", body)
+        self.assertIn("Canonical requirement coverage: 2/2", body)
+        self.assertIn("canonical flow [REQ-1, REQ-2]", body)
 
     def test_cli_approve_checkpoint_dispatches_implementation_plan_to_phase4(self) -> None:
         phase3 = self._create_phase3_run()

@@ -37,7 +37,8 @@ from ..agents.developer import (
     refresh_developer_work_packet,
 )
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent, QaTesterLlmError
-from ..agents.validator import CodeTraceValidator
+from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
+from ..artifacts import CanonicalRequirementInput, read_frozen_requirement_input
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -274,6 +275,18 @@ class PhaseFourWorkflow:
                 run_id=run_id,
             )
 
+        canonical_requirements: list[dict[str, object]] = []
+        requirement_contract = _dict_value(structured_plan.get("requirement_contract"))
+        requirement_coverage = _dict_items(structured_plan.get("requirement_coverage"))
+        if str(state.get("requirement_contract_version") or "v1") == "v2":
+            canonical_requirements, requirement_contract, requirement_coverage = self._require_v2_phase4_input(
+                state=state,
+                artifact_paths=artifact_paths,
+                structured_plan=structured_plan,
+                review=review,
+                run_id=run_id,
+            )
+
         try:
             workspace = self.workspace_manager.resolve(run_id)
             target_info = self._workspace_target_info(run_id=run_id, allow_dirty=False)
@@ -289,6 +302,9 @@ class PhaseFourWorkflow:
                     "implementation_plan_structured": structured_plan_path,
                     "implementation_plan_review": review_path,
                 },
+                canonical_requirements=canonical_requirements,
+                requirement_contract=requirement_contract,
+                requirement_coverage=requirement_coverage,
             )
         except HarnessError as exc:
             state.update(
@@ -340,6 +356,82 @@ class PhaseFourWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _require_v2_phase4_input(
+        self,
+        *,
+        state: dict[str, object],
+        artifact_paths: dict[str, str],
+        structured_plan: dict[str, object],
+        review: dict[str, object],
+        run_id: str,
+    ) -> tuple[list[dict[str, object]], dict[str, object], list[dict[str, object]]]:
+        """Validate the frozen V2 contract and Phase 3 coverage before any Phase 4 mutation."""
+
+        try:
+            frozen = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+            if not isinstance(frozen, CanonicalRequirementInput):
+                raise HarnessError("requirement_model_v2_invalid", "Frozen requirement input is not V2.")
+            graph = build_requirement_graph_v2(frozen.canonical_model)
+            contract = _dict_value(structured_plan.get("requirement_contract"))
+            expected_refs = frozen.approved_artifacts
+            actual_refs = _string_dict(contract.get("artifact_refs"))
+            if (
+                contract.get("version") != "v2"
+                or contract.get("revision") != frozen.canonical_model.revision
+                or any(actual_refs.get(key) != value for key, value in expected_refs.items())
+            ):
+                raise HarnessError(
+                    "requirement_model_v2_invalid",
+                    "Implementation plan requirement contract does not match the frozen canonical revision.",
+                )
+            if review.get("ok") is not True or review.get("requirement_contract_version") != "v2":
+                raise HarnessError(
+                    "implementation_plan_review_not_passed",
+                    "Implementation plan review is not an approved Requirement V2 review.",
+                )
+            trace_ref = _required_phase4_artifact(artifact_paths, "requirement_design_trace", run_id=run_id)
+            trace = _read_json_artifact(self._existing_artifact_path(trace_ref, run_id=run_id), run_id=run_id)
+            trace_inputs = _dict_value(trace.get("inputs"))
+            if (
+                trace.get("mode") != "traceability_v2"
+                or trace.get("requirement_revision") != frozen.canonical_model.revision
+                or trace_inputs.get("requirement_model") != expected_refs.get("requirement_model")
+            ):
+                raise HarnessError(
+                    "requirement_model_v2_invalid",
+                    "Requirement-design trace does not match the frozen canonical revision.",
+                )
+            canonical = _dict_items(graph.get("requirements"))
+            coverage = _dict_items(structured_plan.get("requirement_coverage"))
+            approved_design_ids = {
+                str(item.get("design_element_id") or "").strip()
+                for item in _dict_items(structured_plan.get("design_mappings"))
+                if str(item.get("design_element_id") or "").strip()
+            }
+            referenced_design_ids = {
+                design_id
+                for item in coverage
+                for design_id in _string_items(item.get("design_element_ids"))
+            }
+            if not referenced_design_ids or not referenced_design_ids.issubset(approved_design_ids):
+                raise HarnessError(
+                    "requirement_model_v2_invalid",
+                    "Requirement coverage references missing or unapproved design element IDs.",
+                )
+            _require_exact_v2_coverage(
+                canonical_requirements=canonical,
+                coverage=coverage,
+                trace=trace,
+                run_id=run_id,
+            )
+            return canonical, contract, coverage
+        except HarnessError as exc:
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement V2 Phase 4 input is invalid: {exc.message}",
+                run_id=run_id,
+            ) from exc
 
     def continue_run(self, *, run_id: str) -> dict[str, object]:
         """Chạy bước Phase 4 tiếp theo theo state hiện tại của run."""
@@ -1454,6 +1546,14 @@ class PhaseFourWorkflow:
             "execution_status": execution.status,
             "applied_tests": applied_tests,
             "repaired_from": repaired_from,
+            "requirement_contract": work_packet.get("requirement_contract"),
+            "requirement_ids": sorted(
+                {
+                    requirement_id
+                    for scenario in generated_tests.scenarios
+                    for requirement_id in _string_items(scenario.get("requirement_ids"))
+                }
+            ),
         }
         report_path = write_phase4_qa_test_report(
             store=self.store,
@@ -2308,12 +2408,6 @@ class PhaseFourWorkflow:
                 f"Run is not waiting for implementation plan review: {run_id}",
                 run_id=run_id,
             )
-        if str(state.get("requirement_contract_version") or "v1") == "v2":
-            raise HarnessError(
-                "requirement_v2_phase4_not_ready",
-                "Requirement V2 has completed Phase 3, but Phase 4 does not consume the canonical work packet yet.",
-                run_id=run_id,
-            )
         checkpoint = _dict_value(state.get("pending_checkpoint"))
         if not checkpoint:
             raise HarnessError(
@@ -2402,6 +2496,7 @@ class PhaseFourWorkflow:
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
         }
 
 
@@ -2504,6 +2599,18 @@ def _qa_review_context(
         run_id=run_id,
     )
     traceability = _qa_traceability_summary(trace_report=trace_report, trace_path=trace_path)
+    requirement_contract = _dict_value(work_packet.get("requirement_contract"))
+    v2 = requirement_contract.get("version") == "v2"
+    canonical_requirements = _dict_items(work_packet.get("canonical_requirements")) if v2 else []
+    accepted_requirement: dict[str, object] = requirement
+    if v2:
+        accepted_requirement = {
+            "label": "Canonical Requirement V2 stable-ID set",
+            "requirement_contract": requirement_contract,
+            "requirements": canonical_requirements,
+            "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")),
+            "requirement_packet_reference": requirement,
+        }
     chars_sent = (
         int(requirement.get("chars_sent") or 0)
         + int(verification.get("chars_sent") or 0)
@@ -2516,7 +2623,7 @@ def _qa_review_context(
     )
     return {
         "task": "qa_acceptance_review_v1",
-        "packet_mode": "trace_dev_style_compact_qa_packet_v1",
+        "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
         "run_id": run_id,
         "source_ref": state.get("source_ref"),
         "issue_key": work_packet.get("issue_key"),
@@ -2527,7 +2634,10 @@ def _qa_review_context(
             "proposed_files": work_packet.get("proposed_files"),
             "test_intents": work_packet.get("test_intents"),
         },
-        "accepted_requirement": requirement,
+        "accepted_requirement": accepted_requirement,
+        "requirement_contract": requirement_contract,
+        "canonical_requirements": canonical_requirements,
+        "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")) if v2 else [],
         "code_under_test": code_under_test,
         "verification": verification,
         "traceability": traceability,
@@ -2537,7 +2647,7 @@ def _qa_review_context(
             "requirement_design_code_trace": trace_path,
         },
         "context_budget": {
-            "packet_mode": "trace_dev_style_compact_qa_packet_v1",
+            "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
             "section_count": 3,
             "code_file_count": len(_dict_items(code_under_test.get("files"))),
             "chars_sent": chars_sent,
@@ -2764,6 +2874,7 @@ def _qa_result_from_generated_execution(
                 "result": status,
                 "evidence": reason or str(item.get("expected_result") or ""),
                 "risk": str(item.get("risk") or ""),
+                "requirement_ids": _string_items(item.get("requirement_ids")),
             }
         )
     if not scenarios:
@@ -2773,6 +2884,7 @@ def _qa_result_from_generated_execution(
                 "result": status,
                 "evidence": reason,
                 "risk": "",
+                "requirement_ids": [],
             }
         ]
     if status == "pass":
@@ -2804,6 +2916,7 @@ def _qa_result_from_generated_execution(
         risks=risks,
         raw_response=generated.raw_response,
         review_context=review_context,
+        requirement_contract=generated.requirement_contract,
     )
 
 
@@ -2909,6 +3022,10 @@ def _code_review_pr_body(
     confluence_url = _sync_target_url(state, "confluence")
     scenarios = _dict_items(qa_generated.get("scenarios"))
     risks = _string_items(qa_generated.get("risks"))
+    trace_stats = _dict_value(trace.get("stats"))
+    contract_version = str(trace.get("requirement_contract_version") or "v1")
+    requirement_revision = trace.get("requirement_revision", 0)
+    covered_ids = _string_items(qa.get("requirement_ids"))
     lines = [
         "## SDLC Harness Run",
         "",
@@ -2928,6 +3045,11 @@ def _code_review_pr_body(
         "",
         "## Quality Gates",
         "",
+        f"- Requirement contract: `{contract_version}` revision `{requirement_revision}`",
+        (
+            "- Canonical requirement coverage: "
+            f"{trace_stats.get('requirements_covered', 0)}/{trace_stats.get('requirement_count', 0)}"
+        ),
         "- Compile/unit verification: passed",
         (
             "- Validator traceability: passed "
@@ -2940,9 +3062,17 @@ def _code_review_pr_body(
         "",
     ]
     if scenarios:
-        lines.extend(f"- {str(item.get('name') or '').strip()}" for item in scenarios[:12])
+        lines.extend(
+            (
+                f"- {str(item.get('name') or '').strip()} "
+                f"[{', '.join(_string_items(item.get('requirement_ids')))}]"
+            ).rstrip()
+            for item in scenarios[:12]
+        )
     else:
         lines.append("- See QA report artifact.")
+    if covered_ids:
+        lines.extend(["", "## Stable Requirement IDs", "", *[f"- `{item}`" for item in covered_ids]])
     lines.extend(["", "## Known Risks", ""])
     if risks:
         lines.extend(f"- {risk}" for risk in risks[:10])
@@ -3015,6 +3145,29 @@ def _apply_developer_changes(
     if not allowed_paths:
         raise HarnessError("developer_act_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.")
     applied: list[dict[str, object]] = []
+    requirement_contract = _dict_value(work_packet.get("requirement_contract"))
+    v2 = requirement_contract.get("version") == "v2"
+    assigned_by_file = _requirement_ids_by_file(work_packet) if v2 else {}
+    canonical_ids = {
+        str(item.get("id") or "").strip()
+        for item in _dict_items(work_packet.get("canonical_requirements"))
+        if str(item.get("id") or "").strip()
+    }
+    if v2:
+        for item in result.files:
+            rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
+            covered_requirement_ids = _string_items(item.get("covered_requirement_ids"))
+            invalid = set(covered_requirement_ids) - assigned_by_file.get(rel_path, set())
+            invented = set(covered_requirement_ids) - canonical_ids
+            if invalid or invented:
+                raise HarnessError(
+                    "developer_act_requirement_coverage_invalid",
+                    (
+                        f"Developer.act returned stable requirement IDs outside the approved coverage for {rel_path}: "
+                        f"{sorted(invalid | invented)}"
+                    ),
+                    run_id=run_id,
+                )
     for item in result.files:
         rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
         if rel_path not in allowed_paths:
@@ -3023,6 +3176,7 @@ def _apply_developer_changes(
                 f"Developer.act tried to modify a file outside allowed_paths: {rel_path}",
                 run_id=run_id,
             )
+        covered_requirement_ids = _string_items(item.get("covered_requirement_ids"))
         target_file = (target_path / rel_path).resolve()
         try:
             target_file.relative_to(target_path.resolve())
@@ -3041,11 +3195,96 @@ def _apply_developer_changes(
                 "operation": str(item.get("operation") or ""),
                 "reason": str(item.get("reason") or ""),
                 "covered_design_elements": _string_items(item.get("covered_design_elements")),
+                "covered_requirement_ids": covered_requirement_ids,
             }
         )
     if not applied:
         raise HarnessError("developer_act_failed", "Developer.act did not apply any file.")
     return applied
+
+
+def _requirement_ids_by_file(work_packet: dict[str, object]) -> dict[str, set[str]]:
+    grouped = _dict_value(work_packet.get("requirement_coverage_by_file"))
+    result: dict[str, set[str]] = {}
+    for raw_path, raw_items in grouped.items():
+        path = _normalize_code_path(str(raw_path), run_id="")
+        result[path] = {
+            str(item.get("requirement_id") or "").strip()
+            for item in _dict_items(raw_items)
+            if str(item.get("requirement_id") or "").strip()
+        }
+    return result
+
+
+def _require_exact_v2_coverage(
+    *,
+    canonical_requirements: list[dict[str, object]],
+    coverage: list[dict[str, object]],
+    trace: dict[str, object],
+    run_id: str,
+) -> None:
+    expected = {
+        str(item.get("id") or "").strip(): str(item.get("content") or "").strip()
+        for item in canonical_requirements
+        if str(item.get("id") or "").strip()
+    }
+    actual_ids = [str(item.get("requirement_id") or "").strip() for item in coverage]
+    if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected):
+        raise HarnessError(
+            "requirement_v2_phase4_input_invalid",
+            "Implementation plan must cover each canonical stable requirement ID exactly once.",
+            run_id=run_id,
+        )
+    allowed_targets: dict[str, set[str]] = {key: set() for key in expected}
+    for trace_key in ("class_trace", "sequence_trace"):
+        trace_ids = [
+            str(item.get("requirement") or "").strip()
+            for item in _dict_items(trace.get(trace_key))
+        ]
+        if len(trace_ids) != len(set(trace_ids)) or set(trace_ids) != set(expected):
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"{trace_key} must contain each canonical stable requirement ID exactly once.",
+                run_id=run_id,
+            )
+        for item in _dict_items(trace.get(trace_key)):
+            requirement_id = str(item.get("requirement") or "").strip()
+            for link in _dict_items(item.get("links")):
+                target = str(link.get("target") or "").strip()
+                if target:
+                    allowed_targets[requirement_id].add(target)
+    for item in coverage:
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        if str(item.get("content") or "").strip() != expected[requirement_id]:
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement coverage content does not match canonical ID {requirement_id}.",
+                run_id=run_id,
+            )
+        if set(_string_items(item.get("design_targets"))) != allowed_targets[requirement_id]:
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement coverage design targets do not match approved trace for {requirement_id}.",
+                run_id=run_id,
+            )
+        if not _string_items(item.get("design_element_ids")):
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement {requirement_id} has no approved design element.",
+                run_id=run_id,
+            )
+        if not _string_items(item.get("planned_code_targets")):
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement {requirement_id} has no planned code target.",
+                run_id=run_id,
+            )
+        if not _string_items(item.get("test_intents")):
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement {requirement_id} has no test intent.",
+                run_id=run_id,
+            )
 
 
 def _allowed_paths(work_packet: dict[str, object]) -> list[str]:

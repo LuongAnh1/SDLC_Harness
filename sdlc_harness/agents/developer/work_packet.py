@@ -27,6 +27,9 @@ def build_developer_work_packet(
     target_repo_path: Path,
     run_workspace: dict[str, object],
     approved_plan_refs: dict[str, str],
+    canonical_requirements: list[dict[str, object]] | None = None,
+    requirement_contract: dict[str, object] | None = None,
+    requirement_coverage: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
 
@@ -40,6 +43,13 @@ def build_developer_work_packet(
         for item in proposed_files
     ]
     allowed_paths = [str(item["path"]) for item in enriched_files]
+    canonical_requirements = canonical_requirements or []
+    requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
+    requirement_coverage = requirement_coverage or []
+    coverage_by_file = _group_requirement_coverage_by_file(requirement_coverage)
+    required_fields = ["path", "operation", "content", "reason", "covered_design_elements"]
+    if requirement_contract.get("version") == "v2":
+        required_fields.append("covered_requirement_ids")
     return {
         "version": "developer_work_packet_v1",
         "mode": "approved_implementation_plan_to_developer_act_v1",
@@ -59,6 +69,10 @@ def build_developer_work_packet(
             "remote": run_workspace.get("remote"),
         },
         "approved_plan": approved_plan_refs,
+        "requirement_contract": requirement_contract,
+        "canonical_requirements": canonical_requirements,
+        "requirement_coverage": requirement_coverage,
+        "requirement_coverage_by_file": coverage_by_file,
         "implementation_steps": _dict_items(structured_plan.get("implementation_steps")),
         "proposed_files": enriched_files,
         "design_mappings_by_file": _group_design_mappings_by_file(design_mappings),
@@ -77,7 +91,7 @@ def build_developer_work_packet(
             "format": "changed_files_json_v1",
             "changed_files_only": True,
             "allowed_paths": allowed_paths,
-            "required_fields": ["path", "operation", "content", "reason", "covered_design_elements"],
+            "required_fields": required_fields,
         },
         "constraints": [
             "Chỉ tạo/sửa file nằm trong output_contract.allowed_paths ở slice Developer.act V1.",
@@ -221,6 +235,33 @@ def _group_design_mappings_by_file(mappings: list[dict[str, object]]) -> dict[st
         if not file_path:
             continue
         grouped.setdefault(file_path, []).append(item)
+    return grouped
+
+
+def _group_requirement_coverage_by_file(
+    coverage: list[dict[str, object]],
+) -> dict[str, list[dict[str, object]]]:
+    """Project canonical V2 coverage to files without changing the approved rows."""
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for item in coverage:
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        if not requirement_id:
+            continue
+        for target in _string_items(item.get("planned_code_targets")):
+            file_path = _target_file_from_mapping(target)
+            if not file_path:
+                continue
+            projected = {
+                "requirement_id": requirement_id,
+                "content": str(item.get("content") or "").strip(),
+                "design_element_ids": _string_items(item.get("design_element_ids")),
+                "planned_code_targets": _string_items(item.get("planned_code_targets")),
+                "test_intents": _string_items(item.get("test_intents")),
+            }
+            bucket = grouped.setdefault(file_path, [])
+            if projected not in bucket:
+                bucket.append(projected)
     return grouped
 
 

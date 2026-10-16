@@ -1333,6 +1333,9 @@ def _jira_code_review_comment_body(
         f"Verification: {context['verification']}",
         f"Validator trace: {context['trace']}",
         f"QA acceptance: {context['qa']}",
+        f"Requirement contract: {context['requirement_contract']}",
+        f"Canonical coverage: {context['requirement_coverage']}",
+        f"Stable requirement IDs: {context['requirement_ids']}",
         f"Next action: {next_action}",
     ]
     if confluence_url:
@@ -1696,6 +1699,9 @@ def _confluence_code_review_storage_body(
 <tr><th>Verification</th><td>{escape(str(context['verification']))}</td></tr>
 <tr><th>Validator trace</th><td>{escape(str(context['trace']))}</td></tr>
 <tr><th>QA acceptance</th><td>{escape(str(context['qa']))}</td></tr>
+<tr><th>Requirement contract</th><td>{escape(str(context['requirement_contract']))}</td></tr>
+<tr><th>Canonical coverage</th><td>{escape(str(context['requirement_coverage']))}</td></tr>
+<tr><th>Stable requirement IDs</th><td>{escape(str(context['requirement_ids']))}</td></tr>
 </tbody>
 </table>
 <h2>Review Boundary</h2>
@@ -1725,6 +1731,15 @@ def _code_review_context(store: RuntimeStore, artifact_paths: dict[str, str]) ->
     commit = commit if isinstance(commit, dict) else {}
     trace_stats = trace.get("stats")
     trace_stats = trace_stats if isinstance(trace_stats, dict) else {}
+    requirement_contract = trace.get("requirement_contract")
+    requirement_contract = requirement_contract if isinstance(requirement_contract, dict) else {}
+    requirement_ids = sorted(
+        {
+            str(item.get("requirement_ref") or "").strip()
+            for item in trace.get("mappings", [])
+            if isinstance(item, dict) and str(item.get("requirement_ref") or "").strip()
+        }
+    )
     test_report = _read_artifact(store, artifact_paths, "test_report")
     qa_report = _read_artifact(store, artifact_paths, "qa_test_report")
     return {
@@ -1739,6 +1754,13 @@ def _code_review_context(store: RuntimeStore, artifact_paths: dict[str, str]) ->
             f"mappings={trace_stats.get('mapping_count', 0)}, missing={trace_stats.get('missing_count', 0)}"
         ),
         "qa": _report_result_line(qa_report, fallback="See QA report."),
+        "requirement_contract": (
+            f"{requirement_contract.get('version', 'v1')} revision {requirement_contract.get('revision', 0)}"
+        ),
+        "requirement_coverage": (
+            f"{trace_stats.get('requirements_covered', 0)}/{trace_stats.get('requirement_count', 0)} stable IDs"
+        ),
+        "requirement_ids": ", ".join(requirement_ids) or "none",
     }
 
 

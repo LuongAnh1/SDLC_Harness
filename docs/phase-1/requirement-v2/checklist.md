@@ -50,11 +50,11 @@ triển khai chỉ vì tài liệu đã được viết.
 - [x] Ghi `requirement_contract_version` vào state.
 - [x] Tạo V1/V2 requirement input reader cho Phase 2.
 - [x] Mở rộng frozen V1/V2 requirement input reader cho Phase 3.
-- [ ] Mở rộng V1/V2 requirement input reader/work packet cho Phase 4.
+- [x] Mở rộng V1/V2 requirement input reader/work packet cho Phase 4.
 - [x] Designer/Validator Phase 2 V2 ưu tiên canonical JSON.
 - [x] Stable requirement IDs đi xuyên Phase 2 requirement graph/design trace.
 - [x] Stable requirement IDs đi tiếp qua Phase 3 implementation plan coverage.
-- [ ] Stable requirement IDs đi tiếp qua Phase 4 developer/test/code-trace work packets.
+- [x] Stable requirement IDs đi tiếp qua Phase 4 Developer, code trace, QA và Code Review evidence.
 - [x] Status trả current question và remaining count, không lộ source text/evidence dài.
 - [ ] Niko route/formatter hỏi đúng một câu và gửi đúng question ID.
 - [x] Giữ run V1 hoạt động không đổi.

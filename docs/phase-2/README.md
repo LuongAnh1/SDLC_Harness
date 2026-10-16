@@ -56,8 +56,8 @@ tạo `requirement_graph_v2` bằng stable ID như `MF-1`, `EF-1`, `AC-1` và gh
 ở mode `traceability_v2`. Run V2 được phép tới `waiting_design_approval`.
 
 Phase 3 hiện đã consume canonical V2 và giữ stable IDs tới implementation plan
-checkpoint. Boundary V2 hiện nằm trước Phase 4 bằng
-`requirement_v2_phase4_not_ready`. Default contract vẫn là V1.
+checkpoint. Phase 4 cũng đã dual-read V1/V2 và kiểm canonical coverage trước khi
+tạo DeveloperWorkPacket. Default contract vẫn là V1 cho tới controlled live smoke V2.
 
 ## Ba Vai Trò AI Trong Phase 2
 

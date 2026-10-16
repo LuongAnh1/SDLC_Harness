@@ -122,7 +122,8 @@ Read the DeveloperWorkPacket and return JSON only with this shape:
       "operation": "create|update|create_or_update",
       "content": "complete final file content",
       "reason": "why this file is changed",
-      "covered_design_elements": ["class:...", "method:...", "sequence:..."]
+      "covered_design_elements": ["class:...", "method:...", "sequence:..."],
+      "covered_requirement_ids": ["PRE-1", "MF-1"]
     }}
   ]
 }}
@@ -131,6 +132,7 @@ Rules:
 - Only return files listed in output_contract.allowed_paths.
 - Return complete file content, not patches.
 - Do not add behavior outside the approved requirement/design.
+- When requirement_contract.version is v2, treat canonical_requirements and requirement_coverage as the source of truth and return only stable IDs assigned to that file in requirement_coverage_by_file.
 - Preserve package names and existing code style from current_files.
 - If a file already exists, include the full updated content.
 - Generated code, tests, and helper scripts must work when the repository path contains spaces or Unicode characters.
@@ -162,7 +164,8 @@ Return JSON only with the same shape as Developer Act v1:
       "operation": "create|update|create_or_update",
       "content": "complete final file content",
       "reason": "which Validator feedback item this fixes",
-      "covered_design_elements": ["class:...", "method:...", "sequence:..."]
+      "covered_design_elements": ["class:...", "method:...", "sequence:..."],
+      "covered_requirement_ids": ["PRE-1", "MF-1"]
     }}
   ]
 }}
@@ -172,6 +175,7 @@ Rules:
 - Only return files listed in output_contract.allowed_paths.
 - Return complete file content, not patches.
 - Do not change requirements, approved design, implementation plan, branch, or tool-sync records.
+- Preserve canonical stable requirement IDs and return only IDs assigned to each file in requirement_coverage_by_file.
 - Fix the missing_links, weak trace evidence, or QA acceptance failures in RepairFeedback.
 - Preserve package names and existing code style from current_files.
 - Generated code and tests must work when the repository path contains spaces or Unicode characters.
@@ -218,6 +222,7 @@ def _parse_developer_act_payload(raw: str) -> dict[str, object]:
                 "content": content,
                 "reason": str(item.get("reason") or "").strip(),
                 "covered_design_elements": _string_items(item.get("covered_design_elements")),
+                "covered_requirement_ids": _string_items(item.get("covered_requirement_ids")),
             }
         )
     return {
@@ -330,6 +335,7 @@ def _deterministic_developer_act(work_packet: dict[str, object]) -> DeveloperAct
                 "content": content,
                 "reason": "Fake mode implements the approved Phase 4 output contract.",
                 "covered_design_elements": _covered_elements_for_path(work_packet, path),
+                "covered_requirement_ids": _covered_requirements_for_path(work_packet, path),
             }
         )
     return DeveloperActResult(summary="Fake Developer.act generated deterministic Java changes.", files=files)
@@ -379,6 +385,23 @@ def _covered_elements_for_path(work_packet: dict[str, object], path: str) -> lis
             value = str(item.get("design_element_id") or "").strip()
             if value:
                 result.append(value)
+    return result
+
+
+def _covered_requirements_for_path(work_packet: dict[str, object], path: str) -> list[str]:
+    grouped = work_packet.get("requirement_coverage_by_file")
+    if not isinstance(grouped, dict):
+        return []
+    items = grouped.get(path)
+    if not isinstance(items, list):
+        return []
+    result: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        if requirement_id and requirement_id not in result:
+            result.append(requirement_id)
     return result
 
 

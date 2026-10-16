@@ -369,6 +369,24 @@ def mock_sync_code_review_checkpoint(
     report_path = sync_dir / "tool_sync_report_v4.json"
     github_path = artifact_paths["github_code_review"]
     github = json.loads((store.repo_root / github_path).read_text(encoding="utf-8"))
+    trace = json.loads(
+        (store.repo_root / artifact_paths["requirement_design_code_trace"]).read_text(encoding="utf-8")
+    )
+    requirement_contract = trace.get("requirement_contract", {})
+    requirement_contract = requirement_contract if isinstance(requirement_contract, dict) else {}
+    trace_stats = trace.get("stats", {})
+    trace_stats = trace_stats if isinstance(trace_stats, dict) else {}
+    requirement_ids = sorted(
+        {
+            str(item.get("requirement_ref") or "").strip()
+            for item in trace.get("mappings", [])
+            if isinstance(item, dict) and str(item.get("requirement_ref") or "").strip()
+        }
+    )
+    coverage_line = (
+        f"{trace_stats.get('requirements_covered', 0)}/{trace_stats.get('requirement_count', 0)} stable IDs"
+    )
+    requirement_ids_line = ", ".join(requirement_ids) or "none"
     pull_request = github.get("pull_request", {})
     commit = github.get("commit", {})
     previous_targets = _previous_targets(report_path)
@@ -389,6 +407,9 @@ Status: `{review_status}`
 {pr_label}: `{pull_request.get('url', '')}`
 Branch: `{github.get('branch', '')}`
 Commit: `{commit.get('sha', '')}`
+Requirement contract: `{requirement_contract.get('version', 'v1')}` revision `{requirement_contract.get('revision', 0)}`
+Canonical coverage: `{coverage_line}`
+Stable requirement IDs: `{requirement_ids_line}`
 Next action: {next_action}
 """,
         encoding="utf-8",
@@ -400,6 +421,9 @@ Run: `{run_id}`
 Source: `{source_ref}`
 Status: `{review_status}`
 {pr_label}: `{pull_request.get('url', '')}`
+Requirement contract: `{requirement_contract.get('version', 'v1')}` revision `{requirement_contract.get('revision', 0)}`
+Canonical coverage: `{coverage_line}`
+Stable requirement IDs: `{requirement_ids_line}`
 
 Evidence:
 - Verification: `{artifact_paths['test_report']}`

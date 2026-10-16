@@ -820,3 +820,80 @@ rtk python -m pytest -q
 
 Không nới policy production; thay đổi chỉ đồng bộ test fixture với contract đang
 được runtime áp dụng.
+
+## 2026-10-16 - Slice 4C: Requirement V2 End-to-End trong Phase 4
+
+- Gỡ gate `requirement_v2_phase4_not_ready` và thay bằng validation fail-closed
+  `requirement_v2_phase4_input_invalid` trước mutation.
+- Developer work packet mang canonical contract/coverage và projection stable ID
+  theo file; refresh repair giữ nguyên các trường này.
+- Developer, Code Trace và QA có hard gate riêng cho stable requirement IDs.
+- Code trace V2 ghi `hybrid_rule_llm_code_trace_v2`, revision và coverage stats
+  trong artifact/quality report, vẫn giữ filename V1 để tương thích.
+- QA scenario V2 bắt buộc phủ đúng canonical ID set; repair tiếp tục dùng cùng
+  immutable work packet.
+- Draft PR và mock/real Jira/Confluence Code Review thêm contract revision và
+  coverage count. State/action công khai không đổi nên Niko chưa cần adapter mới.
+
+Test fixture V2 đã đi từ Phase 3 approval qua Developer, verification, code trace
+và QA. Publication/sync tiếp tục dùng cùng Phase 4 state machine đã có; human chỉ
+được chuyển Draft sang Ready và vẫn tự merge trên GitHub.
+
+Kiểm tra cuối:
+
+```bash
+rtk python -m pytest tests/test_phase3.py tests/test_phase4.py -q
+# 81 passed
+
+rtk python -m pytest tests/test_code_review_sync.py tests/test_github_sync.py -q
+# 16 passed
+
+rtk python -m pytest -q
+# 257 passed
+
+rtk git diff --check
+# no whitespace errors
+```
+
+## 2026-10-16 - Slice 4C: Automated V2 E2E and Repair Verification
+
+Đã bổ sung hai regression test còn thiếu cho Requirement V2 trong Phase 4:
+
+- full state flow từ `implementation_ready` qua Developer, verification, code
+  trace, QA, Draft PR, Code Review sync và human approval tới
+  `code_review_approved`;
+- một vòng Developer/code-trace repair và một vòng QA repair trên cùng run V2.
+
+Hai test khóa các invariant sau:
+
+- `requirement_contract.revision` không đổi qua các vòng repair;
+- tập canonical stable requirement IDs trong work packet, code trace và QA luôn
+  bằng nhau;
+- PR body và Jira/Confluence Code Review checkpoint chứa contract revision,
+  coverage count và danh sách stable IDs cụ thể;
+- approval chỉ chuyển Draft PR sang Ready; workflow không merge.
+
+Lần chạy đầu phát hiện mock Jira/Confluence chỉ ghi coverage count mà chưa ghi
+danh sách stable IDs. Đã bổ sung danh sách này cho cả mock sync và real
+Jira/Confluence rendering. Lỗi thứ hai là test đọc `worktree_path` từ status
+summary; đã sửa test để resolve workspace qua `RunWorkspaceManager`, đúng với
+public status contract hiện tại.
+
+Kết quả:
+
+```bash
+rtk python -m pytest -q \
+  tests/test_phase3.py::PhaseThreeTest::test_v2_phase4_runs_to_code_review_approved_with_stable_ids \
+  tests/test_phase3.py::PhaseThreeTest::test_v2_phase4_repair_loops_preserve_contract_and_stable_ids \
+  tests/test_code_review_sync.py::CodeReviewSyncTest::test_real_sync_recovers_remote_ids_and_resync_keeps_them
+# 3 passed in 15.73s
+
+rtk python -m pytest -q tests/test_phase3.py tests/test_phase4.py tests/test_github_sync.py tests/test_code_review_sync.py
+# 100 passed in 315.83s
+
+rtk python -m pytest -q
+# 259 passed in 378.67s
+```
+
+Controlled live smoke V2 với DeepSeek/Jira/GitHub vẫn là gate cuối trước khi đổi
+default requirement contract sang V2.

@@ -697,12 +697,15 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
             "",
             "## Files Applied",
             "",
-            "| File | Operation | Reason | Covered design elements |",
-            "| --- | --- | --- | --- |",
+            "| File | Operation | Reason | Covered design elements | Covered requirements |",
+            "| --- | --- | --- | --- | --- |",
         ]
     )
     for item in files:
         covered = ", ".join(str(value) for value in item.get("covered_design_elements", []) if str(value).strip())
+        covered_requirements = ", ".join(
+            str(value) for value in item.get("covered_requirement_ids", []) if str(value).strip()
+        )
         lines.append(
             "| "
             + " | ".join(
@@ -711,6 +714,7 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
                     _table_cell(str(item.get("operation") or "")),
                     _table_cell(str(item.get("reason") or "")),
                     _table_cell(covered),
+                    _table_cell(covered_requirements),
                 ]
             )
             + " |"
@@ -814,6 +818,11 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
     risks = [str(item).strip() for item in report.get("risks", []) if str(item).strip()] if isinstance(report.get("risks"), list) else []
     context_budget = report.get("review_context")
     context_budget = context_budget if isinstance(context_budget, dict) else {}
+    requirement_contract = report.get("requirement_contract")
+    requirement_contract = requirement_contract if isinstance(requirement_contract, dict) else {}
+    requirement_ids = [
+        str(item).strip() for item in report.get("requirement_ids", []) if str(item).strip()
+    ] if isinstance(report.get("requirement_ids"), list) else []
     lines = [
         f"# QA Test Report {report.get('artifact_version', 'V1')}",
         "",
@@ -824,6 +833,8 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
         f"- Issue key: `{report.get('issue_key', '')}`",
         f"- Target repo: `{report.get('target_repo', '')}`",
         f"- Branch: `{report.get('branch', '')}`",
+        f"- Requirement contract: `{requirement_contract.get('version', 'v1')}` revision `{requirement_contract.get('revision', 0)}`",
+        f"- Stable requirements covered: `{len(requirement_ids)}`",
         "",
         "## Generated Test Execution",
         "",
@@ -846,8 +857,8 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
             "",
             "## Scenarios",
             "",
-            "| Scenario | Result | Evidence | Risk |",
-            "| --- | --- | --- | --- |",
+            "| Scenario | Requirement IDs | Result | Evidence | Risk |",
+            "| --- | --- | --- | --- | --- |",
         ]
     )
     for item in scenarios:
@@ -856,6 +867,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
             + " | ".join(
                 [
                     _table_cell(str(item.get("name") or "")),
+                    _table_cell(", ".join(str(value) for value in item.get("requirement_ids", []) if str(value).strip())),
                     _table_cell(str(item.get("result") or "")),
                     _table_cell(str(item.get("evidence") or "")),
                     _table_cell(str(item.get("risk") or "")),
@@ -864,7 +876,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
             + " |"
         )
     if not scenarios:
-        lines.append("| _none_ |  |  |  |")
+        lines.append("| _none_ |  |  |  |  |")
     lines.extend(["", "## Evidence", ""])
     lines.extend([f"- {item}" for item in evidence] or ["- none"])
     lines.extend(["", "## Risks", ""])

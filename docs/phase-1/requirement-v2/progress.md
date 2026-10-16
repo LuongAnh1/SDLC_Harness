@@ -18,6 +18,7 @@ Slice 4B đã nối canonical Requirement V2 qua Phase 3 đến
 - Markdown/Confluence render coverage; response giữ `requirement_contract_version=v2`.
 - Gate cũ trước Phase 3 đã được chuyển sang Phase 4 với mã
   `requirement_v2_phase4_not_ready`; checkpoint Phase 3 được giữ nguyên khi bị chặn.
+  Slice 4C sau đó đã gỡ gate tạm và thay bằng canonical input validation.
 
 Boundary tiếp theo là Phase 4 canonical work packet/Developer/Tester/code trace.
 Niko/Telegram, live DeepSeek và live Jira smoke chưa nằm trong Slice 4B. Default vẫn V1.
@@ -318,3 +319,41 @@ chỉ mở requirement approval khi không còn blocking question.
 
 Chưa chuyển config mặc định sang V2 cho tới khi workflow, clarification và
 downstream dual-read hoàn tất.
+
+## 2026-10-16 - Slice 4C: Requirement V2 qua Phase 4
+
+Đã mở Phase 4 cho run V2 và giữ stable requirement ID xuyên Developer work
+packet, code change evidence, Validator code trace, QA scenario và Code Review:
+
+- Phase 4 đọc lại frozen canonical model và kiểm contract/revision/artifact refs,
+  trace và coverage trước khi ghi work packet;
+- `developer_work_packet_v1` giữ wire name cũ nhưng có thêm contract, canonical
+  requirements, coverage và projection theo file;
+- Developer output có `covered_requirement_ids`; Python chặn ID ngoài coverage;
+- code trace V2 sinh đúng một mapping cho mỗi canonical ID và ghi coverage stats;
+- QA V2 bắt buộc hợp `requirement_ids` của các scenario phủ đúng canonical set;
+- PR/Jira/Confluence Code Review hiển thị contract revision và coverage count.
+
+Trong lúc triển khai, fixture QA fake cũ không trả stable IDs nên hard gate báo
+`qa_requirement_coverage_invalid`. Fake runtime đã được sửa để lấy IDs trực tiếp
+từ canonical QA packet, không hard-code theo UC2.
+
+Default vẫn là V1. Chưa chạy controlled live smoke V2 với DeepSeek/Jira/GitHub và
+chưa đổi Niko clarification routing trong slice này.
+
+Regression cuối của Slice 4C: Phase 3/4 `81 passed`, Code Review/GitHub sync
+`16 passed`, toàn bộ suite `257 passed`; `git diff --check` sạch.
+
+### Bổ sung kiểm thử E2E và repair - 2026-10-16
+
+Đã bổ sung regression test chạy contract V2 xuyên suốt Phase 4 tới
+`code_review_approved`, cùng test ép một vòng Developer/code-trace repair và một
+vòng QA repair. Cả hai test xác nhận revision và canonical stable ID set không
+đổi giữa work packet, trace, QA, PR và Code Review sync.
+
+Test đầu tiên phát hiện Jira/Confluence Code Review mới chỉ hiển thị coverage
+count. Mock và real renderer đã được bổ sung danh sách stable IDs cụ thể để
+reviewer đối chiếu trực tiếp.
+
+Kết quả cuối: nhóm Phase 3/4/GitHub/Code Review `100 passed`; toàn bộ suite
+`259 passed`. Controlled live smoke V2 vẫn chưa chạy.
