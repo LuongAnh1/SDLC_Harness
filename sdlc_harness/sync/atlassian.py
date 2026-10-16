@@ -2307,7 +2307,7 @@ def _find_remote_confluence_checkpoint(
             continue
         if marker in body:
             marker_matches.append(page_id)
-        elif page_title.startswith(legacy_prefix):
+        elif page_title.startswith(legacy_prefix) and source_ref.lower() in body.lower():
             legacy_matches.append(page_id)
     return _single_remote_match(
         marker_matches or legacy_matches,

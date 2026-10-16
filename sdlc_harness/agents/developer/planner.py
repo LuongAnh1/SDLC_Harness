@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ..requirements import RequirementModelV2
@@ -128,7 +129,16 @@ class DeveloperPlanAgent:
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             target_files=target_files,
+            target_repo_path=target_repo_path,
+            requirement_design_trace=requirement_design_trace,
         )
+        design_adjustments = _design_adjustments(
+            class_graph=class_graph,
+            class_targets=_class_target_files(class_graph=class_graph, target_files=target_files),
+            target_repo_path=target_repo_path,
+            requirement_design_trace=requirement_design_trace,
+        )
+        mappings = _apply_design_adjustments(mappings, design_adjustments)
         test_intents = _test_intents(mappings=mappings, test_command=test_command)
         llm_payload = self._llm_plan(
             run_id=run_id,
@@ -153,6 +163,7 @@ class DeveloperPlanAgent:
             canonical_requirement=canonical_requirement,
         )
         mappings = _merge_mappings(mappings, _dict_items(llm_payload.get("design_mappings")))
+        mappings = _apply_design_adjustments(mappings, design_adjustments)
         test_intents = _dict_items(llm_payload.get("test_intents")) or test_intents
         requirement_coverage = _requirement_coverage(
             requirement_graph=requirement_graph or {},
@@ -160,6 +171,16 @@ class DeveloperPlanAgent:
             mappings=mappings,
         ) if canonical_requirement is not None else []
         llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
+        implementation_steps = _apply_design_adjustments_to_steps(
+            _dict_items(llm_payload.get("implementation_steps")) or _implementation_steps_from_mappings(mappings),
+            design_adjustments,
+        )
+        proposed_files = _canonical_proposed_files(
+            proposed_files=_dict_items(llm_payload.get("proposed_files")),
+            implementation_steps=implementation_steps,
+            mappings=mappings,
+        )
+        proposed_files = _ensure_executable_test_files(proposed_files=proposed_files, mappings=mappings)
         structured = {
             "version": "implementation_plan_structured_v1",
             "planning_mode": (
@@ -194,11 +215,10 @@ class DeveloperPlanAgent:
             "repo_context": _repo_context_summary(repo_context),
             "repo_evidence": _string_items(llm_payload.get("repo_evidence"))
             or _repo_context_evidence_lines(repo_context),
-            "implementation_steps": _dict_items(llm_payload.get("implementation_steps"))
-            or _implementation_steps_from_mappings(mappings),
-            "proposed_files": _dict_items(llm_payload.get("proposed_files"))
-            or _proposed_files_from_mappings(mappings),
+            "implementation_steps": implementation_steps,
+            "proposed_files": proposed_files,
             "design_mappings": mappings,
+            "design_adjustments": design_adjustments,
             "requirement_coverage": requirement_coverage,
             "test_intents": test_intents,
             "assumptions": [
@@ -256,14 +276,17 @@ class DeveloperPlanAgent:
         requirement_graph: dict[str, object] | None = None,
         requirement_artifact_refs: dict[str, str] | None = None,
     ) -> ImplementationPlanDraft:
-        """Tạo lại plan dựa trên feedback của Validator.review_plan.
+        """Apply a repair patch to the previous candidate without rebuilding it from scratch."""
 
-        V1 vẫn giữ plan deterministic từ graph để không sinh target ngoài phạm vi.
-        Feedback của LLM được ghi vào artifact để Phase 4/human thấy lý do vòng
-        repair và để sau này thay bằng Developer LLM prompt mà không đổi workflow.
-        """
-
-        repaired = self.plan(
+        previous = dict(previous_draft.structured)
+        previous_mappings = _dict_items(previous.get("design_mappings"))
+        previous_tests = _dict_items(previous.get("test_intents"))
+        compact_review = _compact_review(review_report)
+        repair_context = {
+            **_repo_context_summary(repo_context or {}),
+            "previous_plan_candidate": _repair_candidate(previous),
+        }
+        llm_payload = self._llm_plan(
             run_id=run_id,
             source_ref=source_ref,
             issue_key=issue_key,
@@ -278,32 +301,83 @@ class DeveloperPlanAgent:
             planned_branch=planned_branch,
             target_files=target_files,
             test_command=test_command,
-            repo_context=repo_context,
+            repo_context=repair_context,
+            base_mappings=previous_mappings,
+            base_test_intents=previous_tests,
             repair_feedback=developer_feedback,
-            previous_review=review_report,
-            workspace_mode=workspace_mode,
-            workspace_ref=workspace_ref,
-            base_sha=base_sha,
+            previous_review=compact_review,
             canonical_requirement=canonical_requirement,
-            requirement_graph=requirement_graph,
-            requirement_artifact_refs=requirement_artifact_refs,
+        )
+        mappings = _merge_mappings(previous_mappings, _dict_items(llm_payload.get("design_mappings")))
+        adjustments = _dict_items(previous.get("design_adjustments"))
+        mappings = _apply_design_adjustments(mappings, adjustments)
+        test_intents = _dict_items(llm_payload.get("test_intents")) or previous_tests
+        implementation_steps = _apply_design_adjustments_to_steps(
+            _dict_items(llm_payload.get("implementation_steps"))
+            or _dict_items(previous.get("implementation_steps")),
+            adjustments,
+        )
+        proposed_files = _canonical_proposed_files(
+            proposed_files=[
+                *_dict_items(previous.get("proposed_files")),
+                *_dict_items(llm_payload.get("proposed_files")),
+            ],
+            implementation_steps=implementation_steps,
+            mappings=mappings,
+        )
+        proposed_files = _ensure_executable_test_files(proposed_files=proposed_files, mappings=mappings)
+        requirement_coverage = (
+            _requirement_coverage(
+                requirement_graph=requirement_graph or {},
+                requirement_design_trace=requirement_design_trace,
+                mappings=mappings,
+            )
+            if canonical_requirement is not None
+            else []
+        )
+        llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
+        history = _dict_items(previous.get("repair_history"))
+        history.append(
+            {
+                "iteration": iteration,
+                "source": "validator_review_plan",
+                "previous_plan_version": f"implementation_plan_v{iteration}",
+                "issue_count": int(review_report.get("issue_count") or len(_string_items(review_report.get("issues")))),
+                "feedback": developer_feedback,
+            }
         )
         structured = {
-            **repaired.structured,
+            **previous,
+            "planning_mode": "llm_repair_patch_v1" if not llm_parse_error else "deterministic_repair_after_llm_parse_error_v1",
+            "repo_context": _repo_context_summary(repo_context or {}),
+            "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
+            "implementation_steps": implementation_steps,
+            "proposed_files": proposed_files,
+            "design_mappings": mappings,
+            "design_adjustments": adjustments,
+            "requirement_coverage": requirement_coverage,
+            "test_intents": test_intents,
             "repair_iteration": iteration,
             "repair_source": "validator_review_plan",
-            "repair_feedback": developer_feedback,
-            "previous_plan_version": previous_draft.structured.get("artifact_ref", ""),
-            "previous_review": review_report,
+            "repair_history": history,
+            "developer_llm": {
+                "used": bool(self.llm_client),
+                "summary": str(llm_payload.get("summary") or "").strip(),
+                "parse_error": llm_parse_error,
+                "repair_feedback_attached": True,
+            },
         }
-        markdown = (
-            repaired.markdown.rstrip()
-            + "\n\n## Repair Feedback Addressed\n\n"
-            + f"- Repair iteration: {iteration}\n"
-            + f"- Validator feedback: {developer_feedback or 'No free-form feedback provided.'}\n"
+        markdown = _markdown_plan(
+            structured=structured,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+        )
+        markdown += (
+            "\n\n## Repair Feedback Addressed\n\n"
+            f"- Repair iteration: {iteration}\n"
+            f"- Validator feedback: {developer_feedback or 'No free-form feedback provided.'}\n"
         )
         return ImplementationPlanDraft(markdown=markdown, structured=structured)
-
 
 def _developer_plan_prompt(
     *,
@@ -334,6 +408,20 @@ def _developer_plan_prompt(
         if canonical_requirement is not None
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
+    repair_mode = bool(repair_feedback.strip())
+    requirement_text = _excerpt(requirement_packet, limit=3000 if repair_mode else 6000)
+    design_text = _excerpt(design_artifact, limit=3000 if repair_mode else 6000)
+    trace_payload = (
+        {
+            key: requirement_design_trace.get(key, [])
+            for key in ("version", "class_trace", "sequence_trace")
+        }
+        if repair_mode
+        else requirement_design_trace
+    )
+    class_payload = _compact_class_graph(class_graph) if repair_mode else class_graph
+    sequence_payload = _compact_sequence_graph(sequence_graph) if repair_mode else sequence_graph
+    mapping_payload = _compact_mappings(base_mappings) if repair_mode else base_mappings
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -384,12 +472,17 @@ Rules:
   them in Python. In `design_mappings`, return only mappings you improve or
   correct using repo evidence. Return [] when the base mappings are good enough.
 - `implementation_steps` must be 3-6 high-level steps, not one step per design element.
-- `proposed_files` must be max 12 files and grouped by file, not by method.
+- `proposed_files` must include every Java file named by implementation steps or design mappings.
+- Keep proposed files grouped by file, not by method.
 - `test_intents` must be max 6 focused tests.
 - Do not add behavior outside the approved requirement/design.
 - Proposed files must stay under src/main/java or src/test/java.
 - Use CodeGraph evidence when naming existing classes/files.
 - If this is a repair iteration, address the validator feedback directly.
+- A mapping with `implementation_status=waived_by_design_adjustment` is intentionally omitted
+  from executable code. Never plan that method in a step, prose, test, or direct symbol target.
+- During repair, return concise replacements and keep the response below 3000 tokens. Do not
+  repeat unchanged design mappings or repository evidence.
 
 Run context:
 - run_id: {run_id}
@@ -407,22 +500,22 @@ Target files:
 {canonical_section}
 
 Approved requirement packet:
-{_excerpt(requirement_packet, limit=6000)}
+{requirement_text}
 
 Approved design artifact:
-{_excerpt(design_artifact, limit=6000)}
+{design_text}
 
 Requirement-design trace:
-{json.dumps(requirement_design_trace, ensure_ascii=False, indent=2)}
+{json.dumps(trace_payload, ensure_ascii=False, separators=(",", ":"))}
 
 Class graph:
-{json.dumps(class_graph, ensure_ascii=False, indent=2)}
+{json.dumps(class_payload, ensure_ascii=False, separators=(",", ":"))}
 
 Sequence graph:
-{json.dumps(sequence_graph, ensure_ascii=False, indent=2)}
+{json.dumps(sequence_payload, ensure_ascii=False, separators=(",", ":"))}
 
 Base deterministic mappings:
-{json.dumps(base_mappings, ensure_ascii=False, indent=2)}
+{json.dumps(mapping_payload, ensure_ascii=False, separators=(",", ":"))}
 
 Base test intents:
 {json.dumps(base_test_intents, ensure_ascii=False, indent=2)}
@@ -498,7 +591,7 @@ def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, 
 
 
 def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
-    return bool(expected_keys.intersection(candidate.keys()))
+    return expected_keys.issubset(candidate.keys())
 
 
 def _merge_mappings(base: list[dict[str, object]], llm_items: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -583,6 +676,288 @@ def _proposed_files_from_mappings(mappings: list[dict[str, object]]) -> list[dic
         if isinstance(refs, list):
             refs.append(str(item.get("design_element_id") or ""))
     return list(result.values())
+
+
+def _canonical_proposed_files(
+    *,
+    proposed_files: list[dict[str, object]],
+    implementation_steps: list[dict[str, object]],
+    mappings: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Return the executable Java file set as one deterministic union."""
+
+    by_path: dict[str, dict[str, object]] = {}
+    for item in proposed_files:
+        path = _java_path(item.get("path"))
+        if path:
+            by_path[path] = {**item, "path": path}
+    for step in implementation_steps:
+        for raw_path in step.get("files", []) if isinstance(step.get("files"), list) else []:
+            path = _java_path(raw_path)
+            if path and path not in by_path:
+                by_path[path] = {
+                    "path": path,
+                    "action": "create_or_update",
+                    "reason": "Named by an implementation step.",
+                    "related_design_elements": _string_items(step.get("design_refs")),
+                }
+    for mapping in mappings:
+        path = _java_path(str(mapping.get("planned_code_target") or "").split("#", 1)[0])
+        if not path:
+            continue
+        entry = by_path.setdefault(
+            path,
+            {
+                "path": path,
+                "action": "create_or_update",
+                "reason": "Needed by an approved design mapping.",
+                "related_design_elements": [],
+            },
+        )
+        refs = entry.setdefault("related_design_elements", [])
+        element_id = str(mapping.get("design_element_id") or "").strip()
+        if isinstance(refs, list) and element_id and element_id not in refs:
+            refs.append(element_id)
+    return list(by_path.values())
+
+
+def _java_path(value: object) -> str:
+    path = str(value or "").strip().replace("\\", "/")
+    return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
+
+
+def _ensure_executable_test_files(
+    *, proposed_files: list[dict[str, object]], mappings: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """Ensure flow and repository behaviors have editable test targets."""
+
+    result = list(proposed_files)
+    seen = {str(item.get("path") or "") for item in result}
+    class_targets = {
+        str(item.get("design_element_name") or ""): str(item.get("planned_code_target") or "").split("#", 1)[0]
+        for item in mappings
+        if item.get("design_element_type") == "class"
+    }
+    required: list[tuple[str, str, str]] = []
+    controllers = [(name, path) for name, path in class_targets.items() if name.endswith("Controller")]
+    if controllers and any(item.get("design_element_type") == "sequence_message" for item in mappings):
+        name, path = controllers[0]
+        flow_name = name.removesuffix("Controller") + "FlowTest"
+        required.append((name, _test_path_for_main(path, flow_name), "Verify the approved sequence and acceptance flow."))
+    repositories = [(name, path) for name, path in class_targets.items() if name.endswith("Repository")]
+    if repositories:
+        name, path = repositories[0]
+        required.append((name, _test_path_for_main(path, f"{name}Test"), "Verify repository rules and persistence boundaries."))
+    for design_name, path, reason in required:
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        result.append(
+            {
+                "path": path,
+                "action": "create_or_update",
+                "reason": reason,
+                "related_design_elements": [f"class:{design_name}"],
+            }
+        )
+    return result
+
+
+def _test_path_for_main(main_path: str, test_class_name: str) -> str:
+    path = _java_path(main_path)
+    if not path or not path.startswith("src/main/java/"):
+        return ""
+    parent = path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
+    return f"{parent}/{test_class_name}.java"
+
+
+def _design_adjustments(
+    *,
+    class_graph: dict[str, object],
+    class_targets: dict[str, str],
+    target_repo_path: str,
+    requirement_design_trace: dict[str, object],
+) -> list[dict[str, object]]:
+    """Propose omission of untraced setters that conflict with existing final fields."""
+
+    directly_traced = {
+        str(link.get("target") or "").strip()
+        for key in ("class_trace", "sequence_trace")
+        for item in _dict_items(requirement_design_trace.get(key))
+        for link in _dict_items(item.get("links"))
+        if str(link.get("target") or "").strip()
+    }
+    root = Path(target_repo_path) if target_repo_path else None
+    result: list[dict[str, object]] = []
+    for node in _dict_items(class_graph.get("nodes")):
+        class_name = str(node.get("className") or node.get("id") or "").strip()
+        class_file = class_targets.get(class_name, "")
+        source = ""
+        if root and class_file:
+            source_path = root / class_file
+            if source_path.exists():
+                source = source_path.read_text(encoding="utf-8", errors="replace")
+        if not source:
+            continue
+        for method in _dict_items(node.get("methods")):
+            method_name = str(method.get("name") or "").strip()
+            if not re.fullmatch(r"set[A-Z].*", method_name):
+                continue
+            field_name = method_name[3:4].lower() + method_name[4:]
+            if not re.search(rf"\bfinal\b[^;]*\b{re.escape(field_name)}\s*;", source):
+                continue
+            design_name = f"{class_name}.{method_name}"
+            traced = design_name in directly_traced or method_name in directly_traced
+            result.append(
+                {
+                    "design_element_id": f"method:{design_name}",
+                    "action": "unresolved" if traced else "omit",
+                    "current_contract": f"`{class_name}.{field_name}` is final in the target repository.",
+                    "proposed_effective_contract": (
+                        f"Preserve immutable `{class_name}` state and constructor assignment; omit `{method_name}`."
+                    ),
+                    "reason": "A generated setter would conflict with the repository's immutable final-field invariant.",
+                    "requirement_trace_refs": [design_name] if traced else [],
+                    "requires_human_approval": True,
+                    "status": "conflict" if traced else "proposed",
+                }
+            )
+    return result
+
+
+def _apply_design_adjustments(
+    mappings: list[dict[str, object]], adjustments: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    by_id = {str(item.get("design_element_id") or ""): item for item in adjustments}
+    result: list[dict[str, object]] = []
+    for mapping in mappings:
+        item = dict(mapping)
+        adjustment = by_id.get(str(item.get("design_element_id") or ""))
+        if adjustment and adjustment.get("action") == "omit":
+            item["planned_code_target"] = str(item.get("planned_code_target") or "").split("#", 1)[0]
+            item["implementation_status"] = "waived_by_design_adjustment"
+            item["adjustment_ref"] = adjustment.get("design_element_id")
+            item["trace_policy"] = "design_adjustment"
+            item["reason"] = str(adjustment.get("proposed_effective_contract") or adjustment.get("reason") or "")
+            item["test_intent"] = "Verify the existing immutable constructor contract remains intact; do not add this setter."
+        result.append(item)
+    return result
+
+
+def _apply_design_adjustments_to_steps(
+    steps: list[dict[str, object]], adjustments: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    omitted = [item for item in adjustments if item.get("action") == "omit"]
+    if not omitted:
+        return steps
+    by_class: dict[str, list[str]] = {}
+    omitted_ids = {str(item.get("design_element_id") or "") for item in omitted}
+    for item in omitted:
+        element_id = str(item.get("design_element_id") or "")
+        qualified = element_id.split(":", 1)[-1]
+        if "." not in qualified:
+            continue
+        class_name, method_name = qualified.rsplit(".", 1)
+        by_class.setdefault(class_name, []).append(method_name)
+
+    result: list[dict[str, object]] = []
+    for step in steps:
+        item = dict(step)
+        refs = _string_items(item.get("design_refs"))
+        text = f"{item.get('title') or ''} {item.get('description') or ''}"
+        affected = {
+            class_name: methods
+            for class_name, methods in by_class.items()
+            if any(f"method:{class_name}.{method}" in refs or method in text for method in methods)
+        }
+        item["design_refs"] = [ref for ref in refs if ref not in omitted_ids]
+        if affected:
+            constraints = []
+            for class_name, methods in affected.items():
+                constraints.append(
+                    f"Preserve the existing immutable `{class_name}` constructor contract and do not add "
+                    + ", ".join(f"`{method}`" for method in methods)
+                    + "; those methods are omitted by the design adjustment reviewed at this checkpoint."
+                )
+            item["description"] = " ".join(constraints) + " Keep all other approved design refs in this step unchanged."
+        result.append(item)
+    return result
+
+
+def _compact_review(review: dict[str, object]) -> dict[str, object]:
+    return {
+        "ok": review.get("ok"),
+        "summary": review.get("summary"),
+        "developer_feedback": review.get("developer_feedback"),
+        "issues": _string_items(review.get("issues")) or [
+            issue
+            for key in (
+                "coverage_issues",
+                "requirement_coverage_issues",
+                "traceability_issues",
+                "executability_issues",
+                "scope_issues",
+                "implementation_quality_issues",
+                "test_issues",
+            )
+            for issue in _string_items(review.get(key))
+        ],
+    }
+
+
+def _repair_candidate(plan: dict[str, object]) -> dict[str, object]:
+    return {
+        "implementation_steps": _dict_items(plan.get("implementation_steps")),
+        "proposed_files": _dict_items(plan.get("proposed_files")),
+        "design_adjustments": _dict_items(plan.get("design_adjustments")),
+        "test_intents": _dict_items(plan.get("test_intents")),
+    }
+
+
+def _compact_mappings(mappings: list[dict[str, object]]) -> list[dict[str, object]]:
+    keys = (
+        "design_element_id",
+        "design_element_type",
+        "design_element_name",
+        "planned_code_target",
+        "message_type",
+        "trace_policy",
+        "implementation_status",
+        "adjustment_ref",
+    )
+    return [{key: item[key] for key in keys if key in item} for item in mappings]
+
+
+def _compact_class_graph(graph: dict[str, object]) -> dict[str, object]:
+    return {
+        "nodes": [
+            {
+                "className": node.get("className") or node.get("id"),
+                "methods": [method.get("name") for method in _dict_items(node.get("methods"))],
+            }
+            for node in _dict_items(graph.get("nodes"))
+        ]
+    }
+
+
+def _compact_sequence_graph(graph: dict[str, object]) -> dict[str, object]:
+    return {
+        "sequenceDiagrams": [
+            {
+                "id": diagram.get("id"),
+                "messages": [
+                    {
+                        "from": message.get("from"),
+                        "to": message.get("to"),
+                        "message": message.get("message"),
+                        "type": message.get("type"),
+                    }
+                    for message in _dict_items(diagram.get("messages"))
+                ],
+            }
+            for diagram in _dict_items(graph.get("sequenceDiagrams"))
+        ]
+    }
 
 
 def _string_items(value: object) -> list[str]:
@@ -680,9 +1055,12 @@ def _design_mappings(
     class_graph: dict[str, object],
     sequence_graph: dict[str, object],
     target_files: list[str],
+    target_repo_path: str = "",
+    requirement_design_trace: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
     mappings: list[dict[str, object]] = []
     class_targets = _class_target_files(class_graph=class_graph, target_files=target_files)
+    class_methods = _class_methods(class_graph)
 
     for node in _dict_items(class_graph.get("nodes")):
         class_name = str(node.get("className") or node.get("id") or "").strip()
@@ -716,17 +1094,22 @@ def _design_mappings(
 
     for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):
         diagram_id = str(diagram.get("id") or "sequence_diagram").strip()
+        participant_classes = _sequence_participant_classes(diagram=diagram, class_targets=class_targets)
         for index, message in enumerate(_dict_items(diagram.get("messages")), start=1):
             source = str(message.get("from") or "").strip()
             target = str(message.get("to") or "").strip()
             text = str(message.get("message") or "").strip()
             if not text:
                 continue
-            code_target = _sequence_message_target(
+            message_type = str(message.get("type") or "synchronous").strip().lower()
+            code_target, trace_policy = _sequence_message_target(
                 message_text=text,
                 source=source,
                 target=target,
                 class_targets=class_targets,
+                class_methods=class_methods,
+                participant_classes=participant_classes,
+                message_type=message_type,
             )
             mappings.append(
                 {
@@ -734,6 +1117,9 @@ def _design_mappings(
                     "design_element_type": "sequence_message",
                     "design_element_name": f"{source}->{target}: {text}",
                     "planned_code_target": code_target,
+                    "message_type": message_type,
+                    "trace_policy": trace_policy,
+                    "source_message": text,
                     "reason": "Preserve the approved sequence interaction in the implementation flow.",
                     "test_intent": f"Verify sequence step `{text}` through an integration or service-level test.",
                 }
@@ -782,15 +1168,70 @@ def _sequence_message_target(
     source: str,
     target: str,
     class_targets: dict[str, str],
-) -> str:
-    method_name = message_text.split("(", 1)[0].strip().replace(" ", "")
-    participant_class = _participant_to_class(target, class_targets) or _participant_to_class(source, class_targets)
-    if participant_class:
-        code_file = class_targets.get(participant_class, _default_java_file(participant_class))
-        if method_name:
-            return f"{code_file}#{method_name}"
-        return code_file
-    return "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java"
+    class_methods: dict[str, set[str]],
+    participant_classes: dict[str, str],
+    message_type: str,
+) -> tuple[str, str]:
+    method_name = _message_method_name(message_text)
+    source_class = participant_classes.get(source) or _participant_to_class(source, class_targets)
+    target_class = participant_classes.get(target) or _participant_to_class(target, class_targets)
+    normalized_type = message_type or "synchronous"
+
+    if normalized_type == "return":
+        owner = source_class or target_class
+        if not owner:
+            return "", "return_behavior"
+        code_file = class_targets.get(owner, _default_java_file(owner))
+        if method_name and method_name in class_methods.get(owner, set()):
+            return f"{code_file}#{method_name}", "direct_symbol"
+        policy = "semantic_side_effect" if method_name.lower().startswith(("display", "show", "notify")) else "return_behavior"
+        return code_file, policy
+
+    if normalized_type in {"lost_or_exception", "exception", "lost"}:
+        owner = source_class or target_class
+        if not owner:
+            return "", "exception_path"
+        return class_targets.get(owner, _default_java_file(owner)), "exception_path"
+
+    owner = target_class or source_class
+    if not owner:
+        return "", "boundary_interaction"
+    code_file = class_targets.get(owner, _default_java_file(owner))
+    if method_name and method_name in class_methods.get(owner, set()):
+        return f"{code_file}#{method_name}", "direct_symbol"
+    return code_file, "boundary_interaction"
+
+
+def _message_method_name(message_text: str) -> str:
+    candidate = message_text.split("(", 1)[0].strip().replace(" ", "")
+    return candidate if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", candidate) else ""
+
+
+def _class_methods(class_graph: dict[str, object]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for node in _dict_items(class_graph.get("nodes")):
+        class_name = str(node.get("className") or node.get("id") or "").strip()
+        if not class_name:
+            continue
+        result[class_name] = {
+            str(method.get("name") or "").strip()
+            for method in _dict_items(node.get("methods"))
+            if str(method.get("name") or "").strip()
+        }
+    return result
+
+
+def _sequence_participant_classes(
+    *, diagram: dict[str, object], class_targets: dict[str, str]
+) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for node in _dict_items(diagram.get("nodes")):
+        participant_id = str(node.get("id") or "").strip()
+        label = str(node.get("label") or node.get("name") or participant_id).strip()
+        class_name = _participant_to_class(label, class_targets) or _participant_to_class(participant_id, class_targets)
+        if participant_id and class_name:
+            result[participant_id] = class_name
+    return result
 
 
 def _participant_to_class(participant: str, class_targets: dict[str, str]) -> str:

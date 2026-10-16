@@ -157,9 +157,34 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "requirement_model_v2_validation_failed")
         self.assertEqual(len(client.calls), 2)
 
-    def test_semantic_violation_does_not_call_repair(self) -> None:
+    def test_exception_placement_violations_use_one_bounded_repair(self) -> None:
         invalid = deepcopy(self.payload)
         invalid["flows"]["main"][0]["action"] = "Cancel the operation."
+        invalid["postconditions"][0]["text"] = "Connection failure is reported."
+
+        result, client = self.refine(self.completion(invalid), self.completion(self.payload))
+
+        self.assertTrue(result.repaired)
+        self.assertEqual([attempt.purpose for attempt in result.attempts], ["initial", "validator_repair"])
+        repair_prompt = str(client.calls[1]["prompt"])
+        self.assertIn("exception_in_main_flow", repair_prompt)
+        self.assertIn("exception_in_postcondition", repair_prompt)
+        self.assertIn("flows.exceptions", repair_prompt)
+        self.assertTrue(result.final_report.ok)
+
+    def test_unapproved_semantic_violation_still_fails_without_repair(self) -> None:
+        invalid = deepcopy(self.payload)
+        invalid["assumptions"] = [
+            {
+                "id": "ASM-1",
+                "text": "The operator uses a desktop browser.",
+                "status": "explicit",
+                "evidence_refs": [],
+                "open_question_refs": [],
+                "reason": "Not confirmed by the source.",
+                "affects": [],
+            }
+        ]
         client = ScriptedLlmClient([self.completion(invalid)])
         with self.assertRaises(HarnessError) as context:
             RequirementModelV2Refiner(client).refine(

@@ -30,12 +30,22 @@ def build_developer_work_packet(
     canonical_requirements: list[dict[str, object]] | None = None,
     requirement_contract: dict[str, object] | None = None,
     requirement_coverage: list[dict[str, object]] | None = None,
+    effective_design_contract: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
 
-    design_mappings = _dict_items(structured_plan.get("design_mappings"))
+    design_mappings = [
+        item
+        for item in _dict_items(structured_plan.get("design_mappings"))
+        if item.get("implementation_status") != "waived_by_design_adjustment"
+    ]
+    implementation_steps = _dict_items(structured_plan.get("implementation_steps"))
     proposed_files = _merge_mapping_targets_into_proposed_files(
-        proposed_files=_normalize_proposed_files(structured_plan.get("proposed_files"), run_id=run_id),
+        proposed_files=_merge_step_targets_into_proposed_files(
+            proposed_files=_normalize_proposed_files(structured_plan.get("proposed_files"), run_id=run_id),
+            implementation_steps=implementation_steps,
+            run_id=run_id,
+        ),
         design_mappings=design_mappings,
     )
     enriched_files = [
@@ -69,11 +79,13 @@ def build_developer_work_packet(
             "remote": run_workspace.get("remote"),
         },
         "approved_plan": approved_plan_refs,
+        "effective_design_contract": effective_design_contract or {},
+        "design_adjustments": _dict_items(structured_plan.get("design_adjustments")),
         "requirement_contract": requirement_contract,
         "canonical_requirements": canonical_requirements,
         "requirement_coverage": requirement_coverage,
         "requirement_coverage_by_file": coverage_by_file,
-        "implementation_steps": _dict_items(structured_plan.get("implementation_steps")),
+        "implementation_steps": implementation_steps,
         "proposed_files": enriched_files,
         "design_mappings_by_file": _group_design_mappings_by_file(design_mappings),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
@@ -285,6 +297,31 @@ def _merge_mapping_targets_into_proposed_files(
                 "purpose": f"Implement mapped design element `{mapping.get('design_element_id') or ''}`.",
             }
         )
+    return merged
+
+
+def _merge_step_targets_into_proposed_files(
+    *,
+    proposed_files: list[dict[str, object]],
+    implementation_steps: list[dict[str, object]],
+    run_id: str,
+) -> list[dict[str, object]]:
+    merged = list(proposed_files)
+    seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
+    for step in implementation_steps:
+        raw_files = step.get("files") if isinstance(step.get("files"), list) else []
+        for raw_path in raw_files:
+            path = _clean_repo_path(str(raw_path), run_id=run_id)
+            if path in seen:
+                continue
+            seen.add(path)
+            merged.append(
+                {
+                    "path": path,
+                    "operation": "create_or_update",
+                    "purpose": f"Implement plan step `{step.get('title') or step.get('order') or ''}`.",
+                }
+            )
     return merged
 
 

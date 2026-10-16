@@ -46,12 +46,30 @@ class LlmClient:
     ) -> LlmCompletion:
         """Sinh completion và giữ finish_reason/usage cho structured-output flow."""
 
+        return self.complete_messages(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+        )
+
+    def complete_messages(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> LlmCompletion:
+        """Complete a bounded transcript for controlled agent loops."""
+
         if self.settings.llm_mode == "fake":
+            prompt = next(
+                (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                "",
+            )
             return LlmCompletion(content=fake_completion(prompt), finish_reason="fake")
         if self.settings.llm_mode in {"deepseek", "openai_compatible"}:
-            return self._call_chat_completions(
-                system=system,
-                prompt=prompt,
+            return self._call_chat_completions_messages(
+                messages=messages,
                 json_mode=json_mode,
                 max_tokens=max_tokens,
             )
@@ -70,6 +88,21 @@ class LlmClient:
     ) -> LlmCompletion:
         """Gọi API Chat Completions tương thích OpenAI bằng stdlib."""
 
+        return self._call_chat_completions_messages(
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+        )
+
+    def _call_chat_completions_messages(
+        self,
+        *,
+        messages: list[dict[str, str]],
+        json_mode: bool = False,
+        max_tokens: int | None = None,
+    ) -> LlmCompletion:
+        """Gọi Chat Completions với transcript đã được Harness kiểm soát."""
+
         if not self.settings.llm_api_key:
             raise HarnessError(
                 "requirement_refiner_failed",
@@ -78,10 +111,7 @@ class LlmClient:
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
         payload = {
             "model": self.settings.llm_model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": prompt},
-            ],
+            "messages": messages,
             "temperature": 0.1,
         }
         if json_mode:
@@ -596,6 +626,31 @@ public final class DeleteCulturalHeritageFlowTest {
 """,
                     "reason": "Captures the approved success path for later test runner integration.",
                     "covered_design_elements": ["sequence:delete_cultural_heritage_main:1"],
+                },
+                {
+                    "path": "src/test/java/com/sdlc/etour/heritage/CulturalHeritageRepositoryTest.java",
+                    "operation": "create_or_update",
+                    "content": """package com.sdlc.etour.heritage;
+
+public final class CulturalHeritageRepositoryTest {
+    public static void main(String[] args) {
+        CulturalHeritageRepository repository = new CulturalHeritageRepository();
+        repository.save("heritage-1", new CulturalHeritage());
+        if (repository.findById("heritage-1").isEmpty()) {
+            throw new IllegalStateException("Expected saved heritage to be found");
+        }
+        if (!repository.delete("heritage-1")) {
+            throw new IllegalStateException("Expected repository delete to succeed");
+        }
+    }
+}
+""",
+                    "reason": "Covers the repository file required by the approved implementation plan.",
+                    "covered_design_elements": [
+                        "class:CulturalHeritageRepository",
+                        "method:CulturalHeritageRepository.findById",
+                        "method:CulturalHeritageRepository.delete",
+                    ],
                 },
             ],
         },

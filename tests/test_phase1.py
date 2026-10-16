@@ -448,6 +448,44 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(response["summary_for_user"], current_summary)
         self.assertEqual(state_path.read_text(encoding="utf-8"), persisted_before)
 
+    def test_get_status_advertises_sync_retry_for_partial_checkpoint_sync(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_20261016_072017_ae0bac6b"
+        state = {
+            "ok": True,
+            "run_id": run_id,
+            "source_ref": "jira_issue:SDLC-2",
+            "current_phase": "design_review",
+            "status": "waiting_design_approval",
+            "pending_checkpoint": {
+                "checkpoint_id": f"checkpoint_design_{run_id}",
+                "type": "design_approval",
+                "artifact_ref": "design_artifact_v1",
+            },
+            "allowed_next_actions": [
+                "approve_checkpoint",
+                "request_change",
+                "cancel_run",
+                "get_status",
+            ],
+            "last_sync": {
+                "phase": "design_checkpoint",
+                "status": "partial_failed",
+                "mode": "real",
+            },
+        }
+        workflow.store.write_state(state)
+        state_path = workflow.store.state_path(run_id)
+        persisted_before = state_path.read_text(encoding="utf-8")
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(
+            response["allowed_next_actions"],
+            ["approve_checkpoint", "request_change", "sync_run", "cancel_run", "get_status"],
+        )
+        self.assertEqual(state_path.read_text(encoding="utf-8"), persisted_before)
+
     def test_get_status_returns_run_not_found(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
         with self.assertRaises(HarnessError) as ctx:
@@ -799,6 +837,62 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(result["status"], "partial_failed")
         self.assertEqual(result["targets"][0]["status"], "synced")
         self.assertEqual(result["targets"][1]["status"], "failed")
+
+    def test_status_exposes_safe_retry_for_legacy_developer_truncation_in_tool_loop_mode(self) -> None:
+        settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
+            },
+        )
+        workflow = PhaseOneWorkflow(settings)
+        workflow.store.write_state(
+            {
+                "run_id": "run_legacy_developer_truncation",
+                "source_ref": "jira_issue:SDLC-2",
+                "current_phase": "implementation_writing",
+                "status": "blocked",
+                "latest_artifacts": {"developer_work_packet": "packet.json"},
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": {"error_code": "developer_act_failed", "message": "truncated"},
+                "developer_execution": {},
+            }
+        )
+
+        response = workflow.get_status(run_id="run_legacy_developer_truncation")
+
+        self.assertEqual(response["allowed_next_actions"][0], "continue_run")
+        self.assertEqual(response["developer_execution"], {})
+
+    def test_status_exposes_safe_retry_for_blocked_repair_selection_policy_drift(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_repair_item_scope_mismatch"
+        workflow.store.write_state(
+            {
+                "run_id": run_id,
+                "source_ref": "jira_issue:SDLC-2",
+                "current_phase": "implementation_repair",
+                "status": "blocked",
+                "latest_artifacts": {
+                    "implementation_repair_feedback": "feedback.json",
+                    "developer_repair_execution_manifest": "manifest.json",
+                    "developer_repair_execution_journal": "journal.json",
+                },
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": {
+                    "error_code": "developer_input_drift",
+                    "message": "Persisted repair selection differs from the current selection policy.",
+                },
+                "developer_execution": {"mode": "implementation_repair"},
+            }
+        )
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(response["allowed_next_actions"][0], "continue_run")
 
 
 def _valid_requirement_packet() -> str:

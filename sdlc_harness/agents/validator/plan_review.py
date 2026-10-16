@@ -41,7 +41,12 @@ def _expected_design_elements(
             text = str(message.get("message") or "").strip()
             if text:
                 name = f"{source}->{target}: {text}"
-                expected[f"sequence:{diagram_id}:{index}"] = {"type": "sequence_message", "name": name}
+                expected[f"sequence:{diagram_id}:{index}"] = {
+                    "type": "sequence_message",
+                    "name": name,
+                    "message_type": str(message.get("type") or "synchronous").strip().lower(),
+                    "message": text,
+                }
     return expected
 
 
@@ -166,7 +171,125 @@ def _executability_issues(
     for item in test_intents:
         if not str(item.get("command") or "").strip():
             issues.append("A test intent is missing the command.")
+
+    proposed = _dict_items(structured_plan.get("proposed_files"))
+    proposed_paths = {_normalized_java_path(item.get("path")) for item in proposed}
+    proposed_paths.discard("")
+    for item in proposed:
+        path = _normalized_java_path(item.get("path"))
+        if not path:
+            issues.append(f"Proposed file is outside Java source/test roots: {item.get('path')}")
+    step_paths: set[str] = set()
+    for step in _dict_items(structured_plan.get("implementation_steps")):
+        raw_files = step.get("files") if isinstance(step.get("files"), list) else []
+        for raw_path in raw_files:
+            path = _normalized_java_path(raw_path)
+            if not path:
+                issues.append(f"Implementation step file is outside Java source/test roots: {raw_path}")
+                continue
+            step_paths.add(path)
+    for path in sorted(step_paths - proposed_paths):
+        issues.append(f"Implementation step file is missing from proposed_files: {path}")
+    mapping_paths = {
+        _normalized_java_path(str(item.get("planned_code_target") or "").split("#", 1)[0])
+        for item in mappings
+    }
+    mapping_paths.discard("")
+    for path in sorted(mapping_paths - proposed_paths):
+        issues.append(f"Design mapping file is missing from proposed_files: {path}")
+
+    class_targets = {
+        str(item.get("design_element_name") or ""): str(item.get("planned_code_target") or "").split("#", 1)[0]
+        for item in mappings
+        if item.get("design_element_type") == "class"
+    }
+    if any(item.get("design_element_type") == "sequence_message" for item in mappings):
+        controller = next(
+            ((name, path) for name, path in class_targets.items() if name.endswith("Controller")),
+            None,
+        )
+        if controller:
+            name, main_path = controller
+            parent = main_path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
+            expected_flow_test = f"{parent}/{name.removesuffix('Controller')}FlowTest.java"
+            if expected_flow_test not in proposed_paths:
+                issues.append(f"Approved sequence flow has no editable flow-test path: {expected_flow_test}")
+
+    for adjustment in _dict_items(structured_plan.get("design_adjustments")):
+        if adjustment.get("action") == "unresolved" or adjustment.get("status") == "conflict":
+            issues.append(
+                f"Design/repository conflict is unresolved: {adjustment.get('design_element_id')}"
+            )
     return issues
+
+
+def _mapping_contract_issues(
+    *,
+    mappings: list[dict[str, Any]],
+    expected: dict[str, dict[str, str]],
+    class_graph: dict[str, object],
+) -> list[str]:
+    issues: list[str] = []
+    ids = [str(item.get("design_element_id") or "").strip() for item in mappings]
+    if len([item for item in ids if item]) != len(set(item for item in ids if item)):
+        issues.append("Implementation plan contains duplicate design mapping IDs.")
+    class_methods: dict[str, set[str]] = {}
+    for node in _dict_items(class_graph.get("nodes")):
+        class_name = str(node.get("className") or node.get("id") or "").strip()
+        class_methods[class_name] = {
+            str(method.get("name") or "").strip()
+            for method in _dict_items(node.get("methods"))
+            if str(method.get("name") or "").strip()
+        }
+    allowed_policies = {
+        "synchronous": {"direct_symbol", "boundary_interaction"},
+        "return": {"direct_symbol", "return_behavior", "semantic_side_effect"},
+        "lost_or_exception": {"exception_path"},
+        "exception": {"exception_path"},
+        "lost": {"exception_path"},
+    }
+    for mapping in mappings:
+        element_id = str(mapping.get("design_element_id") or "").strip()
+        expected_item = expected.get(element_id)
+        if not expected_item:
+            continue
+        if str(mapping.get("design_element_type") or "") != expected_item["type"]:
+            issues.append(f"Mapping type does not match approved graph: {element_id}")
+        if str(mapping.get("design_element_name") or "") != expected_item["name"]:
+            issues.append(f"Mapping name does not match approved graph: {element_id}")
+        if expected_item["type"] == "method":
+            if mapping.get("implementation_status") == "waived_by_design_adjustment":
+                continue
+            target = str(mapping.get("planned_code_target") or "").strip()
+            if "#" not in target:
+                issues.append(f"Method mapping does not target an approved method symbol: {element_id}")
+            else:
+                path, symbol = target.split("#", 1)
+                owner = path.rsplit("/", 1)[-1].removesuffix(".java")
+                if symbol not in class_methods.get(owner, set()):
+                    issues.append(f"Method target is not an approved class method: {target}")
+            continue
+        if expected_item["type"] != "sequence_message":
+            continue
+        message_type = str(mapping.get("message_type") or "").strip().lower()
+        trace_policy = str(mapping.get("trace_policy") or "").strip()
+        if message_type != expected_item.get("message_type"):
+            issues.append(f"Sequence message type does not match approved graph: {element_id}")
+        if trace_policy not in allowed_policies.get(message_type, set()):
+            issues.append(f"Sequence trace policy `{trace_policy}` is invalid for {message_type}: {element_id}")
+        target = str(mapping.get("planned_code_target") or "").strip()
+        if "#" not in target or trace_policy != "direct_symbol":
+            continue
+        path, symbol = target.split("#", 1)
+        owner = path.rsplit("/", 1)[-1].removesuffix(".java")
+        if symbol not in class_methods.get(owner, set()):
+            issues.append(f"Direct sequence target is not an approved class method: {target}")
+    return issues
+
+
+def _normalized_java_path(value: object) -> str:
+    path = str(value or "").strip().replace("\\", "/")
+    return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
 
 
 def _dict_items(value: object) -> list[dict[str, Any]]:
@@ -320,6 +443,9 @@ class ImplementationPlanValidator:
         executability_issues = _executability_issues(
             structured_plan=structured_plan,
             mappings=mappings,
+        )
+        executability_issues.extend(
+            _mapping_contract_issues(mappings=mappings, expected=expected, class_graph=class_graph)
         )
         scope_issues = [
             f"Plan references design element outside approved graph: {element_id}"
@@ -484,6 +610,15 @@ def _llm_review_prompt(
         if canonical_requirement
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
+    compact_plan = {
+        key: value
+        for key, value in structured_plan.items()
+        if key not in {"requirement_coverage", "repair_history", "repo_context"}
+    }
+    compact_trace = {
+        key: requirement_design_trace.get(key, [])
+        for key in ("version", "class_trace", "sequence_trace")
+    }
     return f"""Implementation Plan LLM Review v1
 
 You must compare the implementation plan against the approved requirement and design.
@@ -509,6 +644,15 @@ Fail the review when:
 - the test plan is too vague for Phase 4 to verify the use case;
 - the plan adds out-of-scope behavior not present in the approved design.
 
+Review boundaries:
+- An untraced `design_adjustment` with action `omit`, a waived mapping, and
+  `requires_human_approval=true` is a proposal for the current human plan checkpoint.
+  Treat it as internally resolved when steps do not implement the omitted element;
+  the next human approval freezes it into the effective design contract.
+- Judge concurrency, transaction, rollback, authentication, and infrastructure only
+  when the approved requirement/design explicitly defines those semantics. Do not
+  invent a broader system contract as a reason to reject the plan.
+
 Approved requirement packet:
 {_excerpt(requirement_packet, limit=6000)}
 
@@ -518,16 +662,16 @@ Approved design artifact:
 {_excerpt(design_artifact, limit=6000)}
 
 Requirement-design trace JSON:
-{json.dumps(requirement_design_trace, ensure_ascii=False, indent=2)}
+{json.dumps(compact_trace, ensure_ascii=False, separators=(",", ":"))}
 
 Class graph JSON:
-{json.dumps(class_graph, ensure_ascii=False, indent=2)}
+{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}
 
 Sequence graph JSON:
-{json.dumps(sequence_graph, ensure_ascii=False, indent=2)}
+{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))}
 
 Structured implementation plan JSON:
-{json.dumps(structured_plan, ensure_ascii=False, indent=2)}
+{json.dumps(compact_plan, ensure_ascii=False, separators=(",", ":"))}
 
 Rule review JSON:
 {json.dumps(rule_review.to_dict(), ensure_ascii=False, indent=2)}
@@ -548,7 +692,7 @@ def _parse_llm_review_payload(raw: str) -> dict[str, object]:
             "Implementation plan LLM review must return a JSON object.",
         )
     payload = {
-        "ok": bool(parsed.get("ok")),
+        "ok": parsed.get("ok") if isinstance(parsed.get("ok"), bool) else False,
         "summary": str(parsed.get("summary") or "").strip(),
         "coverage_issues": _string_items(parsed.get("coverage_issues")),
         "requirement_coverage_issues": _string_items(parsed.get("requirement_coverage_issues")),
@@ -612,7 +756,7 @@ def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, 
 
 
 def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
-    return bool(expected_keys.intersection(candidate.keys()))
+    return expected_keys.issubset(candidate.keys())
 
 
 def _string_items(value: object) -> list[str]:

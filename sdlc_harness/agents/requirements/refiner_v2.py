@@ -56,6 +56,8 @@ _REPAIRABLE_ISSUE_CODES = {
     "unknown_without_question",
     "unknown_contains_inferred_content",
     "resolved_question_without_decision",
+    "exception_in_main_flow",
+    "exception_in_postcondition",
 }
 
 

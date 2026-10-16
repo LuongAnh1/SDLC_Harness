@@ -1,0 +1,774 @@
+"""Focused tests for the durable Phase 4 Developer action loop."""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import os
+from pathlib import Path
+import subprocess
+import tempfile
+import unittest
+
+from sdlc_harness.agents.developer.execution import (
+    DeveloperExecutionError,
+    DeveloperToolLoopExecutor,
+    _build_manifest,
+    _new_journal,
+    _parse_action,
+    _selected_repair_paths,
+    repair_scope_mismatch_retry_allowed,
+)
+from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import LlmCompletion
+from sdlc_harness.storage.runtime import RuntimeStore
+
+
+class ScriptedLlm:
+    def __init__(self, responses: list[LlmCompletion]):
+        self.responses = list(responses)
+        self.prompts: list[str] = []
+
+    def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.prompts.append(str(kwargs.get("prompt") or ""))
+        if not self.responses:
+            raise AssertionError("Scripted LLM ran out of responses")
+        return self.responses.pop(0)
+
+
+class SequenceSelfCheck:
+    def __init__(self, results: list[dict[str, object]]):
+        self.results = list(results)
+        self.calls = 0
+
+    def __call__(self) -> dict[str, object]:
+        self.calls += 1
+        if not self.results:
+            raise AssertionError("Self-check ran out of results")
+        return self.results.pop(0)
+
+
+def action(name: str, arguments: dict[str, object], *, finish_reason: str = "stop") -> LlmCompletion:
+    return LlmCompletion(
+        content=json.dumps({"action": name, "arguments": arguments}),
+        finish_reason=finish_reason,
+        usage={"completion_tokens": 12},
+    )
+
+
+class DeveloperToolLoopTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp_dir.name)
+        self.repo = self.root / "target"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        self.runtime = self.root / ".runtime"
+        self.store = RuntimeStore(repo_root=self.root, runtime_root=self.runtime)
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
+                "SDLC_DEVELOPER_MAX_ACTION_RETRIES": "0",
+            },
+        )
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def work_packet(self) -> dict[str, object]:
+        paths = ["src/Main.java", "src/MainTest.java"]
+        return {
+            "issue_key": "SDLC-2",
+            "approved_plan": {"summary": "Implement and test one behavior."},
+            "effective_design_contract": {"classes": ["Main"]},
+            "requirement_contract": {"version": "v2"},
+            "canonical_requirements": [{"id": "REQ-1", "content": "The behavior must be implemented."}],
+            "proposed_files": [
+                {"path": path, "operation": "create", "purpose": "Cover REQ-1."}
+                for path in paths
+            ],
+            "implementation_steps": [
+                {"order": index, "title": path, "description": "Implement REQ-1.", "files": [path]}
+                for index, path in enumerate(paths, start=1)
+            ],
+            "requirement_coverage_by_file": {
+                path: [{"requirement_id": "REQ-1"}] for path in paths
+            },
+            "design_mappings_by_file": {
+                path: [{"design_element_id": "class:Main", "planned_code_target": path}]
+                for path in paths
+            },
+            "output_contract": {"allowed_paths": paths},
+            "run_workspace": {"base_sha": "base-sha"},
+        }
+
+    def one_file_packet(self) -> dict[str, object]:
+        packet = self.work_packet()
+        packet["proposed_files"] = packet["proposed_files"][:1]
+        packet["implementation_steps"] = packet["implementation_steps"][:1]
+        packet["requirement_coverage_by_file"] = {
+            "src/Main.java": [{"requirement_id": "REQ-1"}],
+        }
+        packet["design_mappings_by_file"] = {
+            "src/Main.java": [{"design_element_id": "class:Main", "planned_code_target": "src/Main.java"}],
+        }
+        packet["output_contract"] = {"allowed_paths": ["src/Main.java"]}
+        return packet
+
+    def executor(self, llm: ScriptedLlm) -> DeveloperToolLoopExecutor:
+        return DeveloperToolLoopExecutor(settings=self.settings, store=self.store, llm_client=llm)
+
+    def test_truncated_item_rolls_back_only_current_item_and_resume_skips_completed_work(self) -> None:
+        first_llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("complete", {"summary": "Main implemented"}),
+                LlmCompletion(content="", finish_reason="length"),
+            ]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(first_llm).execute(
+                run_id="run_resume",
+                work_packet=self.work_packet(),
+                target_path=self.repo,
+            )
+
+        self.assertTrue(caught.exception.retriable)
+        self.assertEqual(caught.exception.error_code, "developer_action_truncated")
+        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+        self.assertFalse((self.repo / "src" / "MainTest.java").exists())
+
+        journal_path = self.root / caught.exception.journal_path
+        paused = json.loads(journal_path.read_text(encoding="utf-8"))
+        self.assertEqual([item["status"] for item in paused["items"]], ["completed", "pending"])
+
+        resumed_llm = ScriptedLlm(
+            [
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "Main test implemented"}),
+            ]
+        )
+        result = self.executor(resumed_llm).execute(
+            run_id="run_resume",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 2)
+        self.assertEqual(len(resumed_llm.prompts), 2)
+        self.assertIn("src/MainTest.java", resumed_llm.prompts[0])
+        self.assertNotIn('"path":"src/Main.java","operation"', resumed_llm.prompts[0])
+        action_dir = self.runtime / "runs" / "run_resume" / "developer_execution" / "act_v1" / "actions"
+        self.assertTrue((action_dir / "wi-002_a001_001.txt").exists())
+        self.assertTrue((action_dir / "wi-002_a002_001.txt").exists())
+        completed = json.loads(journal_path.read_text(encoding="utf-8"))
+        second_item = completed["items"][1]
+        self.assertEqual(second_item["attempts"], 2)
+        self.assertEqual(len(second_item["attempt_history"]), 1)
+
+    def test_write_action_cannot_escape_current_work_item(self) -> None:
+        llm = ScriptedLlm(
+            [action("write_file", {"path": "../escape.java", "expected_sha256": "", "content": "bad"})]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(llm).execute(
+                run_id="run_scope",
+                work_packet=self.work_packet(),
+                target_path=self.repo,
+            )
+
+        self.assertFalse(caught.exception.retriable)
+        self.assertEqual(caught.exception.error_code, "developer_act_out_of_scope")
+        self.assertFalse((self.root / "escape.java").exists())
+
+    def test_multiple_actions_with_reasoning_are_rejected_with_specific_feedback(self) -> None:
+        raw = (
+            '{"action":"read_file","arguments":{"path":"src/Main.java"}}\n'
+            "I should edit it now.\n"
+            '{"action":"write_file","arguments":{"path":"src/Main.java","content":"class Main {}"}}'
+        )
+
+        with self.assertRaisesRegex(
+            HarnessError,
+            "contained 2 JSON actions",
+        ):
+            _parse_action(raw)
+
+    def test_invalid_action_retry_count_resets_after_a_valid_action(self) -> None:
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
+                "SDLC_DEVELOPER_MAX_ACTION_RETRIES": "1",
+            },
+        )
+        packet = self.work_packet()
+        packet["proposed_files"] = packet["proposed_files"][:1]
+        packet["implementation_steps"] = packet["implementation_steps"][:1]
+        packet["requirement_coverage_by_file"] = {"src/Main.java": [{"requirement_id": "REQ-1"}]}
+        packet["design_mappings_by_file"] = {
+            "src/Main.java": [{"design_element_id": "class:Main", "planned_code_target": "src/Main.java"}],
+        }
+        packet["output_contract"] = {"allowed_paths": ["src/Main.java"]}
+        malformed = LlmCompletion(
+            content=(
+                '{"action":"read_file","arguments":{"path":"src/Main.java"}}\n'
+                "Then edit it.\n"
+                '{"action":"write_file","arguments":{"path":"src/Main.java","content":"class Main {}"}}'
+            ),
+            finish_reason="stop",
+        )
+        llm = ScriptedLlm(
+            [
+                malformed,
+                action("read_file", {"path": "src/Main.java"}),
+                malformed,
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                ),
+                action("complete", {"summary": "Main implemented"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_invalid_retry_reset",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 1)
+        self.assertIn("contained 2 JSON actions", llm.prompts[1])
+        self.assertIn("Return exactly one JSON action object", llm.prompts[1])
+
+    def test_repair_recovers_cross_item_write_and_can_complete_inspected_noop_item(self) -> None:
+        main_path = self.repo / "src" / "Main.java"
+        main_path.parent.mkdir(parents=True)
+        main_path.write_text("class Main {}\n", encoding="utf-8")
+        feedback = {
+            "feedback_source": "verification",
+            "verification": {
+                "stderr": "src/Main.java:1: inspect owner\nsrc/MainTest.java:1: error: missing coverage",
+            },
+        }
+        llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Main.java"}),
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "Main already correct", "no_change_required": True}),
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "test repaired"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_cross_item_recovery",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 2)
+        self.assertEqual(main_path.read_text(encoding="utf-8"), "class Main {}\n")
+        self.assertTrue(result.files[0]["no_change_required"])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        mismatch = journal["items"][0]["actions"][1]["tool_result"]
+        self.assertEqual(mismatch["error"], "current_item_mismatch")
+        self.assertEqual(mismatch["current_item"], "src/Main.java")
+
+    def test_repair_resume_accepts_persisted_scope_when_only_selection_policy_changed(self) -> None:
+        run_id = "run_selection_policy_migration"
+        packet = self.work_packet()
+        target = self.repo / "src" / "Main.java"
+        target.parent.mkdir(parents=True)
+        target.write_text("class Main {}\n", encoding="utf-8")
+        feedback = {
+            "feedback_source": "verification",
+            "verification": {"stderr": "src/MainTest.java:12: error: cannot call main.run()"},
+        }
+        session_dir = self.runtime / "runs" / run_id / "developer_execution" / "implementation_repair_v1"
+        session_dir.mkdir(parents=True)
+        persisted = _build_manifest(
+            run_id=run_id,
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+            selected_paths={"src/Main.java", "src/MainTest.java"},
+        )
+        current = _build_manifest(
+            run_id=run_id,
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        self.assertNotEqual(persisted["input_hash"], current["input_hash"])
+        (session_dir / "manifest.json").write_text(json.dumps(persisted), encoding="utf-8")
+        (session_dir / "journal.json").write_text(
+            json.dumps(_new_journal(run_id=run_id, manifest=persisted, mode="implementation_repair", repair_iteration=1)),
+            encoding="utf-8",
+        )
+        llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Main.java"}),
+                action("complete", {"summary": "legacy item is already correct", "no_change_required": True}),
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "test repaired"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id=run_id,
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 2)
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["migrations"][0]["code"], "repair_selection_policy_migrated")
+        self.assertEqual(journal["migrations"][0]["current_item_paths"], ["src/MainTest.java"])
+
+    def test_repair_resume_still_blocks_real_approved_input_drift(self) -> None:
+        run_id = "run_real_input_drift"
+        packet = self.work_packet()
+        feedback = {
+            "feedback_source": "verification",
+            "verification": {"stderr": "src/MainTest.java:12: error: missing coverage"},
+        }
+        session_dir = self.runtime / "runs" / run_id / "developer_execution" / "implementation_repair_v1"
+        session_dir.mkdir(parents=True)
+        manifest = _build_manifest(
+            run_id=run_id,
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        (session_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        changed_packet = self.work_packet()
+        changed_packet["approved_plan"] = {"summary": "Changed after approval."}
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(ScriptedLlm([])).execute(
+                run_id=run_id,
+                work_packet=changed_packet,
+                target_path=self.repo,
+                repair_feedback=feedback,
+                repair_iteration=1,
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_input_drift")
+        self.assertFalse(caught.exception.retriable)
+
+    def test_no_change_completion_is_rejected_outside_repair_mode(self) -> None:
+        packet = self.work_packet()
+        packet["proposed_files"] = packet["proposed_files"][:1]
+        packet["implementation_steps"] = packet["implementation_steps"][:1]
+        packet["requirement_coverage_by_file"] = {"src/Main.java": [{"requirement_id": "REQ-1"}]}
+        packet["design_mappings_by_file"] = {
+            "src/Main.java": [{"design_element_id": "class:Main", "planned_code_target": "src/Main.java"}],
+        }
+        packet["output_contract"] = {"allowed_paths": ["src/Main.java"]}
+        target = self.repo / "src" / "Main.java"
+        target.parent.mkdir(parents=True)
+        target.write_text("class Main {}\n", encoding="utf-8")
+        expected_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Main.java"}),
+                action("complete", {"summary": "skip", "no_change_required": True}),
+                action(
+                    "write_file",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": expected_hash,
+                        "content": "class Main { int value; }",
+                    },
+                ),
+                action("complete", {"summary": "implemented"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_act_requires_mutation",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        self.assertFalse(result.files[0]["no_change_required"])
+        self.assertIn("successful mutation", llm.prompts[2])
+        self.assertIn("int value", target.read_text(encoding="utf-8"))
+
+    def test_repair_scopes_use_separate_durable_sessions(self) -> None:
+        packet = self.work_packet()
+        implementation = self.executor(
+            ScriptedLlm(
+                [
+                    action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                    action("complete", {"summary": "implementation repair"}),
+                ]
+            )
+        ).execute(
+            run_id="run_repair_scopes",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback={"path": "src/Main.java", "message": "fix implementation"},
+            repair_iteration=1,
+            repair_scope="implementation",
+        )
+        qa = self.executor(
+            ScriptedLlm(
+                [
+                    action(
+                        "write_file",
+                        {
+                            "path": "src/MainTest.java",
+                            "expected_sha256": "",
+                            "content": "class MainTest {}",
+                        },
+                    ),
+                    action("complete", {"summary": "qa repair"}),
+                ]
+            )
+        ).execute(
+            run_id="run_repair_scopes",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback={"path": "src/MainTest.java", "message": "fix qa"},
+            repair_iteration=1,
+            repair_scope="qa",
+        )
+
+        self.assertIn("implementation_repair_v1", implementation.manifest_path)
+        self.assertIn("qa_repair_v1", qa.manifest_path)
+        self.assertNotEqual(implementation.manifest_path, qa.manifest_path)
+
+    def test_verification_feedback_does_not_treat_incidental_type_mentions_as_repair_targets(self) -> None:
+        packet = self.work_packet()
+        selected = _selected_repair_paths(
+            packet,
+            {
+                "feedback_source": "verification",
+                "verification": {
+                    "stderr": ".\\SRC\\MAINTEST.java:12: error: cannot call main.run()",
+                },
+            },
+        )
+
+        self.assertEqual(selected, {"src/MainTest.java"})
+
+    def test_verification_feedback_includes_high_signal_compiler_owner_symbols(self) -> None:
+        selected = _selected_repair_paths(
+            self.work_packet(),
+            {
+                "feedback_source": "verification",
+                "verification": {
+                    "stderr": ".\\src\\MainTest.java:12: error: cannot inherit from final Main",
+                },
+            },
+        )
+
+        self.assertEqual(selected, {"src/Main.java", "src/MainTest.java"})
+
+    def test_blocked_repair_scope_mismatch_has_safe_resume_migration(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "implementation_repair",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "implementation_repair"},
+            "latest_artifacts": {
+                "implementation_repair_feedback": "feedback.json",
+                "developer_repair_execution_manifest": "manifest.json",
+                "developer_repair_execution_journal": "journal.json",
+            },
+        }
+
+        self.assertTrue(repair_scope_mismatch_retry_allowed(state))
+        state["last_error"] = {"error_code": "developer_input_drift"}
+        self.assertTrue(repair_scope_mismatch_retry_allowed(state))
+        state["latest_artifacts"].pop("developer_repair_execution_journal")
+        self.assertFalse(repair_scope_mismatch_retry_allowed(state))
+
+    def test_repair_prompt_contains_structured_verification_feedback(self) -> None:
+        feedback = {
+            "feedback_source": "verification",
+            "verification": {"stderr": "src/Main.java:1: error: broken contract"},
+        }
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("complete", {"summary": "verification repair"}),
+                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
+                action("complete", {"summary": "related test repair"}),
+            ]
+        )
+
+        self.executor(llm).execute(
+            run_id="run_verification_feedback",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertIn("broken contract", llm.prompts[0])
+        manifest = json.loads(
+            (
+                self.runtime
+                / "runs"
+                / "run_verification_feedback"
+                / "developer_execution"
+                / "implementation_repair_v1"
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["repair_feedback"]["feedback_source"], "verification")
+
+    def test_self_check_passes_before_executor_completes(self) -> None:
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("complete", {"summary": "implemented"}),
+            ]
+        )
+        self_check = SequenceSelfCheck(
+            [{"status": "passed", "command": "fixed test command", "exit_code": 0, "reason": "passed"}]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_self_check_pass",
+            work_packet=self.one_file_packet(),
+            target_path=self.repo,
+            self_check=self_check,
+        )
+
+        self.assertEqual(self_check.calls, 1)
+        self.assertEqual(result.progress["self_check"]["status"], "passed")
+        self.assertEqual(result.progress["self_check"]["attempts"], 1)
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["self_check"]["latest_result"]["command"], "fixed test command")
+
+    def test_self_check_failure_reopens_diagnosed_item_and_repairs_in_same_session(self) -> None:
+        bad_content = "class Main { int broken; }"
+        bad_hash = hashlib.sha256((bad_content + os.linesep).encode("utf-8")).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": bad_content}),
+                action("complete", {"summary": "initial implementation"}),
+                action("read_file", {"path": "src/Main.java"}),
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": bad_hash, "content": "class Main {}"},
+                ),
+                action("complete", {"summary": "self-check repair"}),
+            ]
+        )
+        self_check = SequenceSelfCheck(
+            [
+                {
+                    "status": "failed",
+                    "command": "fixed test command",
+                    "exit_code": 1,
+                    "stderr": "src/Main.java:1: error: broken field",
+                    "reason": "compile failed",
+                },
+                {"status": "passed", "command": "fixed test command", "exit_code": 0, "reason": "passed"},
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_self_check_repair",
+            work_packet=self.one_file_packet(),
+            target_path=self.repo,
+            self_check=self_check,
+        )
+
+        self.assertEqual(self_check.calls, 2)
+        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+        self.assertIn("broken field", llm.prompts[2])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["items"][0]["attempts"], 2)
+        self.assertEqual(journal["self_check"]["status"], "passed")
+
+    def test_self_check_without_manifest_path_pauses_without_arbitrary_repair(self) -> None:
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("complete", {"summary": "implemented"}),
+            ]
+        )
+        self_check = SequenceSelfCheck(
+            [
+                {
+                    "status": "failed",
+                    "command": "fixed test command",
+                    "exit_code": 1,
+                    "stderr": "generic compiler failure without an owning file",
+                    "reason": "compile failed",
+                }
+            ]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(llm).execute(
+                run_id="run_self_check_unknown_scope",
+                work_packet=self.one_file_packet(),
+                target_path=self.repo,
+                self_check=self_check,
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_self_check_failed")
+        self.assertTrue(caught.exception.retriable)
+        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+        journal = json.loads((self.root / caught.exception.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["status"], "paused")
+        self.assertEqual(journal["self_check"]["affected_paths"], [])
+
+    def test_self_check_can_reopen_an_earlier_completed_work_item(self) -> None:
+        main_content = "class Main { int broken; }"
+        main_hash = hashlib.sha256((main_content + os.linesep).encode("utf-8")).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": main_content}),
+                action("complete", {"summary": "main implemented"}),
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "test implemented"}),
+                action("read_file", {"path": "src/Main.java"}),
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": main_hash, "content": "class Main {}"},
+                ),
+                action("complete", {"summary": "earlier item repaired"}),
+            ]
+        )
+        self_check = SequenceSelfCheck(
+            [
+                {
+                    "status": "failed",
+                    "command": "fixed test command",
+                    "exit_code": 1,
+                    "stderr": "src/Main.java:1: error: broken field",
+                    "reason": "compile failed",
+                },
+                {"status": "passed", "command": "fixed test command", "exit_code": 0, "reason": "passed"},
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_self_check_earlier_item",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+            self_check=self_check,
+        )
+
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual([item["attempts"] for item in journal["items"]], [2, 1])
+        self.assertEqual((self.repo / "src" / "MainTest.java").read_text(encoding="utf-8"), "class MainTest {}\n")
+
+    def test_self_check_repair_pause_resumes_with_diagnostic_and_valid_workspace_hash(self) -> None:
+        bad_content = "class Main { int broken; }"
+        bad_hash = hashlib.sha256((bad_content + os.linesep).encode("utf-8")).hexdigest()
+        first_llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": bad_content}),
+                action("complete", {"summary": "initial implementation"}),
+                LlmCompletion(content="", finish_reason="length"),
+            ]
+        )
+        failed_check = SequenceSelfCheck(
+            [
+                {
+                    "status": "failed",
+                    "command": "fixed test command",
+                    "exit_code": 1,
+                    "stderr": "src/Main.java:1: error: broken field",
+                    "reason": "compile failed",
+                },
+            ]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(first_llm).execute(
+                run_id="run_self_check_resume",
+                work_packet=self.one_file_packet(),
+                target_path=self.repo,
+                self_check=failed_check,
+            )
+        self.assertEqual(caught.exception.error_code, "developer_action_truncated")
+        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), bad_content + "\n")
+
+        resumed_llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Main.java"}),
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": bad_hash, "content": "class Main {}"},
+                ),
+                action("complete", {"summary": "resumed self-check repair"}),
+            ]
+        )
+        result = self.executor(resumed_llm).execute(
+            run_id="run_self_check_resume",
+            work_packet=self.one_file_packet(),
+            target_path=self.repo,
+            self_check=SequenceSelfCheck(
+                [{"status": "passed", "command": "fixed test command", "exit_code": 0, "reason": "passed"}]
+            ),
+        )
+
+        self.assertIn("broken field", resumed_llm.prompts[0])
+        self.assertEqual(result.progress["self_check"]["status"], "passed")
+        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+
+    def test_manifest_purpose_falls_back_to_proposed_file_reason(self) -> None:
+        packet = self.one_file_packet()
+        packet["proposed_files"] = [
+            {"path": "src/Main.java", "operation": "update", "reason": "Repair the compile failure."},
+        ]
+
+        manifest = _build_manifest(
+            run_id="run_reason_fallback",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback={"feedback_source": "verification", "verification": {"stderr": "src/Main.java"}},
+            repair_iteration=1,
+        )
+
+        self.assertEqual(manifest["items"][0]["purpose"], "Repair the compile failure.")
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -22,7 +22,12 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.verification import VerificationResult, VerificationRunner
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
-from sdlc_harness.workflows.phase4 import PhaseFourWorkflow, _apply_developer_changes, _code_review_pr_body
+from sdlc_harness.workflows.phase4 import (
+    PhaseFourWorkflow,
+    _apply_developer_changes,
+    _code_review_pr_body,
+    _verification_attempt_count,
+)
 
 
 class OutOfScopeDeveloper:
@@ -304,10 +309,54 @@ class PhaseFourTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_verification_attempt_count_ignores_phase4_artifact_version_gaps(self) -> None:
+        workflow = PhaseFourWorkflow(self.settings)
+        artifact_dir = workflow.store.run_dir("run_attempt_count") / "artifacts"
+        artifact_dir.mkdir(parents=True)
+        for name in (
+            "test_report_v1.md",
+            "test_report_v5.md",
+            "test_report_v6.md",
+            "code_change_report_v12.md",
+        ):
+            (artifact_dir / name).write_text("report\n", encoding="utf-8")
+
+        self.assertEqual(_verification_attempt_count(workflow.store, "run_attempt_count"), 3)
+
+    def test_continue_run_resumes_blocked_repair_selection_policy_drift(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        run_id = "run_repair_item_scope_mismatch"
+        state = {
+            "run_id": run_id,
+            "status": "blocked",
+            "current_phase": "implementation_repair",
+            "last_error": {"error_code": "developer_input_drift"},
+            "developer_execution": {"mode": "implementation_repair"},
+            "latest_artifacts": {
+                "implementation_repair_feedback": "feedback.json",
+                "developer_repair_execution_manifest": "manifest.json",
+                "developer_repair_execution_journal": "journal.json",
+            },
+            "allowed_next_actions": ["get_status", "cancel_run"],
+        }
+        resumed = {"run_id": run_id, "status": "implementation_executing"}
+
+        with (
+            patch.object(workflow.workspace_manager, "locked_workspace", return_value=contextlib.nullcontext()),
+            patch.object(workflow.store, "read_state", return_value=state),
+            patch.object(workflow, "_continue_implementation_repair", return_value=resumed) as repair,
+        ):
+            response = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(response, resumed)
+        repair.assert_called_once_with(state=state, run_id=run_id)
+
     def _settings(self, **extra_overrides: str):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
+            "SDLC_REQUIREMENT_CONTRACT_VERSION": "v1",
+            "SDLC_DEVELOPER_EXECUTION_MODE": "legacy",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -1291,7 +1340,7 @@ class PhaseFourTest(unittest.TestCase):
             ).exists()
         )
 
-    def test_continue_run_from_repair_needed_blocks_when_repair_verification_fails(self) -> None:
+    def test_continue_run_from_repair_needed_requeues_when_repair_verification_fails(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
@@ -1314,10 +1363,12 @@ class PhaseFourTest(unittest.TestCase):
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(repair_needed["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_repair")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "test_failed")
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertIsNone(response["last_error"])
         self.assertEqual(response["implementation_repair_iterations"], 1)
         self.assertIn("test_report_v2.md", response["latest_artifacts"]["test_report"])
+        self.assertIn("implementation_repair_feedback_v2.json", response["latest_artifacts"]["implementation_repair_feedback"])
+        self.assertEqual(response["quality_reports"]["implementation_repair"]["feedback_source"], "verification")
         report = (self.repo_root / str(response["latest_artifacts"]["test_report"])).read_text(encoding="utf-8")
         self.assertIn("Status: `failed`", report)
         self.assertIn("repair unit failed", report)
@@ -1399,7 +1450,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("developer_work_packet_v3.json", response["latest_artifacts"]["developer_work_packet"])
         self.assertIn("requirement_design_code_trace_v3.json", response["latest_artifacts"]["requirement_design_code_trace"])
 
-    def test_revalidate_implementation_rejects_non_limit_blocked_state(self) -> None:
+    def test_revalidate_implementation_rejects_non_revalidatable_blocked_state(self) -> None:
         written = self._create_phase4_written_run()
         store = PhaseOneWorkflow(self.settings).store
         state = store.read_state(str(written["run_id"]))
@@ -1407,7 +1458,7 @@ class PhaseFourTest(unittest.TestCase):
             {
                 "status": "blocked",
                 "current_phase": "implementation_testing",
-                "last_error": HarnessError("test_failed", "unit failed", run_id=str(written["run_id"])).to_response(),
+                "last_error": HarnessError("workspace_dirty", "workspace changed", run_id=str(written["run_id"])).to_response(),
             }
         )
         store.write_state(state)
@@ -1499,7 +1550,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "blocked")
         self.assertEqual(response["last_error"]["error_code"], "approved_implementation_plan_not_found")
 
-    def test_continue_run_blocks_when_verification_fails(self) -> None:
+    def test_continue_run_routes_actionable_verification_failure_to_repair(self) -> None:
         written = self._create_phase4_written_run()
         (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
             "Write-Error 'unit failed'\nexit 1\n",
@@ -1508,13 +1559,67 @@ class PhaseFourTest(unittest.TestCase):
 
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
 
-        self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "test_failed")
+        self.assertEqual(response["current_phase"], "implementation_repair")
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertIsNone(response["last_error"])
+        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        self.assertEqual(response["implementation_repair_iterations"], 0)
         self.assertIn("test_report", response["latest_artifacts"])
+        self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
         report = (self.repo_root / str(response["latest_artifacts"]["test_report"])).read_text(encoding="utf-8")
         self.assertIn("Status: `failed`", report)
         self.assertIn("unit failed", report)
+        feedback = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["implementation_repair_feedback"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(feedback["feedback_source"], "verification")
+        self.assertEqual(feedback["verification_artifact"], response["latest_artifacts"]["test_report"])
+        self.assertIn("unit failed", feedback["verification"]["stderr"])
+
+    def test_legacy_blocked_test_failure_is_exposed_and_resumed_through_repair(self) -> None:
+        written = self._create_phase4_written_run()
+        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
+            "Write-Error 'legacy unit failed'\nexit 1\n",
+            encoding="utf-8",
+        )
+        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(str(written["run_id"]))
+        latest = dict(state["latest_artifacts"])
+        feedback_path = self.repo_root / str(latest.pop("implementation_repair_feedback"))
+        feedback_path.unlink()
+        quality_reports = dict(state.get("quality_reports") or {})
+        quality_reports.pop("verification", None)
+        quality_reports.pop("implementation_repair", None)
+        state.update(
+            {
+                "current_phase": "implementation_testing",
+                "status": "blocked",
+                "latest_artifacts": latest,
+                "quality_reports": quality_reports,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": HarnessError(
+                    "test_failed",
+                    "Test command exited with code 1.",
+                    run_id=str(written["run_id"]),
+                ).to_response(),
+            }
+        )
+        store.write_state(state)
+
+        status = PhaseOneWorkflow(self.settings).get_status(run_id=str(written["run_id"]))
+        self.assertIn("continue_run", status["allowed_next_actions"])
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_repair")
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertEqual(response["implementation_repair_iterations"], 1)
+        self.assertIn("test_report_v2.md", response["latest_artifacts"]["test_report"])
+        self.assertIn("implementation_repair_feedback_v2.json", response["latest_artifacts"]["implementation_repair_feedback"])
+        self.assertTrue(repair_needed["quality_reports"]["verification"]["repairable"])
 
     def test_continue_run_blocks_when_verification_is_skipped(self) -> None:
         written = self._create_phase4_written_run()
@@ -1528,9 +1633,51 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["current_phase"], "implementation_testing")
         self.assertEqual(response["status"], "blocked")
         self.assertEqual(response["last_error"]["error_code"], "test_skipped")
+        self.assertEqual(response["allowed_next_actions"], ["revalidate_implementation", "get_status", "cancel_run"])
         self.assertIn("test_report", response["latest_artifacts"])
         report = (self.repo_root / str(response["latest_artifacts"]["test_report"])).read_text(encoding="utf-8")
         self.assertIn("Status: `skipped`", report)
+
+    def test_verification_timeout_stays_blocked_and_can_be_revalidated(self) -> None:
+        written = self._create_phase4_written_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        original_run = workflow.verification_runner.run
+
+        def timed_out_run(**kwargs: object) -> VerificationResult:
+            result = original_run(**kwargs)
+            return VerificationResult(
+                **{
+                    **result.to_dict(),
+                    "reason": "Test command timed out after 120s.",
+                    "timed_out": True,
+                }
+            )
+
+        workflow.verification_runner.run = timed_out_run  # type: ignore[method-assign]
+
+        response = workflow.continue_run(run_id=str(written["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "test_failed")
+        self.assertFalse(response["quality_reports"]["verification"]["repairable"])
+        self.assertEqual(response["allowed_next_actions"], ["revalidate_implementation", "get_status", "cancel_run"])
+
+    def test_verification_failure_blocks_after_shared_repair_limit(self) -> None:
+        self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
+        written = self._create_phase4_written_run()
+        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
+            "Write-Error 'still failing'\nexit 1\n",
+            encoding="utf-8",
+        )
+        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
+
+        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(repair_needed["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_repair_limit_exceeded")
+        self.assertEqual(response["implementation_repair_iterations"], 1)
+        self.assertEqual(response["allowed_next_actions"], ["revalidate_implementation", "get_status", "cancel_run"])
 
     def test_verification_runner_adds_sdlc_java_home_to_path(self) -> None:
         fake_jdk = Path(self.temp_dir.name) / "fake-jdk"

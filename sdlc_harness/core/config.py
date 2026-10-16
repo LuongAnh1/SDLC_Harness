@@ -24,6 +24,11 @@ class Settings:
     llm_model: str
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
+    llm_context_window_tokens: int
+    developer_execution_mode: str
+    developer_max_actions_per_item: int
+    developer_max_action_retries: int
+    developer_self_check_limit: int
     requirement_contract_version: str
     design_repair_limit: int
     implementation_plan_repair_limit: int
@@ -107,6 +112,11 @@ def load_settings(
         "SDLC_LLM_MODEL",
         "SDLC_LLM_TIMEOUT_SECONDS",
         "SDLC_LLM_STRUCTURED_MAX_TOKENS",
+        "SDLC_LLM_CONTEXT_WINDOW_TOKENS",
+        "SDLC_DEVELOPER_EXECUTION_MODE",
+        "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM",
+        "SDLC_DEVELOPER_MAX_ACTION_RETRIES",
+        "SDLC_DEVELOPER_SELF_CHECK_LIMIT",
         "SDLC_REQUIREMENT_CONTRACT_VERSION",
         "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
@@ -139,6 +149,9 @@ def load_settings(
     requirement_contract_version = merged.get("SDLC_REQUIREMENT_CONTRACT_VERSION", "v1").strip().lower() or "v1"
     if requirement_contract_version not in {"v1", "v2"}:
         requirement_contract_version = "v1"
+    developer_execution_mode = merged.get("SDLC_DEVELOPER_EXECUTION_MODE", "legacy").strip().lower() or "legacy"
+    if developer_execution_mode not in {"legacy", "tool_loop"}:
+        developer_execution_mode = "legacy"
     target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_eTour")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
@@ -163,6 +176,27 @@ def load_settings(
             merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"),
             default=8192,
             minimum=1024,
+        ),
+        llm_context_window_tokens=_int_value(
+            merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"),
+            default=128000,
+            minimum=8192,
+        ),
+        developer_execution_mode=developer_execution_mode,
+        developer_max_actions_per_item=_int_value(
+            merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"),
+            default=24,
+            minimum=1,
+        ),
+        developer_max_action_retries=_int_value(
+            merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"),
+            default=2,
+            minimum=0,
+        ),
+        developer_self_check_limit=_int_value(
+            merged.get("SDLC_DEVELOPER_SELF_CHECK_LIMIT"),
+            default=5,
+            minimum=1,
         ),
         requirement_contract_version=requirement_contract_version,
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),

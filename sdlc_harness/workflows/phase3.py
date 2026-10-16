@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 
 from ..agents.developer import DeveloperPlanAgent
 from ..agents.validator import ImplementationPlanValidator, build_requirement_graph_v2
@@ -28,6 +29,7 @@ from ..workspaces import RunWorkspaceManager
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "approve_checkpoint",
+    "revalidate_implementation_plan",
     "request_change",
     "cancel_run",
     "get_status",
@@ -72,6 +74,247 @@ class PhaseThreeWorkflow:
             return self._status_response(state, created_new_run=False)
         with self.workspace_manager.locked_workspace(run_id):
             return self._approve_design_checkpoint_locked(run_id=run_id, checkpoint_id=checkpoint_id)
+
+    def revalidate_implementation_plan(self, *, run_id: str) -> dict[str, object]:
+        """Create a new plan version from frozen Phase 1/2 inputs and review it again."""
+
+        state = self.store.read_state(run_id)
+        status = str(state.get("status") or "")
+        if str(state.get("current_phase") or "") != "implementation_planning" or status not in {
+            "waiting_implementation_plan_review",
+            "blocked",
+        }:
+            raise HarnessError(
+                "implementation_plan_revalidation_not_allowed",
+                f"Run is not waiting on an implementation plan: {run_id}",
+                run_id=run_id,
+            )
+        with self.workspace_manager.locked_workspace(run_id):
+            return self._revalidate_implementation_plan_locked(run_id=run_id)
+
+    def _revalidate_implementation_plan_locked(self, *, run_id: str) -> dict[str, object]:
+        state = self.store.read_state(run_id)
+        frozen_requirement, requirement_graph = self._read_phase3_inputs(state=state, run_id=run_id)
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        design_path = _required_artifact(artifact_paths, "design_artifact", run_id=run_id)
+        trace_path = _required_artifact(artifact_paths, "requirement_design_trace", run_id=run_id)
+        class_graph_path = _required_artifact(artifact_paths, "class_diagram_graph", run_id=run_id)
+        sequence_graph_path = _required_artifact(artifact_paths, "sequence_diagram_graph", run_id=run_id)
+        design_artifact = self._existing_artifact_path(design_path, run_id=run_id).read_text(encoding="utf-8")
+        requirement_design_trace = _read_json_artifact(
+            self._existing_artifact_path(trace_path, run_id=run_id), run_id=run_id
+        )
+        class_graph = _read_json_artifact(
+            self._existing_artifact_path(class_graph_path, run_id=run_id), run_id=run_id
+        )
+        sequence_graph = _read_json_artifact(
+            self._existing_artifact_path(sequence_graph_path, run_id=run_id), run_id=run_id
+        )
+        workspace = self.workspace_manager.resolve(run_id)
+        target_path = Path(workspace.worktree_path)
+        target_files = _target_source_files(target_path)
+        issue_key = _issue_key_from_state(state)
+        self.repo_context_provider.prepare_index(target_path)
+        repo_context = self.repo_context_provider.collect(
+            target_path=target_path,
+            target_files=target_files,
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            issue_key=issue_key,
+        ).to_dict()
+        requirement_packet = frozen_requirement.requirement_packet
+        plan_draft = self.developer.plan(
+            run_id=run_id,
+            source_ref=str(state.get("source_ref") or ""),
+            issue_key=issue_key,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+            requirement_design_trace=requirement_design_trace,
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            target_repo_path=str(target_path),
+            target_repo_remote=workspace.remote,
+            target_base_branch=self.settings.target_base_branch,
+            planned_branch=workspace.branch,
+            target_files=target_files,
+            test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+            repo_context=repo_context,
+            workspace_mode=workspace.workspace_mode,
+            workspace_ref=artifact_paths["run_workspace"],
+            base_sha=workspace.base_sha,
+            canonical_requirement=(
+                frozen_requirement.canonical_model
+                if isinstance(frozen_requirement, CanonicalRequirementInput)
+                else None
+            ),
+            requirement_graph=requirement_graph,
+            requirement_artifact_refs=frozen_requirement.approved_artifacts,
+        )
+        start_version = _next_implementation_plan_version(self.store.run_dir(run_id) / "artifacts")
+        versions = list(
+            _dict_value(_dict_value(state.get("quality_reports")).get("implementation_plan_review")).get(
+                "versions", []
+            )
+        )
+        merged_artifacts = dict(artifact_paths)
+        quality_reports = _dict_value(state.get("quality_reports"))
+        review = None
+        review_report_path = ""
+        plan_paths: dict[str, str] = {}
+        previous_fingerprint = ""
+        stalled = False
+        repair_limit = self.settings.implementation_plan_repair_limit
+        for repair_iteration in range(repair_limit + 1):
+            version = start_version + repair_iteration
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_plan_revalidating",
+                    "status": "implementation_plan_revalidating",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "summary_for_user": f"Đang revalidate implementation plan V{version}.",
+                }
+            )
+            self.store.write_state(state)
+            review = self.validator.review(
+                structured_plan=plan_draft.structured,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                requirement_design_trace=requirement_design_trace,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                repair_iterations=repair_iteration,
+                requirement_graph=requirement_graph,
+                requirement_contract_version=frozen_requirement.contract_version,
+                canonical_requirement=(
+                    frozen_requirement.canonical_model.to_dict()
+                    if isinstance(frozen_requirement, CanonicalRequirementInput)
+                    else None
+                ),
+            )
+            plan_paths = write_phase3_implementation_plan(
+                store=self.store,
+                run_id=run_id,
+                markdown=plan_draft.markdown,
+                structured_plan=plan_draft.structured,
+                version=version,
+            )
+            review_report_path = write_phase3_plan_review_report(
+                store=self.store, run_id=run_id, review_report=review.to_dict(), version=version
+            )
+            version_label = f"v{version}"
+            if version_label not in versions:
+                versions.append(version_label)
+            merged_artifacts = {
+                **artifact_paths,
+                **plan_paths,
+                "implementation_plan_review": review_report_path,
+            }
+            quality_reports = {
+                **quality_reports,
+                "implementation_plan_review": {
+                    **review.to_dict(),
+                    "versions": versions,
+                    "report": review_report_path,
+                },
+            }
+            state.update({"latest_artifacts": merged_artifacts, "quality_reports": quality_reports})
+            self.store.write_state(state)
+            if review.ok or repair_iteration >= repair_limit:
+                break
+            fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
+            if fingerprint == previous_fingerprint:
+                stalled = True
+                break
+            previous_fingerprint = fingerprint
+            feedback = review.developer_feedback or "\n".join(review.issues)
+            plan_draft = self.developer.repair_plan(
+                previous_draft=plan_draft,
+                review_report=review.to_dict(),
+                developer_feedback=feedback,
+                iteration=repair_iteration + 1,
+                run_id=run_id,
+                source_ref=str(state.get("source_ref") or ""),
+                issue_key=issue_key,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                requirement_design_trace=requirement_design_trace,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                target_repo_path=str(target_path),
+                target_repo_remote=workspace.remote,
+                target_base_branch=self.settings.target_base_branch,
+                planned_branch=workspace.branch,
+                target_files=target_files,
+                test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                repo_context=repo_context,
+                workspace_mode=workspace.workspace_mode,
+                workspace_ref=artifact_paths["run_workspace"],
+                base_sha=workspace.base_sha,
+                canonical_requirement=(
+                    frozen_requirement.canonical_model
+                    if isinstance(frozen_requirement, CanonicalRequirementInput)
+                    else None
+                ),
+                requirement_graph=requirement_graph,
+                requirement_artifact_refs=frozen_requirement.approved_artifacts,
+            )
+        if review is None or not review.ok:
+            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
+            error = HarnessError(
+                error_code,
+                f"Implementation plan revalidation stopped with {len(review.issues) if review else 0} issue(s).",
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_planning",
+                    "status": "blocked",
+                    "latest_artifacts": merged_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["revalidate_implementation_plan", "get_status", "request_change", "cancel_run"],
+                    "last_error": error.to_response(),
+                    "quality_reports": quality_reports,
+                    "summary_for_user": f"Revalidation chưa pass. Report: `{review_report_path}`.",
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        last_sync = sync_implementation_plan_checkpoint(
+            store=self.store,
+            settings=self.settings,
+            run_id=run_id,
+            source_ref=str(state.get("source_ref") or ""),
+            artifact_paths=merged_artifacts,
+        )
+        checkpoint_id = f"checkpoint_implementation_plan_{run_id}"
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "implementation_planning",
+                "status": "waiting_implementation_plan_review",
+                "latest_artifacts": merged_artifacts,
+                "pending_checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "type": "implementation_plan_review",
+                    "artifact_ref": _artifact_ref(plan_paths["implementation_plan"]),
+                    "artifact_path": plan_paths["implementation_plan"],
+                },
+                "allowed_next_actions": ALLOWED_IMPLEMENTATION_PLAN_ACTIONS,
+                "last_error": None,
+                "last_sync": last_sync,
+                "quality_reports": quality_reports,
+                "summary_for_user": (
+                    f"Implementation plan V{start_version + review.repair_iterations} đã pass revalidation "
+                    f"và sync status={last_sync.get('status')}. Run đang chờ review implementation plan."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def _approve_design_checkpoint_locked(
         self,
@@ -172,6 +415,8 @@ class PhaseThreeWorkflow:
         merged_artifacts = dict(artifact_paths)
         quality_reports = _dict_value(state.get("quality_reports"))
         versions: list[str] = []
+        previous_fingerprint = ""
+        stalled = False
         repair_limit = self.settings.implementation_plan_repair_limit
         for repair_iteration in range(repair_limit + 1):
             version = repair_iteration + 1
@@ -255,6 +500,11 @@ class PhaseThreeWorkflow:
             if review.ok or repair_iteration >= repair_limit:
                 break
 
+            fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
+            if fingerprint == previous_fingerprint:
+                stalled = True
+                break
+            previous_fingerprint = fingerprint
             feedback = review.developer_feedback or "\n".join(review.issues)
             try:
                 plan_draft = self.developer.repair_plan(
@@ -298,8 +548,9 @@ class PhaseThreeWorkflow:
                 run_id=run_id,
             )
         if not review.ok:
+            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
             error = HarnessError(
-                "implementation_plan_review_failed",
+                error_code,
                 (
                     f"Validator.review_plan found {len(review.issues)} issue(s) "
                     f"after {review.repair_iterations} repair iteration(s)."
@@ -313,7 +564,7 @@ class PhaseThreeWorkflow:
                     "status": "blocked",
                     "latest_artifacts": merged_artifacts,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "request_change", "cancel_run"],
+                    "allowed_next_actions": ["revalidate_implementation_plan", "get_status", "request_change", "cancel_run"],
                     "last_error": error.to_response(),
                     "quality_reports": quality_reports,
                     "summary_for_user": (
@@ -485,6 +736,26 @@ def _target_source_files(target_path: Path) -> list[str]:
         for path in sorted(root.rglob("*.java")):
             files.append(str(path.relative_to(target_path)).replace("\\", "/"))
     return files
+
+
+def _next_implementation_plan_version(artifact_dir: Path) -> int:
+    versions = []
+    for path in artifact_dir.glob("implementation_plan_structured_v*.json"):
+        match = re.search(r"_v(\d+)\.json$", path.name)
+        if match:
+            versions.append(int(match.group(1)))
+    return max(versions, default=0) + 1
+
+
+def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[str]) -> str:
+    payload = {
+        "implementation_steps": structured_plan.get("implementation_steps", []),
+        "proposed_files": structured_plan.get("proposed_files", []),
+        "design_mappings": structured_plan.get("design_mappings", []),
+        "test_intents": structured_plan.get("test_intents", []),
+        "issues": issues,
+    }
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def _required_artifact(artifact_paths: dict[str, str], key: str, *, run_id: str) -> str:

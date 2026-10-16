@@ -378,6 +378,29 @@ def write_phase4_developer_work_packet(
     return store.relative(path)
 
 
+def write_phase4_effective_design_contract(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    contract: dict[str, object],
+    version: int = 1,
+) -> str:
+    """Freeze approved Phase 3 design adjustments before code generation."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    suffix = f"v{version}"
+    path = artifact_dir / f"effective_design_contract_{suffix}.json"
+    payload = {
+        **contract,
+        "version": f"effective_design_contract_{suffix}",
+        "created_at": utc_now_iso(),
+        "artifact_ref": f"effective_design_contract_{suffix}",
+    }
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return store.relative(path)
+
+
 def write_phase4_code_change_report(
     *,
     store: RuntimeStore,

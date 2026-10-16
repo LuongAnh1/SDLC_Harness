@@ -222,7 +222,11 @@ class CodeReviewSyncTest(unittest.TestCase):
                 return {"results": []}
             return {
                 "results": [
-                    {"id": "legacy-1", "title": "Code Review Checkpoint - eTour UC1 - run_old"}
+                    {
+                        "id": "legacy-1",
+                        "title": "Code Review Checkpoint - eTour UC1 - run_old",
+                        "body": {"storage": {"value": "Source: jira_issue:SDLC-1"}},
+                    }
                 ]
             }
 
@@ -239,8 +243,16 @@ class CodeReviewSyncTest(unittest.TestCase):
                 return {"results": []}
             return {
                 "results": [
-                    {"id": "legacy-1", "title": "Code Review Checkpoint - eTour UC1 - run_old"},
-                    {"id": "legacy-2", "title": "Code Review Checkpoint - eTour UC1 - run_older"},
+                    {
+                        "id": "legacy-1",
+                        "title": "Code Review Checkpoint - eTour UC1 - run_old",
+                        "body": {"storage": {"value": "Source: jira_issue:SDLC-1"}},
+                    },
+                    {
+                        "id": "legacy-2",
+                        "title": "Code Review Checkpoint - eTour UC1 - run_older",
+                        "body": {"storage": {"value": "Source: jira_issue:SDLC-1"}},
+                    },
                 ]
             }
 
@@ -252,6 +264,36 @@ class CodeReviewSyncTest(unittest.TestCase):
                 "code_review",
             )
         self.assertEqual(context.exception.error_code, "remote_sync_ambiguous")
+
+    def test_legacy_confluence_pages_from_another_source_are_ignored(self) -> None:
+        settings, _, _, _ = self._fixture(sync_mode="real")
+
+        def request(method: str, url: str, payload: dict[str, object] | None):
+            if "/wiki/api/v2/pages?" in url:
+                return {"results": []}
+            return {
+                "results": [
+                    {
+                        "id": "legacy-1",
+                        "title": "Design Checkpoint - eTour UC1 - run_old",
+                        "body": {"storage": {"value": "Source: dataset_use_case:eTour:UC1"}},
+                    },
+                    {
+                        "id": "legacy-2",
+                        "title": "Design Checkpoint - eTour UC1 - run_older",
+                        "body": {"storage": {"value": "Source: dataset_use_case:eTour:UC1"}},
+                    },
+                ]
+            }
+
+        matched = _find_remote_confluence_checkpoint(
+            settings,
+            request,
+            "jira_issue:SDLC-2",
+            "design",
+        )
+
+        self.assertIsNone(matched)
 
     def test_workflow_keeps_evidence_on_partial_failure_then_retries_to_ready(self) -> None:
         settings, store, run_id, artifacts = self._fixture(sync_mode="mock")

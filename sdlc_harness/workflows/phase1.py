@@ -25,6 +25,7 @@ from ..core.errors import HarnessError
 from ..sources.fixtures import UseCaseSource, load_use_case
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
+from ..agents.developer import repair_scope_mismatch_retry_allowed
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementModelV2Refiner,
@@ -512,6 +513,38 @@ class PhaseOneWorkflow:
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         """Chuẩn hóa JSON response cho cả start và get-status."""
 
+        allowed_next_actions = [str(action) for action in state.get("allowed_next_actions", []) if action]
+        last_error = state.get("last_error")
+        latest_artifacts = state.get("latest_artifacts")
+        legacy_developer_retry = (
+            self.settings.developer_execution_mode == "tool_loop"
+            and str(state.get("status") or "") == "blocked"
+            and isinstance(last_error, dict)
+            and last_error.get("error_code") == "developer_act_failed"
+            and isinstance(latest_artifacts, dict)
+            and bool(latest_artifacts.get("developer_work_packet"))
+            and not bool(latest_artifacts.get("code_change_report"))
+        )
+        if legacy_developer_retry and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
+        legacy_verification_repair = (
+            str(state.get("status") or "") == "blocked"
+            and isinstance(last_error, dict)
+            and last_error.get("error_code") == "test_failed"
+            and isinstance(latest_artifacts, dict)
+            and bool(latest_artifacts.get("developer_work_packet"))
+            and bool(latest_artifacts.get("code_change_report"))
+            and bool(latest_artifacts.get("test_report"))
+            and not bool(latest_artifacts.get("implementation_repair_feedback"))
+            and not (
+                isinstance(state.get("quality_reports"), dict)
+                and bool(state["quality_reports"].get("verification"))
+            )
+        )
+        if legacy_verification_repair and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
+        if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
         response = {
             "ok": True,
             "created_new_run": created_new_run,
@@ -520,17 +553,37 @@ class PhaseOneWorkflow:
             "requirement_contract_version": state.get("requirement_contract_version", "v1"),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
-            "latest_artifacts": state.get("latest_artifacts", {}),
+            "latest_artifacts": latest_artifacts if isinstance(latest_artifacts, dict) else {},
             "pending_checkpoint": state.get("pending_checkpoint"),
-            "allowed_next_actions": state.get("allowed_next_actions", []),
+            "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
+            "developer_execution": state.get("developer_execution", {}),
         }
         checkpoint = response.get("pending_checkpoint")
+        last_sync = response.get("last_sync")
+        if response.get("current_phase") == "implementation_planning" and response.get("status") in {
+            "waiting_implementation_plan_review",
+            "blocked",
+        }:
+            allowed_actions = [str(action) for action in response["allowed_next_actions"]]
+            if "revalidate_implementation_plan" not in allowed_actions:
+                allowed_actions.insert(0, "revalidate_implementation_plan")
+            response["allowed_next_actions"] = allowed_actions
+        if (
+            isinstance(checkpoint, dict)
+            and isinstance(last_sync, dict)
+            and str(last_sync.get("status") or "") in {"failed", "partial_failed"}
+        ):
+            allowed_actions = [str(action) for action in response["allowed_next_actions"]]
+            if "sync_run" not in allowed_actions:
+                insert_at = allowed_actions.index("cancel_run") if "cancel_run" in allowed_actions else len(allowed_actions)
+                allowed_actions.insert(insert_at, "sync_run")
+            response["allowed_next_actions"] = allowed_actions
         if (
             response.get("status") == "code_review_ready"
             and isinstance(checkpoint, dict)
