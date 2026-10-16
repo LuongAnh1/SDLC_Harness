@@ -1,5 +1,96 @@
 # Requirement V2 Implementation Progress
 
+## Cập nhật Slice 4B - 2026-10-16
+
+Slice 4B đã nối canonical Requirement V2 qua Phase 3 đến
+`waiting_implementation_plan_review`.
+
+- Phase 3 đọc frozen artifacts từ checkpoint requirement và kiểm tra lại canonical
+  model/projection trước khi dùng.
+- Saved requirement graph và design trace phải khớp revision, model ref, nội dung
+  canonical graph và exact stable ID set; sai lệch trả
+  `requirement_v2_phase3_input_invalid` trước khi tạo workspace hoặc mutate state.
+- Developer prompt ưu tiên canonical JSON. Python dựng `requirement_coverage` sau
+  mapping merge, gồm requirement ID/content, approved design targets, resolved design
+  element IDs, planned code targets và test intents.
+- Validator V2 hard-gate coverage thiếu/trùng/tự bịa, target ngoài approved trace,
+  thiếu code target hoặc test intent. Repair dựng lại coverage deterministically.
+- Markdown/Confluence render coverage; response giữ `requirement_contract_version=v2`.
+- Gate cũ trước Phase 3 đã được chuyển sang Phase 4 với mã
+  `requirement_v2_phase4_not_ready`; checkpoint Phase 3 được giữ nguyên khi bị chặn.
+
+Boundary tiếp theo là Phase 4 canonical work packet/Developer/Tester/code trace.
+Niko/Telegram, live DeepSeek và live Jira smoke chưa nằm trong Slice 4B. Default vẫn V1.
+
+Test tập trung Phase 3 + requirement reader: `43 passed`. Full regression cuối:
+`251 passed in 244.06s`. Lượt full đầu tiên lộ một test cũ còn kỳ vọng gate Phase 3;
+đã cập nhật theo boundary Phase 4 và chạy lại toàn bộ thành công.
+Coverage resolver sau đó được test thêm với class attribute target; hai test V2 happy
+path/repair đều pass.
+
+## Cập nhật Slice 4A - 2026-10-16
+
+Slice 4A đã nối Requirement V2 qua Phase 2 với contract dual-read:
+
+```text
+V1 packet/formal -> legacy Phase 2 path
+V2 canonical model + verified projections -> Designer/Validator -> design checkpoint
+```
+
+### Đã triển khai
+
+- Thêm reader nội bộ phân biệt `LegacyRequirementInput` và
+  `CanonicalRequirementInput`; thiếu contract version vẫn dùng V1.
+- Reader V2 fail closed nếu model/checkpoint lệch revision, source fingerprint
+  sai, model không còn normalized/valid, còn blocking question, hoặc packet/formal
+  không khớp deterministic projection.
+- Reader V1 giữ contract mặc định; nếu state đã tham chiếu formal artifact nhưng
+  file bị mất thì fail closed bằng `approved_requirement_not_found`.
+- Designer V2 đặt canonical JSON ở đầu prompt làm source of truth; packet/formal
+  chỉ được gắn nhãn review projection.
+- Validator tạo graph từ canonical model, giữ stable ID `PRE/MF/AF/EF/POST/BR/AC/QR`
+  và không đưa unknown/assumption/open question vào traceability requirement set.
+- Trace, missing-link report và quality report ghi mode `traceability_v2`, contract
+  version, canonical revision và artifact refs.
+- Bỏ gate cũ trước Phase 2. Run V2 có thể tới `waiting_design_approval`.
+- Tại thời điểm chốt 4A, đặt gate `requirement_v2_phase3_not_ready` trước Phase 3;
+  Slice 4B phía trên đã gỡ gate này và chuyển boundary sang Phase 4.
+
+### Boundary tại thời điểm chốt Slice 4A (đã được Slice 4B supersede)
+
+- Phase 3-4 chưa consume canonical Requirement V2 hoặc truyền stable ID qua work packet.
+- Niko route/formatter và controlled Jira/Telegram smoke chưa nằm trong slice này.
+- Default `SDLC_REQUIREMENT_CONTRACT_VERSION` vẫn là `v1`.
+
+### Kiểm tra
+
+- Test reader V1/V2, revision identity, source fingerprint, projection tampering và
+  blocking model.
+- Test Designer canonical-first, Validator stable ID và V2 Phase 2 integration.
+- Test repair loop V2 xác nhận canonical model được giữ từ draft sang repair,
+  stable IDs không đổi giữa hai vòng và checkpoint mở ở design artifact V2.
+- Test V2 design approval dừng đúng gate Phase 3; test V1 hiện có tiếp tục chạy.
+
+Kết quả test:
+
+```bash
+rtk python -m pytest tests/test_requirement_input_v2.py \
+  tests/test_requirement_clarification_v2.py tests/test_phase1.py \
+  tests/test_phase2.py tests/test_phase3.py -q
+```
+
+Kết quả regression Phase 1-3: `114 passed`.
+
+```bash
+rtk python -m pytest -q
+```
+
+Kết quả toàn bộ: `243 passed` trong `291.65s`. `git diff --check` không phát
+hiện whitespace error.
+
+Sau full suite trên, bổ sung riêng regression repair loop V2 và chạy lại nhóm
+Requirement V2 + Phase 2: `56 passed`; riêng file dual-reader/V2: `11 passed`.
+
 ## Cập nhật Slice 3 - 2026-10-16
 
 Slice 3 đã hoàn tất ở mức SDLC Harness:
@@ -13,9 +104,8 @@ UseCaseSource
   -> waiting_requirement_approval
 ```
 
-Default vẫn là Requirement V1. Run V2 dừng an toàn trước Phase 2 bằng lỗi
-`requirement_v2_downstream_not_ready` cho tới khi downstream dual read được triển
-khai ở slice tiếp theo.
+Default vẫn là Requirement V1. Gate cũ trước Phase 2 đã được thay bởi reader
+dual-read trong Slice 4A; lịch sử dưới đây mô tả trạng thái khi Slice 3 vừa hoàn tất.
 
 ### Đã triển khai
 

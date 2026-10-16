@@ -3,6 +3,54 @@
 Tài liệu này ghi lại tiến độ triển khai Phase 3 theo từng lát nhỏ để tránh nhầm
 giữa phần đã chạy được và phần vẫn nằm trong kế hoạch.
 
+## 2026-10-16 - Requirement V2 Slice 4B
+
+Phase 3 đã consume canonical Requirement V2 và giữ stable IDs tới implementation
+plan checkpoint:
+
+```text
+frozen canonical requirement
+  -> verified requirement graph/design trace
+  -> deterministic requirement coverage
+  -> Developer plan + Validator V2 hard gate
+  -> waiting_implementation_plan_review
+```
+
+Đã triển khai:
+
+- thêm `read_frozen_requirement_input` dùng `approved_artifacts` cho handoff sau Phase 2;
+- fail-fast trước workspace/state mutation nếu canonical model, revision, graph hoặc
+  exact stable ID set trong trace bị lệch;
+- Developer nhận canonical model trong prompt và Python tạo coverage từ requirement
+  ID qua approved design target đến planned code target/test intent;
+- structured plan thêm `requirement_contract` và `requirement_coverage` nhưng giữ
+  version filename/schema V1 để tương thích;
+- Validator có `requirement_coverage_issues` và mode rule/hybrid theo contract;
+- repair plan luôn dựng lại coverage bằng Python;
+- Markdown/Confluence hiển thị Requirement Coverage;
+- bỏ gate trước Phase 3 và đặt gate `requirement_v2_phase4_not_ready` tại Phase 4.
+
+Boundary còn giữ: Phase 4 chưa consume canonical V2 work packet; Niko/Telegram và
+live Jira smoke không thuộc slice này. Default contract vẫn là V1.
+
+Kiểm tra hoàn tất:
+
+```bash
+rtk python -m pytest tests/test_phase3.py tests/test_requirement_input_v2.py -q
+# 43 passed
+
+rtk python -m pytest -q
+# 251 passed in 244.06s
+```
+
+Full suite đầu tiên phát hiện một test clarification cũ vẫn kỳ vọng gate
+`requirement_v2_phase3_not_ready`. Test này được cập nhật theo boundary mới; test riêng
+và full suite sau đó đều pass.
+
+Sau full suite, coverage resolver được kiểm tra thêm với class trace target ở mức
+attribute (`Class.attribute`) và resolve về owning class/code target; hai test V2 happy
+path + repair pass.
+
 ## 2026-10-15 - Slice 4.9A3 cập nhật ownership của Phase 3
 
 Design approval nay tạo branch/worktree riêng cho run trước khi Developer.plan

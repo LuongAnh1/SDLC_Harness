@@ -27,12 +27,6 @@ class CheckpointApprovalWorkflow:
                 run_id=run_id,
             )
         if status == "waiting_requirement_approval":
-            if str(state.get("requirement_contract_version") or "v1") == "v2":
-                raise HarnessError(
-                    "requirement_v2_downstream_not_ready",
-                    "Requirement V2 is ready for review, but Phase 2 does not consume the V2 canonical model yet.",
-                    run_id=run_id,
-                )
             return PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id, checkpoint_id=checkpoint_id)
         if status == "waiting_design_approval":
             return PhaseThreeWorkflow(self.settings).approve_design_checkpoint(

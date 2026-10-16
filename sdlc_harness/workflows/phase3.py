@@ -15,7 +15,8 @@ import json
 from pathlib import Path
 
 from ..agents.developer import DeveloperPlanAgent
-from ..agents.validator import ImplementationPlanValidator
+from ..agents.validator import ImplementationPlanValidator, build_requirement_graph_v2
+from ..artifacts import CanonicalRequirementInput, read_frozen_requirement_input
 from ..artifacts.writers import write_phase3_implementation_plan, write_phase3_plan_review_report
 from ..core.config import Settings
 from ..core.errors import HarnessError
@@ -50,6 +51,8 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        if str(state.get("requirement_contract_version") or "v1") == "v2":
+            self._read_phase3_inputs(state=state, run_id=run_id)
         try:
             self.workspace_manager.create_for_run(run_id)
         except HarnessError as exc:
@@ -80,13 +83,13 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        frozen_requirement, requirement_graph = self._read_phase3_inputs(state=state, run_id=run_id)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
-        requirement_path = _required_artifact(artifact_paths, "requirement_packet", run_id=run_id)
+        requirement_path = frozen_requirement.approved_artifacts["requirement_packet"]
         design_path = _required_artifact(artifact_paths, "design_artifact", run_id=run_id)
         trace_path = _required_artifact(artifact_paths, "requirement_design_trace", run_id=run_id)
         class_graph_path = _required_artifact(artifact_paths, "class_diagram_graph", run_id=run_id)
         sequence_graph_path = _required_artifact(artifact_paths, "sequence_diagram_graph", run_id=run_id)
-        requirement_abs_path = self._existing_artifact_path(requirement_path, run_id=run_id)
         design_abs_path = self._existing_artifact_path(design_path, run_id=run_id)
         trace_abs_path = self._existing_artifact_path(trace_path, run_id=run_id)
         class_graph_abs_path = self._existing_artifact_path(class_graph_path, run_id=run_id)
@@ -119,7 +122,7 @@ class PhaseThreeWorkflow:
         )
         self.store.write_state(state)
 
-        requirement_packet = requirement_abs_path.read_text(encoding="utf-8")
+        requirement_packet = frozen_requirement.requirement_packet
         design_artifact = design_abs_path.read_text(encoding="utf-8")
         requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
         class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
@@ -152,6 +155,13 @@ class PhaseThreeWorkflow:
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
                 base_sha=workspace.base_sha,
+                canonical_requirement=(
+                    frozen_requirement.canonical_model
+                    if isinstance(frozen_requirement, CanonicalRequirementInput)
+                    else None
+                ),
+                requirement_graph=requirement_graph,
+                requirement_artifact_refs=frozen_requirement.approved_artifacts,
             )
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -199,6 +209,13 @@ class PhaseThreeWorkflow:
                 class_graph=class_graph,
                 sequence_graph=sequence_graph,
                 repair_iterations=repair_iteration,
+                requirement_graph=requirement_graph,
+                requirement_contract_version=frozen_requirement.contract_version,
+                canonical_requirement=(
+                    frozen_requirement.canonical_model.to_dict()
+                    if isinstance(frozen_requirement, CanonicalRequirementInput)
+                    else None
+                ),
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -263,6 +280,13 @@ class PhaseThreeWorkflow:
                     workspace_mode=workspace.workspace_mode,
                     workspace_ref=artifact_paths["run_workspace"],
                     base_sha=workspace.base_sha,
+                    canonical_requirement=(
+                        frozen_requirement.canonical_model
+                        if isinstance(frozen_requirement, CanonicalRequirementInput)
+                        else None
+                    ),
+                    requirement_graph=requirement_graph,
+                    requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 )
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -336,6 +360,40 @@ class PhaseThreeWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _read_phase3_inputs(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+    ) -> tuple[object, dict[str, object]]:
+        """Read frozen Phase 1 input and validate the V2 Phase 2 handoff before mutation."""
+
+        try:
+            frozen = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+            if not isinstance(frozen, CanonicalRequirementInput):
+                return frozen, {}
+            artifact_paths = _string_dict(state.get("latest_artifacts"))
+            graph_path = _required_artifact(artifact_paths, "requirement_graph", run_id=run_id)
+            trace_path = _required_artifact(artifact_paths, "requirement_design_trace", run_id=run_id)
+            saved_graph = _read_json_artifact(self._existing_artifact_path(graph_path, run_id=run_id), run_id=run_id)
+            trace = _read_json_artifact(self._existing_artifact_path(trace_path, run_id=run_id), run_id=run_id)
+            _require_v2_phase3_contract(
+                canonical=frozen,
+                canonical_graph=build_requirement_graph_v2(frozen.canonical_model),
+                saved_graph=saved_graph,
+                trace=trace,
+                run_id=run_id,
+            )
+            return frozen, saved_graph
+        except HarnessError as exc:
+            if str(state.get("requirement_contract_version") or "v1") != "v2":
+                raise
+            raise HarnessError(
+                "requirement_v2_phase3_input_invalid",
+                f"Requirement V2 Phase 3 input is invalid: {exc.message}",
+                run_id=run_id,
+            ) from exc
 
     def _require_design_checkpoint(
         self,
@@ -414,6 +472,7 @@ class PhaseThreeWorkflow:
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
         }
 
 
@@ -485,3 +544,61 @@ def _issue_key_from_state(state: dict[str, object]) -> str:
 def _artifact_ref(path: str) -> str:
     name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return name.rsplit(".", 1)[0]
+
+
+def _require_v2_phase3_contract(
+    *,
+    canonical: CanonicalRequirementInput,
+    canonical_graph: dict[str, object],
+    saved_graph: dict[str, object],
+    trace: dict[str, object],
+    run_id: str,
+) -> None:
+    revision = canonical.canonical_model.revision
+    model_ref = canonical.approved_artifacts.get("requirement_model", "")
+    if (
+        saved_graph.get("source_graph_version") != "requirement_graph_v2"
+        or saved_graph.get("requirement_contract_version") != "v2"
+        or saved_graph.get("revision") != revision
+        or saved_graph.get("requirements") != canonical_graph.get("requirements")
+    ):
+        raise HarnessError(
+            "requirement_v2_phase3_input_invalid",
+            "Saved requirement graph does not match the frozen canonical Requirement V2 model.",
+            run_id=run_id,
+        )
+    trace_inputs = _dict_value(trace.get("inputs"))
+    if (
+        trace.get("mode") != "traceability_v2"
+        or trace.get("requirement_contract_version") != "v2"
+        or trace.get("requirement_revision") != revision
+        or str(trace_inputs.get("requirement_model") or "") != model_ref
+    ):
+        raise HarnessError(
+            "requirement_v2_phase3_input_invalid",
+            "Requirement-design trace metadata does not match the frozen canonical revision.",
+            run_id=run_id,
+        )
+    expected_ids = [
+        str(item.get("id") or "")
+        for item in _dict_list(canonical_graph.get("requirements"))
+        if str(item.get("id") or "")
+    ]
+    for trace_key in ("class_trace", "sequence_trace"):
+        actual_ids = [
+            str(item.get("requirement") or "")
+            for item in _dict_list(trace.get(trace_key))
+            if str(item.get("requirement") or "")
+        ]
+        if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected_ids):
+            raise HarnessError(
+                "requirement_v2_phase3_input_invalid",
+                f"{trace_key} does not contain each canonical stable requirement ID exactly once.",
+                run_id=run_id,
+            )
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]

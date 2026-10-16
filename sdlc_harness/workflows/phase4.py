@@ -2308,6 +2308,12 @@ class PhaseFourWorkflow:
                 f"Run is not waiting for implementation plan review: {run_id}",
                 run_id=run_id,
             )
+        if str(state.get("requirement_contract_version") or "v1") == "v2":
+            raise HarnessError(
+                "requirement_v2_phase4_not_ready",
+                "Requirement V2 has completed Phase 3, but Phase 4 does not consume the canonical work packet yet.",
+                run_id=run_id,
+            )
         checkpoint = _dict_value(state.get("pending_checkpoint"))
         if not checkpoint:
             raise HarnessError(

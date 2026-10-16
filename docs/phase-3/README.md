@@ -21,11 +21,13 @@ assumptions và out-of-scope.
 ```text
 approve_checkpoint(run_id)
 -> kiểm tra run đang ở waiting_design_approval
--> đọc approved requirement_packet_v1
+-> đọc frozen Requirement V1 hoặc canonical Requirement V2 đã duyệt
 -> đọc approved design_artifact_v{n}
 -> đọc requirement-design trace và graph liên quan
+-> với V2: đối chiếu revision, stable IDs và nội dung graph trước khi tạo worktree
 -> state=implementation_planning
 -> Developer.plan tạo implementation_plan_v1
+-> Python tạo requirement_coverage từ canonical ID -> design trace -> code/test target
 -> Validator.review_plan kiểm coverage/traceability/executability/scope
 -> sync implementation plan lên Confluence và comment trạng thái lên Jira
 -> status=waiting_implementation_plan_review
@@ -152,6 +154,26 @@ summary_for_user
 Checkpoint này nghĩa là human cần duyệt kế hoạch implement trước khi Phase 4 được
 phép sửa target repo.
 
+## Requirement Contract V2 Trong Phase 3
+
+Phase 3 dùng `approved_artifacts` để đọc lại requirement đã được đóng băng tại
+checkpoint Phase 1. Với V2, canonical model là source of truth; packet/formal chỉ là
+projection đã được kiểm tra. Trước khi tạo worktree hoặc đổi state, workflow đối chiếu:
+
+- contract version, canonical revision và model artifact ref;
+- requirement graph đã lưu với graph dựng lại từ canonical model;
+- tập stable ID trong class trace và sequence trace;
+- trace metadata với đúng canonical revision.
+
+Sai lệch dừng bằng `requirement_v2_phase3_input_invalid` và không mutate state.
+Structured plan vẫn giữ marker `implementation_plan_structured_v1` để tương thích,
+nhưng có thêm `requirement_contract` và `requirement_coverage`. Coverage được Python
+dựng lại sau mỗi vòng Developer repair, không lấy trực tiếp từ nội dung LLM.
+
+Validator V2 hard-gate requirement ID thiếu, trùng, tự bịa, design target ngoài
+approved trace, hoặc requirement chưa có code target/test intent. Markdown và
+Confluence cùng render bảng coverage để human review.
+
 ## Quan Hệ Với Phase 4
 
 ```text
@@ -164,6 +186,10 @@ Jira issue SDLC-1
 
 Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi mới chạy
 `Developer.act`, Tester và Validator code trace.
+
+Requirement V2 hiện dừng ở checkpoint này. Approval sang Phase 4 trả
+`requirement_v2_phase4_not_ready` cho đến khi Phase 4 work packet, Developer, Tester
+và code trace cùng consume stable requirement IDs. Default contract vẫn là V1.
 
 ## Không Làm Trong Phase 3
 

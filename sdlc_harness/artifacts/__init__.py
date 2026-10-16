@@ -7,6 +7,13 @@ from .requirement_v2 import (
     write_requirement_v2_revision_artifacts,
     write_source_snapshot_v2,
 )
+from .requirement_input import (
+    ApprovedRequirementInput,
+    CanonicalRequirementInput,
+    LegacyRequirementInput,
+    read_approved_requirement_input,
+    read_frozen_requirement_input,
+)
 from .writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -24,6 +31,11 @@ from .writers import (
 )
 
 __all__ = [
+    "ApprovedRequirementInput",
+    "CanonicalRequirementInput",
+    "LegacyRequirementInput",
+    "read_approved_requirement_input",
+    "read_frozen_requirement_input",
     "read_requirement_model_v2",
     "read_source_snapshot_v2",
     "write_requirement_v2_artifacts",

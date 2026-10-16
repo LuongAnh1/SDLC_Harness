@@ -386,9 +386,31 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 )
             self.assertEqual(completed["status"], "waiting_requirement_approval")
             self.assertTrue(completed["latest_artifacts"]["requirement_model"].endswith("_r5.json"))
-            with self.assertRaises(HarnessError) as downstream:
-                CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(start["run_id"]))
-            self.assertEqual(downstream.exception.error_code, "requirement_v2_downstream_not_ready")
+            design = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(start["run_id"]))
+            self.assertEqual(design["status"], "waiting_design_approval")
+            self.assertEqual(design["requirement_contract_version"], "v2")
+            self.assertEqual(design["quality_reports"]["design_traceability"]["mode"], "traceability_v2")
+            self.assertTrue(design["latest_artifacts"]["requirement_graph"].endswith("requirement_graph_v1.json"))
+            trace = json.loads(
+                (workflow.store.repo_root / design["latest_artifacts"]["requirement_design_trace"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            graph = json.loads(
+                (workflow.store.repo_root / design["latest_artifacts"]["requirement_graph"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(trace["mode"], "traceability_v2")
+            self.assertEqual(trace["requirement_contract_version"], "v2")
+            self.assertEqual(trace["requirement_revision"], 5)
+            self.assertTrue(trace["inputs"]["requirement_model"].endswith("_r5.json"))
+            graph_ids = {item["id"] for item in graph["requirements"]}
+            self.assertIn("MF-1", graph_ids)
+            self.assertIn("AC-1", graph_ids)
+            persisted = workflow.store.read_state(str(start["run_id"]))
+            self.assertIn("requirement_model", persisted["approved_artifacts"])
+            self.assertEqual(workflow.store.read_state(str(start["run_id"]))["status"], "waiting_design_approval")
             with self.assertRaises(HarnessError) as wrong_state:
                 workflow.answer_clarification(
                     run_id=str(start["run_id"]),

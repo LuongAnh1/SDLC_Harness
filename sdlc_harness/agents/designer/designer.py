@@ -9,8 +9,10 @@ hữu checkpoint, state và sync.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 
+from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 
@@ -34,12 +36,19 @@ class DesignerAgent:
     def __init__(self, llm_client: LlmClient):
         self.llm_client = llm_client
 
-    def analysis(self, *, requirement_packet: str, formal_use_case: str = "") -> str:
+    def analysis(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str = "",
+        canonical_requirement: RequirementModelV2 | None = None,
+    ) -> str:
         """Sinh khuyến nghị kiến trúc ngắn từ requirement đã duyệt."""
 
         use_case_input = _combined_requirement_input(
             requirement_packet=requirement_packet,
             formal_use_case=formal_use_case,
+            canonical_requirement=canonical_requirement,
         )
         prompt = _RECOMMENDATION_PROMPT_PATH.read_text(encoding="utf-8").replace(
             "{Use Case}",
@@ -55,12 +64,20 @@ class DesignerAgent:
         except Exception as exc:
             raise HarnessError("designer_failed", str(exc)) from exc
 
-    def act(self, *, requirement_packet: str, formal_use_case: str, analysis_report: str) -> str:
+    def act(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str,
+        analysis_report: str,
+        canonical_requirement: RequirementModelV2 | None = None,
+    ) -> str:
         """Sinh artifact thiết kế PlantUML class/sequence diagram."""
 
         use_case_input = _combined_requirement_input(
             requirement_packet=requirement_packet,
             formal_use_case=formal_use_case,
+            canonical_requirement=canonical_requirement,
         )
         prompt = _DESIGNER_PROMPT_PATH.read_text(encoding="utf-8")
         prompt = prompt.replace("{UC}", use_case_input)
@@ -75,17 +92,25 @@ class DesignerAgent:
         except Exception as exc:
             raise HarnessError("designer_failed", str(exc)) from exc
 
-    def draft(self, *, requirement_packet: str, formal_use_case: str = "") -> DesignDraft:
+    def draft(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str = "",
+        canonical_requirement: RequirementModelV2 | None = None,
+    ) -> DesignDraft:
         """Chạy đủ hai bước Designer để workflow nhận một draft hoàn chỉnh."""
 
         analysis_report = self.analysis(
             requirement_packet=requirement_packet,
             formal_use_case=formal_use_case,
+            canonical_requirement=canonical_requirement,
         )
         design_model = self.act(
             requirement_packet=requirement_packet,
             formal_use_case=formal_use_case,
             analysis_report=analysis_report,
+            canonical_requirement=canonical_requirement,
         )
         return DesignDraft(analysis_report=analysis_report, design_model=design_model)
 
@@ -96,12 +121,14 @@ class DesignerAgent:
         formal_use_case: str,
         current_design: str,
         audit_report: str,
+        canonical_requirement: RequirementModelV2 | None = None,
     ) -> str:
         """Sửa design hiện tại dựa trên report thiếu link của Validator."""
 
         requirement_context = _combined_requirement_input(
             requirement_packet=requirement_packet,
             formal_use_case=formal_use_case,
+            canonical_requirement=canonical_requirement,
         )
         prompt = _UPDATE_DESIGNER_PROMPT_PATH.read_text(encoding="utf-8")
         prompt = prompt.replace("{diagram}", current_design.strip())
@@ -120,10 +147,28 @@ class DesignerAgent:
             raise HarnessError("designer_failed", str(exc)) from exc
 
 
-def _combined_requirement_input(*, requirement_packet: str, formal_use_case: str) -> str:
+def _combined_requirement_input(
+    *,
+    requirement_packet: str,
+    formal_use_case: str,
+    canonical_requirement: RequirementModelV2 | None = None,
+) -> str:
     """Ghép input người đọc được và formal use case máy đọc được cho Designer."""
 
-    parts = ["# Requirement Packet", requirement_packet.strip()]
+    parts: list[str] = []
+    if canonical_requirement is not None:
+        parts.extend(
+            [
+                "# Canonical Requirement Model V2 (Source of Truth)",
+                json.dumps(canonical_requirement.to_dict(), ensure_ascii=False, indent=2),
+                "",
+                "# Requirement Packet (Review Projection)",
+                requirement_packet.strip(),
+            ]
+        )
+    else:
+        parts.extend(["# Requirement Packet", requirement_packet.strip()])
     if formal_use_case.strip():
-        parts.extend(["", "# Formal Use Case", formal_use_case.strip()])
+        heading = "# Formal Use Case (Review Projection)" if canonical_requirement is not None else "# Formal Use Case"
+        parts.extend(["", heading, formal_use_case.strip()])
     return "\n".join(parts).strip()

@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 
@@ -53,6 +54,7 @@ class DeveloperPlanAgent:
         test_command: str,
         repair_feedback: str,
         previous_review: dict[str, object],
+        canonical_requirement: RequirementModelV2 | None,
     ) -> dict[str, object]:
         """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
 
@@ -78,6 +80,7 @@ class DeveloperPlanAgent:
             test_command=test_command,
             repair_feedback=repair_feedback,
             previous_review=previous_review,
+            canonical_requirement=canonical_requirement,
         )
         raw = self.llm_client.complete(
             system=(
@@ -114,6 +117,9 @@ class DeveloperPlanAgent:
         workspace_mode: str = "",
         workspace_ref: str = "",
         base_sha: str = "",
+        canonical_requirement: RequirementModelV2 | None = None,
+        requirement_graph: dict[str, object] | None = None,
+        requirement_artifact_refs: dict[str, str] | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
@@ -144,9 +150,15 @@ class DeveloperPlanAgent:
             test_command=test_command,
             repair_feedback=repair_feedback,
             previous_review=previous_review or {},
+            canonical_requirement=canonical_requirement,
         )
         mappings = _merge_mappings(mappings, _dict_items(llm_payload.get("design_mappings")))
         test_intents = _dict_items(llm_payload.get("test_intents")) or test_intents
+        requirement_coverage = _requirement_coverage(
+            requirement_graph=requirement_graph or {},
+            requirement_design_trace=requirement_design_trace,
+            mappings=mappings,
+        ) if canonical_requirement is not None else []
         llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
         structured = {
             "version": "implementation_plan_structured_v1",
@@ -174,6 +186,11 @@ class DeveloperPlanAgent:
                 "class_graph_version": class_graph.get("version", ""),
                 "sequence_graph_version": sequence_graph.get("version", ""),
             },
+            "requirement_contract": {
+                "version": "v2" if canonical_requirement is not None else "v1",
+                "revision": canonical_requirement.revision if canonical_requirement is not None else 0,
+                "artifact_refs": requirement_artifact_refs or {},
+            },
             "repo_context": _repo_context_summary(repo_context),
             "repo_evidence": _string_items(llm_payload.get("repo_evidence"))
             or _repo_context_evidence_lines(repo_context),
@@ -182,6 +199,7 @@ class DeveloperPlanAgent:
             "proposed_files": _dict_items(llm_payload.get("proposed_files"))
             or _proposed_files_from_mappings(mappings),
             "design_mappings": mappings,
+            "requirement_coverage": requirement_coverage,
             "test_intents": test_intents,
             "assumptions": [
                 "Phase 3 tạo branch/worktree riêng cho run để lập kế hoạch; Phase 4 mới sửa code, chạy test và mở Draft PR.",
@@ -234,6 +252,9 @@ class DeveloperPlanAgent:
         workspace_mode: str = "",
         workspace_ref: str = "",
         base_sha: str = "",
+        canonical_requirement: RequirementModelV2 | None = None,
+        requirement_graph: dict[str, object] | None = None,
+        requirement_artifact_refs: dict[str, str] | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo lại plan dựa trên feedback của Validator.review_plan.
 
@@ -263,6 +284,9 @@ class DeveloperPlanAgent:
             workspace_mode=workspace_mode,
             workspace_ref=workspace_ref,
             base_sha=base_sha,
+            canonical_requirement=canonical_requirement,
+            requirement_graph=requirement_graph,
+            requirement_artifact_refs=requirement_artifact_refs,
         )
         structured = {
             **repaired.structured,
@@ -302,7 +326,14 @@ def _developer_plan_prompt(
     test_command: str,
     repair_feedback: str,
     previous_review: dict[str, object],
+    canonical_requirement: RequirementModelV2 | None,
 ) -> str:
+    canonical_section = (
+        "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
+        + json.dumps(canonical_requirement.to_dict(), ensure_ascii=False, indent=2)
+        if canonical_requirement is not None
+        else "Canonical Requirement V2: not enabled for this V1 run."
+    )
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -372,6 +403,8 @@ Run context:
 
 Target files:
 {json.dumps(target_files, ensure_ascii=False, indent=2)}
+
+{canonical_section}
 
 Approved requirement packet:
 {_excerpt(requirement_packet, limit=6000)}
@@ -558,6 +591,90 @@ def _string_items(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
+def _requirement_coverage(
+    *,
+    requirement_graph: dict[str, object],
+    requirement_design_trace: dict[str, object],
+    mappings: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Derive canonical requirement -> approved design -> code/test coverage in Python."""
+
+    mapping_by_name: dict[str, list[dict[str, object]]] = {}
+    for mapping in mappings:
+        name = str(mapping.get("design_element_name") or "").strip()
+        if name:
+            mapping_by_name.setdefault(name, []).append(mapping)
+
+    trace_targets: dict[str, list[str]] = {}
+    for trace_key in ("class_trace", "sequence_trace"):
+        for item in _dict_items(requirement_design_trace.get(trace_key)):
+            requirement_id = str(item.get("requirement") or "").strip()
+            if not requirement_id:
+                continue
+            targets = trace_targets.setdefault(requirement_id, [])
+            for link in _dict_items(item.get("links")):
+                target = str(link.get("target") or "").strip()
+                if target and target not in targets:
+                    targets.append(target)
+
+    coverage: list[dict[str, object]] = []
+    for requirement in _dict_items(requirement_graph.get("requirements")):
+        requirement_id = str(requirement.get("id") or "").strip()
+        if not requirement_id:
+            continue
+        targets = trace_targets.get(requirement_id, [])
+        resolved: list[dict[str, object]] = []
+        for target in targets:
+            candidates = _mappings_for_trace_target(target=target, mapping_by_name=mapping_by_name)
+            for mapping in candidates:
+                if mapping not in resolved:
+                    resolved.append(mapping)
+        coverage.append(
+            {
+                "requirement_id": requirement_id,
+                "content": str(requirement.get("content") or "").strip(),
+                "design_targets": targets,
+                "design_element_ids": _unique_strings(
+                    str(item.get("design_element_id") or "") for item in resolved
+                ),
+                "planned_code_targets": _unique_strings(
+                    str(item.get("planned_code_target") or "") for item in resolved
+                ),
+                "test_intents": _unique_strings(str(item.get("test_intent") or "") for item in resolved),
+            }
+        )
+    return coverage
+
+
+def _mappings_for_trace_target(
+    *,
+    target: str,
+    mapping_by_name: dict[str, list[dict[str, object]]],
+) -> list[dict[str, object]]:
+    candidates = list(mapping_by_name.get(target, []))
+    candidates.extend(
+        mapping
+        for name, named_mappings in mapping_by_name.items()
+        if name.endswith(f": {target}")
+        for mapping in named_mappings
+    )
+    # Class trace may point to an approved attribute. Phase 3 plans at class/file
+    # granularity, so resolve `Class.attribute` through its owning class mapping.
+    if "." in target:
+        owner = target.split(".", 1)[0]
+        candidates.extend(mapping_by_name.get(owner, []))
+    return candidates
+
+
+def _unique_strings(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        text = str(value).strip()
+        if text and text not in result:
+            result.append(text)
+    return result
+
+
 def _design_mappings(
     *,
     class_graph: dict[str, object],
@@ -693,6 +810,7 @@ def _markdown_plan(
 ) -> str:
     repo = _object_dict(structured.get("target_repository"))
     mappings = _dict_items(structured.get("design_mappings"))
+    requirement_coverage = _dict_items(structured.get("requirement_coverage"))
     test_intents = _dict_items(structured.get("test_intents"))
     implementation_steps = _dict_items(structured.get("implementation_steps"))
     proposed_files = _dict_items(structured.get("proposed_files"))
@@ -790,6 +908,31 @@ def _markdown_plan(
             )
             + " |"
         )
+
+    if requirement_coverage:
+        lines.extend(
+            [
+                "",
+                "## Requirement Coverage",
+                "",
+                "| Requirement | Content | Approved design targets | Planned code targets | Test intents |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        for item in requirement_coverage:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _table_cell(str(item.get("requirement_id") or "")),
+                        _table_cell(str(item.get("content") or "")),
+                        _table_cell(", ".join(_string_items(item.get("design_targets")))),
+                        _table_cell(", ".join(_string_items(item.get("planned_code_targets")))),
+                        _table_cell("; ".join(_string_items(item.get("test_intents")))),
+                    ]
+                )
+                + " |"
+            )
 
     lines.extend(
         [

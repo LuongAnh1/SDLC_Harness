@@ -48,9 +48,13 @@ triển khai chỉ vì tài liệu đã được viết.
 ## 5. Downstream Và Niko Contract
 
 - [x] Ghi `requirement_contract_version` vào state.
-- [ ] Tạo V1/V2 requirement input reader cho Phase 2-4.
-- [ ] Designer/Validator V2 ưu tiên canonical JSON.
-- [ ] Stable requirement IDs đi xuyên trace graph/work packets.
+- [x] Tạo V1/V2 requirement input reader cho Phase 2.
+- [x] Mở rộng frozen V1/V2 requirement input reader cho Phase 3.
+- [ ] Mở rộng V1/V2 requirement input reader/work packet cho Phase 4.
+- [x] Designer/Validator Phase 2 V2 ưu tiên canonical JSON.
+- [x] Stable requirement IDs đi xuyên Phase 2 requirement graph/design trace.
+- [x] Stable requirement IDs đi tiếp qua Phase 3 implementation plan coverage.
+- [ ] Stable requirement IDs đi tiếp qua Phase 4 developer/test/code-trace work packets.
 - [x] Status trả current question và remaining count, không lộ source text/evidence dài.
 - [ ] Niko route/formatter hỏi đúng một câu và gửi đúng question ID.
 - [x] Giữ run V1 hoạt động không đổi.
@@ -65,7 +69,7 @@ triển khai chỉ vì tài liệu đã được viết.
 - [x] Answer đủ/thiếu, answer lặp, answer khác, wrong question và wrong state có
   kết quả đúng contract.
 - [x] Projection mismatch và invalid evidence fail closed.
-- [ ] V1/V2 dual-read regression pass.
+- [x] V1/V2 dual-read regression Phase 2 pass.
 - [x] Mock sync cập nhật đúng checkpoint context.
 - [ ] Real sync controlled smoke update đúng target.
 - [ ] E2E qua Niko: start -> hỏi từng câu -> requirement approval -> Design.

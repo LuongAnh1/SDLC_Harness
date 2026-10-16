@@ -177,6 +177,10 @@ def write_phase2_design_artifacts(
     formal_use_case: str = "",
     version: int = 1,
     repair_iterations: int = 0,
+    traceability_mode: str = "traceability_v1",
+    requirement_contract_version: str = "v1",
+    requirement_artifact_refs: dict[str, str] | None = None,
+    requirement_revision: int | None = None,
 ) -> dict[str, str]:
     """Ghi artifact design theo version từ Designer, parser PlantUML và Validator."""
 
@@ -220,6 +224,7 @@ def write_phase2_design_artifacts(
     requirement_graph_payload = {
         **requirement_graph,
         "version": f"requirement_graph_{suffix}",
+        "source_graph_version": requirement_graph.get("version", "requirement_graph_v1"),
         "created_at": utc_now_iso(),
     }
     requirement_graph_path.write_text(
@@ -231,12 +236,18 @@ def write_phase2_design_artifacts(
     trace = {
         "version": f"requirement_design_trace_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "traceability_v1",
+        "mode": traceability_mode,
+        "requirement_contract_version": requirement_contract_version,
+        "requirement_revision": requirement_revision,
         "requirement_count": requirement_count,
         "class_trace": class_trace,
         "sequence_trace": sequence_trace,
         "inputs": {
-            "requirement_packet": "requirement_packet_v1",
+            "requirement_packet": (requirement_artifact_refs or {}).get(
+                "requirement_packet", "requirement_packet_v1"
+            ),
+            "requirement_model": (requirement_artifact_refs or {}).get("requirement_model"),
+            "formal_use_case": (requirement_artifact_refs or {}).get("formal_use_case"),
             "formal_use_case_attached": bool(formal_use_case.strip()),
             "requirement_graph": f"requirement_graph_{suffix}",
             "class_diagram_graph": f"class_diagram_graph_{suffix}",
@@ -249,7 +260,9 @@ def write_phase2_design_artifacts(
     missing = {
         "version": f"missing_design_links_{suffix}",
         "created_at": utc_now_iso(),
-        "mode": "traceability_v1",
+        "mode": traceability_mode,
+        "requirement_contract_version": requirement_contract_version,
+        "requirement_revision": requirement_revision,
         "missing_links": missing_links,
         "missing_count": missing_count,
     }
@@ -259,7 +272,9 @@ def write_phase2_design_artifacts(
     quality_path.write_text(
         f"""# Design Quality Report {suffix.upper()}
 
-- Validator mode: traceability_v1
+- Validator mode: {traceability_mode}
+- Requirement contract: {requirement_contract_version}
+- Requirement revision: {requirement_revision if requirement_revision is not None else "n/a"}
 - Requirement items checked: {requirement_count}
 - Class graph parser: passed
 - Sequence graph parser: passed

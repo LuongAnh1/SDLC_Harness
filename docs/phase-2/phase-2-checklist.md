@@ -27,6 +27,10 @@ Mục đích: Phase 2 dùng requirement đã duyệt, không tự kéo source ho
 - [x] Ghi `approved_artifacts.requirement_packet`.
 - [x] Không gọi Requirement Refiner trong Phase 2.
 - [x] Nếu artifact requirement thiếu, trả lỗi `approved_requirement_not_found`.
+- [x] Dual-read V1/V2 tại biên approval; thiếu version tiếp tục được hiểu là V1.
+- [x] Với V2, kiểm canonical revision, source fingerprint, validation status và
+  deterministic packet/formal projections trước khi đổi state.
+- [x] Ghi canonical model cùng projections vào `approved_artifacts` của run V2.
 
 ## 3. Designer Agent
 
@@ -62,6 +66,9 @@ Mục đích: kiểm tra requirement đã được design thể hiện đủ ở
 - [x] Trace placeholder không invent target không có trong graph.
 - [x] Class trace chấp nhận `ClassName.attributeName` nếu attribute tồn tại trong class graph.
 - [x] Sequence trace chấp nhận return message target dùng arrow `-->`.
+- [x] V2 requirement graph giữ stable ID canonical và loại unknown/assumption
+  khỏi tập requirement dùng cho traceability.
+- [x] Trace/report V2 ghi `traceability_v2`, contract version, revision và artifact refs.
 
 ## 6. Validator Quality Report Và Repair Loop
 
@@ -148,4 +155,8 @@ Mục đích: Phase 2 thật sự chạy được từ terminal trước khi liv
 - [x] Unit test partial failure real sync design.
 - [x] Smoke test CLI từ run Phase 1 thật sang `waiting_design_approval`.
 - [x] Smoke test qua Niko sau khi CLI pass.
+- [x] Regression V1/V2 xác nhận V2 tới `waiting_design_approval` và V1 không đổi.
+- [x] V2 repair loop giữ cùng canonical model, stable IDs và trace mode qua các vòng.
+- [x] Phase 3 có frozen canonical reader; approval design V2 đi tiếp tới
+  `waiting_implementation_plan_review` và boundary được chuyển sang Phase 4.
 

@@ -142,4 +142,17 @@ CodeGraph để lập plan có evidence, implementation steps và proposed files
 - [x] Structured plan lưu `planning_mode=llm_developer_with_codegraph_context_v1`.
 - [x] Unit test missing CodeGraph index.
 - [x] Unit test Phase 3 pass: `rtk python -m pytest tests/test_phase3.py`.
+
+## 10. Requirement Contract V2 - Slice 4B
+
+- [x] Phase 3 đọc frozen requirement từ `approved_artifacts`, không đọc nhầm projection mới nhất.
+- [x] V2 đối chiếu canonical revision/model ref, saved requirement graph và exact stable ID set trong trace.
+- [x] Tamper V2 fail trước khi tạo worktree hoặc mutate state bằng `requirement_v2_phase3_input_invalid`.
+- [x] Developer prompt đặt canonical model trước packet projection.
+- [x] Python tạo lại `requirement_coverage` sau LLM mapping merge và sau mỗi repair.
+- [x] Validator V2 hard-gate ID thiếu/trùng/tự bịa, target ngoài trace, thiếu code target hoặc test intent.
+- [x] Markdown và Confluence render Requirement Coverage.
+- [x] State/response giữ `requirement_contract_version=v2` tại `waiting_implementation_plan_review`.
+- [x] Gate V2 được chuyển sang Phase 4 với `requirement_v2_phase4_not_ready` và không mutate state.
+- [x] V1 regression tiếp tục dùng contract mặc định và schema artifact hiện có.
 - [ ] Về sau bổ sung redact/filter hoặc local model để tránh gửi source snippets nhạy cảm ra LLM ngoài.

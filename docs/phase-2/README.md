@@ -33,7 +33,7 @@ approve_checkpoint(run_id)
 -> nếu fail vì requirement thiếu/nhập nhằng: state=blocked để human xử lý lại requirement
 ```
 
-## Requirement V2 Input - Planned
+## Requirement V2 Input - Implemented For Phase 2
 
 Với run `requirement_contract_version=v2`, Phase 2 phải đọc
 `requirement_model_v2_r<n>.json` đã duyệt làm nguồn sự thật. Requirement Packet
@@ -48,6 +48,16 @@ V2 -> requirement_model_v2_r<n> canonical + projections để review/debug
 Stable requirement IDs từ V2 phải được giữ khi tạo requirement graph và
 requirement-design trace. Chi tiết migration nằm tại
 `../phase-1/requirement-v2/migration-and-rollout.md`.
+
+Phase 2 hiện đã dual-read V1/V2. Với V2, reader kiểm lại canonical revision,
+source fingerprint, Python validation và hai deterministic projection trước khi
+workflow đổi state. Designer nhận canonical JSON trước các projection; Validator
+tạo `requirement_graph_v2` bằng stable ID như `MF-1`, `EF-1`, `AC-1` và ghi trace
+ở mode `traceability_v2`. Run V2 được phép tới `waiting_design_approval`.
+
+Phase 3 hiện đã consume canonical V2 và giữ stable IDs tới implementation plan
+checkpoint. Boundary V2 hiện nằm trước Phase 4 bằng
+`requirement_v2_phase4_not_ready`. Default contract vẫn là V1.
 
 ## Ba Vai Trò AI Trong Phase 2
 

@@ -1508,6 +1508,7 @@ def _confluence_implementation_plan_storage_body(
     repo = structured_plan.get("target_repository", {})
     repo = repo if isinstance(repo, dict) else {}
     mappings = _dict_list(structured_plan.get("design_mappings"))
+    requirement_coverage = _dict_list(structured_plan.get("requirement_coverage"))
     test_intents = _dict_list(structured_plan.get("test_intents"))
     assumptions = _string_list(structured_plan.get("assumptions"))
     open_questions = _string_list(structured_plan.get("open_questions"))
@@ -1535,6 +1536,7 @@ def _confluence_implementation_plan_storage_body(
             ("Validator ok", str(review_ok).lower()),
             ("Issue count", str(issue_count)),
             ("Coverage issues", str(len(review_report.get("coverage_issues", []) or []))),
+            ("Requirement coverage issues", str(len(review_report.get("requirement_coverage_issues", []) or []))),
             ("Traceability issues", str(len(review_report.get("traceability_issues", []) or []))),
             ("Executability issues", str(len(review_report.get("executability_issues", []) or []))),
             ("Scope issues", str(len(review_report.get("scope_issues", []) or []))),
@@ -1552,6 +1554,16 @@ def _confluence_implementation_plan_storage_body(
     )
     target_rows = _confluence_implementation_target_rows(target_groups)
     test_rows = _confluence_implementation_test_rows(test_intents)
+    requirement_coverage_rows = "\n".join(
+        "<tr>"
+        f"<td><code>{escape(str(item.get('requirement_id') or ''))}</code></td>"
+        f"<td>{escape(str(item.get('content') or ''))}</td>"
+        f"<td>{escape(', '.join(_string_list(item.get('design_targets'))))}</td>"
+        f"<td>{escape(', '.join(_string_list(item.get('planned_code_targets'))))}</td>"
+        f"<td>{escape('; '.join(_string_list(item.get('test_intents'))))}</td>"
+        "</tr>"
+        for item in requirement_coverage
+    ) or '<tr><td colspan="5">Requirement V2 coverage is not enabled for this run.</td></tr>'
 
     return f"""
 <!-- {escape(_checkpoint_marker(source_ref, "implementation_plan"))} -->
@@ -1567,6 +1579,7 @@ def _confluence_implementation_plan_storage_body(
 <tr><th>Base branch</th><td><code>{escape(str(repo.get("base_branch", "")))}</code></td></tr>
 <tr><th>Planned branch</th><td><code>{escape(str(repo.get("planned_branch", "")))}</code></td></tr>
 <tr><th>Design-to-code mappings</th><td>{mapping_count}</td></tr>
+<tr><th>Canonical requirement coverage</th><td>{len(requirement_coverage)}</td></tr>
 <tr><th>Review focus</th><td>Check whether the target files, implementation steps, and test plan are acceptable before code generation starts.</td></tr>
 <tr><th>Next action</th><td>Approve this implementation plan, request changes, cancel the run, or ask Niko for status.</td></tr>
 </tbody>
@@ -1579,6 +1592,14 @@ def _confluence_implementation_plan_storage_body(
 <tr><th>Method mappings</th><td>{mapping_counts.get("method", 0)}</td></tr>
 <tr><th>Sequence-flow mappings</th><td>{mapping_counts.get("sequence_message", 0)}</td></tr>
 <tr><th>Test commands</th><td>{escape(", ".join(unique_commands) if unique_commands else "Not specified.")}</td></tr>
+</tbody>
+</table>
+<h2>Requirement Coverage</h2>
+<p>Canonical stable requirement IDs are mapped through the approved design trace to planned code targets and tests.</p>
+<table>
+<tbody>
+<tr><th>Requirement</th><th>Content</th><th>Approved design targets</th><th>Planned code targets</th><th>Test intents</th></tr>
+{requirement_coverage_rows}
 </tbody>
 </table>
 <h2>Execution Steps</h2>

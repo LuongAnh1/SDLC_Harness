@@ -3,6 +3,32 @@
 Tài liệu này ghi lại tiến độ triển khai Phase 2 theo từng lát nhỏ. Không đánh
 dấu một mục là xong nếu mới chỉ có tài liệu mà chưa có code/test tương ứng.
 
+## 2026-10-16 - Requirement V2 Dual Read
+
+Đã làm:
+
+- Thêm reader requirement input V1/V2 trước khi Phase 2 mutate state.
+- V2 đọc canonical model làm source of truth và xác minh revision, source
+  fingerprint, validation cùng packet/formal projections.
+- Designer nhận canonical JSON trước review projections.
+- Validator dựng graph từ canonical V2 và giữ stable requirement IDs trong trace.
+- Artifact Phase 2 ghi mode `traceability_v2`, contract version, revision và refs.
+- Run V2 đi tới `waiting_design_approval`. Slice 4B sau đó đã mở Phase 3 bằng
+  frozen canonical reader và chuyển boundary sang Phase 4.
+
+Phạm vi chưa mở:
+
+- Phase 4 canonical work packet và stable ID propagation.
+- Niko/Telegram thay đổi và live DeepSeek/Jira smoke.
+
+Đã kiểm thử:
+
+- Regression Phase 1-3: `114 passed`.
+- Full suite SDLC Harness: `243 passed` trong `291.65s`.
+- Sau đó bổ sung test repair loop V2: file dual-reader/V2 `11 passed`; nhóm
+  Requirement V2 + Phase 2 `56 passed`.
+- `git diff --check`: pass.
+
 ## 2026-10-13 - V0 Approve Requirement Sang Design Checkpoint
 
 Đã làm:
