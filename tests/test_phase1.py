@@ -612,6 +612,12 @@ class PhaseOneTest(unittest.TestCase):
             run_id=run_id,
             source_ref=str(created["source_ref"]),
             artifact_paths=artifact_paths,
+            checkpoint_context={
+                "status": "waiting_requirement_clarification",
+                "remaining_blocking_count": 2,
+                "current_question": {"id": "Q-4", "text": "Which fields define a duplicate?"},
+                "decision_summary": {"id": "D-1", "question_id": "Q-3", "status": "accepted"},
+            },
             request_json=fake_request,
         )
 
@@ -623,6 +629,11 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(jira_body["content"][0]["type"], "heading")
         self.assertIn("Requirement review", jira_body["content"][0]["content"][0]["text"])
         self.assertTrue(any(block["type"] == "bulletList" for block in jira_body["content"]))
+        jira_text = json.dumps(jira_body, ensure_ascii=False)
+        self.assertIn("waiting_requirement_clarification", jira_text)
+        self.assertIn("Which fields define a duplicate?", jira_text)
+        self.assertIn("Remaining blocking questions: 2", jira_text)
+        self.assertIn("D-1 / Q-3 / accepted", jira_text)
         confluence_payload = calls[1][2]
         self.assertIsNotNone(confluence_payload)
         confluence_body = confluence_payload["body"]["value"]
@@ -632,6 +643,10 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIn("<h2>Requirement Packet</h2>", confluence_body)
         self.assertIn("<h3>Alternative / Exception Flows</h3>", confluence_body)
         self.assertIn("<h3>Acceptance Criteria</h3>", confluence_body)
+        self.assertIn("waiting_requirement_clarification", confluence_body)
+        self.assertIn("Which fields define a duplicate?", confluence_body)
+        self.assertIn("Remaining blocking questions</th><td>2", confluence_body)
+        self.assertIn("D-1 / Q-3 / accepted", confluence_body)
         self.assertNotIn("<pre>", confluence_body)
         report_path = self.repo_root / str(result["report"])
         report = json.loads(report_path.read_text(encoding="utf-8"))

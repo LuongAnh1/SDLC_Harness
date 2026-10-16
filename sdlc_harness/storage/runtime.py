@@ -14,6 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from ..core.errors import HarnessError
+from .locks import RuntimeActionLock
 
 TERMINAL_STATUSES = {"done", "cancelled", "failed"}
 
@@ -48,6 +49,11 @@ class RuntimeStore:
 
     def state_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "state.json"
+
+    def run_lock(self, run_id: str) -> RuntimeActionLock:
+        """Serialize state/artifact mutations belonging to one workflow run."""
+
+        return RuntimeActionLock(self.runtime_root / "locks" / f"run-{run_id}.lock", run_id=run_id)
 
     def artifact_path(self, run_id: str, filename: str) -> Path:
         """Trả đường dẫn artifact cố định và chặn filename thoát thư mục run."""

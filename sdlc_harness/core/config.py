@@ -24,6 +24,7 @@ class Settings:
     llm_model: str
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
+    requirement_contract_version: str
     design_repair_limit: int
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
@@ -106,6 +107,7 @@ def load_settings(
         "SDLC_LLM_MODEL",
         "SDLC_LLM_TIMEOUT_SECONDS",
         "SDLC_LLM_STRUCTURED_MAX_TOKENS",
+        "SDLC_REQUIREMENT_CONTRACT_VERSION",
         "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
@@ -134,6 +136,9 @@ def load_settings(
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
         sync_mode = "mock"
+    requirement_contract_version = merged.get("SDLC_REQUIREMENT_CONTRACT_VERSION", "v1").strip().lower() or "v1"
+    if requirement_contract_version not in {"v1", "v2"}:
+        requirement_contract_version = "v1"
     target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_eTour")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
@@ -159,6 +164,7 @@ def load_settings(
             default=8192,
             minimum=1024,
         ),
+        requirement_contract_version=requirement_contract_version,
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_plan_repair_limit=_int_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"),

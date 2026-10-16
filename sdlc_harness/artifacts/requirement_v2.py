@@ -1,14 +1,67 @@
-"""Revisioned artifact bundle for the canonical Requirement Model V2."""
+"""Immutable revisioned artifacts for Requirement Model V2."""
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
+from typing import Any
 
+from ..agents.requirements.model_v2 import RequirementModelV2
 from ..agents.requirements.projection_v2 import require_valid_requirement_v2_projections
 from ..agents.requirements.refiner_v2 import RequirementModelV2RefinementResult
 from ..agents.requirements.renderer_v2 import render_formal_use_case_v2, render_requirement_packet_v2
+from ..agents.requirements.validator_v2 import RequirementModelV2ValidationReport
 from ..core.errors import HarnessError
+from ..sources.fixtures import UseCaseSource
 from ..storage.runtime import RuntimeStore, utc_now_iso
+
+
+def write_source_snapshot_v2(*, store: RuntimeStore, run_id: str, source: UseCaseSource) -> str:
+    payload: dict[str, object] = {
+        "artifact_version": "source_snapshot_v1",
+        "run_id": run_id,
+        "dataset": source.dataset,
+        "use_case": source.use_case,
+        "source_ref": source.source_ref,
+        "text": source.text,
+        "fingerprint": _fingerprint(source.text),
+    }
+    path = store.artifact_path(run_id, "source_snapshot_v1.json")
+    _write_json_immutable(path, payload, run_id=run_id)
+    return store.relative(path)
+
+
+def read_source_snapshot_v2(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    artifact_ref: str,
+    expected_source_ref: str,
+    expected_fingerprint: str,
+) -> str:
+    path = (store.repo_root / artifact_ref).resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            f"Cannot read Requirement V2 source snapshot: {artifact_ref}",
+            run_id=run_id,
+        ) from exc
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if (
+        not isinstance(text, str)
+        or payload.get("source_ref") != expected_source_ref
+        or payload.get("fingerprint") != expected_fingerprint
+        or _fingerprint(text) != expected_fingerprint
+    ):
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            "Requirement V2 source snapshot identity or fingerprint does not match the canonical model.",
+            run_id=run_id,
+        )
+    return text
 
 
 def write_requirement_v2_artifacts(
@@ -17,23 +70,107 @@ def write_requirement_v2_artifacts(
     run_id: str,
     refinement_result: RequirementModelV2RefinementResult,
 ) -> dict[str, str]:
-    """Write the canonical model, deterministic projections, and audit report."""
+    return write_requirement_v2_revision_artifacts(
+        store=store,
+        run_id=run_id,
+        model=refinement_result.model,
+        validation_report=refinement_result.final_report,
+        audit=refinement_result.to_report_dict(),
+    )
 
-    model = refinement_result.model
-    report = refinement_result.final_report
+
+def write_requirement_v2_revision_artifacts(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    model: RequirementModelV2,
+    validation_report: RequirementModelV2ValidationReport,
+    audit: dict[str, object],
+) -> dict[str, str]:
+    """Write one immutable model/projection/decision revision bundle."""
+
+    _require_writable_model(model, validation_report, run_id=run_id)
+    revision = model.revision
+    packet = render_requirement_packet_v2(model)
+    formal = render_formal_use_case_v2(model)
+    projection_report = require_valid_requirement_v2_projections(
+        model,
+        requirement_packet=packet,
+        formal_use_case=formal,
+    )
+    model_path = store.artifact_path(run_id, f"requirement_model_v2_r{revision}.json")
+    packet_path = store.artifact_path(run_id, f"requirement_packet_v2_r{revision}.md")
+    formal_path = store.artifact_path(run_id, f"formal_use_case_v2_r{revision}.txt")
+    validation_path = store.artifact_path(run_id, f"requirement_validation_v2_r{revision}.json")
+    decisions_path = store.artifact_path(run_id, f"requirement_decisions_v2_r{revision}.json")
+    created_at = utc_now_iso()
+
+    _write_json_immutable(model_path, model.to_dict(), run_id=run_id)
+    _write_text_immutable(packet_path, packet, run_id=run_id)
+    _write_text_immutable(formal_path, formal, run_id=run_id)
+    _write_json_immutable(
+        validation_path,
+        {
+            "artifact_version": "requirement_validation_v2",
+            "run_id": run_id,
+            "revision": revision,
+            "created_at": created_at,
+            **audit,
+            "final_report": validation_report.to_dict(),
+            "projection_report": projection_report.to_dict(),
+        },
+        run_id=run_id,
+        ignore_created_at=True,
+    )
+    _write_json_immutable(
+        decisions_path,
+        {
+            "artifact_version": "requirement_decisions_v2",
+            "run_id": run_id,
+            "revision": revision,
+            "created_at": created_at,
+            "decisions": model.to_dict()["decisions"],
+        },
+        run_id=run_id,
+        ignore_created_at=True,
+    )
+    return {
+        "requirement_model": store.relative(model_path),
+        "requirement_packet": store.relative(packet_path),
+        "formal_use_case": store.relative(formal_path),
+        "requirement_validation": store.relative(validation_path),
+        "requirement_decisions": store.relative(decisions_path),
+    }
+
+
+def read_requirement_model_v2(*, store: RuntimeStore, run_id: str, artifact_ref: str) -> RequirementModelV2:
+    path = (store.repo_root / artifact_ref).resolve()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return RequirementModelV2.from_dict(payload)
+    except HarnessError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            "requirement_model_v2_invalid",
+            f"Cannot read Requirement Model V2 artifact: {artifact_ref}",
+            run_id=run_id,
+        ) from exc
+
+
+def _require_writable_model(
+    model: RequirementModelV2,
+    report: RequirementModelV2ValidationReport,
+    *,
+    run_id: str,
+) -> None:
     if model.run_id != run_id:
         raise HarnessError(
             "requirement_model_v2_validation_failed",
             f"Requirement model run_id {model.run_id!r} does not match writer run_id {run_id!r}.",
             run_id=run_id,
         )
-    if model.revision < 1:
-        raise HarnessError(
-            "requirement_model_v2_validation_failed",
-            "Requirement model revision must start at 1.",
-            run_id=run_id,
-        )
-    if not report.ok or report.status not in {"valid", "clarification_required"}:
+    if model.revision < 1 or not report.ok or report.status not in {"valid", "clarification_required"}:
         raise HarnessError(
             "requirement_model_v2_validation_failed",
             "Cannot write artifacts for an invalid Requirement Model V2.",
@@ -46,47 +183,53 @@ def write_requirement_v2_artifacts(
             run_id=run_id,
         )
 
-    revision = model.revision
-    packet = render_requirement_packet_v2(model)
-    formal = render_formal_use_case_v2(model)
-    projection_report = require_valid_requirement_v2_projections(
-        model,
-        requirement_packet=packet,
-        formal_use_case=formal,
-    )
 
-    model_path = store.write_json_artifact(
-        run_id,
-        f"requirement_model_v2_r{revision}.json",
-        model.to_dict(),
-    )
-    packet_path = store.artifact_path(run_id, f"requirement_packet_v2_r{revision}.md")
-    formal_path = store.artifact_path(run_id, f"formal_use_case_v2_r{revision}.txt")
-    _write_text(packet_path, packet, run_id=run_id)
-    _write_text(formal_path, formal, run_id=run_id)
-    validation_path = store.write_json_artifact(
-        run_id,
-        f"requirement_validation_v2_r{revision}.json",
-        {
-            "artifact_version": "requirement_validation_v2",
-            "run_id": run_id,
-            "revision": revision,
-            "created_at": utc_now_iso(),
-            **refinement_result.to_report_dict(),
-            "projection_report": projection_report.to_dict(),
-        },
-    )
-    return {
-        "requirement_model": store.relative(model_path),
-        "requirement_packet": store.relative(packet_path),
-        "formal_use_case": store.relative(formal_path),
-        "requirement_validation": store.relative(validation_path),
-    }
-
-
-def _write_text(path: Path, content: str, *, run_id: str) -> None:
+def _write_text_immutable(path: Path, content: str, *, run_id: str) -> None:
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            if path.read_text(encoding="utf-8") == content:
+                return
+            raise HarnessError(
+                "requirement_revision_conflict",
+                f"Requirement revision artifact already exists with different content: {path.name}",
+                run_id=run_id,
+            )
         path.write_text(content, encoding="utf-8")
+    except HarnessError:
+        raise
     except OSError as exc:
         raise HarnessError("runtime_write_failed", str(exc), run_id=run_id) from exc
+
+
+def _write_json_immutable(
+    path: Path,
+    data: dict[str, object],
+    *,
+    run_id: str,
+    ignore_created_at: bool = False,
+) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            current = json.loads(path.read_text(encoding="utf-8"))
+            expected: Any = data
+            if ignore_created_at and isinstance(current, dict):
+                current = {key: value for key, value in current.items() if key != "created_at"}
+                expected = {key: value for key, value in data.items() if key != "created_at"}
+            if current == expected:
+                return
+            raise HarnessError(
+                "requirement_revision_conflict",
+                f"Requirement revision artifact already exists with different content: {path.name}",
+                run_id=run_id,
+            )
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except HarnessError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError("runtime_write_failed", str(exc), run_id=run_id) from exc
+
+
+def _fingerprint(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()

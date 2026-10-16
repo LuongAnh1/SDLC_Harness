@@ -7,6 +7,17 @@ from .model_v2 import (
     RequirementStatus,
     ValidationStatus,
 )
+from .clarification_v2 import (
+    ClarificationAttempt,
+    CurrentRequirementQuestion,
+    RequirementClarificationResult,
+    RequirementClarificationUpdater,
+    RequirementQuestionSelection,
+    clarification_submission_hash,
+    find_clarification_submission,
+    normalize_clarification_answer,
+    select_current_requirement_question,
+)
 from .refiner import FormalRefinementResult, RequirementPacketRefinementResult, RequirementRefiner
 from .refiner_v2 import (
     RequirementModelV2Attempt,
@@ -29,12 +40,16 @@ from .validator_v2 import (
 )
 
 __all__ = [
+    "ClarificationAttempt",
+    "CurrentRequirementQuestion",
     "DecisionStatus",
     "FormalCheckReport",
     "FormalRefinementResult",
     "FormalUseCaseValidator",
     "HARD_BLOCKING_CATEGORIES",
     "QuestionStatus",
+    "RequirementClarificationResult",
+    "RequirementClarificationUpdater",
     "RequirementModelV2",
     "RequirementModelV2Attempt",
     "RequirementModelV2Issue",
@@ -43,15 +58,20 @@ __all__ = [
     "RequirementModelV2ValidationReport",
     "RequirementModelV2ValidationResult",
     "RequirementProjectionV2Report",
+    "RequirementQuestionSelection",
     "RequirementPacketRefinementResult",
     "RequirementRefiner",
     "RequirementStatus",
     "RequirementValidator",
     "ValidationReport",
     "ValidationStatus",
+    "clarification_submission_hash",
+    "find_clarification_submission",
     "normalize_and_validate_requirement_model_v2",
+    "normalize_clarification_answer",
     "require_valid_requirement_v2_projections",
     "render_formal_use_case_v2",
     "render_requirement_packet_v2",
+    "select_current_requirement_question",
     "validate_requirement_v2_projections",
 ]

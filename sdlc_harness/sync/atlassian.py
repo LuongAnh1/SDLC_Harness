@@ -88,6 +88,7 @@ def real_sync_requirement_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    checkpoint_context: dict[str, object] | None = None,
     request_json: JsonRequester | None = None,
 ) -> dict[str, object]:
     """Sync requirement checkpoint to Jira/Confluence and write sync report."""
@@ -116,6 +117,7 @@ def real_sync_requirement_checkpoint(
                     run_id,
                     source_ref,
                     artifact_paths,
+                    checkpoint_context=checkpoint_context,
                     previous_comment_id=previous_comment_id,
                 )
             )
@@ -139,6 +141,7 @@ def real_sync_requirement_checkpoint(
                     run_id,
                     source_ref,
                     artifact_paths,
+                    checkpoint_context=checkpoint_context,
                     previous_page_id=previous_page_id,
                 )
             )
@@ -566,6 +569,7 @@ def _sync_jira_comment(
     source_ref: str,
     artifact_paths: dict[str, str],
     *,
+    checkpoint_context: dict[str, object] | None = None,
     previous_comment_id: str | None,
 ) -> dict[str, object]:
     issue_key = _jira_issue_key(settings, source_ref)
@@ -580,6 +584,7 @@ def _sync_jira_comment(
                 run_id=run_id,
                 source_ref=source_ref,
                 artifact_paths=artifact_paths,
+                checkpoint_context=checkpoint_context,
             )
         }
         response, operation = _upsert_jira_comment(
@@ -818,6 +823,7 @@ def _sync_confluence_page(
     source_ref: str,
     artifact_paths: dict[str, str],
     *,
+    checkpoint_context: dict[str, object] | None = None,
     previous_page_id: str | None,
 ) -> dict[str, object]:
     try:
@@ -828,7 +834,13 @@ def _sync_confluence_page(
             raise ValueError("Missing CONFLUENCE_SYNC_PARENT_PAGE_ID.")
 
         title = _checkpoint_title(source_ref, "requirement")
-        body = _confluence_storage_body(store, run_id, source_ref, artifact_paths)
+        body = _confluence_storage_body(
+            store,
+            run_id,
+            source_ref,
+            artifact_paths,
+            checkpoint_context=checkpoint_context,
+        )
         if previous_page_id:
             current = request_json("GET", f"{settings.atlassian_base_url}/wiki/api/v2/pages/{previous_page_id}", None)
             version = int(current.get("version", {}).get("number", 1)) + 1
@@ -1132,6 +1144,7 @@ def _jira_comment_body(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    checkpoint_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     requirement_text = _read_requirement_packet(store, artifact_paths)
     goal = _section_preview(requirement_text, "Goal", default="See requirement packet.")
@@ -1139,6 +1152,33 @@ def _jira_comment_body(
     acceptance_criteria = _section_items(requirement_text, "Acceptance Criteria")
     open_questions = _section_items(requirement_text, "Open Questions")
     artifact_items = [f"{_artifact_label(name)}: {path}" for name, path in artifact_paths.items()]
+    context = checkpoint_context or {}
+    checkpoint_status = str(context.get("status") or "waiting_requirement_approval")
+    current_question = context.get("current_question")
+    question_text = str(current_question.get("text") or "") if isinstance(current_question, dict) else ""
+    remaining = context.get("remaining_blocking_count")
+    decision = context.get("decision_summary")
+    next_action = (
+        "answer_clarification, get_status, sync_run, or cancel_run"
+        if checkpoint_status == "waiting_requirement_clarification"
+        else "approve_checkpoint, request_change, cancel_run, or get_status"
+    )
+    summary_items = [
+        f"Goal: {goal}",
+        f"Alternative / exception flows: {len(alternative_flows)} item(s)",
+        f"Acceptance criteria: {len(acceptance_criteria)} item(s)",
+        f"Open questions: {len(open_questions)} item(s)",
+        "Full packet is available in the synced Confluence page and local artifacts.",
+    ]
+    if question_text:
+        summary_items.insert(0, f"Current clarification question: {question_text}")
+    if remaining is not None:
+        summary_items.insert(1 if question_text else 0, f"Remaining blocking questions: {remaining}")
+    if isinstance(decision, dict):
+        summary_items.append(
+            "Latest decision: "
+            f"{decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}"
+        )
 
     return {
         "type": "doc",
@@ -1146,25 +1186,17 @@ def _jira_comment_body(
         "content": [
             _adf_heading("SDLC Harness checkpoint: Requirement review", level=2),
             _adf_paragraph(_checkpoint_marker(source_ref, "requirement")),
-            _adf_paragraph("Requirement packet has been normalized and is waiting for human approval."),
+            _adf_paragraph("Requirement checkpoint is ready for the next human action."),
             _adf_bullet_list(
                 [
                     f"Run: {run_id}",
                     f"Source: {source_ref}",
-                    "Status: waiting_requirement_approval",
-                    "Next action: approve_checkpoint, request_change, cancel_run, or get_status",
+                    f"Status: {checkpoint_status}",
+                    f"Next action: {next_action}",
                 ]
             ),
             _adf_heading("Requirement summary", level=3),
-            _adf_bullet_list(
-                [
-                    f"Goal: {goal}",
-                    f"Alternative / exception flows: {len(alternative_flows)} item(s)",
-                    f"Acceptance criteria: {len(acceptance_criteria)} item(s)",
-                    f"Open questions: {len(open_questions)} item(s)",
-                    "Full packet is available in the synced Confluence page and local artifacts.",
-                ]
-            ),
+            _adf_bullet_list(summary_items),
             _adf_heading("Artifacts", level=3),
             _adf_bullet_list(artifact_items),
         ],
@@ -1330,6 +1362,8 @@ def _confluence_storage_body(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    *,
+    checkpoint_context: dict[str, object] | None = None,
 ) -> str:
     requirement_text = _read_requirement_packet(store, artifact_paths)
     artifact_rows = "\n".join(
@@ -1347,6 +1381,29 @@ def _confluence_storage_body(
     acceptance_lines = "\n".join(f"<li>{escape(item)}</li>" for item in acceptance_criteria) or "<li>None recorded.</li>"
     open_question_lines = "\n".join(f"<li>{escape(item)}</li>" for item in open_questions) or "<li>None recorded.</li>"
     requirement_body = _markdown_to_confluence_storage(requirement_text)
+    context = checkpoint_context or {}
+    checkpoint_status = str(context.get("status") or "waiting_requirement_approval")
+    current_question = context.get("current_question")
+    question_text = str(current_question.get("text") or "") if isinstance(current_question, dict) else ""
+    remaining = context.get("remaining_blocking_count")
+    decision = context.get("decision_summary")
+    question_row = (
+        f"<tr><th>Current question</th><td>{escape(question_text)}</td></tr>" if question_text else ""
+    )
+    remaining_row = (
+        f"<tr><th>Remaining blocking questions</th><td>{escape(str(remaining))}</td></tr>"
+        if remaining is not None
+        else ""
+    )
+    decision_row = ""
+    if isinstance(decision, dict):
+        decision_text = f"{decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}"
+        decision_row = f"<tr><th>Latest decision</th><td>{escape(decision_text)}</td></tr>"
+    next_action = (
+        "Answer the current clarification question, sync again, cancel the run, or ask Niko for status."
+        if checkpoint_status == "waiting_requirement_clarification"
+        else "Approve, request changes, cancel the run, or ask Niko for status."
+    )
 
     return f"""
 <!-- {escape(_checkpoint_marker(source_ref, "requirement"))} -->
@@ -1356,8 +1413,11 @@ def _confluence_storage_body(
 <tbody>
 <tr><th>Run</th><td><code>{escape(run_id)}</code></td></tr>
 <tr><th>Source</th><td><code>{escape(source_ref)}</code></td></tr>
-<tr><th>Status</th><td><strong>waiting_requirement_approval</strong></td></tr>
-<tr><th>Next action</th><td>Approve, request changes, cancel the run, or ask Niko for status.</td></tr>
+<tr><th>Status</th><td><strong>{escape(checkpoint_status)}</strong></td></tr>
+{question_row}
+{remaining_row}
+{decision_row}
+<tr><th>Next action</th><td>{escape(next_action)}</td></tr>
 </tbody>
 </table>
 <h2>Review Summary</h2>

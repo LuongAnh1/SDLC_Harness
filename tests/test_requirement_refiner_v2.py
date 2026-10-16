@@ -194,7 +194,13 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             )
             self.assertEqual(
                 set(artifacts),
-                {"requirement_model", "requirement_packet", "formal_use_case", "requirement_validation"},
+                {
+                    "requirement_model",
+                    "requirement_packet",
+                    "formal_use_case",
+                    "requirement_validation",
+                    "requirement_decisions",
+                },
             )
             for relative_path in artifacts.values():
                 self.assertTrue((root / relative_path).is_file())

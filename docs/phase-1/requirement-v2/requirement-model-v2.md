@@ -169,7 +169,7 @@ Các item requirement dùng field chung `id`, `text`, `status`, `evidence_refs`,
 | `acceptance_criteria` | `verifies` chứa stable IDs được kiểm chứng |
 | `assumptions` | `reason`, `affects`; không được có status confirmed |
 | `open_questions` | `question`, `category`, `proposed_blocking`, `effective_blocking`, `affects`, `depends_on`, `status`, `answer_guidance` |
-| `decisions` | `question_id`, `answer`, `answered_by`, `answered_at`, `affected_requirement_ids`, `status`, `supersedes_decision_id` |
+| `decisions` | `question_id`, `answer`, `answered_by`, `answered_at`, `affected_requirement_ids`, `status`, `supersedes_decision_id`, `submission_hash` |
 | `evidence` | `source_ref`, `location`, `quote` |
 
 Giá trị enum:
@@ -253,7 +253,8 @@ Mỗi câu trả lời được lưu trong `decisions` và projection audit
   "answered_by": "telegram:<user-id>",
   "answered_at": "<UTC ISO-8601>",
   "affected_requirement_ids": ["BR-1", "AC-2"],
-  "supersedes_decision_id": null
+  "supersedes_decision_id": null,
+  "submission_hash": "sha256:<normalized-question-answer-hash>"
 }
 ```
 

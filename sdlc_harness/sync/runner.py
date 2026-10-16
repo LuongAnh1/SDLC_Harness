@@ -29,6 +29,7 @@ def sync_requirement_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    checkpoint_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Sync requirement checkpoint bằng mock, real hoặc cả hai."""
 
@@ -38,6 +39,7 @@ def sync_requirement_checkpoint(
             run_id=run_id,
             source_ref=source_ref,
             artifact_paths=artifact_paths,
+            checkpoint_context=checkpoint_context,
         )
     if settings.sync_mode == "both":
         mock_sync_requirement_checkpoint(
@@ -45,6 +47,7 @@ def sync_requirement_checkpoint(
             run_id=run_id,
             source_ref=source_ref,
             artifact_paths=artifact_paths,
+            checkpoint_context=checkpoint_context,
         )
     return real_sync_requirement_checkpoint(
         store=store,
@@ -52,6 +55,7 @@ def sync_requirement_checkpoint(
         run_id=run_id,
         source_ref=source_ref,
         artifact_paths=artifact_paths,
+        checkpoint_context=checkpoint_context,
     )
 
 

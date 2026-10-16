@@ -19,6 +19,7 @@ def mock_sync_requirement_checkpoint(
     run_id: str,
     source_ref: str,
     artifact_paths: dict[str, str],
+    checkpoint_context: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Tạo file giả lập Jira comment, Confluence page và sync report."""
 
@@ -29,12 +30,25 @@ def mock_sync_requirement_checkpoint(
     confluence_page_path = sync_dir / "confluence-page.md"
     report_path = sync_dir / "tool_sync_report_v1.json"
 
+    context = checkpoint_context or {}
+    status = str(context.get("status") or "waiting_requirement_approval")
+    current_question = context.get("current_question")
+    question_text = current_question.get("text") if isinstance(current_question, dict) else ""
+    question_line = f"\nCurrent clarification question: {question_text}\n" if question_text else ""
+    remaining = context.get("remaining_blocking_count")
+    remaining_line = f"\nRemaining blocking questions: {remaining}\n" if remaining is not None else ""
+    decision = context.get("decision_summary")
+    decision_line = ""
+    if isinstance(decision, dict):
+        decision_line = (
+            f"\nLatest decision: {decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}\n"
+        )
     jira_comment_path.write_text(
         f"""# Mock Jira Comment
 
 Source: `{source_ref}`
 
-Formal use case và requirement packet đã được chuẩn hóa, validator pass và đang chờ duyệt.
+Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{decision_line}
 
 Requirement artifact: `{artifact_paths['requirement_packet']}`
 """,
@@ -46,6 +60,12 @@ Requirement artifact: `{artifact_paths['requirement_packet']}`
     check_line = ""
     if "formal_check_report" in artifact_paths:
         check_line = f"- Formal check report: `{artifact_paths['formal_check_report']}`\n"
+    trace_line = ""
+    if "trace_graph" in artifact_paths:
+        trace_line = f"- Trace graph: `{artifact_paths['trace_graph']}`\n"
+    model_line = ""
+    if "requirement_model" in artifact_paths:
+        model_line = f"- Canonical model: `{artifact_paths['requirement_model']}`\n"
     confluence_page_path.write_text(
         f"""# Mock Confluence Page
 
@@ -53,10 +73,12 @@ Source: `{source_ref}`
 
 Trang này giả lập nơi lưu formal use case và requirement packet để reviewer đọc trước khi chuyển sang phase design.
 
+Checkpoint status: `{status}`.{question_line}{remaining_line}{decision_line}
+
 Artifacts:
 - Use case packet: `{artifact_paths['use_case_packet']}`
 {formal_line}{check_line}- Requirement packet: `{artifact_paths['requirement_packet']}`
-- Trace graph: `{artifact_paths['trace_graph']}`
+{model_line}{trace_line}
 """,
         encoding="utf-8",
     )
