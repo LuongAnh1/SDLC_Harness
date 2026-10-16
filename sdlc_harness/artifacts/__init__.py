@@ -1,5 +1,6 @@
 ﻿"""Artifact writers cho workflow outputs."""
 
+from .requirement_v2 import write_requirement_v2_artifacts
 from .writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -17,6 +18,7 @@ from .writers import (
 )
 
 __all__ = [
+    "write_requirement_v2_artifacts",
     "write_phase4_code_change_report",
     "write_phase4_code_trace_report",
     "write_phase4_developer_llm_metadata",

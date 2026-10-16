@@ -4,18 +4,19 @@ Ngày cập nhật: 2026-10-16
 
 ## Trạng thái hiện tại
 
-Slice 1 đã triển khai xong ở mức code và test tập trung:
+Slice 2 đã triển khai xong ở mức code và test:
 
 ```text
-Requirement Model V2 payload
-  -> parse thành canonical model
+UseCaseSource
+  -> Requirement Model V2 structured output
+  -> parse / bounded recovery hoặc repair
   -> Python validation + blocking policy
-  -> Requirement Packet V2
-  -> Formal Use Case V2
+  -> revisioned canonical model + deterministic projections + audit report
 ```
 
-Slice này chưa được nối vào Requirement Refiner, `PhaseOneWorkflow`, CLI, runtime
-artifact writer hoặc Niko. Luồng Phase 1 V1 vẫn là luồng runtime mặc định.
+Refiner và runtime artifact writer V2 đã có API độc lập. Slice này chưa nối vào
+`PhaseOneWorkflow`, CLI, runtime state hoặc Niko. Luồng Phase 1 V1 vẫn là luồng
+runtime mặc định.
 
 ## Đã triển khai
 
@@ -37,6 +38,20 @@ artifact writer hoặc Niko. Luồng Phase 1 V1 vẫn là luồng runtime mặc 
 - Thêm fixture canonical UC2 và test độc lập cho parse, validation, blocking,
   evidence, references, flow separation và rendering.
 - Export API V2 qua `sdlc_harness.agents.requirements`; không sửa API V1.
+- Thêm `RequirementModelV2Refiner` gọi structured output bằng `json_mode=True`
+  và `SDLC_LLM_STRUCTURED_MAX_TOKENS`.
+- Python ghi đè `schema_version`, revision, run id, source metadata/fingerprint,
+  decisions và validation để LLM không thể giả provenance của con người.
+- Thêm tối đa một lần gọi phục hồi: format recovery cho JSON bị cắt/không parse
+  được, hoặc validator repair cho schema, reference và evidence grounding.
+- Thêm attempt metadata gồm purpose, `finish_reason`, usage, parse status,
+  JSON mode và output-token limit.
+- Thêm cross-projection validator đối chiếu byte-for-byte với canonical renderer.
+- Thêm artifact bundle revisioned:
+  - `requirement_model_v2_r<n>.json`;
+  - `requirement_packet_v2_r<n>.md`;
+  - `formal_use_case_v2_r<n>.txt`;
+  - `requirement_validation_v2_r<n>.json`.
 
 ## Quyết định kỹ thuật
 
@@ -51,6 +66,14 @@ artifact writer hoặc Niko. Luồng Phase 1 V1 vẫn là luồng runtime mặc 
 - Blocking question hợp lệ trả trạng thái `clarification_required`; đây không
   phải validation error.
 - Renderer chỉ đọc canonical model, không gọi LLM và không ghi runtime artifact.
+- `clarification_required` là kết quả refiner hợp lệ và được phép ghi artifact;
+  clarification không bị coi là lỗi cần LLM repair.
+- Mỗi lần refine có tối đa hai LLM calls. Nếu lần thứ hai vẫn bị cắt, không parse
+  được hoặc không hợp lệ thì fail closed bằng error code riêng.
+- Lỗi semantic như exception nằm trong main flow hoặc assumption được xác nhận
+  không được gửi cho LLM repair.
+- Artifact writer không cập nhật state; việc nối workflow và tạo revision tiếp
+  theo thuộc các slice sau.
 
 ## Lỗi gặp trong quá trình triển khai
 
@@ -61,6 +84,8 @@ artifact writer hoặc Niko. Luồng Phase 1 V1 vẫn là luồng runtime mặc 
   action và grounded evidence bị Python hạ thành non-blocking observation.
 - Đã cập nhật hai fake validator theo contract hardening hiện tại. Sáu test từng
   fail, toàn bộ Phase 4 và full suite hiện đều pass.
+- Slice 2 không phát sinh lỗi code hoặc regression. Test tập trung, Phase 1 V1 và
+  full suite đều pass ngay sau khi hoàn thiện implementation.
 
 ## Đã kiểm tra
 
@@ -90,17 +115,34 @@ rtk python -m pytest -q
 
 Kết quả cuối: Phase 4 `46 passed`; full suite `206 passed`.
 
+Sau Slice 2:
+
+```bash
+rtk python -m pytest tests/test_requirement_model_v2.py tests/test_requirement_refiner_v2.py -q
+```
+
+Kết quả: `25 passed`.
+
+```bash
+rtk python -m pytest tests/test_phase1.py -q
+```
+
+Kết quả regression V1: `34 passed`.
+
+```bash
+rtk python -m pytest -q
+```
+
+Kết quả toàn bộ: `217 passed`.
+
 `git diff --check` không phát hiện whitespace error trước khi cập nhật tài liệu;
 sẽ chạy lại ở bước chốt.
 
 ## Việc tiếp theo
 
-Slice 2 sẽ đổi Requirement Refiner sang structured output, áp bounded repair cho
-schema/grounding/reference, rồi ghi các artifact có revision:
-
-- `requirement_model_v2_r<n>.json`;
-- `requirement_packet_v2_r<n>.md`;
-- `formal_use_case_v2_r<n>.txt`.
+Slice 3 sẽ triển khai clarification state/action: chọn blocking question hiện
+tại, nhận answer có question ID, lưu decision provenance, tạo revision mới và
+chỉ mở requirement approval khi không còn blocking question.
 
 Chưa chuyển config mặc định sang V2 cho tới khi workflow, clarification và
 downstream dual-read hoàn tất.

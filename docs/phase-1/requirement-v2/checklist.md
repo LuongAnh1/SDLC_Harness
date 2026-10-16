@@ -24,14 +24,14 @@ triển khai chỉ vì tài liệu đã được viết.
 
 ## 3. Refiner Và Projections
 
-- [ ] Requirement Refiner sinh structured model, không sinh hai artifact semantic
+- [x] Requirement Refiner sinh structured model, không sinh hai artifact semantic
   độc lập.
-- [ ] Bỏ chỉ dẫn infer từ domain knowledge cho confirmed requirement.
-- [ ] Bounded repair chỉ sửa schema/grounding/reference violation.
+- [x] Bỏ chỉ dẫn infer từ domain knowledge cho confirmed requirement.
+- [x] Bounded repair chỉ sửa schema/grounding/reference violation.
 - [x] Render `requirement_packet_v2_r<n>.md` deterministically.
 - [ ] Render/parse `formal_use_case_v2_r<n>.txt` với alternative/exception và
   `UNKNOWN_FROM_SOURCE [Q-id]`.
-- [ ] Cross-projection validator so ID/content với canonical model.
+- [x] Cross-projection validator so ID/content với canonical model.
 
 ## 4. Clarification Workflow
 
@@ -64,7 +64,7 @@ triển khai chỉ vì tài liệu đã được viết.
 - [ ] Non-blocking question không chặn approval và được render như assumption.
 - [ ] Answer đủ/thiếu, answer lặp, answer khác, wrong question và wrong state có
   kết quả đúng contract.
-- [ ] Projection mismatch và invalid evidence fail closed.
+- [x] Projection mismatch và invalid evidence fail closed.
 - [ ] V1/V2 dual-read regression pass.
 - [ ] Mock sync idempotent; real sync controlled smoke update đúng target.
 - [ ] E2E qua Niko: start -> hỏi từng câu -> requirement approval -> Design.
