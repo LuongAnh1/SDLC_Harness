@@ -2,24 +2,19 @@
 
 Phase 1 là lát cắt triển khai đầu tiên của SDLC Harness. Mục tiêu là chứng minh một use case có thể được SDLC Harness kéo về từ fixture local hoặc Jira issue, chuẩn hóa thành **formal use case** theo tinh thần TraceDev, sinh **requirement packet** cho người duyệt, kiểm tra bằng Validator, đồng bộ mock hoặc real tool, rồi trả trạng thái cho Niko đọc.
 
-Luồng bên dưới là contract V1 đang chạy. Requirement Model V2 và clarification
-checkpoint đã được chốt ở mức thiết kế trong `requirement-v2/`, nhưng chưa thay
-contract runtime cho tới khi checklist V2 hoàn tất.
+Requirement Contract V2 hiện là contract runtime duy nhất. Phase 1 sinh canonical JSON, chạy validation/clarification, rồi render packet và formal use case làm projection.
 
 Luồng Phase 1:
 
 ```text
 start-or-get-run(eTour UC1) hoặc start-from-jira(SDLC-1)
--> SDLC Harness kiểm tra active run theo source_ref
--> nếu chưa có active run: load fixture hoặc fetch Jira issue
--> tạo workflow run
--> gọi Requirement Refiner LLM để sinh formal use case
--> Formal Use Case Validator kiểm tra grammar tối thiểu
--> tạo use_case_packet_v1
--> tạo formal_use_case_v1 + formal_check_report_v1
--> sinh requirement_packet_v1 cho checkpoint người duyệt
--> tạo trace_graph_v1
--> sync Jira/Confluence theo cấu hình mock/real
+-> kiểm tra active run theo source_ref
+-> load fixture hoặc Jira source
+-> Requirement Refiner sinh requirement_model_v2_r1.json
+-> Python validator kiểm tra schema, grounding, references và blocking questions
+-> nếu còn blocking question: state=waiting_requirement_clarification
+-> nếu đã rõ: render requirement_packet_v2_r1.md + formal_use_case_v2_r1.txt
+-> sync Jira/Confluence
 -> state=waiting_requirement_approval
 -> get-status trả JSON cho Niko
 ```
@@ -63,37 +58,7 @@ Phase 1 cần chứng minh:
 
 ## Đầu Ra Bắt Buộc
 
-Sau khi Phase 1 code hoàn thành, một smoke test `start-or-get-run` phải tạo được:
-
-```text
-.runtime/runs/<run_id>/state.json
-.runtime/runs/<run_id>/artifacts/use_case_packet_v1.md
-.runtime/runs/<run_id>/artifacts/formal_use_case_v1.txt
-.runtime/runs/<run_id>/artifacts/formal_check_report_v1.json
-.runtime/runs/<run_id>/artifacts/requirement_packet_v1.md
-.runtime/runs/<run_id>/artifacts/trace_graph_v1.json
-.runtime/runs/<run_id>/sync/jira-comment.md              # mock mode
-.runtime/runs/<run_id>/sync/confluence-page.md           # mock mode
-.runtime/runs/<run_id>/sync/tool_sync_report_v1.json
-.runtime/index/active_runs.json
-```
-
-Và CLI phải trả JSON có:
-
-```text
-ok
-created_new_run
-source_ref
-run_id
-current_phase
-status
-latest_artifacts
-pending_checkpoint
-allowed_next_actions
-last_sync
-last_error
-summary_for_user
-```
+Một run V2 tạo source packet/snapshot, canonical model, deterministic projections, validation/decision artifacts và sync report như mô tả tại `runtime-layout.md`.
 
 ## Run Idempotency Theo Source Ref
 
@@ -132,30 +97,6 @@ Trước khi chuyển sang Phase 2, không chỉ cần code Phase 1 chạy pass.
 
 ## Requirement Packet Và Formal Use Case
 
-Artifact hiện tại của Phase 1 gồm `formal_use_case_v1.txt` và `requirement_packet_v1.md`. `formal_use_case_v1.txt` là bản máy đọc theo grammar TraceDev để tầng Designer/Validator dùng sau. `requirement_packet_v1.md` là bản dễ đọc để Niko/người dùng duyệt, có Open Questions và Source Evidence.
+Canonical artifact là `requirement_model_v2_r<n>.json`. `requirement_packet_v2_r<n>.md` và `formal_use_case_v2_r<n>.txt` được render deterministically từ cùng revision để phục vụ review, debug và downstream context.
 
-Requirement packet không được copy mù từ formal use case. Nó phải tách riêng
-happy path, alternative/exception flows, postconditions, acceptance criteria và
-quality/non-functional requirements. `Source Evidence` chỉ dùng nguồn gốc ban
-đầu như Jira issue/comment hoặc fixture, không dùng dòng formal use case do
-model sinh ra làm bằng chứng.
-
-Quy ước đuôi file: prompt/artifact formal use case dùng `.txt` vì là grammar máy đọc; prompt/artifact requirement packet dùng `.md` vì hướng tới checkpoint người duyệt.
-
-## Requirement V2 Đã Chốt Ở Mức Thiết Kế
-
-V2 đổi thứ tự và quyền ưu tiên artifact:
-
-```text
-source
--> requirement_model_v2_r<n>.json (canonical)
--> Python grounding/blocking validation
--> clarification từng câu nếu còn blocking question
--> requirement_packet_v2_r<n>.md + formal_use_case_v2_r<n>.txt (projection)
--> requirement approval
-```
-
-Formal V2 có block riêng cho main/alternative/exception flow và không được dùng
-để ghi đè canonical JSON. Run V1 giữ nguyên; V2 chỉ áp dụng cho run mới sau khi
-rollout gate pass. Xem `requirement-v2/README.md` và `requirement-v2/checklist.md`.
-
+V1 refiner, V1 validator, V1 prompt và dual reader đã được gỡ ngày 2026-10-16. Run có `requirement_contract_version` khác `v2` bị từ chối bằng `requirement_contract_unsupported`; không có fallback ngầm sang text artifact cũ. Các tên `use_case_packet_v1` và `tool_sync_report_v1` là version riêng của raw-source/sync artifact.

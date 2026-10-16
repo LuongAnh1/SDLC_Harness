@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -176,10 +177,8 @@ def strip_code_fence(text: str) -> str:
 def fake_completion(prompt: str) -> str:
     """Fake output theo loại prompt để test không gọi API thật."""
 
-    if "Formal Syntactic Constraint" in prompt or "ReconstructedUseCase" in prompt:
-        return fake_formal_use_case()
-    if "Repair Requirement Packet v1" in prompt or "Requirement Validation Report" in prompt:
-        return fake_refined_requirement(prompt)
+    if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
+        return fake_requirement_model_v2(prompt)
     if "UML Audit / Report" in prompt and "updated Class Diagram" in prompt:
         return fake_design_model()
     if "both a Class Diagram and Sequence Diagrams" in prompt:
@@ -207,34 +206,94 @@ def fake_completion(prompt: str) -> str:
     return fake_refined_requirement(prompt)
 
 
-def fake_formal_use_case() -> str:
-    """Formal use case hợp lệ theo grammar tối thiểu kiểu TraceDev."""
+def fake_requirement_model_v2(prompt: str) -> str:
+    """Sinh Requirement Model V2 tối thiểu, có evidence từ source snapshot."""
 
-    return """UsecaseName: Delete Cultural Heritage
-Description: The goal of this use case is to allow Agency Operator to delete a CulturalHeritage in order to remove an obsolete cultural object from the system
-Actors: Agency Operator
-Entry Conditions:
-Agency Operator IS logged in
-Agency Operator HAS selected CulturalHeritage from SearchCulturalHeritage results
-Flow of Events:
-1. Agency Operator views the list of CulturalHeritage returned by SearchCulturalHeritage.
-2. Agency Operator selects one CulturalHeritage.
-3. Agency Operator activates the delete function.
-4. System asks for confirmation.
-5. Agency Operator confirms the operation.
-6. System deletes the selected CulturalHeritage.
-Exit Conditions:
-System notifies successful deletion of the selected CulturalHeritage.
-Agency Operator cancels the operation.
-Connection to the ETOUR server is interrupted.
-Quality Requirement:
-System blocks input controls after receiving confirmation or cancellation to avoid multiple submissions before the operation ends.""".strip()
+    source_ref_match = re.search(r"Source ref:\s*`([^`]+)`", prompt)
+    source_ref = source_ref_match.group(1).strip() if source_ref_match else "fake:source"
+    use_case_match = re.search(r"Use case:\s*`([^`]+)`", prompt)
+    use_case_name = use_case_match.group(1).strip() if use_case_match else "FakeUseCase"
+    marker = "## Source snapshot"
+    source_text = prompt.split(marker, 1)[1] if marker in prompt else prompt
+    source_text = source_text.split("\n## ", 1)[0].strip()
+    evidence_quote = next((line.strip() for line in source_text.splitlines() if line.strip()), "Fake source requirement.")
+    payload = {
+        "schema_version": "requirement_model_v2",
+        "revision": 1,
+        "run_id": "fake_run",
+        "source": {
+            "source_ref": source_ref,
+            "artifact_ref": "fake_source_snapshot",
+            "fingerprint": "fake_fingerprint",
+        },
+        "use_case": {
+            "id": "UC-1",
+            "name": use_case_name,
+            "goal": {
+                "id": "GOAL-1",
+                "text": evidence_quote,
+                "status": "explicit",
+                "evidence_refs": ["E-1"],
+                "open_question_refs": [],
+            },
+            "actors": [],
+        },
+        "preconditions": [
+            {
+                "id": "PRE-1",
+                "text": evidence_quote,
+                "status": "explicit",
+                "evidence_refs": ["E-1"],
+                "open_question_refs": [],
+            }
+        ],
+        "flows": {
+            "main": [
+                {
+                    "id": "MF-1",
+                    "actor": "System",
+                    "action": evidence_quote,
+                    "target": None,
+                    "evidence_refs": ["E-1"],
+                    "open_question_refs": [],
+                }
+            ],
+            "alternatives": [],
+            "exceptions": [],
+        },
+        "postconditions": [],
+        "business_rules": [],
+        "acceptance_criteria": [
+            {
+                "id": "AC-1",
+                "text": evidence_quote,
+                "status": "explicit",
+                "evidence_refs": ["E-1"],
+                "open_question_refs": [],
+                "verifies": ["MF-1"],
+            }
+        ],
+        "quality_requirements": [],
+        "assumptions": [],
+        "open_questions": [],
+        "decisions": [],
+        "evidence": [
+            {
+                "id": "E-1",
+                "source_ref": source_ref,
+                "location": "source snapshot",
+                "quote": evidence_quote,
+            }
+        ],
+        "validation": {"status": "valid", "errors": []},
+    }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def fake_refined_requirement(prompt: str) -> str:
-    """Requirement packet ổn định để test contract mà không gọi API thật."""
+    """Requirement projection V2 ổn định cho các test downstream độc lập."""
 
-    return """# Requirement Packet V1
+    return """# Requirement Packet V2
 
 ## Goal
 Cho phép Agency Operator xóa một cultural heritage object đã chọn trong hệ thống eTour.

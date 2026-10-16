@@ -35,7 +35,7 @@ class RepairingDesigner:
         self.update_calls = 0
         self.last_audit_report = ""
 
-    def draft(self, *, requirement_packet: str, formal_use_case: str = "") -> DesignDraft:
+    def draft(self, *, requirement_packet: str, formal_use_case: str = "", canonical_requirement=None) -> DesignDraft:
         return DesignDraft(analysis_report="test architecture", design_model=fake_design_model())
 
     def update_design(
@@ -45,6 +45,7 @@ class RepairingDesigner:
         formal_use_case: str,
         current_design: str,
         audit_report: str,
+        canonical_requirement=None,
     ) -> str:
         self.update_calls += 1
         self.last_audit_report = audit_report
@@ -62,6 +63,7 @@ class SequencedTraceabilityValidator:
         requirement_packet: str,
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
+        canonical_requirement=None,
     ) -> TraceabilityResult:
         graph = build_requirement_graph(requirement_packet)
         requirements = graph["requirements"]
@@ -457,7 +459,7 @@ class OnlyClass {
         self.assertIn("requirement_graph", response["latest_artifacts"])
         self.assertIn("requirement_design_trace", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
-        self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "traceability_v1")
+        self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "traceability_v2")
         self.assertIn("không phát hiện missing link", response["quality_reports"]["design_traceability"]["summary"])
 
         run_dir = self.runtime_root / "runs" / str(created["run_id"])
@@ -480,11 +482,11 @@ class OnlyClass {
             any(message["message"] == "requestDeletion(heritageId)" for message in first_sequence["messages"])
         )
         trace = json.loads((run_dir / "artifacts" / "requirement_design_trace_v1.json").read_text(encoding="utf-8"))
-        self.assertEqual(trace["mode"], "traceability_v1")
+        self.assertEqual(trace["mode"], "traceability_v2")
         self.assertIn("class_trace", trace)
         self.assertIn("sequence_trace", trace)
         missing = json.loads((run_dir / "artifacts" / "missing_design_links_v1.json").read_text(encoding="utf-8"))
-        self.assertEqual(missing["mode"], "traceability_v1")
+        self.assertEqual(missing["mode"], "traceability_v2")
         self.assertEqual(missing["missing_count"], 0)
         self.assertIn("class_diagram", missing["missing_links"])
         report = json.loads((run_dir / "sync" / "tool_sync_report_v2.json").read_text(encoding="utf-8"))
@@ -546,25 +548,22 @@ class OnlyClass {
         self.assertIn("Repair iterations: 2", quality_v3)
         self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
-    def test_requirement_graph_failure_blocks_with_clear_reason(self) -> None:
+    def test_projection_tampering_is_rejected_before_design_state_mutation(self) -> None:
         created = self._create_phase1_run()
         run_id = str(created["run_id"])
         state_path = self.runtime_root / "runs" / run_id / "state.json"
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        requirement_path = self.repo_root / str(state["latest_artifacts"]["requirement_packet"])
+        state_before = json.loads(state_path.read_text(encoding="utf-8"))
+        requirement_path = self.repo_root / str(state_before["latest_artifacts"]["requirement_packet"])
         requirement_path.write_text(
-            "# Requirement Packet V1\n\n## Notes\nThis packet has no traceable requirement sections.",
+            "# Requirement Packet V2\n\n## Notes\nTampered projection.",
             encoding="utf-8",
         )
 
-        response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+        with self.assertRaises(HarnessError) as caught:
+            PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
 
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["current_phase"], "design_review")
-        self.assertIsNone(response["pending_checkpoint"])
-        self.assertEqual(response["last_error"]["error_code"], "requirement_traceability_blocked")
-        self.assertIn("traceable requirement", response["last_error"]["message"])
-        self.assertIn("requirement chưa đủ rõ", response["summary_for_user"])
+        self.assertEqual(caught.exception.error_code, "requirement_projection_mismatch")
+        self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state_before)
         self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
 
     def test_design_failure_clears_old_requirement_checkpoint(self) -> None:

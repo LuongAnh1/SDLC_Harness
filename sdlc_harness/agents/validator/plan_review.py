@@ -315,7 +315,7 @@ class ImplementationPlanReview:
     rule_review: dict[str, object] | None = None
     llm_review: dict[str, object] | None = None
     repair_iterations: int = 0
-    requirement_contract_version: str = "v1"
+    requirement_contract_version: str = "v2"
 
     @property
     def issues(self) -> list[str]:
@@ -368,7 +368,7 @@ class ImplementationPlanValidator:
         llm_client: Any | None = None,
         repair_iterations: int = 0,
         requirement_graph: dict[str, object] | None = None,
-        requirement_contract_version: str = "v1",
+        requirement_contract_version: str = "v2",
         canonical_requirement: dict[str, object] | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
@@ -416,7 +416,7 @@ class ImplementationPlanValidator:
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         requirement_graph: dict[str, object] | None = None,
-        requirement_contract_version: str = "v1",
+        requirement_contract_version: str = "v2",
     ) -> ImplementationPlanReview:
         """Hard gate: kiểm coverage/traceability/executability/scope bằng graph."""
 

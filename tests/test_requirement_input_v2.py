@@ -14,7 +14,6 @@ from sdlc_harness.agents.requirements import normalize_and_validate_requirement_
 from sdlc_harness.agents.validator import TraceabilityResult, ValidatorAgent, build_requirement_graph_v2
 from sdlc_harness.artifacts import (
     CanonicalRequirementInput,
-    LegacyRequirementInput,
     read_approved_requirement_input,
     read_frozen_requirement_input,
     write_requirement_v2_revision_artifacts,
@@ -198,44 +197,27 @@ class RequirementInputV2Test(unittest.TestCase):
         store.write_state(state)
         return store, state, refs, validation.model
 
-    def test_dual_reader_keeps_missing_contract_version_on_v1(self) -> None:
+    def test_reader_rejects_missing_contract_version(self) -> None:
         with TemporaryDirectory() as directory:
             store = RuntimeStore(repo_root=self.root, runtime_root=Path(directory) / ".runtime")
-            packet = Path(directory) / "requirement.md"
-            formal = Path(directory) / "formal.txt"
-            packet.write_text("legacy packet", encoding="utf-8")
-            formal.write_text("legacy formal", encoding="utf-8")
-            result = read_approved_requirement_input(
-                store=store,
-                run_id="run_v1",
-                state={
-                    "latest_artifacts": {
-                        "requirement_packet": str(packet),
-                        "formal_use_case": str(formal),
-                    }
-                },
-            )
-            self.assertIsInstance(result, LegacyRequirementInput)
-            self.assertEqual(result.contract_version, "v1")
-            self.assertEqual(result.requirement_packet, "legacy packet")
+            with self.assertRaises(HarnessError) as caught:
+                read_approved_requirement_input(
+                    store=store,
+                    run_id="run_without_contract",
+                    state={"latest_artifacts": {}},
+                )
+            self.assertEqual(caught.exception.error_code, "approved_requirement_not_found")
 
-    def test_v1_reader_fails_closed_when_referenced_formal_artifact_is_missing(self) -> None:
+    def test_reader_rejects_explicit_v1_contract(self) -> None:
         with TemporaryDirectory() as directory:
             store = RuntimeStore(repo_root=self.root, runtime_root=Path(directory) / ".runtime")
-            packet = Path(directory) / "requirement.md"
-            packet.write_text("legacy packet", encoding="utf-8")
             with self.assertRaises(HarnessError) as caught:
                 read_approved_requirement_input(
                     store=store,
                     run_id="run_v1",
-                    state={
-                        "latest_artifacts": {
-                            "requirement_packet": str(packet),
-                            "formal_use_case": str(Path(directory) / "missing-formal.txt"),
-                        }
-                    },
+                    state={"requirement_contract_version": "v1", "latest_artifacts": {}},
                 )
-            self.assertEqual(caught.exception.error_code, "approved_requirement_not_found")
+            self.assertEqual(caught.exception.error_code, "requirement_contract_unsupported")
 
     def test_v2_reader_verifies_canonical_revision_and_projections(self) -> None:
         with TemporaryDirectory() as directory:
@@ -260,21 +242,6 @@ class RequirementInputV2Test(unittest.TestCase):
             self.assertIsInstance(result, CanonicalRequirementInput)
             self.assertEqual(result.canonical_model.revision, 1)
             self.assertEqual(result.approved_artifacts["requirement_model"], refs["requirement_model"])
-
-    def test_frozen_reader_keeps_v1_compatibility(self) -> None:
-        with TemporaryDirectory() as directory:
-            store = RuntimeStore(repo_root=self.root, runtime_root=Path(directory) / ".runtime")
-            packet = Path(directory) / "requirement.md"
-            packet.write_text("legacy frozen packet", encoding="utf-8")
-
-            result = read_frozen_requirement_input(
-                store=store,
-                run_id="run_v1_frozen",
-                state={"approved_artifacts": {"requirement_packet": str(packet)}},
-            )
-
-            self.assertIsInstance(result, LegacyRequirementInput)
-            self.assertEqual(result.requirement_packet, "legacy frozen packet")
 
     def test_v2_reader_rejects_stale_checkpoint_revision(self) -> None:
         with TemporaryDirectory() as directory:

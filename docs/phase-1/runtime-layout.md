@@ -1,117 +1,33 @@
-﻿# Runtime Layout Phase 1
+# Runtime Layout Phase 1
 
-Runtime output không được ghi vào `docs/`. Tất cả output chạy thử nằm trong `.runtime/` và được ignore khỏi git.
-
-## Layout Chính
+Runtime output nằm trong `.runtime/` và không được commit.
 
 ```text
 .runtime/
-  index/
-    active_runs.json
-  runs/
-    <run_id>/
-      state.json
-      artifacts/
-        use_case_packet_v1.md
-        requirement_packet_v1.md
-        trace_graph_v1.json
-      sync/
-        jira-comment.md
-        confluence-page.md
-        tool_sync_report_v1.json
-      logs/
-        run.log
+  index/active_runs.json
+  runs/<run_id>/
+    state.json
+    artifacts/
+      use_case_packet_v1.md
+      source_snapshot_v1.json
+      requirement_model_v2_r1.json
+      requirement_packet_v2_r1.md
+      formal_use_case_v2_r1.txt
+      requirement_validation_v2_r1.json
+      requirement_decisions_v2_r1.json
+      ... revision r2, r3 khi clarification thay đổi model
+    sync/
+      jira-comment.md
+      confluence-page.md
+      tool_sync_report_v1.json
 ```
 
-`logs/run.log` là optional ở Phase 1. Nếu chưa cần log file riêng thì có thể bỏ, nhưng layout nên dành chỗ trước.
+`state.json` luôn có `requirement_contract_version: "v2"`. `latest_artifacts`
+trỏ tới requirement revision hiện tại; revision cũ được giữ bất biến để audit.
+`pending_checkpoint.current_question` và `remaining_blocking_count` chỉ xuất hiện
+khi workflow đang chờ clarification.
 
-## `state.json`
+Tên `use_case_packet_v1`, `source_snapshot_v1` và `tool_sync_report_v1` là version
+schema riêng của các artifact đó. Chúng không kích hoạt Requirement Contract V1.
 
-Nội dung tối thiểu:
-
-```json
-{
-  "run_id": "run_...",
-  "source_ref": "dataset_use_case:eTour:UC1",
-  "source": {
-    "source_type": "dataset_use_case",
-    "dataset": "eTour",
-    "use_case": "UC1",
-    "fixture_path": "fixtures/etour/UC1.txt"
-  },
-  "current_phase": "waiting_requirement_approval",
-  "status": "waiting_requirement_approval",
-  "latest_artifacts": {},
-  "pending_checkpoint": {},
-  "allowed_next_actions": [],
-  "last_sync": {},
-  "last_error": null,
-  "created_at": "ISO-8601",
-  "updated_at": "ISO-8601"
-}
-```
-
-## Active Run Index
-
-Để `start-or-get-run` không tạo run mới mù quáng, Phase 1 cần một index tối thiểu:
-
-```text
-.runtime/index/active_runs.json
-```
-
-Nội dung khái niệm:
-
-```json
-{
-  "dataset_use_case:eTour:UC1": "run_..."
-}
-```
-
-Khi run chuyển sang `done` hoặc `cancelled`, key có thể được gỡ hoặc trỏ sang latest run tùy policy Phase sau. Phase 1 chỉ cần đảm bảo active run chưa done/cancelled được trả lại.
-
-## File Naming
-
-Quy tắc đặt tên:
-
-```text
-<artifact_name>_v<number>.<ext>
-```
-
-Ví dụ:
-
-```text
-requirement_packet_v1.md
-trace_graph_v1.json
-tool_sync_report_v1.json
-```
-
-Phase 1 chỉ tạo version `v1`. Version `v2` bắt đầu quan trọng ở Phase 5 khi có sửa tại checkpoint.
-
-## Runtime Layout V2 - Planned
-
-Requirement V2 tách schema version khỏi artifact revision và tạo revision ngay
-trong Phase 1 khi human trả lời clarification:
-
-```text
-.runtime/runs/<run_id>/
-  state.json
-  artifacts/
-    use_case_packet_v1.md
-    requirement_model_v2_r1.json
-    requirement_packet_v2_r1.md
-    formal_use_case_v2_r1.txt
-    requirement_decisions_v2_r1.json
-    requirement_model_v2_r2.json
-    requirement_packet_v2_r2.md
-    formal_use_case_v2_r2.txt
-    requirement_decisions_v2_r2.json
-```
-
-Run V2 ghi `requirement_contract_version=v2`; run thiếu field này được hiểu là
-V1. `latest_artifacts` trỏ tới revision mới nhất và không ghi đè revision cũ.
-Quy ước `_v2_r<n>` chỉ áp dụng cho Requirement V2; artifact V1 hiện tại giữ
-nguyên tên để không phá run lịch sử.
-
-## Git Policy
-
-`.runtime/` không commit. Chỉ commit docs, fixture, source code và tests.
+Run lịch sử ghi contract khác V2 không được tiếp tục qua downstream workflow.

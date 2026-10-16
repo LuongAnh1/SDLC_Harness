@@ -1,71 +1,32 @@
-# Phase 2 - Requirement Packet Đến Design
+# Phase 2 - Requirement Đến Design
 
-Phase 2 bắt đầu sau khi người dùng duyệt checkpoint requirement của Phase 1.
-Mục tiêu của phase này là biến `requirement_packet_v1` đã duyệt thành
-`design_artifact_v{n}`, kiểm tra traceability bằng Validator, repair design nếu
-còn missing link, đồng bộ checkpoint design lên tool và trả state để Niko báo lại
-cho người dùng.
-
-Điểm khác biệt quan trọng so với TraceDev: TraceDev chạy thẳng trong một script,
-còn SDLC_Harness phải lưu state, artifact version, trace report và checkpoint
-sau từng vòng để Niko/human có thể dừng, đọc, duyệt hoặc yêu cầu sửa.
+Phase 2 bắt đầu sau khi canonical Requirement Model V2 được duyệt. Designer và
+Validator luôn đọc `CanonicalRequirementInput`; packet/formal V2 chỉ là projection
+review và context.
 
 ## Luồng Phase 2
 
 ```text
 approve_checkpoint(run_id)
--> kiểm tra run đang ở waiting_requirement_approval
--> đọc requirement_packet_v1 đã duyệt
--> đọc formal_use_case_v1 nếu có
+-> verify approved requirement_model_v2 revision và source fingerprint
 -> state=design_drafting
--> Designer.analysis(requirement_packet_v1)
--> Designer.act(requirement_packet_v1, designer_analysis)
--> sinh design_artifact_v1
--> state=design_validating
--> Parser tạo class diagram graph, sequence diagram graph từ PlantUML
--> Validator tạo requirement graph và requirement-design trace links
--> Validator phát hiện missing links và tạo design_quality_report_v1
--> nếu còn missing link: Designer.update_design(report), tạo design_artifact_v2
--> Validator kiểm lại tối đa số vòng cho phép
--> nếu pass: sync design checkpoint theo policy Jira/Confluence
--> state=waiting_design_approval
--> nếu fail vì design chưa đủ: state=blocked
--> nếu fail vì requirement thiếu/nhập nhằng: state=blocked để human xử lý lại requirement
+-> Designer.analysis/act với canonical requirement
+-> parse class/sequence graph
+-> Validator tạo requirement graph bằng stable IDs và trace links
+-> Designer repair trong giới hạn nếu còn missing links
+-> pass: sync design checkpoint và waiting_design_approval
+-> không hội tụ: blocked
 ```
 
-## Requirement V2 Input - Implemented For Phase 2
-
-Với run `requirement_contract_version=v2`, Phase 2 phải đọc
-`requirement_model_v2_r<n>.json` đã duyệt làm nguồn sự thật. Requirement Packet
-và Formal Use Case V2 chỉ là projection review/trace, không được ghi đè canonical
-JSON khi nội dung khác nhau. Reader Phase 2 phải dual-read:
-
-```text
-V1 -> requirement_packet_v1 + formal_use_case_v1
-V2 -> requirement_model_v2_r<n> canonical + projections để review/debug
-```
-
-Stable requirement IDs từ V2 phải được giữ khi tạo requirement graph và
-requirement-design trace. Chi tiết migration nằm tại
-`../phase-1/requirement-v2/migration-and-rollout.md`.
-
-Phase 2 hiện đã dual-read V1/V2. Với V2, reader kiểm lại canonical revision,
-source fingerprint, Python validation và hai deterministic projection trước khi
-workflow đổi state. Designer nhận canonical JSON trước các projection; Validator
-tạo `requirement_graph_v2` bằng stable ID như `MF-1`, `EF-1`, `AC-1` và ghi trace
-ở mode `traceability_v2`. Run V2 được phép tới `waiting_design_approval`.
-
-Phase 3 hiện đã consume canonical V2 và giữ stable IDs tới implementation plan
-checkpoint. Phase 4 cũng đã dual-read V1/V2 và kiểm canonical coverage trước khi
-tạo DeveloperWorkPacket. Default contract vẫn là V1 cho tới controlled live smoke V2.
+Phase 2 không còn dual-read Requirement V1/V2. State khác V2 bị reader từ chối
+trước khi workflow mutate state.
 
 ## Ba Vai Trò AI Trong Phase 2
 
 ### Requirement Refiner
 
 Requirement Refiner không chạy lại trong Phase 2. Artifact của nó
-(`requirement_packet_v1` và `formal_use_case_v1`) là input đã được duyệt từ Phase
-1. Nếu Validator phát hiện thiếu thông tin ở requirement, Phase 2 không tự sửa
+canonical Requirement Model V2 là input đã được duyệt từ Phase 1. Nếu Validator phát hiện thiếu thông tin ở requirement, Phase 2 không tự sửa
 requirement; workflow phải yêu cầu người dùng quay lại checkpoint requirement.
 
 ### Designer

@@ -66,13 +66,11 @@ class PhaseTwoWorkflow:
         self.store.write_state(state)
 
         try:
-            draft_args = {
-                "requirement_packet": requirement_packet,
-                "formal_use_case": formal_use_case,
-            }
-            if canonical_requirement is not None:
-                draft_args["canonical_requirement"] = canonical_requirement
-            draft = self.designer.draft(**draft_args)
+            draft = self.designer.draft(
+                requirement_packet=requirement_packet,
+                formal_use_case=formal_use_case,
+                canonical_requirement=canonical_requirement,
+            )
             design_model = draft.design_model
             versions: list[str] = []
             design_paths: dict[str, str] = {}
@@ -110,14 +108,12 @@ class PhaseTwoWorkflow:
                 self.store.write_state(state)
 
                 parsed = parse_design_model(design_model)
-                trace_args = {
-                    "requirement_packet": requirement_packet,
-                    "class_graph": parsed.class_graph,
-                    "sequence_graph": parsed.sequence_graph,
-                }
-                if canonical_requirement is not None:
-                    trace_args["canonical_requirement"] = canonical_requirement
-                traceability = self.validator.construct_traceability(**trace_args)
+                traceability = self.validator.construct_traceability(
+                    requirement_packet=requirement_packet,
+                    class_graph=parsed.class_graph,
+                    sequence_graph=parsed.sequence_graph,
+                    canonical_requirement=canonical_requirement,
+                )
                 design_paths = write_phase2_design_artifacts(
                     store=self.store,
                     run_id=run_id,
@@ -140,7 +136,7 @@ class PhaseTwoWorkflow:
                     traceability_mode=traceability.mode,
                     requirement_contract_version=approved_requirement.contract_version,
                     requirement_artifact_refs=approved_requirement.approved_artifacts,
-                    requirement_revision=(canonical_requirement.revision if canonical_requirement else None),
+                    requirement_revision=canonical_requirement.revision,
                 )
                 versions.append(f"v{version}")
                 merged_artifacts = {**artifact_paths, **design_paths}
@@ -169,15 +165,13 @@ class PhaseTwoWorkflow:
                 previous_quality_report = design_paths["design_quality_report"]
                 audit_report_path = (self.store.repo_root / previous_quality_report).resolve()
                 audit_report = audit_report_path.read_text(encoding="utf-8")
-                update_args = dict(
+                design_model = self.designer.update_design(
                     requirement_packet=requirement_packet,
                     formal_use_case=formal_use_case,
                     current_design=design_model,
                     audit_report=audit_report,
+                    canonical_requirement=canonical_requirement,
                 )
-                if canonical_requirement is not None:
-                    update_args["canonical_requirement"] = canonical_requirement
-                design_model = self.designer.update_design(**update_args)
         except HarnessError as exc:
             requirement_error = _requirement_blocking_error(exc, run_id=run_id)
             if requirement_error is not None:
@@ -343,7 +337,7 @@ class PhaseTwoWorkflow:
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
-            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v2"),
         }
 
 

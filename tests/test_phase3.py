@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-from copy import deepcopy
-import hashlib
 import io
 import json
 from pathlib import Path
@@ -16,13 +14,10 @@ from unittest.mock import patch
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
 from sdlc_harness.agents.developer.planner import _parse_developer_plan_payload
-from sdlc_harness.agents.requirements import normalize_and_validate_requirement_model_v2
 from sdlc_harness.agents.validator import (
     ImplementationPlanReview,
     ImplementationPlanValidator,
-    build_requirement_graph_v2,
 )
-from sdlc_harness.artifacts import write_requirement_v2_revision_artifacts, write_source_snapshot_v2
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.verification import VerificationResult
@@ -31,7 +26,6 @@ from sdlc_harness.sync.atlassian import (
     real_sync_implementation_plan_checkpoint,
 )
 from sdlc_harness.sync.github import GitHubCodeReviewResult
-from sdlc_harness.sources.fixtures import UseCaseSource
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
@@ -95,7 +89,7 @@ class SequencedImplementationPlanValidator:
         if ok:
             return ImplementationPlanReview(
                 ok=True,
-                mode="implementation_plan_review_hybrid_v1",
+                mode="implementation_plan_review_hybrid_v2",
                 summary="LLM review accepts the repaired implementation plan.",
                 rule_review={"ok": True, "mode": "implementation_plan_rule_review_v1"},
                 llm_review={"ok": True, "summary": "accepted"},
@@ -103,7 +97,7 @@ class SequencedImplementationPlanValidator:
             )
         return ImplementationPlanReview(
             ok=False,
-            mode="implementation_plan_review_hybrid_v1",
+            mode="implementation_plan_review_hybrid_v2",
             implementation_quality_issues=["Plan does not describe the implementation order clearly enough."],
             developer_feedback="Add explicit ordering from design elements to code targets and tests.",
             rule_review={"ok": True, "mode": "implementation_plan_rule_review_v1"},
@@ -274,109 +268,9 @@ class PhaseThreeTest(unittest.TestCase):
         return approved
 
     def _create_v2_phase2_run(self) -> dict[str, object]:
-        approved = self._create_phase2_run()
-        workflow = PhaseThreeWorkflow(self.settings)
-        store = workflow.store
-        run_id = str(approved["run_id"])
-        state = store.read_state(run_id)
-        source_text = (self.repo_root / "fixtures" / "etour" / "UC2.txt").read_text(encoding="utf-8").strip()
-        source = UseCaseSource(
-            dataset="eTour",
-            use_case="UC2",
-            source_ref="dataset_use_case:eTour:UC2",
-            source_path=self.repo_root / "fixtures" / "etour" / "UC2.txt",
-            text=source_text,
-        )
-        snapshot_ref = write_source_snapshot_v2(store=store, run_id=run_id, source=source)
-        payload = deepcopy(
-            json.loads(
-                (self.repo_root / "tests" / "fixtures" / "requirement_v2" / "uc2.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-        )
-        payload["open_questions"] = []
-        for item in payload["flows"]["alternatives"] + payload["flows"]["exceptions"]:
-            item["open_question_refs"] = []
-        payload["business_rules"][0]["open_question_refs"] = []
-        payload["acceptance_criteria"][0].update(
-            {
-                "text": "The system rejects a duplicate cultural heritage record.",
-                "status": "explicit",
-                "evidence_refs": ["E-13"],
-                "open_question_refs": [],
-            }
-        )
-        payload.update(
-            {
-                "schema_version": "requirement_model_v2",
-                "revision": 1,
-                "run_id": run_id,
-                "source": {
-                    "source_ref": source.source_ref,
-                    "artifact_ref": snapshot_ref,
-                    "fingerprint": "sha256:" + hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
-                },
-                "decisions": [],
-                "validation": {"status": "invalid", "errors": []},
-            }
-        )
-        validation = normalize_and_validate_requirement_model_v2(payload, source_text)
-        refs = write_requirement_v2_revision_artifacts(
-            store=store,
-            run_id=run_id,
-            model=validation.model,
-            validation_report=validation.report,
-            audit={"test": True},
-        )
-        graph = build_requirement_graph_v2(validation.model)
-        graph_path = self.repo_root / str(state["latest_artifacts"]["requirement_graph"])
-        graph_path.write_text(
-            json.dumps(
-                {**graph, "version": "requirement_graph_v1", "source_graph_version": graph["version"]},
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
-        )
-        trace = {
-            "version": "requirement_design_trace_v1",
-            "mode": "traceability_v2",
-            "requirement_contract_version": "v2",
-            "requirement_revision": 1,
-            "inputs": {
-                "requirement_model": refs["requirement_model"],
-                "requirement_packet": refs["requirement_packet"],
-                "formal_use_case": refs["formal_use_case"],
-            },
-            "class_trace": [],
-            "sequence_trace": [],
-        }
-        for requirement in graph["requirements"]:
-            class_item = {
-                "requirement": requirement["id"],
-                "content": requirement["content"],
-                "links": [{"target": "CulturalHeritage.id", "reason": "covered"}],
-            }
-            sequence_item = {
-                "requirement": requirement["id"],
-                "content": requirement["content"],
-                "links": [{"target": "DeleteCulturalHeritageService", "reason": "covered"}],
-            }
-            trace["class_trace"].append(class_item)
-            trace["sequence_trace"].append(sequence_item)
-        trace_path = self.repo_root / str(state["latest_artifacts"]["requirement_design_trace"])
-        trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2), encoding="utf-8")
-        state.update(
-            {
-                "requirement_contract_version": "v2",
-                "source_ref": source.source_ref,
-                "approved_artifacts": dict(refs),
-                "latest_artifacts": {**state["latest_artifacts"], **refs},
-            }
-        )
-        store.write_state(state)
-        return store.read_state(run_id)
+        """All new Phase 2 runs already use the canonical V2 contract."""
+
+        return self._create_phase2_run()
 
     def test_dispatcher_still_approves_requirement_checkpoint_to_design(self) -> None:
         created = PhaseOneWorkflow(self.settings).start_or_get_run(
@@ -446,7 +340,7 @@ class PhaseThreeTest(unittest.TestCase):
         review_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_review"])
         review = json.loads(review_path.read_text(encoding="utf-8"))
         self.assertTrue(review["ok"])
-        self.assertEqual(review["mode"], "implementation_plan_review_hybrid_v1")
+        self.assertEqual(review["mode"], "implementation_plan_review_hybrid_v2")
         self.assertTrue(review["rule_review"]["ok"])
         self.assertTrue(review["llm_review"]["ok"])
         self.assertEqual(review["repair_iterations"], 0)
@@ -1228,7 +1122,7 @@ Thanks."""
         self.assertEqual(response["last_error"]["error_code"], "implementation_plan_review_failed")
         report = response["quality_reports"]["implementation_plan_review"]
         self.assertFalse(report["ok"])
-        self.assertEqual(report["mode"], "implementation_plan_review_hybrid_v1")
+        self.assertEqual(report["mode"], "implementation_plan_review_hybrid_v2")
         self.assertEqual(report["llm_review"]["reason"], "rule_review_failed")
         self.assertTrue(report["coverage_issues"])
         self.assertTrue(report["executability_issues"])

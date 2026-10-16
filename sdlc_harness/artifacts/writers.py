@@ -1,11 +1,11 @@
 ﻿"""Ghi artifact runtime cho các phase của SDLC Harness.
 
 Artifact là sản phẩm mà checkpoint, Validator và tool sync tham chiếu. Phase 1
-sinh formal use case và requirement packet; Phase 2 sinh design, graph, trace và
-quality report theo từng version; Phase 3 sinh implementation plan trước khi sửa
-code; Phase 4 sinh work packet, code change report, test report, code trace và
-repair feedback theo từng version để không ghi đè lịch sử chạy. QA cũng có
-feedback riêng khi acceptance tests fail và cần Developer sửa lại code/test.
+V2 được ghi bởi ``requirement_v2``; Phase 2 sinh design, graph, trace và quality
+report theo từng version; Phase 3 sinh implementation plan trước khi sửa code;
+Phase 4 sinh work packet, code change report, test report, code trace và repair
+feedback theo từng version để không ghi đè lịch sử chạy. QA cũng có feedback
+riêng khi acceptance tests fail và cần Developer sửa lại code/test.
 """
 
 from __future__ import annotations
@@ -13,8 +13,6 @@ from __future__ import annotations
 import json
 
 from ..sources.fixtures import UseCaseSource
-from ..agents.requirements.refiner import FormalRefinementResult
-from ..agents.requirements.validator import ValidationReport
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 
@@ -39,128 +37,6 @@ def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSo
     return store.relative(path)
 
 
-def write_formal_use_case(*, store: RuntimeStore, run_id: str, formal_use_case: str) -> str:
-    """Lưu formal use case theo grammar TraceDev để phase sau dùng."""
-
-    path = store.run_dir(run_id) / "artifacts" / "formal_use_case_v1.txt"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(formal_use_case.rstrip() + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
-def write_formal_check_report(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    refinement_result: FormalRefinementResult,
-) -> str:
-    """Lưu report kiểm tra formal grammar và trạng thái repair."""
-
-    path = store.run_dir(run_id) / "artifacts" / "formal_check_report_v1.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(refinement_result.to_report_dict(), ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    return store.relative(path)
-
-
-def write_requirement_packet(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    requirement_packet: str,
-    validation_report: ValidationReport,
-) -> str:
-    """Lưu requirement packet và kèm report validator ở cuối file."""
-
-    path = store.run_dir(run_id) / "artifacts" / "requirement_packet_v1.md"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = requirement_packet.rstrip() + "\n\n---\n\n"
-    content += "## Validator Report\n\n"
-    content += f"- ok: {str(validation_report.ok).lower()}\n"
-    if validation_report.issues:
-        for issue in validation_report.issues:
-            content += f"- issue: {issue}\n"
-    else:
-        content += "- issue: none\n"
-    path.write_text(content, encoding="utf-8")
-    return store.relative(path)
-
-
-def write_trace_graph(
-    *,
-    store: RuntimeStore,
-    run_id: str,
-    source: UseCaseSource,
-    artifact_paths: dict[str, str],
-    validation_report: ValidationReport,
-    formal_refinement: FormalRefinementResult,
-    llm_mode: str,
-    llm_model: str,
-) -> str:
-    """Sinh trace graph cho đường source -> formal use case -> requirement packet."""
-
-    path = store.run_dir(run_id) / "artifacts" / "trace_graph_v1.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    graph = {
-        "version": "trace_graph_v1",
-        "run_id": run_id,
-        "created_at": utc_now_iso(),
-        "nodes": [
-            {
-                "id": "source_use_case",
-                "type": "source",
-                "label": f"{source.dataset}/{source.use_case}",
-                "ref": source.source_ref,
-            },
-            {
-                "id": "requirement_refiner",
-                "type": "agent_step",
-                "label": "Requirement Refiner",
-                "llm_mode": llm_mode,
-                "llm_model": llm_model,
-            },
-            {
-                "id": "formal_use_case_v1",
-                "type": "artifact",
-                "label": "Formal Use Case V1",
-                "path": artifact_paths["formal_use_case"],
-            },
-            {
-                "id": "formal_use_case_validator",
-                "type": "validator_step",
-                "label": "Formal Use Case Validator",
-                "ok": formal_refinement.final_report.ok,
-                "issues": formal_refinement.final_report.issues,
-                "repaired": formal_refinement.repaired,
-            },
-            {
-                "id": "requirement_packet_validator",
-                "type": "validator_step",
-                "label": "Requirement Packet Validator",
-                "ok": validation_report.ok,
-                "issues": validation_report.issues,
-            },
-            {
-                "id": "requirement_packet_v1",
-                "type": "artifact",
-                "label": "Requirement Packet V1",
-                "path": artifact_paths["requirement_packet"],
-            },
-        ],
-        "edges": [
-            {"from": "source_use_case", "to": "requirement_refiner", "relation": "refines"},
-            {"from": "requirement_refiner", "to": "formal_use_case_v1", "relation": "generates"},
-            {"from": "formal_use_case_v1", "to": "formal_use_case_validator", "relation": "validates_formal_grammar"},
-            {"from": "formal_use_case_v1", "to": "requirement_packet_v1", "relation": "summarizes_for_human_checkpoint"},
-            {"from": "requirement_packet_v1", "to": "requirement_packet_validator", "relation": "validates_checkpoint_packet"},
-        ],
-    }
-    path.write_text(json.dumps(graph, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return store.relative(path)
-
-
 def write_phase2_design_artifacts(
     *,
     store: RuntimeStore,
@@ -178,7 +54,7 @@ def write_phase2_design_artifacts(
     version: int = 1,
     repair_iterations: int = 0,
     traceability_mode: str = "traceability_v1",
-    requirement_contract_version: str = "v1",
+    requirement_contract_version: str = "v2",
     requirement_artifact_refs: dict[str, str] | None = None,
     requirement_revision: int | None = None,
 ) -> dict[str, str]:
@@ -244,7 +120,7 @@ def write_phase2_design_artifacts(
         "sequence_trace": sequence_trace,
         "inputs": {
             "requirement_packet": (requirement_artifact_refs or {}).get(
-                "requirement_packet", "requirement_packet_v1"
+                "requirement_packet", "requirement_packet_v2"
             ),
             "requirement_model": (requirement_artifact_refs or {}).get("requirement_model"),
             "formal_use_case": (requirement_artifact_refs or {}).get("formal_use_case"),
@@ -856,7 +732,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
         f"- Issue key: `{report.get('issue_key', '')}`",
         f"- Target repo: `{report.get('target_repo', '')}`",
         f"- Branch: `{report.get('branch', '')}`",
-        f"- Requirement contract: `{requirement_contract.get('version', 'v1')}` revision `{requirement_contract.get('revision', 0)}`",
+        f"- Requirement contract: `{requirement_contract.get('version', 'v2')}` revision `{requirement_contract.get('revision', 0)}`",
         f"- Stable requirements covered: `{len(requirement_ids)}`",
         "",
         "## Generated Test Execution",

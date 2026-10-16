@@ -1,18 +1,12 @@
 ﻿"""Workflow Phase 1: use case -> formal use case -> requirement checkpoint.
 
-Phase này học trực tiếp từ TraceDev ở bước Requirement Refiner, nhưng thêm state,
-artifact, checkpoint và mock sync để Niko có thể kiểm soát từng bước.
+Phase này tạo structured requirement model, kiểm tra grounding/clarification,
+render các projection và lưu checkpoint để Niko có thể kiểm soát từng bước.
 """
 
 from __future__ import annotations
 
-from ..artifacts.writers import (
-    write_formal_check_report,
-    write_formal_use_case,
-    write_requirement_packet,
-    write_trace_graph,
-    write_use_case_packet,
-)
+from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
     read_requirement_model_v2,
     read_source_snapshot_v2,
@@ -29,8 +23,6 @@ from ..agents.developer import repair_scope_mismatch_retry_allowed
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementModelV2Refiner,
-    RequirementRefiner,
-    RequirementValidator,
     find_clarification_submission,
     select_current_requirement_question,
 )
@@ -64,10 +56,8 @@ class PhaseOneWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.llm_client = LlmClient(settings)
-        self.refiner = RequirementRefiner(self.llm_client)
         self.refiner_v2 = RequirementModelV2Refiner(self.llm_client)
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
-        self.validator = RequirementValidator()
 
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
@@ -111,103 +101,11 @@ class PhaseOneWorkflow:
                 "mode": self.settings.llm_mode,
                 "model": self.settings.llm_model,
             },
-            "summary_for_user": "Đang chuẩn hóa use case thành formal use case và requirement packet.",
+            "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
         self.store.write_state(state)
 
-        if self.settings.requirement_contract_version == "v2":
-            return self._start_v2(source=source, state=state)
-
-        try:
-            use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
-            formal_refinement = self.refiner.refine_formal_use_case(source)
-            formal_use_case_path = write_formal_use_case(
-                store=self.store,
-                run_id=run_id,
-                formal_use_case=formal_refinement.final_use_case,
-            )
-            formal_check_report_path = write_formal_check_report(
-                store=self.store,
-                run_id=run_id,
-                refinement_result=formal_refinement,
-            )
-            requirement_refinement = self.refiner.refine_requirement_packet(
-                source,
-                formal_use_case=formal_refinement.final_use_case,
-            )
-            requirement_text = requirement_refinement.final_packet
-            validation_report = requirement_refinement.final_report
-            requirement_packet_path = write_requirement_packet(
-                store=self.store,
-                run_id=run_id,
-                requirement_packet=requirement_text,
-                validation_report=validation_report,
-            )
-        except HarnessError as exc:
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "status": "failed",
-                    "last_error": exc.to_response(),
-                    "summary_for_user": f"Phase 1 lỗi khi chuẩn hóa requirement: {exc.message}",
-                }
-            )
-            self.store.write_state(state)
-            raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
-        artifact_paths = {
-            "use_case_packet": use_case_packet_path,
-            "formal_use_case": formal_use_case_path,
-            "formal_check_report": formal_check_report_path,
-            "requirement_packet": requirement_packet_path,
-        }
-        trace_graph_path = write_trace_graph(
-            store=self.store,
-            run_id=run_id,
-            source=source,
-            artifact_paths={**artifact_paths, "trace_graph": "pending"},
-            validation_report=validation_report,
-            formal_refinement=formal_refinement,
-            llm_mode=self.settings.llm_mode,
-            llm_model=self.settings.llm_model,
-        )
-        artifact_paths["trace_graph"] = trace_graph_path
-        last_sync = sync_requirement_checkpoint(
-            store=self.store,
-            settings=self.settings,
-            run_id=run_id,
-            source_ref=source.source_ref,
-            artifact_paths=artifact_paths,
-        )
-
-        checkpoint_id = f"checkpoint_requirement_{run_id}"
-        state.update(
-            {
-                "updated_at": utc_now_iso(),
-                "current_phase": "waiting_requirement_approval",
-                "status": "waiting_requirement_approval",
-                "latest_artifacts": artifact_paths,
-                "pending_checkpoint": {
-                    "checkpoint_id": checkpoint_id,
-                    "type": "requirement_approval",
-                    "artifact_ref": "requirement_packet_v1",
-                    "artifact_path": requirement_packet_path,
-                },
-                "allowed_next_actions": ALLOWED_REQUIREMENT_ACTIONS,
-                "last_sync": last_sync,
-                "quality_reports": {
-                    "formal_use_case": formal_refinement.final_report.to_dict(),
-                    "requirement_packet": requirement_refinement.to_report_dict(),
-                },
-                "summary_for_user": (
-                    f"Đã chuẩn hóa {source.dataset} {source.use_case} thành formal use case và requirement packet v1 "
-                    f"bằng Requirement Refiner, validator đã pass, và sync status={last_sync.get('status')}. "
-                    "Run đang chờ anh duyệt requirement trước khi chuyển sang design."
-                ),
-            }
-        )
-        self.store.write_state(state)
-        self.store.register_active_run(source.source_ref, run_id)
-        return self._status_response(state, created_new_run=True)
+        return self._start_v2(source=source, state=state)
 
     def _start_v2(self, *, source: UseCaseSource, state: dict[str, object]) -> dict[str, object]:
         """Create the canonical V2 model and stop at clarification or approval."""
@@ -271,7 +169,7 @@ class PhaseOneWorkflow:
 
         with self.store.run_lock(run_id):
             state = self.store.read_state(run_id)
-            if str(state.get("requirement_contract_version") or "v1") != "v2":
+            if str(state.get("requirement_contract_version") or "v2") != "v2":
                 raise HarnessError(
                     "requirement_clarification_not_supported",
                     "Clarification answers require Requirement Contract V2.",
@@ -401,7 +299,7 @@ class PhaseOneWorkflow:
     def _requirement_sync_context(self, state: dict[str, object]) -> dict[str, object]:
         checkpoint = state.get("pending_checkpoint")
         context: dict[str, object] = {
-            "requirement_contract_version": str(state.get("requirement_contract_version") or "v1"),
+            "requirement_contract_version": str(state.get("requirement_contract_version") or "v2"),
             "status": str(state.get("status") or ""),
         }
         if isinstance(checkpoint, dict):
@@ -555,7 +453,7 @@ class PhaseOneWorkflow:
             "created_new_run": created_new_run,
             "source_ref": state.get("source_ref"),
             "run_id": state.get("run_id"),
-            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
             "latest_artifacts": latest_artifacts if isinstance(latest_artifacts, dict) else {},

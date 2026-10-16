@@ -83,3 +83,10 @@ triển khai chỉ vì tài liệu đã được viết.
 - [ ] Chuyển default sang `v2` sau khi mọi gate pass.
 - [ ] Cập nhật docs trạng thái implemented và đóng backlog clarification.
 
+## Requirement V1 Retirement (2026-10-16)
+
+- [x] Controlled E2E UC2 hoàn tất trên Requirement Contract V2.
+- [x] Cố định runtime contract ở V2 và gỡ config/CLI selector.
+- [x] Gỡ refiner, validator, prompt, writer và downstream reader V1.
+- [x] State không phải V2 fail closed bằng `requirement_contract_unsupported`.
+- [ ] Chạy regression sau thay đổi retirement khi được yêu cầu.

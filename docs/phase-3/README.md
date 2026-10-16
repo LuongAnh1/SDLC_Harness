@@ -189,7 +189,7 @@ Phase 4 sẽ đọc `implementation_plan_v1` cùng approved design graph, rồi 
 
 Requirement V2 hiện được phép đi tiếp từ checkpoint này sang Phase 4. Canonical
 work packet, Developer, Tester và code trace cùng consume stable requirement IDs.
-Default contract vẫn là V1 cho tới controlled live smoke V2.
+Requirement Contract V2 hiện là contract runtime duy nhất.
 
 ## Không Làm Trong Phase 3
 

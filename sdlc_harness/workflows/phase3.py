@@ -53,8 +53,7 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
-        if str(state.get("requirement_contract_version") or "v1") == "v2":
-            self._read_phase3_inputs(state=state, run_id=run_id)
+        self._read_phase3_inputs(state=state, run_id=run_id)
         try:
             self.workspace_manager.create_for_run(run_id)
         except HarnessError as exc:
@@ -142,11 +141,7 @@ class PhaseThreeWorkflow:
             workspace_mode=workspace.workspace_mode,
             workspace_ref=artifact_paths["run_workspace"],
             base_sha=workspace.base_sha,
-            canonical_requirement=(
-                frozen_requirement.canonical_model
-                if isinstance(frozen_requirement, CanonicalRequirementInput)
-                else None
-            ),
+            canonical_requirement=frozen_requirement.canonical_model,
             requirement_graph=requirement_graph,
             requirement_artifact_refs=frozen_requirement.approved_artifacts,
         )
@@ -187,11 +182,7 @@ class PhaseThreeWorkflow:
                 repair_iterations=repair_iteration,
                 requirement_graph=requirement_graph,
                 requirement_contract_version=frozen_requirement.contract_version,
-                canonical_requirement=(
-                    frozen_requirement.canonical_model.to_dict()
-                    if isinstance(frozen_requirement, CanonicalRequirementInput)
-                    else None
-                ),
+                canonical_requirement=frozen_requirement.canonical_model.to_dict(),
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -252,11 +243,7 @@ class PhaseThreeWorkflow:
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
                 base_sha=workspace.base_sha,
-                canonical_requirement=(
-                    frozen_requirement.canonical_model
-                    if isinstance(frozen_requirement, CanonicalRequirementInput)
-                    else None
-                ),
+                canonical_requirement=frozen_requirement.canonical_model,
                 requirement_graph=requirement_graph,
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
             )
@@ -398,11 +385,7 @@ class PhaseThreeWorkflow:
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
                 base_sha=workspace.base_sha,
-                canonical_requirement=(
-                    frozen_requirement.canonical_model
-                    if isinstance(frozen_requirement, CanonicalRequirementInput)
-                    else None
-                ),
+                canonical_requirement=frozen_requirement.canonical_model,
                 requirement_graph=requirement_graph,
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
             )
@@ -456,11 +439,7 @@ class PhaseThreeWorkflow:
                 repair_iterations=repair_iteration,
                 requirement_graph=requirement_graph,
                 requirement_contract_version=frozen_requirement.contract_version,
-                canonical_requirement=(
-                    frozen_requirement.canonical_model.to_dict()
-                    if isinstance(frozen_requirement, CanonicalRequirementInput)
-                    else None
-                ),
+                canonical_requirement=frozen_requirement.canonical_model.to_dict(),
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -530,11 +509,7 @@ class PhaseThreeWorkflow:
                     workspace_mode=workspace.workspace_mode,
                     workspace_ref=artifact_paths["run_workspace"],
                     base_sha=workspace.base_sha,
-                    canonical_requirement=(
-                        frozen_requirement.canonical_model
-                        if isinstance(frozen_requirement, CanonicalRequirementInput)
-                        else None
-                    ),
+                    canonical_requirement=frozen_requirement.canonical_model,
                     requirement_graph=requirement_graph,
                     requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 )
@@ -617,13 +592,11 @@ class PhaseThreeWorkflow:
         *,
         state: dict[str, object],
         run_id: str,
-    ) -> tuple[object, dict[str, object]]:
+    ) -> tuple[CanonicalRequirementInput, dict[str, object]]:
         """Read frozen Phase 1 input and validate the V2 Phase 2 handoff before mutation."""
 
         try:
             frozen = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
-            if not isinstance(frozen, CanonicalRequirementInput):
-                return frozen, {}
             artifact_paths = _string_dict(state.get("latest_artifacts"))
             graph_path = _required_artifact(artifact_paths, "requirement_graph", run_id=run_id)
             trace_path = _required_artifact(artifact_paths, "requirement_design_trace", run_id=run_id)
@@ -638,8 +611,6 @@ class PhaseThreeWorkflow:
             )
             return frozen, saved_graph
         except HarnessError as exc:
-            if str(state.get("requirement_contract_version") or "v1") != "v2":
-                raise
             raise HarnessError(
                 "requirement_v2_phase3_input_invalid",
                 f"Requirement V2 Phase 3 input is invalid: {exc.message}",
@@ -723,7 +694,7 @@ class PhaseThreeWorkflow:
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
-            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v2"),
         }
 
 

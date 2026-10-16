@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeAlias
-
 from ..agents.requirements import (
     RequirementModelV2,
     normalize_and_validate_requirement_model_v2,
@@ -17,15 +15,6 @@ from .requirement_v2 import read_requirement_model_v2, read_source_snapshot_v2
 
 
 @dataclass(frozen=True)
-class LegacyRequirementInput:
-    contract_version: str
-    requirement_packet: str
-    formal_use_case: str
-    approved_artifacts: dict[str, str]
-    canonical_model: RequirementModelV2 | None = None
-
-
-@dataclass(frozen=True)
 class CanonicalRequirementInput:
     contract_version: str
     requirement_packet: str
@@ -34,7 +23,7 @@ class CanonicalRequirementInput:
     canonical_model: RequirementModelV2
 
 
-ApprovedRequirementInput: TypeAlias = LegacyRequirementInput | CanonicalRequirementInput
+ApprovedRequirementInput = CanonicalRequirementInput
 
 
 def read_approved_requirement_input(
@@ -81,20 +70,12 @@ def _read_requirement_input(
     artifacts: dict[str, str],
     require_current_checkpoint: bool,
 ) -> ApprovedRequirementInput:
-    contract_version = str(state.get("requirement_contract_version") or "v1")
+    contract_version = str(state.get("requirement_contract_version") or "v2")
     if contract_version != "v2":
-        packet_ref = _required_ref(artifacts, "requirement_packet", run_id=run_id)
-        packet = _read_text(store, packet_ref, run_id=run_id)
-        formal_ref = artifacts.get("formal_use_case", "")
-        formal = _read_text(store, formal_ref, run_id=run_id) if formal_ref else ""
-        approved = {"requirement_packet": packet_ref}
-        if formal_ref:
-            approved["formal_use_case"] = formal_ref
-        return LegacyRequirementInput(
-            contract_version="v1",
-            requirement_packet=packet,
-            formal_use_case=formal,
-            approved_artifacts=approved,
+        raise HarnessError(
+            "requirement_contract_unsupported",
+            f"Only Requirement Contract V2 is supported; run uses {contract_version!r}.",
+            run_id=run_id,
         )
 
     model_ref = _required_ref(artifacts, "requirement_model", run_id=run_id)

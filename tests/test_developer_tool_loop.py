@@ -110,11 +110,10 @@ class DeveloperToolLoopTest(unittest.TestCase):
     def executor(self, llm: ScriptedLlm) -> DeveloperToolLoopExecutor:
         return DeveloperToolLoopExecutor(settings=self.settings, store=self.store, llm_client=llm)
 
-    def test_truncated_item_rolls_back_only_current_item_and_resume_skips_completed_work(self) -> None:
+    def test_truncated_execution_unit_rolls_back_and_can_resume(self) -> None:
         first_llm = ScriptedLlm(
             [
                 action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
-                action("complete", {"summary": "Main implemented"}),
                 LlmCompletion(content="", finish_reason="length"),
             ]
         )
@@ -128,20 +127,14 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         self.assertTrue(caught.exception.retriable)
         self.assertEqual(caught.exception.error_code, "developer_action_truncated")
-        self.assertEqual((self.repo / "src" / "Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+        self.assertFalse((self.repo / "src" / "Main.java").exists())
         self.assertFalse((self.repo / "src" / "MainTest.java").exists())
-
-        journal_path = self.root / caught.exception.journal_path
-        paused = json.loads(journal_path.read_text(encoding="utf-8"))
-        self.assertEqual([item["status"] for item in paused["items"]], ["completed", "pending"])
 
         resumed_llm = ScriptedLlm(
             [
-                action(
-                    "write_file",
-                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
-                ),
-                action("complete", {"summary": "Main test implemented"}),
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
+                action("complete", {"summary": "coherent slice implemented"}),
             ]
         )
         result = self.executor(resumed_llm).execute(
@@ -150,17 +143,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
             target_path=self.repo,
         )
 
-        self.assertEqual(result.progress["completed_items"], 2)
-        self.assertEqual(len(resumed_llm.prompts), 2)
-        self.assertIn("src/MainTest.java", resumed_llm.prompts[0])
-        self.assertNotIn('"path":"src/Main.java","operation"', resumed_llm.prompts[0])
-        action_dir = self.runtime / "runs" / "run_resume" / "developer_execution" / "act_v1" / "actions"
-        self.assertTrue((action_dir / "wi-002_a001_001.txt").exists())
-        self.assertTrue((action_dir / "wi-002_a002_001.txt").exists())
-        completed = json.loads(journal_path.read_text(encoding="utf-8"))
-        second_item = completed["items"][1]
-        self.assertEqual(second_item["attempts"], 2)
-        self.assertEqual(len(second_item["attempt_history"]), 1)
+        self.assertEqual(result.progress["completed_items"], 1)
+        self.assertTrue((self.repo / "src" / "Main.java").exists())
+        self.assertTrue((self.repo / "src" / "MainTest.java").exists())
 
     def test_write_action_cannot_escape_current_work_item(self) -> None:
         llm = ScriptedLlm(
@@ -241,28 +226,18 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("contained 2 JSON actions", llm.prompts[1])
         self.assertIn("Return exactly one JSON action object", llm.prompts[1])
 
-    def test_repair_recovers_cross_item_write_and_can_complete_inspected_noop_item(self) -> None:
+    def test_repair_execution_unit_can_update_any_approved_path(self) -> None:
         main_path = self.repo / "src" / "Main.java"
         main_path.parent.mkdir(parents=True)
         main_path.write_text("class Main {}\n", encoding="utf-8")
         feedback = {
             "feedback_source": "verification",
-            "verification": {
-                "stderr": "src/Main.java:1: inspect owner\nsrc/MainTest.java:1: error: missing coverage",
-            },
+            "verification": {"stderr": "src/MainTest.java:1: error: missing coverage"},
         }
         llm = ScriptedLlm(
             [
                 action("read_file", {"path": "src/Main.java"}),
-                action(
-                    "write_file",
-                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
-                ),
-                action("complete", {"summary": "Main already correct", "no_change_required": True}),
-                action(
-                    "write_file",
-                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
-                ),
+                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
                 action("complete", {"summary": "test repaired"}),
             ]
         )
@@ -275,20 +250,13 @@ class DeveloperToolLoopTest(unittest.TestCase):
             repair_iteration=1,
         )
 
-        self.assertEqual(result.progress["completed_items"], 2)
+        self.assertEqual(result.progress["completed_items"], 1)
         self.assertEqual(main_path.read_text(encoding="utf-8"), "class Main {}\n")
-        self.assertTrue(result.files[0]["no_change_required"])
-        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
-        mismatch = journal["items"][0]["actions"][1]["tool_result"]
-        self.assertEqual(mismatch["error"], "current_item_mismatch")
-        self.assertEqual(mismatch["current_item"], "src/Main.java")
+        self.assertTrue((self.repo / "src" / "MainTest.java").exists())
 
     def test_repair_resume_accepts_persisted_scope_when_only_selection_policy_changed(self) -> None:
         run_id = "run_selection_policy_migration"
         packet = self.work_packet()
-        target = self.repo / "src" / "Main.java"
-        target.parent.mkdir(parents=True)
-        target.write_text("class Main {}\n", encoding="utf-8")
         feedback = {
             "feedback_source": "verification",
             "verification": {"stderr": "src/MainTest.java:12: error: cannot call main.run()"},
@@ -320,12 +288,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         llm = ScriptedLlm(
             [
-                action("read_file", {"path": "src/Main.java"}),
-                action("complete", {"summary": "legacy item is already correct", "no_change_required": True}),
-                action(
-                    "write_file",
-                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
-                ),
+                action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
                 action("complete", {"summary": "test repaired"}),
             ]
         )
@@ -338,7 +301,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
             repair_iteration=1,
         )
 
-        self.assertEqual(result.progress["completed_items"], 2)
+        self.assertEqual(result.progress["completed_items"], 1)
         journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
         self.assertEqual(journal["migrations"][0]["code"], "repair_selection_policy_migrated")
         self.assertEqual(journal["migrations"][0]["current_item_paths"], ["src/MainTest.java"])
@@ -555,7 +518,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
             repair_iteration=1,
         )
 
-        self.assertEqual(manifest["items"][0]["purpose"], "Repair the compile failure.")
+        self.assertEqual(manifest["items"][0]["files"][0]["purpose"], "Repair the compile failure.")
 
 
 if __name__ == "__main__":

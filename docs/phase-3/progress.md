@@ -32,7 +32,7 @@ frozen canonical requirement
   gate này đã được Slice 4C thay bằng canonical input validation.
 
 Boundary còn giữ: Phase 4 chưa consume canonical V2 work packet; Niko/Telegram và
-live Jira smoke không thuộc slice này. Default contract vẫn là V1.
+live Jira smoke không thuộc slice này. Requirement Contract V2 hiện là contract runtime duy nhất.
 
 Kiểm tra hoàn tất:
 

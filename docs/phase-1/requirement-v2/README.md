@@ -1,8 +1,6 @@
 # Requirement Model V2 Và Clarification Workflow
 
-Tài liệu trong thư mục này chốt thiết kế nâng cấp Requirement Refiner sau lần
-chạy E2E V1 với eTour UC2. Thiết kế đã được duyệt ở mức tài liệu; code/runtime
-hiện vẫn dùng contract Phase 1 V1 cho tới khi checklist triển khai hoàn tất.
+Tài liệu trong thư mục này mô tả Requirement Contract V2 đang chạy. Sau E2E UC2, V2 đã trở thành contract runtime duy nhất và code V1 đã được gỡ ngày 2026-10-16.
 
 ## Vấn Đề Cần Giải Quyết
 
@@ -52,7 +50,7 @@ Các quyết định đã chốt:
 - LLM đề xuất category/impact/blocking cho câu hỏi; Python áp policy cuối cùng.
 - Niko hỏi một blocking question mỗi lượt theo thứ tự dependency và priority.
 - Câu trả lời human tạo revision mới và decision provenance.
-- Chỉ run mới dùng V2; run V1 tiếp tục theo contract cũ, không migrate lịch sử.
+- Run mới luôn dùng V2; run V1 lịch sử chỉ còn là dữ liệu audit và không thể tiếp tục workflow.
 - Full redesign này xử lý requirement semantics và clarification. Hardening
   output-token/model capability vẫn là backlog LLM client riêng.
 
@@ -80,7 +78,7 @@ trả lời đã đủ để đóng question hay chưa.
 
 1. `requirement-model-v2.md`: canonical schema, grounding và projections.
 2. `clarification-workflow.md`: state machine và CLI/status contract.
-3. `migration-and-rollout.md`: tương thích V1/V2 và rollout.
+3. `migration-and-rollout.md`: trạng thái retirement V1 và contract V2-only.
 4. `checklist.md`: thứ tự triển khai, test và controlled smoke.
 5. `progress.md`: nhật ký code, kiểm tra, lỗi phát sinh và việc tiếp theo.
 
@@ -91,5 +89,5 @@ trả lời đã đủ để đóng question hay chưa.
 - Main/alternative/exception flow có cấu trúc riêng.
 - JSON, Requirement Packet và Formal Use Case cùng revision và cùng semantics.
 - Phase 2 V2 ưu tiên canonical JSON; projection không thể ghi đè model.
-- Contract V1 vẫn đọc được cho run lịch sử.
+- Contract không phải V2 bị từ chối rõ ràng, không fallback sang legacy text.
 

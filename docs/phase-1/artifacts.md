@@ -1,172 +1,35 @@
-﻿# Phase 1 Artifacts
+# Phase 1 Artifacts
 
-Phase 1 tạo artifact tối thiểu để chứng minh use case đã được Requirement Refiner chuẩn hóa thành requirement packet có thể duyệt.
+## Canonical Requirement
 
-## `use_case_packet_v1.md`
+`requirement_model_v2_r<n>.json` là nguồn sự thật duy nhất. Model giữ stable IDs,
+source evidence, assumptions, open questions, human decisions và validation status.
 
-Mục đích: giữ bản chuẩn hóa nhẹ của input gốc.
+## Source Artifacts
 
-Nội dung tối thiểu:
+- `use_case_packet_v1.md`: bản raw use case dễ đọc.
+- `source_snapshot_v1.json`: source text, source ref và fingerprint để validator
+  kiểm tra grounding và phát hiện tampering.
 
-```markdown
-# Use Case Packet v1
+Hai tên này là version schema của source artifact, không phải Requirement Contract V1.
 
-- Run ID:
-- Source Ref: dataset_use_case:eTour:UC1
-- Dataset: eTour
-- Use Case: UC1
-- Source fixture: fixtures/etour/UC1.txt
+## Deterministic Projections
 
-## Raw Use Case
+- `requirement_packet_v2_r<n>.md`: bản review cho human/Jira/Confluence.
+- `formal_use_case_v2_r<n>.txt`: projection máy đọc cho downstream context.
+- `requirement_decisions_v2_r<n>.json`: audit các câu trả lời clarification.
+- `requirement_validation_v2_r<n>.json`: report schema, grounding, references và
+  blocking questions.
 
-<copy nội dung UC1 hoặc trích nguyên văn có cấu trúc>
-```
+Projection được render từ canonical model, không gọi LLM riêng và không được ghi
+ngược semantics vào JSON.
 
-## `requirement_packet_v1.md`
+## Sync Artifact
 
-Mục đích: artifact chính để human duyệt trước khi sang design.
+`tool_sync_report_v1.json` ghi mode, trạng thái và remote target của lần sync. Đây
+là sync-report schema V1, độc lập với Requirement Contract.
 
-Nội dung tối thiểu:
+## Ownership
 
-```markdown
-# Requirement Packet v1
-
-- Run ID:
-- Source: eTour UC1
-- Produced by: Requirement Refiner
-- Status: waiting_requirement_approval
-
-## Goal
-
-## Actors
-
-## Main Flow
-
-## Preconditions
-
-## Alternative / Exception Flows
-
-## Postconditions
-
-## Acceptance Criteria
-
-## Quality / Non-functional Requirements
-
-## Open Questions
-
-## Source Evidence
-
-## Notes For Validator
-```
-
-Phase 1 dùng LLM ở role Requirement Refiner để sinh requirement packet. Nếu trường nào không có đủ bằng chứng từ UC1, Requirement Refiner phải ghi vào `Open Questions` hoặc `Notes For Validator`, không bịa.
-
-Requirement packet là artifact cho người duyệt, không phải bản copy máy móc của
-formal use case. `formal_use_case_v1.txt` chỉ là bản chuẩn hóa trung gian theo
-grammar TraceDev; phần `Source Evidence` trong requirement packet phải trích từ
-nguồn gốc ban đầu như Jira issue, comment hoặc fixture, không được dùng các dòng
-do formal use case sinh ra như `UsecaseName:` làm bằng chứng.
-
-Các nhóm nội dung phải tách rõ:
-
-- `Main Flow`: chỉ chứa happy path.
-- `Alternative / Exception Flows`: chứa hủy thao tác, lỗi kết nối, gián đoạn,
-  dữ liệu không hợp lệ hoặc các nhánh ngoại lệ.
-- `Postconditions`: chỉ chứa trạng thái thành công sau khi use case hoàn tất.
-- `Acceptance Criteria`: chứa tiêu chí kiểm thử/review được.
-- `Quality / Non-functional Requirements`: chứa yêu cầu phi chức năng như độ
-  tin cậy, tránh duplicate, hiệu năng, bảo mật hoặc khả năng dùng.
-
-## Requirement Validator Phase 1
-
-Validator tối thiểu kiểm tra packet có đủ các vùng chính:
-
-```text
-Goal
-Actors
-Main Flow
-Preconditions
-Alternative / Exception Flows
-Postconditions
-Acceptance Criteria
-Quality / Non-functional Requirements
-Open Questions
-Source Evidence
-```
-
-Validator Phase 1 hiện là validator cấu trúc cộng guardrail ngữ nghĩa nhẹ. Mục
-tiêu là ngăn packet thiếu cấu trúc, bịa thông tin không có trong nguồn, hoặc
-đẩy nhầm exception/quality vào postcondition hay acceptance criteria. Validator
-không thay thế review của người dùng; nó chỉ chặn các lỗi thô trước khi sync lên
-Jira/Confluence.
-
-## `trace_graph_v1.json`
-
-Mục đích: trace tối thiểu từ source use case sang requirement packet.
-
-Schema khái niệm:
-
-```json
-{
-  "version": 1,
-  "nodes": [
-    {"id": "source:etour:UC1", "type": "source_use_case"},
-    {"id": "agent:requirement_refiner", "type": "agent_role"},
-    {"id": "artifact:requirement_packet_v1", "type": "requirement_packet"}
-  ],
-  "edges": [
-    {"from": "source:etour:UC1", "to": "agent:requirement_refiner", "type": "read_by"},
-    {"from": "agent:requirement_refiner", "to": "artifact:requirement_packet_v1", "type": "produced"},
-    {"from": "source:etour:UC1", "to": "artifact:requirement_packet_v1", "type": "normalized_into"}
-  ]
-}
-```
-
-## `tool_sync_report_v1.json`
-
-Mục đích: ghi nhận sync mock do SDLC Harness thực hiện.
-
-Nội dung tối thiểu:
-
-```json
-{
-  "version": 1,
-  "mode": "mock",
-  "status": "mock_synced",
-  "targets": [
-    {"tool": "jira", "artifact": "requirement_packet_v1", "path": ".runtime/runs/<run_id>/sync/jira-comment.md"},
-    {"tool": "confluence", "artifact": "requirement_packet_v1", "path": ".runtime/runs/<run_id>/sync/confluence-page.md"}
-  ]
-}
-```
-
-## Artifact Ownership
-
-SDLC Harness sở hữu tất cả artifact Phase 1. Niko chỉ đọc summary/status và không tự sửa artifact runtime.
-
-## Formal Use Case v1
-
-`formal_use_case_v1.txt` là artifact máy đọc theo grammar TraceDev. Nó dùng các keyword `UsecaseName`, `Description`, `Actors`, `Entry Conditions`, `Flow of Events`, `Exit Conditions`, `Quality Requirement` để Designer/Validator có input ổn định.
-
-`formal_check_report_v1.json` lưu kết quả kiểm tra grammar tối thiểu và cờ `repaired` để biết Requirement Refiner có phải gọi repair prompt hay không.
-
-## Artifact Contract V2 - Planned
-
-Thiết kế V2 không tiếp tục để Formal Use Case và Requirement Packet là hai
-semantic output độc lập. Run V2 dùng:
-
-```text
-requirement_model_v2_r<n>.json           # canonical
-requirement_packet_v2_r<n>.md            # deterministic review projection
-formal_use_case_v2_r<n>.txt              # deterministic trace/compat projection
-requirement_decisions_v2_r<n>.json       # decision audit projection
-```
-
-`latest_artifacts` trỏ tới revision hiện tại, còn revision cũ bất biến để audit.
-Mỗi requirement/flow/question/evidence/decision có stable ID. Confirmed statement
-phải được grounded bằng source evidence hoặc human decision. Field thiếu dùng
-`unknown` và question reference, không dùng domain inference.
-
-Schema, ID rules và projection contract nằm tại
-`requirement-v2/requirement-model-v2.md`. Contract này chưa được coi là runtime
-hiện hành trước khi checklist V2 pass.
+SDLC_Harness tạo, validate, version và sync các artifact. Niko chỉ đọc JSON status,
+hiển thị checkpoint/câu hỏi và chuyển control action của người dùng.

@@ -16,8 +16,6 @@ from sdlc_harness.core.config import load_settings, repo_root
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.sources.fixtures import UseCaseSource, load_use_case
 from sdlc_harness.sources.jira import load_jira_issue_source
-from sdlc_harness.llm.client import LlmClient, fake_formal_use_case
-from sdlc_harness.agents.requirements import FormalUseCaseValidator, RequirementRefiner, RequirementValidator
 from sdlc_harness.sync.atlassian import real_sync_requirement_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 
@@ -182,24 +180,6 @@ class PhaseOneTest(unittest.TestCase):
         self.assertNotIn("run_old", source.text)
         self.assertNotIn("SDLC-HARNESS-CHECKPOINT", source.text)
 
-    def test_requirement_prompt_templates_exist(self) -> None:
-        prompt_root = self.repo_root / "sdlc_harness" / "agents" / "requirements" / "prompts"
-        packet_prompt = (prompt_root / "requirement_packet_v1.md").read_text(encoding="utf-8")
-        packet_repair_prompt = (prompt_root / "requirement_packet_repair_v1.md").read_text(encoding="utf-8")
-        formal_prompt = (prompt_root / "formal_use_case_v1.txt").read_text(encoding="utf-8")
-        repair_prompt = (prompt_root / "formal_use_case_repair_v1.txt").read_text(encoding="utf-8")
-
-        self.assertIn("## Source Evidence", packet_prompt)
-        self.assertIn("## Alternative / Exception Flows", packet_prompt)
-        self.assertIn("## Quality / Non-functional Requirements", packet_prompt)
-        self.assertIn("{formal_use_case}", packet_prompt)
-        self.assertIn("{RequirementValidationReport}", packet_repair_prompt)
-        self.assertIn("{RequirementPacket}", packet_repair_prompt)
-        self.assertIn("Formal Syntactic Constraint", formal_prompt)
-        self.assertIn("{OriginalUseCase}", formal_prompt)
-        self.assertIn("{FormalCheckResult}", repair_prompt)
-        self.assertIn("{ReconstructedUseCase}", repair_prompt)
-
     def test_trace_dev_role_prompts_are_available(self) -> None:
         prompt_paths = [
             self.repo_root / "sdlc_harness" / "agents" / "designer" / "prompts" / "designer.txt",
@@ -211,96 +191,6 @@ class PhaseOneTest(unittest.TestCase):
             self.assertTrue(path.exists(), str(path))
             self.assertGreater(len(path.read_text(encoding="utf-8")), 100)
 
-    def test_formal_use_case_validator_passes_fake_formal_output(self) -> None:
-        report = FormalUseCaseValidator().require_valid(fake_formal_use_case())
-        self.assertTrue(report.ok)
-        self.assertGreaterEqual(report.flow_step_count, 1)
-
-    def test_formal_use_case_validator_rejects_missing_grammar(self) -> None:
-        report = FormalUseCaseValidator().validate("UsecaseName: Broken\nFlow of Events:\n1. Do something")
-        self.assertFalse(report.ok)
-        self.assertIn("Description:", " ".join(report.issues))
-
-    def test_fake_refiner_output_passes_validators(self) -> None:
-        source = load_use_case(dataset="eTour", use_case="UC1", repo_root=self.repo_root)
-        refiner = RequirementRefiner(LlmClient(self.settings))
-        formal_result = refiner.refine_formal_use_case(source)
-        packet_result = refiner.refine_requirement_packet(source, formal_use_case=formal_result.final_use_case)
-        packet = packet_result.final_packet
-        report = packet_result.final_report
-
-        self.assertTrue(formal_result.final_report.ok)
-        self.assertFalse(formal_result.repaired)
-        self.assertFalse(packet_result.repaired)
-        self.assertTrue(report.ok)
-        self.assertIn("## Main Flow", packet)
-        self.assertIn("## Alternative / Exception Flows", packet)
-        self.assertIn("## Quality / Non-functional Requirements", packet)
-
-    def test_requirement_packet_refiner_repairs_validator_failure(self) -> None:
-        source = UseCaseSource(
-            dataset="jira",
-            use_case="SDLC-1",
-            source_ref="jira_issue:SDLC-1",
-            source_path=None,
-            text="Jira Issue: SDLC-1\nDescription: Delete a cultural object. Operator can cancel. Connection may fail.",
-        )
-        invalid_packet = _valid_requirement_packet().replace(
-            "## Acceptance Criteria\n- Khi Agency Operator xác nhận, hệ thống xóa cultural heritage object đã chọn.",
-            "## Acceptance Criteria\n- System handles connection interruption and cancellation.",
-        )
-        calls: list[str] = []
-
-        class RepairingClient:
-            def complete(self, *, system: str, prompt: str) -> str:
-                calls.append(prompt)
-                if "Repair Requirement Packet v1" in prompt:
-                    return _valid_requirement_packet()
-                return invalid_packet
-
-        result = RequirementRefiner(RepairingClient()).refine_requirement_packet(
-            source,
-            formal_use_case=fake_formal_use_case(),
-        )
-
-        self.assertTrue(result.repaired)
-        self.assertFalse(result.initial_report.ok)
-        self.assertTrue(result.final_report.ok)
-        self.assertIn("Requirement Validation Report", calls[-1])
-
-    def test_requirement_validator_rejects_exception_in_postconditions(self) -> None:
-        packet = _valid_requirement_packet().replace(
-            "## Postconditions\n- Cultural heritage object đã chọn không còn khả dụng sau khi xóa thành công.",
-            "## Postconditions\n- Agency Operator cancels the operation.",
-        )
-
-        report = RequirementValidator().validate(packet)
-
-        self.assertFalse(report.ok)
-        self.assertIn("Postconditions must describe successful final state", " ".join(report.issues))
-
-    def test_requirement_validator_rejects_quality_in_acceptance_criteria(self) -> None:
-        packet = _valid_requirement_packet().replace(
-            "## Acceptance Criteria\n- Khi Agency Operator xác nhận, hệ thống xóa cultural heritage object đã chọn.",
-            "## Acceptance Criteria\n- Hệ thống chặn multiple submissions trong khi chờ xác nhận.",
-        )
-
-        report = RequirementValidator().validate(packet)
-
-        self.assertFalse(report.ok)
-        self.assertIn("Acceptance Criteria must not contain quality", " ".join(report.issues))
-
-    def test_requirement_validator_rejects_formal_text_as_source_evidence(self) -> None:
-        packet = _valid_requirement_packet().replace(
-            '- "Delete a cultural object in the system."',
-            '- "UsecaseName: Delete CulturalHeritage"',
-        )
-
-        report = RequirementValidator().validate(packet)
-
-        self.assertFalse(report.ok)
-        self.assertIn("original source", " ".join(report.issues))
-
     def test_start_or_get_run_creates_runtime_files(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
         response = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
@@ -310,18 +200,19 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(response["current_phase"], "waiting_requirement_approval")
         self.assertEqual(response["last_sync"]["status"], "mock_synced")
         self.assertIn("formal_use_case", response["latest_artifacts"])
-        self.assertIn("formal_check_report", response["latest_artifacts"])
-        self.assertTrue(response["quality_reports"]["formal_use_case"]["ok"])
-        self.assertTrue(response["quality_reports"]["requirement_packet"]["final_report"]["ok"])
+        self.assertEqual(response["requirement_contract_version"], "v2")
+        self.assertIn("requirement_model", response["latest_artifacts"])
+        self.assertTrue(response["quality_reports"]["requirement_model_v2"]["final_report"]["ok"])
 
         run_id = str(response["run_id"])
         run_dir = self.runtime_root / "runs" / run_id
         self.assertTrue((run_dir / "state.json").exists())
         self.assertTrue((run_dir / "artifacts" / "use_case_packet_v1.md").exists())
-        self.assertTrue((run_dir / "artifacts" / "formal_use_case_v1.txt").exists())
-        self.assertTrue((run_dir / "artifacts" / "formal_check_report_v1.json").exists())
-        self.assertTrue((run_dir / "artifacts" / "requirement_packet_v1.md").exists())
-        self.assertTrue((run_dir / "artifacts" / "trace_graph_v1.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_model_v2_r1.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "formal_use_case_v2_r1.txt").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_packet_v2_r1.md").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_validation_v2_r1.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_decisions_v2_r1.json").exists())
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
 
     def test_start_from_jira_creates_runtime_files(self) -> None:
@@ -893,48 +784,3 @@ class PhaseOneTest(unittest.TestCase):
         response = workflow.get_status(run_id=run_id)
 
         self.assertEqual(response["allowed_next_actions"][0], "continue_run")
-
-
-def _valid_requirement_packet() -> str:
-    return """# Requirement Packet V1
-
-## Goal
-Cho phép Agency Operator xóa một cultural heritage object đã chọn.
-
-## Actors
-- Agency Operator
-
-## Preconditions
-- Agency Operator đã đăng nhập.
-
-## Main Flow
-1. Agency Operator chọn một cultural heritage object.
-2. Hệ thống yêu cầu xác nhận.
-3. Agency Operator xác nhận.
-4. Hệ thống xóa cultural heritage object đã chọn.
-
-## Alternative / Exception Flows
-- Agency Operator cancels the operation.
-- Connection to the ETOUR server is interrupted.
-
-## Postconditions
-- Cultural heritage object đã chọn không còn khả dụng sau khi xóa thành công.
-
-## Acceptance Criteria
-- Khi Agency Operator xác nhận, hệ thống xóa cultural heritage object đã chọn.
-
-## Quality / Non-functional Requirements
-- Hệ thống chặn multiple submissions trong khi chờ xác nhận.
-
-## Open Questions
-- None.
-
-## Source Evidence
-- "Delete a cultural object in the system."
-- "Operator Agency cancels the operation."
-- "Interruption of connection to the server ETOUR."
-""".strip()
-
-
-if __name__ == "__main__":
-    unittest.main()

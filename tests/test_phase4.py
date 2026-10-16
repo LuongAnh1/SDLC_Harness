@@ -98,7 +98,7 @@ class RejectingCodeTraceLlm:
             {
                 "ok": False,
                 "confidence": 0.87,
-                "summary": "Semantic graph review found missing delete confirmation behavior.",
+                "summary": "Semantic graph review found missing request-deletion coverage.",
                 "graph_edges": [],
                 "missing_links": [
                     {
@@ -106,11 +106,11 @@ class RejectingCodeTraceLlm:
                         "blocking": True,
                         "owner": "developer",
                         "recommended_action": "developer_repair",
-                        "message": "Delete confirmation is not convincingly covered by code/test evidence.",
-                        "requirement_ref": "approved_requirement_packet",
+                        "message": "Approved requestDeletion behavior is not covered by code/test evidence.",
+                        "requirement_ref": "MF-1",
                         "design_element_id": "sequence:delete_cultural_heritage_main",
-                        "evidence_ref": "requirement_packet:Source Evidence",
-                        "evidence_quote": "Asks confirmation",
+                        "evidence_ref": "approved_design:sequence",
+                        "evidence_quote": "requestDeletion(heritageId)",
                     }
                 ],
                 "risks": ["Code file exists but behavior evidence is weak."],
@@ -355,7 +355,6 @@ class PhaseFourTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
-            "SDLC_REQUIREMENT_CONTRACT_VERSION": "v1",
             "SDLC_DEVELOPER_EXECUTION_MODE": "legacy",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
@@ -812,7 +811,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(trace["mappings"])
         self.assertFalse(trace["missing_links"])
         self.assertGreater(trace["stats"]["test_file_count"], 0)
-        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v1")
+        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v2")
         self.assertTrue(trace["llm_required"])
         self.assertTrue(trace["llm_review"]["ok"])
         self.assertTrue(trace["llm_review"]["review_context"]["code_snippets_included"])
@@ -884,7 +883,7 @@ class PhaseFourTest(unittest.TestCase):
                 / "RecordingQaAcceptanceTest.java"
             ).exists()
         )
-        self.assertEqual(recorder.context["packet_mode"], "trace_dev_style_compact_qa_packet_v1")
+        self.assertEqual(recorder.context["packet_mode"], "trace_dev_style_compact_qa_packet_v2")
         self.assertIn("accepted_requirement", recorder.context)
         self.assertIn("code_under_test", recorder.context)
         self.assertIn("verification", recorder.context)
@@ -1179,7 +1178,11 @@ class PhaseFourTest(unittest.TestCase):
                 encoding="utf-8"
             )
         )
-        self.assertEqual(feedback["llm_review"]["summary"], "Semantic graph review found missing delete confirmation behavior.")
+        self.assertEqual(
+            feedback["llm_review"]["summary"],
+            "Validator reported 1 actionable blocking link(s). "
+            "Approved requestDeletion behavior is not covered by code/test evidence.",
+        )
         self.assertTrue(feedback["developer_constraints"]["allowed_paths"])
 
     def test_continue_run_from_repair_needed_repairs_code_then_retraces(self) -> None:
@@ -1417,7 +1420,10 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "implementation_repair_needed")
         self.assertIsNone(response["last_error"])
         self.assertEqual(response["implementation_repair_iterations"], 1)
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        self.assertEqual(
+            response["allowed_next_actions"],
+            ["continue_run", "revalidate_implementation", "get_status", "cancel_run"],
+        )
         self.assertIn("developer_work_packet_v3.json", response["latest_artifacts"]["developer_work_packet"])
         self.assertIn("test_report_v3.md", response["latest_artifacts"]["test_report"])
         self.assertIn(
@@ -1508,7 +1514,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(payload["implementation_repair_iterations"], 1)
         self.assertIn("requirement_design_code_trace_v3.json", payload["latest_artifacts"]["requirement_design_code_trace"])
 
-    def test_continue_run_blocks_when_code_trace_failure_is_not_repairable(self) -> None:
+    def test_canonical_trace_survives_redundant_file_mapping_removal(self) -> None:
         tested = self._create_phase4_tested_run()
         store = PhaseOneWorkflow(self.settings).store
         state = store.read_state(str(tested["run_id"]))
@@ -1520,8 +1526,8 @@ class PhaseFourTest(unittest.TestCase):
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
+        self.assertEqual(response["status"], "implementation_traced")
+        self.assertIsNone(response["last_error"])
         self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
         self.assertNotIn("implementation_repair_feedback", response["latest_artifacts"])
 
@@ -1565,7 +1571,10 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["current_phase"], "implementation_repair")
         self.assertEqual(response["status"], "implementation_repair_needed")
         self.assertIsNone(response["last_error"])
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        self.assertEqual(
+            response["allowed_next_actions"],
+            ["continue_run", "revalidate_implementation", "get_status", "cancel_run"],
+        )
         self.assertEqual(response["implementation_repair_iterations"], 0)
         self.assertIn("test_report", response["latest_artifacts"])
         self.assertIn("implementation_repair_feedback", response["latest_artifacts"])

@@ -189,7 +189,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
-                    "SDLC_REQUIREMENT_CONTRACT_VERSION": "v2",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -211,7 +210,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
-                    "SDLC_REQUIREMENT_CONTRACT_VERSION": "v2",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -317,7 +315,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
-                    "SDLC_REQUIREMENT_CONTRACT_VERSION": "v2",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -428,7 +425,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
-                    "SDLC_REQUIREMENT_CONTRACT_VERSION": "v2",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -461,7 +457,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
             settings = load_settings(
                 root=self.root,
                 runtime_root=Path(directory),
-                overrides={"SDLC_REQUIREMENT_CONTRACT_VERSION": "v2"},
+                overrides={},
             )
             store = RuntimeStore(repo_root=self.root, runtime_root=Path(directory))
             store.write_state(
@@ -475,7 +471,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id="run_blocked")
             self.assertEqual(context.exception.error_code, "requirement_approval_blocked")
 
-    def test_cli_exposes_v2_start_and_answer_action(self) -> None:
+    def test_cli_exposes_start_and_answer_action(self) -> None:
         parser = build_parser()
         start = parser.parse_args(
             [
@@ -486,8 +482,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 "UC2",
                 "--requested-by",
                 "owner",
-                "--requirement-contract-version",
-                "v2",
             ]
         )
         answer = parser.parse_args(
@@ -503,7 +497,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 "owner",
             ]
         )
-        self.assertEqual(start.requirement_contract_version, "v2")
+        self.assertEqual(start.command, "start-or-get-run")
         self.assertEqual(answer.command, "answer-clarification")
 
     def test_cli_v2_start_answer_and_status_sequence(self) -> None:
@@ -515,7 +509,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
-                    "SDLC_REQUIREMENT_CONTRACT_VERSION": "v2",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -538,8 +531,6 @@ class RequirementClarificationV2Test(unittest.TestCase):
                             "owner",
                             "--llm-mode",
                             "fake",
-                            "--requirement-contract-version",
-                            "v2",
                             "--runtime-root",
                             str(runtime_root),
                         ]
@@ -585,16 +576,10 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 self.assertEqual(status["latest_artifacts"], answered["latest_artifacts"])
                 self.assertEqual(status["requirement_contract_version"], "v2")
 
-    def test_requirement_contract_config_defaults_to_v1(self) -> None:
+    def test_requirement_contract_is_fixed_to_v2(self) -> None:
         with TemporaryDirectory() as directory:
             default = load_settings(root=self.root, runtime_root=Path(directory))
-            invalid = load_settings(
-                root=self.root,
-                runtime_root=Path(directory),
-                overrides={"SDLC_REQUIREMENT_CONTRACT_VERSION": "unknown"},
-            )
-        self.assertEqual(default.requirement_contract_version, "v1")
-        self.assertEqual(invalid.requirement_contract_version, "v1")
+        self.assertEqual(default.requirement_contract_version, "v2")
 
     def test_run_lock_rejects_a_second_mutation(self) -> None:
         with TemporaryDirectory() as directory:

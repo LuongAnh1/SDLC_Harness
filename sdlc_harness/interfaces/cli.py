@@ -35,7 +35,6 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--use-case", required=True)
     start.add_argument("--requested-by", required=True)
     start.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
-    start.add_argument("--requirement-contract-version", choices=["v1", "v2"], default=None)
     _add_sync_mode_argument(start)
     start.add_argument("--runtime-root", default=None)
 
@@ -43,7 +42,6 @@ def build_parser() -> argparse.ArgumentParser:
     start_jira.add_argument("--issue-key", required=True)
     start_jira.add_argument("--requested-by", required=True)
     start_jira.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
-    start_jira.add_argument("--requirement-contract-version", choices=["v1", "v2"], default=None)
     _add_sync_mode_argument(start_jira)
     start_jira.add_argument("--runtime-root", default=None)
 
@@ -124,8 +122,6 @@ def _settings_from_args(args: argparse.Namespace):
     overrides = {}
     if getattr(args, "llm_mode", None):
         overrides["SDLC_LLM_MODE"] = args.llm_mode
-    if getattr(args, "requirement_contract_version", None):
-        overrides["SDLC_REQUIREMENT_CONTRACT_VERSION"] = str(args.requirement_contract_version)
     if getattr(args, "design_repair_limit", None) is not None:
         overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
     if getattr(args, "implementation_plan_repair_limit", None) is not None:

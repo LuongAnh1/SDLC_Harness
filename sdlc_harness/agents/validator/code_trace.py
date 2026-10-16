@@ -74,7 +74,7 @@ class CodeTraceResult:
         return {
             "ok": self.ok,
             "mode": mode,
-            "requirement_contract_version": contract.get("version", "v1"),
+            "requirement_contract_version": contract.get("version", "v2"),
             "requirement_revision": contract.get("revision", 0),
             "summary": self.summary,
             "stats": self.stats,

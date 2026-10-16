@@ -357,3 +357,11 @@ reviewer đối chiếu trực tiếp.
 
 Kết quả cuối: nhóm Phase 3/4/GitHub/Code Review `100 passed`; toàn bộ suite
 `259 passed`. Controlled live smoke V2 vẫn chưa chạy.
+
+## Requirement V1 Retirement (2026-10-16)
+
+- [x] Controlled E2E UC2 hoàn tất trên Requirement Contract V2.
+- [x] Cố định runtime contract ở V2 và gỡ config/CLI selector.
+- [x] Gỡ refiner, validator, prompt, writer và downstream reader V1.
+- [x] State không phải V2 fail closed bằng `requirement_contract_unsupported`.
+- [ ] Chạy regression sau thay đổi retirement khi được yêu cầu.

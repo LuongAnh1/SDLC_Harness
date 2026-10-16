@@ -41,7 +41,7 @@ from ..agents.developer import (
 )
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent, QaTesterLlmError
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
-from ..artifacts import CanonicalRequirementInput, read_frozen_requirement_input
+from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -336,17 +336,13 @@ class PhaseFourWorkflow:
             version=1,
         )
 
-        canonical_requirements: list[dict[str, object]] = []
-        requirement_contract = _dict_value(structured_plan.get("requirement_contract"))
-        requirement_coverage = _dict_items(structured_plan.get("requirement_coverage"))
-        if str(state.get("requirement_contract_version") or "v1") == "v2":
-            canonical_requirements, requirement_contract, requirement_coverage = self._require_v2_phase4_input(
-                state=state,
-                artifact_paths=artifact_paths,
-                structured_plan=structured_plan,
-                review=review,
-                run_id=run_id,
-            )
+        canonical_requirements, requirement_contract, requirement_coverage = self._require_v2_phase4_input(
+            state=state,
+            artifact_paths=artifact_paths,
+            structured_plan=structured_plan,
+            review=review,
+            run_id=run_id,
+        )
 
         try:
             workspace = self.workspace_manager.resolve(run_id)
@@ -437,8 +433,6 @@ class PhaseFourWorkflow:
 
         try:
             frozen = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
-            if not isinstance(frozen, CanonicalRequirementInput):
-                raise HarnessError("requirement_model_v2_invalid", "Frozen requirement input is not V2.")
             graph = build_requirement_graph_v2(frozen.canonical_model)
             contract = _dict_value(structured_plan.get("requirement_contract"))
             expected_refs = frozen.approved_artifacts
@@ -3221,7 +3215,7 @@ class PhaseFourWorkflow:
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
-            "requirement_contract_version": state.get("requirement_contract_version", "v1"),
+            "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             "developer_execution": state.get("developer_execution", {}),
         }
 
@@ -3780,7 +3774,7 @@ def _code_review_pr_body(
     scenarios = _dict_items(qa_generated.get("scenarios"))
     risks = _string_items(qa_generated.get("risks"))
     trace_stats = _dict_value(trace.get("stats"))
-    contract_version = str(trace.get("requirement_contract_version") or "v1")
+    contract_version = str(trace.get("requirement_contract_version") or "v2")
     requirement_revision = trace.get("requirement_revision", 0)
     covered_ids = _string_items(qa.get("requirement_ids"))
     lines = [

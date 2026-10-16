@@ -99,7 +99,7 @@ class QaTestResult:
             "ok": self.ok,
             "status": self.status,
             "mode": mode,
-            "requirement_contract_version": contract.get("version", "v1"),
+            "requirement_contract_version": contract.get("version", "v2"),
             "requirement_revision": contract.get("revision", 0),
             "summary": self.summary,
             "scenario_count": len(self.scenarios),
