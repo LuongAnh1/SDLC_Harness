@@ -1,4 +1,5 @@
 ﻿.runtime/
+.experiments/
 .debug/
 .venv/
 __pycache__/

@@ -128,6 +128,16 @@ class DesignValidator:
     def __init__(self, llm_client: Any):
         self.llm_client = llm_client
 
+    def preflight(
+        self,
+        *,
+        class_graph: dict[str, object],
+        sequence_graph: dict[str, object],
+    ) -> list[DesignFinding]:
+        """Run deterministic graph checks before paying for traceability/semantic review."""
+
+        return _structural_findings(class_graph=class_graph, sequence_graph=sequence_graph)
+
     def review(
         self,
         *,
@@ -327,6 +337,34 @@ def _rule_findings(
 ) -> list[DesignFinding]:
     findings: list[DesignFinding] = []
     counter = 0
+    for diagram_name, missing in traceability.missing_links.items():
+        for item in missing:
+            req_id = str(item.get("requirement") or "")
+            counter += 1
+            findings.append(
+                DesignFinding(
+                    finding_id=f"TRACE-{counter:03d}",
+                    category="traceability_missing",
+                    severity="blocking",
+                    message=f"Requirement {req_id} has no {diagram_name.replace('_', ' ')} link.",
+                    expected_change="Add the UML element and trace target that implement this approved requirement.",
+                    requirement_ids=[req_id] if req_id else [],
+                    evidence=[{"source": "requirement", "ref": req_id, "excerpt": str(item.get("content") or "")}],
+                    subject_ref=f"{diagram_name}:{req_id}",
+                    origin="deterministic",
+                )
+            )
+    findings.extend(_structural_findings(class_graph=class_graph, sequence_graph=sequence_graph))
+    return findings
+
+
+def _structural_findings(
+    *,
+    class_graph: dict[str, object],
+    sequence_graph: dict[str, object],
+) -> list[DesignFinding]:
+    findings: list[DesignFinding] = []
+    counter = 0
 
     def add(category: str, message: str, expected: str, *, diagram: str = "", evidence: str = "") -> None:
         nonlocal counter
@@ -348,24 +386,6 @@ def _rule_findings(
                 origin="deterministic",
             )
         )
-
-    for diagram_name, missing in traceability.missing_links.items():
-        for item in missing:
-            req_id = str(item.get("requirement") or "")
-            counter += 1
-            findings.append(
-                DesignFinding(
-                    finding_id=f"TRACE-{counter:03d}",
-                    category="traceability_missing",
-                    severity="blocking",
-                    message=f"Requirement {req_id} has no {diagram_name.replace('_', ' ')} link.",
-                    expected_change="Add the UML element and trace target that implement this approved requirement.",
-                    requirement_ids=[req_id] if req_id else [],
-                    evidence=[{"source": "requirement", "ref": req_id, "excerpt": str(item.get("content") or "")}],
-                    subject_ref=f"{diagram_name}:{req_id}",
-                    origin="deterministic",
-                )
-            )
 
     classes = _class_symbols(class_graph)
     for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):

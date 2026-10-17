@@ -191,6 +191,12 @@ def fake_completion(prompt: str) -> str:
         return fake_traceability_sequence(prompt)
     if "Design Semantic Review v2" in prompt:
         return fake_design_semantic_review()
+    if "Progressive Semantic Claim Review" in prompt:
+        return fake_progressive_semantic_review(prompt)
+    if "Progressive Targeted Repair Verification" in prompt:
+        return fake_progressive_targeted_review(prompt)
+    if "Progressive Bounded Semantic Adjudication" in prompt:
+        return fake_progressive_adjudication(prompt)
     if "Implementation Plan LLM Review v1" in prompt:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
@@ -206,6 +212,79 @@ def fake_completion(prompt: str) -> str:
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
+
+
+def fake_progressive_semantic_review(prompt: str) -> str:
+    """Return one satisfied assessment for every immutable experiment claim."""
+
+    context = _fake_progressive_context(prompt)
+    claims = context.get("claims") if isinstance(context, dict) else []
+    assessments = []
+    for item in claims if isinstance(claims, list) else []:
+        if not isinstance(item, dict):
+            continue
+        refs = item.get("allowed_design_refs")
+        assessments.append(
+            {
+                "claim_id": str(item.get("claim_id") or ""),
+                "verdict": "satisfied",
+                "category": "none",
+                "message": "Covered by the traced fake design.",
+                "expected_change": "",
+                "design_refs": list(refs[:1]) if isinstance(refs, list) else [],
+            }
+        )
+    return json.dumps({"assessments": assessments}, ensure_ascii=False)
+
+
+def fake_progressive_targeted_review(prompt: str) -> str:
+    context = _fake_progressive_context(prompt)
+    candidates = context.get("candidates") if isinstance(context, dict) else []
+    return json.dumps(
+        {
+            "results": [
+                {
+                    "candidate_id": str(item.get("candidate_id") or ""),
+                    "verdict": "resolved",
+                    "evidence_refs": list(item.get("design_refs") or [])[:1],
+                    "reason": "Resolved in the fake revised design.",
+                }
+                for item in candidates if isinstance(item, dict)
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_progressive_adjudication(prompt: str) -> str:
+    context = _fake_progressive_context(prompt)
+    candidates = context.get("candidates") if isinstance(context, dict) else []
+    return json.dumps(
+        {
+            "decisions": [
+                {
+                    "candidate_id": str(item.get("candidate_id") or ""),
+                    "decision": "refuted",
+                    "requirement_refs": [str(item.get("requirement_id") or "")],
+                    "design_refs": list(item.get("design_refs") or []),
+                    "reason": "The minority observation is not supported by the fake fixtures.",
+                }
+                for item in candidates if isinstance(item, dict)
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _fake_progressive_context(prompt: str) -> dict[str, object]:
+    marker = "INPUT:\n"
+    if marker not in prompt:
+        return {}
+    try:
+        value = json.loads(prompt.split(marker, 1)[1])
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def fake_requirement_model_v2(prompt: str) -> str:

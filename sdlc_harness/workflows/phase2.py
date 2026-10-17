@@ -130,82 +130,23 @@ class PhaseTwoWorkflow:
         except HarnessError as exc:
             return self._handle_error(state, run_id=run_id, error=exc)
 
-    def experiment_design_consensus(self, *, source_run_id: str) -> dict[str, object]:
-        """Generate a fresh design from a frozen requirement in an isolated run."""
+    def experiment_design_consensus(
+        self,
+        *,
+        source_run_id: str,
+        experiment_root: Path | None = None,
+        llm_call_budget: int = 16,
+    ) -> dict[str, object]:
+        """Run the isolated progressive validator without touching production state."""
 
-        source_state = self.store.read_state(source_run_id)
-        approved = read_frozen_requirement_input(
-            store=self.store,
-            state=source_state,
-            run_id=source_run_id,
-        )
-        run_id = self.store.new_run_id()
-        now = utc_now_iso()
-        copied_artifacts = self._copy_requirement_snapshot(
-            source_run_id=source_run_id,
-            experiment_run_id=run_id,
-            approved_artifacts=approved.approved_artifacts,
-            source_artifact_ref=str(approved.canonical_model.source.get("artifact_ref") or ""),
-        )
-        state: dict[str, object] = {
-            "ok": True,
-            "run_id": run_id,
-            "source_ref": source_state.get("source_ref"),
-            "dataset": source_state.get("dataset"),
-            "use_case": source_state.get("use_case"),
-            "requirement_contract_version": approved.contract_version,
-            "approved_artifacts": copied_artifacts,
-            "latest_artifacts": dict(copied_artifacts),
-            "created_at": now,
-            "updated_at": now,
-            "current_phase": "design_experiment",
-            "status": "design_experiment_drafting",
-            "pending_checkpoint": None,
-            "allowed_next_actions": ["get_status"],
-            "last_sync": {"status": "disabled", "mode": "none"},
-            "last_error": None,
-            "llm": {"mode": self.settings.llm_mode, "model": self.settings.llm_model},
-            "experiment": {
-                "kind": "design_validator_consensus",
-                "source_run_id": source_run_id,
-                "validation_trials": self.settings.design_validation_trials,
-                "quorum": self.settings.design_validation_trials // 2 + 1,
-                "repair_limit": self.settings.design_repair_limit,
-                "sync_disabled": True,
-                "trajectory": [],
-            },
-            "summary_for_user": "Đang sinh design mới để đo độ hội tụ của validator consensus.",
-        }
-        self.store.write_state(state)
-        try:
-            draft = self.designer.draft(
-                requirement_packet=approved.requirement_packet,
-                formal_use_case=approved.formal_use_case,
-                canonical_requirement=approved.canonical_model,
-            )
-            return self._run_validation_loop(
-                state=state,
-                approved=approved,
-                design_model=draft.design_model,
-                base_analysis=draft.analysis_report,
-                artifact_paths=copied_artifacts,
-                start_version=1,
-                existing_versions=[],
-                sync_checkpoint=False,
-                experiment_mode=True,
-            )
-        except HarnessError as exc:
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "status": "design_experiment_failed",
-                    "last_error": HarnessError(exc.error_code, exc.message, run_id=run_id).to_response(),
-                    "summary_for_user": f"Thử nghiệm design consensus lỗi: {exc.message}",
-                }
-            )
-            self._write_experiment_report(state)
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=True)
+        from .design_experiment import ProgressiveDesignExperiment
+
+        root = experiment_root or (self.settings.repo_root / ".experiments" / "design-validator")
+        return ProgressiveDesignExperiment(
+            self.settings,
+            experiment_root=root,
+            llm_call_budget=llm_call_budget,
+        ).run(source_run_id=source_run_id)
 
     def _copy_requirement_snapshot(
         self,

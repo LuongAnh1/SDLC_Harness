@@ -90,8 +90,10 @@ def build_parser() -> argparse.ArgumentParser:
     experiment_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     experiment_design.add_argument("--design-repair-limit", default="3")
     experiment_design.add_argument("--design-validation-trials", default="3")
+    experiment_design.add_argument("--llm-call-budget", default="16")
     experiment_design.add_argument("--sync-mode", choices=["none"], default="none")
-    experiment_design.add_argument("--runtime-root", default=None)
+    experiment_design.add_argument("--source-runtime-root", default=None)
+    experiment_design.add_argument("--experiment-root", default=".experiments/design-validator")
 
     approve = subparsers.add_parser("approve-checkpoint")
     approve.add_argument("--run-id", required=True)
@@ -136,7 +138,8 @@ def _add_sync_mode_argument(parser: argparse.ArgumentParser) -> None:
 
 
 def _settings_from_args(args: argparse.Namespace):
-    runtime_root = Path(args.runtime_root) if getattr(args, "runtime_root", None) else None
+    runtime_value = getattr(args, "source_runtime_root", None) or getattr(args, "runtime_root", None)
+    runtime_root = Path(runtime_value) if runtime_value else None
     overrides = {}
     if getattr(args, "llm_mode", None):
         overrides["SDLC_LLM_MODE"] = args.llm_mode
@@ -197,6 +200,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "experiment-design-consensus":
         return PhaseTwoWorkflow(settings).experiment_design_consensus(
             source_run_id=args.source_run_id,
+            experiment_root=Path(args.experiment_root),
+            llm_call_budget=int(args.llm_call_budget),
         )
     if args.command == "approve-checkpoint":
         workflow = CheckpointApprovalWorkflow(settings)
