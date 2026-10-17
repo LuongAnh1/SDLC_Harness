@@ -125,8 +125,11 @@ class DeveloperToolLoopExecutor:
                 persisted_paths: set[str] = set()
                 legacy_context_schema = (
                     bool(repair_feedback)
-                    and existing.get("version") == "developer_execution_manifest_v3"
-                    and manifest.get("version") == "developer_execution_manifest_v4"
+                    and existing.get("version") in {
+                        "developer_execution_manifest_v3",
+                        "developer_execution_manifest_v4",
+                    }
+                    and manifest.get("version") == "developer_execution_manifest_v5"
                     and existing.get("mode") == manifest.get("mode")
                     and existing.get("repair_iteration") == manifest.get("repair_iteration")
                     and existing.get("repair_feedback") == manifest.get("repair_feedback")
@@ -185,6 +188,7 @@ class DeveloperToolLoopExecutor:
                 current_entry["paths"] = _item_paths(current_item)
                 current_entry["context_paths"] = context_paths
                 current_entry["direct_repair_paths"] = _item_direct_repair_paths(current_item)
+                current_entry["diagnostic_paths"] = _item_diagnostic_paths(current_item)
                 current_entry["contract_anchor_paths"] = _item_contract_anchor_paths(current_item)
                 current_entry.pop("required_paths", None)
                 if current_entry.get("status") != "completed":
@@ -850,12 +854,19 @@ def _build_manifest(
     if not allowed:
         raise HarnessError("developer_work_packet_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.", run_id=run_id)
     closure = build_repair_closure(work_packet=work_packet, feedback=repair_feedback, target_path=target_path)
-    context_selected = (
-        {path.strip().replace("\\", "/") for path in selected_paths}
-        if selected_paths is not None
-        else set(_string_items(closure.get("context_paths"))) if repair_feedback else set(allowed)
-    )
+    if repair_feedback and mode == "implementation_repair":
+        context_selected = set(allowed)
+    else:
+        context_selected = (
+            {path.strip().replace("\\", "/") for path in selected_paths}
+            if selected_paths is not None
+            else set(_string_items(closure.get("context_paths"))) if repair_feedback else set(allowed)
+        )
     direct_selected = set(_string_items(closure.get("direct_repair_paths")))
+    diagnostic_selected = set(
+        _string_items(closure.get("diagnostic_paths"))
+        or _string_items(closure.get("direct_repair_paths"))
+    )
     anchor_selected = set(_string_items(closure.get("contract_anchor_paths")))
     proposed = {str(item.get("path") or ""): item for item in _dict_items(work_packet.get("proposed_files"))}
     coverage = _dict_value(work_packet.get("requirement_coverage_by_file"))
@@ -870,6 +881,7 @@ def _build_manifest(
     ordered.extend(path for path in allowed if path in execution_paths and "/src/test/" in f"/{path}")
     context_ordered = [path for path in ordered if path in context_selected]
     direct_ordered = [path for path in ordered if path in direct_selected]
+    diagnostic_ordered = [path for path in ordered if path in diagnostic_selected]
     anchor_ordered = [path for path in ordered if path in anchor_selected]
     if repair_feedback and not context_ordered:
         raise HarnessError(
@@ -938,6 +950,7 @@ def _build_manifest(
         "paths": ordered,
         "context_paths": context_ordered,
         "direct_repair_paths": direct_ordered,
+        "diagnostic_paths": diagnostic_ordered,
         "contract_anchor_paths": anchor_ordered,
         "files": files,
         "requirement_ids": requirement_ids,
@@ -947,6 +960,7 @@ def _build_manifest(
             **closure,
             "context_paths": context_ordered,
             "direct_repair_paths": direct_ordered,
+            "diagnostic_paths": diagnostic_ordered,
             "contract_anchor_paths": anchor_ordered,
         } if repair_feedback else {},
     }
@@ -965,7 +979,7 @@ def _build_manifest(
         "repair_feedback": repair_feedback or {},
     }
     return {
-        "version": "developer_execution_manifest_v4",
+        "version": "developer_execution_manifest_v5",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -994,6 +1008,7 @@ def _new_journal(*, run_id: str, manifest: dict[str, object], mode: str, repair_
                 "paths": _item_paths(item),
                 "context_paths": _item_context_paths(item),
                 "direct_repair_paths": _item_direct_repair_paths(item),
+                "diagnostic_paths": _item_diagnostic_paths(item),
                 "contract_anchor_paths": _item_contract_anchor_paths(item),
                 "status": "pending",
                 "attempts": 0,
@@ -1025,7 +1040,7 @@ def _action_prompt(
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
     context_repair = str(manifest.get("mode") or "") == "implementation_repair"
     paths = _item_context_paths(item) if context_repair else _item_paths(item)
-    direct_paths = _item_direct_repair_paths(item) if context_repair else paths
+    diagnostic_paths = _item_diagnostic_paths(item) if context_repair else paths
     anchor_paths = _item_contract_anchor_paths(item) if context_repair else []
     handled_paths = _handled_paths(history, required_paths=paths)
     inspected_paths = _inspected_paths(history, required_paths=paths)
@@ -1045,14 +1060,16 @@ def _action_prompt(
         "execution": {"mode": manifest.get("mode"), "base_sha": manifest.get("base_sha")},
         "repair_feedback": _developer_repair_context(manifest.get("repair_feedback")),
         "repair_progress": {
-            "direct_repair_paths": direct_paths,
-            "context_paths": paths,
+            "workspace_allowed_paths": _item_paths(item),
+            "diagnostic_paths": diagnostic_paths,
             "contract_anchor_paths": anchor_paths,
+            "repair_hints": _dict_value(item.get("repair_closure")).get("repair_hints", {}),
             "mutated_context_paths": sorted(handled_paths),
             "inspected_context_paths": sorted(inspected_paths),
             "completion_rule": (
-                "Apply one coherent real mutation, then call complete so Verification can rerun. Context paths are "
-                "not a mutation checklist. A no-change completion requires inspected evidence and a specific reason."
+                "Apply one coherent real mutation, including every related approved file needed to keep the worktree "
+                "internally consistent, then call complete so Verification can rerun. Diagnostic paths are hints, "
+                "not a mutation boundary. A no-change completion requires inspected evidence and a specific reason."
                 if context_repair
                 else "Complete after one coherent mutation; the owning quality gate will rerun."
             ),
@@ -1099,11 +1116,11 @@ def _action_prompt(
         )
     elif feedback_source == "verification":
         work_instruction = (
-            "This is a Verification repair pass. The approved repair_objective is the contract authority, the latest "
-            "verification field is the current diagnostic, and worktree files are only the starting state. Repair the "
-            "latest diagnostic with the smallest coherent mutation. Inspect context_paths as needed, but do not modify "
-            "a contract_anchor_path away from its expected_signature merely to match a stale caller or test. Preserve "
-            "correct tests and code; do not regenerate unrelated files. Then call complete for Verification to rerun."
+            "This is a Verification repair pass. The approved requirement, design, and work packet are the contract; "
+            "the latest verification field is the current diagnostic and worktree files are the current state. Find "
+            "the root cause and make the smallest coherent fix across any workspace_allowed_paths that must change. "
+            "Diagnostic and contract-anchor paths are inspection hints only. Keep production code, callers, and tests "
+            "consistent; do not regenerate unrelated files. Then call complete for Verification to rerun."
         )
     elif feedback_source == "validator_code_trace":
         work_instruction = (
@@ -1611,14 +1628,17 @@ def _selected_repair_paths(
     *,
     target_path: Path | None = None,
 ) -> set[str]:
-    """Compatibility wrapper around the evidence-backed repair closure builder."""
+    """Compatibility wrapper returning diagnostic hints, not the write boundary."""
 
     closure = build_repair_closure(
         work_packet=work_packet,
         feedback=feedback,
         target_path=target_path,
     )
-    return set(_string_items(closure.get("context_paths")))
+    return set(
+        _string_items(closure.get("diagnostic_paths"))
+        or _string_items(closure.get("direct_repair_paths"))
+    )
 
 
 def _looks_like_test_path(path: str) -> bool:
@@ -1813,6 +1833,13 @@ def _item_context_paths(item: dict[str, object]) -> list[str]:
 
 def _item_direct_repair_paths(item: dict[str, object]) -> list[str]:
     declared = [path.replace("\\", "/") for path in _string_items(item.get("direct_repair_paths"))]
+    return list(dict.fromkeys(declared))
+
+
+def _item_diagnostic_paths(item: dict[str, object]) -> list[str]:
+    declared = [path.replace("\\", "/") for path in _string_items(item.get("diagnostic_paths"))]
+    if not declared:
+        declared = _item_direct_repair_paths(item)
     return list(dict.fromkeys(declared))
 
 

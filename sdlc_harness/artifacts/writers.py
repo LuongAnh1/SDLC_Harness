@@ -37,6 +37,45 @@ def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSo
     return store.relative(path)
 
 
+def write_phase2_traceability_attempt(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    design_version: int,
+    attempt: dict[str, object],
+) -> dict[str, str]:
+    """Persist raw traceability output and metadata before normalization can fail."""
+
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    diagram = str(attempt.get("diagram") or "trace").replace(" diagram", "").replace(" ", "_")
+    attempt_number = int(attempt.get("attempt") or 1)
+    stem = f"traceability_{diagram}_v{design_version}_attempt{attempt_number}"
+    raw_path = artifact_dir / f"{stem}_raw.txt"
+    metadata_path = artifact_dir / f"{stem}_metadata.json"
+    raw_path.write_text(str(attempt.get("raw_response") or "").rstrip() + "\n", encoding="utf-8")
+    metadata = {
+        "version": "traceability_attempt_v1",
+        "created_at": utc_now_iso(),
+        "design_version": f"v{design_version}",
+        "diagram": attempt.get("diagram"),
+        "attempt": attempt_number,
+        "finish_reason": attempt.get("finish_reason"),
+        "usage": attempt.get("usage") if isinstance(attempt.get("usage"), dict) else {},
+        "parse_status": attempt.get("parse_status"),
+        "error": attempt.get("error"),
+        "raw_response": store.relative(raw_path),
+    }
+    metadata_path.write_text(
+        json.dumps(metadata, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "raw_response": store.relative(raw_path),
+        "metadata": store.relative(metadata_path),
+    }
+
+
 def write_phase2_design_artifacts(
     *,
     store: RuntimeStore,

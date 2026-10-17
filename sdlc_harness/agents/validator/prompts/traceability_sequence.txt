@@ -49,6 +49,8 @@ array for that requirement. Do not invent or abbreviate a target.
 Same as in prompt 1:
 ```json
 {
+  "traceability": [
+  {
   "requirement": "<requirement key>",
   "content": "<original text>",
   "links": [
@@ -57,9 +59,15 @@ Same as in prompt 1:
       "reason": "<why they match>"
     }
   ]
+  }
+  ]
 }
 ```
 
 ## **Output**
 
-Only output a JSON array representing requirement-to-sequence-diagram traceability without any explanations
+Output exactly one item for every supplied requirement ID and copy each ID verbatim.
+Never emit a blank, placeholder, duplicate, or invented requirement ID.
+Keep each reason to one short sentence and include only directly supporting targets.
+Return exactly one complete JSON object with a top-level `traceability` array,
+without markdown fences or explanations.

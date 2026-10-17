@@ -408,7 +408,9 @@ class ProgressiveDesignReviewEngine:
     ) -> tuple[list[SemanticCandidate], list[SemanticCandidate], dict[str, object]]:
         trials: list[dict[str, object]] = []
         invalid_trials: list[dict[str, object]] = []
+        degraded_trials: list[dict[str, object]] = []
         assessments: list[tuple[str, dict[str, object]]] = []
+        review_claims, evidence_catalog = _prepare_semantic_evidence(claims)
         max_attempts = self.validation_trials * 2
         attempt = 0
         while len(trials) < self.validation_trials and attempt < max_attempts:
@@ -421,14 +423,19 @@ class ProgressiveDesignReviewEngine:
                 payload = self._complete_json(
                     system="You are Progressive Design Semantic Judge. Return strict JSON only.",
                     prompt=_semantic_prompt(
-                        claims=claims,
+                        claims=review_claims,
+                        evidence_catalog=evidence_catalog,
                         requirement_model=requirement_model,
                         design_model=design_model,
                         class_graph=class_graph,
                         sequence_graph=sequence_graph,
                     ),
                 )
-                normalized = _validate_assessments(payload, claims)
+                normalized, rejected = _normalize_assessments(
+                    payload,
+                    review_claims,
+                    evidence_catalog=evidence_catalog,
+                )
             except HarnessError as exc:
                 if exc.error_code != "design_semantic_review_failed":
                     raise
@@ -439,6 +446,19 @@ class ProgressiveDesignReviewEngine:
                         "message": exc.message,
                     }
                 )
+                continue
+            if rejected:
+                degraded = {
+                    "attempt_id": attempt_id,
+                    "error_code": "design_semantic_evidence_rejected",
+                    "message": _rejected_evidence_message(rejected),
+                    "assessments": normalized,
+                    "rejected_assessments": rejected,
+                }
+                degraded_trials.append(degraded)
+                # Keep the normalized assessments for diagnostics, but a trial
+                # with rejected evidence must never certify a zero-blocker pass.
+                invalid_trials.append(degraded)
                 continue
             trial_id = f"trial-{len(trials) + 1}"
             trials.append({"trial_id": trial_id, "assessments": normalized})
@@ -458,6 +478,9 @@ class ProgressiveDesignReviewEngine:
             "max_attempts": max_attempts,
             "invalid_trial_count": len(invalid_trials),
             "invalid_trials": invalid_trials,
+            "degraded_trial_count": len(degraded_trials),
+            "degraded_trials": degraded_trials,
+            "evidence_catalog_size": len(evidence_catalog),
             "trials": trials,
         }
 
@@ -745,13 +768,85 @@ def _links_by_requirement(trace_items: list[dict[str, object]]) -> dict[str, set
     return result
 
 
-def _validate_assessments(payload: dict[str, object], claims: list[dict[str, object]]) -> list[dict[str, object]]:
+def _canonical_evidence_ref(value: object) -> str:
+    """Normalize formatting noise without changing the design reference itself."""
+
+    return " ".join(str(value or "").strip().split())
+
+
+def _evidence_id(reference: str) -> str:
+    digest = hashlib.sha256(reference.encode("utf-8")).hexdigest()[:12].upper()
+    return f"EVD-{digest}"
+
+
+def _prepare_semantic_evidence(
+    claims: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Build one immutable evidence registry shared by every semantic claim.
+
+    Claim-local references remain recommendations.  Authenticity is checked
+    against the complete registry so a real cross-requirement diagram edge is
+    not rejected merely because traceability attached it to a related claim.
+    """
+
+    evidence_by_ref: dict[str, dict[str, object]] = {}
+    claim_refs: dict[str, list[str]] = {}
+    for claim in claims:
+        claim_id = str(claim.get("claim_id") or "")
+        requirement_id = str(claim.get("requirement_id") or claim_id.removeprefix("CLAIM-"))
+        for raw_ref in list(claim.get("allowed_design_refs") or []):
+            reference = _canonical_evidence_ref(raw_ref)
+            if not reference:
+                continue
+            entry = evidence_by_ref.setdefault(
+                reference,
+                {
+                    "evidence_id": _evidence_id(reference),
+                    "ref": reference,
+                    "claim_ids": [],
+                    "requirement_ids": [],
+                },
+            )
+            claim_ids = entry["claim_ids"]
+            requirement_ids = entry["requirement_ids"]
+            if claim_id and claim_id not in claim_ids:
+                claim_ids.append(claim_id)
+            if requirement_id and requirement_id not in requirement_ids:
+                requirement_ids.append(requirement_id)
+            claim_refs.setdefault(claim_id, []).append(str(entry["evidence_id"]))
+
+    catalog = sorted(evidence_by_ref.values(), key=lambda item: str(item["evidence_id"]))
+    for entry in catalog:
+        entry["claim_ids"] = sorted(str(value) for value in entry["claim_ids"])
+        entry["requirement_ids"] = sorted(str(value) for value in entry["requirement_ids"])
+
+    prepared_claims: list[dict[str, object]] = []
+    for claim in claims:
+        claim_id = str(claim.get("claim_id") or "")
+        prepared_claims.append(
+            {
+                **claim,
+                "recommended_evidence_ids": sorted(set(claim_refs.get(claim_id, []))),
+            }
+        )
+    return prepared_claims, catalog
+
+
+def _normalize_assessments(
+    payload: dict[str, object],
+    claims: list[dict[str, object]],
+    *,
+    evidence_catalog: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     raw = payload.get("assessments")
     if not isinstance(raw, list):
         raise HarnessError("design_semantic_review_failed", "Semantic judge must return an assessments array.")
     known = {str(item["claim_id"]): item for item in claims}
+    catalog_by_id = {str(item["evidence_id"]): item for item in evidence_catalog}
+    catalog_by_ref = {_canonical_evidence_ref(item["ref"]): item for item in evidence_catalog}
     seen: set[str] = set()
     normalized: list[dict[str, object]] = []
+    rejected: list[dict[str, object]] = []
     for item in raw:
         if not isinstance(item, dict):
             raise HarnessError("design_semantic_review_failed", "Semantic assessment must be an object.")
@@ -764,20 +859,57 @@ def _validate_assessments(payload: dict[str, object], claims: list[dict[str, obj
             raise HarnessError("design_semantic_review_failed", "Violated semantic claim has an unsupported category.")
         if verdict != "violated":
             category = "none"
-        allowed = set(str(value) for value in known[claim_id].get("allowed_design_refs") or [])
+
+        accepted_ids: list[str] = []
+        accepted_refs: list[str] = []
+        rejection_reasons: list[dict[str, str]] = []
+        raw_ids = item.get("evidence_ids")
+        evidence_ids = [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        for evidence_id in evidence_ids:
+            evidence = catalog_by_id.get(evidence_id)
+            if evidence is None:
+                rejection_reasons.append({"kind": "unknown_evidence_id", "value": evidence_id})
+                continue
+            if evidence_id not in accepted_ids:
+                accepted_ids.append(evidence_id)
+                accepted_refs.append(str(evidence["ref"]))
+
+        # Transitional compatibility for old fake clients and stored prompts.
+        # New prompts require evidence_ids, but real references are resolved
+        # against the same global catalog instead of a claim-local allowlist.
         raw_refs = item.get("design_refs")
-        refs = [str(value) for value in raw_refs] if isinstance(raw_refs, list) else []
-        invalid_refs = [value for value in refs if value not in allowed]
-        if invalid_refs:
-            raise HarnessError(
-                "design_semantic_review_failed",
-                (
-                    f"Semantic judge cited evidence outside fixed claim {claim_id}: "
-                    f"invalid_refs={invalid_refs[:5]!r}; allowed_refs={sorted(allowed)[:10]!r}."
-                ),
+        legacy_refs = [str(value) for value in raw_refs] if isinstance(raw_refs, list) else []
+        for raw_ref in legacy_refs:
+            reference = _canonical_evidence_ref(raw_ref)
+            evidence = catalog_by_ref.get(reference)
+            if evidence is None:
+                rejection_reasons.append({"kind": "unknown_design_ref", "value": raw_ref})
+                continue
+            evidence_id = str(evidence["evidence_id"])
+            if evidence_id not in accepted_ids:
+                accepted_ids.append(evidence_id)
+                accepted_refs.append(str(evidence["ref"]))
+
+        if verdict == "violated" and not accepted_ids:
+            rejection_reasons.append({"kind": "missing_verified_evidence", "value": claim_id})
+
+        recommended = set(str(value) for value in known[claim_id].get("recommended_evidence_ids") or [])
+        evidence_scope = "none"
+        if accepted_ids:
+            evidence_scope = "direct" if set(accepted_ids).issubset(recommended) else "cross_claim"
+        if rejection_reasons:
+            rejected.append(
+                {
+                    "claim_id": claim_id,
+                    "original_verdict": verdict,
+                    "reasons": rejection_reasons,
+                    "accepted_evidence_ids": accepted_ids,
+                }
             )
-        if verdict == "violated" and not refs:
-            raise HarnessError("design_semantic_review_failed", "Violated semantic claim lacks bounded design evidence.")
+            # Preserve a complete claim assessment for diagnostics, but never
+            # let an assessment with rejected evidence contribute a blocker.
+            verdict = "uncertain"
+            category = "none"
         normalized.append(
             {
                 "claim_id": claim_id,
@@ -785,12 +917,33 @@ def _validate_assessments(payload: dict[str, object], claims: list[dict[str, obj
                 "category": category,
                 "message": str(item.get("message") or ""),
                 "expected_change": str(item.get("expected_change") or ""),
-                "design_refs": refs,
+                "evidence_ids": accepted_ids,
+                "evidence_scope": evidence_scope,
+                "design_refs": accepted_refs,
             }
         )
         seen.add(claim_id)
     if seen != set(known):
         raise HarnessError("design_semantic_review_failed", "Semantic judge omitted one or more fixed claims.")
+    return normalized, rejected
+
+
+def _rejected_evidence_message(rejected: list[dict[str, object]]) -> str:
+    claim_ids = sorted({str(item.get("claim_id") or "") for item in rejected})
+    return f"Semantic judge returned rejected evidence for claim(s): {', '.join(claim_ids)}."
+
+
+def _validate_assessments(payload: dict[str, object], claims: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Strict compatibility wrapper used by focused contract checks."""
+
+    prepared_claims, evidence_catalog = _prepare_semantic_evidence(claims)
+    normalized, rejected = _normalize_assessments(
+        payload,
+        prepared_claims,
+        evidence_catalog=evidence_catalog,
+    )
+    if rejected:
+        raise HarnessError("design_semantic_review_failed", _rejected_evidence_message(rejected))
     return normalized
 
 
@@ -847,9 +1000,9 @@ def _semantic_prompt(**context: object) -> str:
 
 Judge every fixed claim exactly once. Do not add, remove, merge, or rename claims.
 Return one JSON object only:
-{"assessments":[{"claim_id":"CLAIM-ID","verdict":"satisfied|violated|uncertain","category":"behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption|none","message":"specific evidence-based reason","expected_change":"specific correction or empty","design_refs":["one of allowed_design_refs"]}]}
+{"assessments":[{"claim_id":"CLAIM-ID","verdict":"satisfied|violated|uncertain","category":"behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption|none","message":"specific evidence-based reason","expected_change":"specific correction or empty","evidence_ids":["EVD-ID from evidence_catalog"]}]}
 
-A violation must cite a behavior required by the claim and evidence already present in its allowed_design_refs. For every assessment, copy design_refs only from that same claim's allowed_design_refs, byte for byte. Never cite a ref borrowed from another claim or merely visible in the full graphs. If no allowed ref supports the verdict, return an empty design_refs list and use uncertain. Architectural preferences are satisfied or uncertain, never violations. `none` is required for satisfied/uncertain.
+A violation must cite verified evidence from evidence_catalog. Prefer the claim's recommended_evidence_ids. You may cite a catalog evidence ID owned by a related requirement when it directly supports a cross-requirement or cross-diagram judgment. Never invent an evidence ID and never copy raw graph text into evidence_ids. If no catalog evidence supports the verdict, return an empty evidence_ids list and use uncertain. Architectural preferences are satisfied or uncertain, never violations. `none` is required for satisfied/uncertain.
 
 INPUT:
 """ + json.dumps(context, ensure_ascii=False, separators=(",", ":"))

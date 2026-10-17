@@ -263,15 +263,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
         }
         session_dir = self.runtime / "runs" / run_id / "developer_execution" / "implementation_repair_v1"
         session_dir.mkdir(parents=True)
-        persisted = _build_manifest(
-            run_id=run_id,
-            work_packet=packet,
-            target_path=self.repo,
-            mode="implementation_repair",
-            repair_feedback=feedback,
-            repair_iteration=1,
-            selected_paths={"src/Main.java", "src/MainTest.java"},
-        )
         current = _build_manifest(
             run_id=run_id,
             work_packet=packet,
@@ -280,6 +271,11 @@ class DeveloperToolLoopTest(unittest.TestCase):
             repair_feedback=feedback,
             repair_iteration=1,
         )
+        persisted = json.loads(json.dumps(current))
+        persisted["version"] = "developer_execution_manifest_v4"
+        persisted["input_hash"] = "sha256:legacy-v4-selection-policy"
+        persisted["items"][0]["context_paths"] = ["src/MainTest.java"]
+        persisted["items"][0]["repair_closure"]["context_paths"] = ["src/MainTest.java"]
         self.assertNotEqual(persisted["input_hash"], current["input_hash"])
         (session_dir / "manifest.json").write_text(json.dumps(persisted), encoding="utf-8")
         (session_dir / "journal.json").write_text(
@@ -305,7 +301,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(result.progress["completed_items"], 1)
         journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
         self.assertEqual(journal["migrations"][0]["code"], "repair_selection_policy_migrated")
-        self.assertEqual(journal["migrations"][0]["current_item_paths"], ["src/MainTest.java"])
+        self.assertEqual(journal["migrations"][0]["current_item_paths"], ["src/Main.java", "src/MainTest.java"])
 
     def test_repair_resume_still_blocks_real_approved_input_drift(self) -> None:
         run_id = "run_real_input_drift"
@@ -585,19 +581,64 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
         item = manifest["items"][0]
+        self.assertEqual(set(item["context_paths"]), set(contents))
+        self.assertEqual(item["direct_repair_paths"], ["src/FlowTest.java"])
         self.assertEqual(
-            set(item["context_paths"]),
+            set(item["diagnostic_paths"]),
             {"src/EditFormView.java", "src/Controller.java", "src/FlowTest.java"},
         )
-        self.assertEqual(item["direct_repair_paths"], ["src/FlowTest.java"])
         self.assertEqual(item["contract_anchor_paths"], ["src/EditFormView.java"])
-        self.assertNotIn("src/Unrelated.java", item["context_paths"])
+        self.assertIn("src/Unrelated.java", item["context_paths"])
+        self.assertNotIn("src/Unrelated.java", item["repair_closure"]["repair_hints"]["path_reasons"])
         self.assertEqual((self.repo / "src/EditFormView.java").read_text(encoding="utf-8"), interface_before)
         self.assertEqual((self.repo / "src/Controller.java").read_text(encoding="utf-8"), controller_before)
         self.assertEqual([row["path"] for row in result.files], ["src/FlowTest.java"])
         journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
         self.assertEqual(len(journal["items"][0]["actions"]), 2)
         self.assertEqual(journal["items"][0]["unresolved_paths"], [])
+
+    def test_verification_repair_can_modify_related_approved_file_outside_diagnostic_paths(self) -> None:
+        packet = self.one_file_packet()
+        packet["proposed_files"].append({"path": "src/Caller.java", "purpose": "Call Main"})
+        packet["output_contract"]["allowed_paths"].append("src/Caller.java")
+        main = self.repo / "src/Main.java"
+        caller = self.repo / "src/Caller.java"
+        main.parent.mkdir(parents=True)
+        main.write_text("class Main { void run() {} }\n", encoding="utf-8")
+        caller.write_text("class Caller { void call() { new Main().oldRun(); } }\n", encoding="utf-8")
+        caller_hash = hashlib.sha256(caller.read_bytes()).hexdigest()
+        feedback = {
+            "feedback_source": "verification",
+            "verification": {"stderr": "src/Main.java:1: error: cannot find symbol oldRun"},
+        }
+        llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Caller.java"}),
+                action(
+                    "write_file",
+                    {
+                        "path": "src/Caller.java",
+                        "expected_sha256": caller_hash,
+                        "content": "class Caller { void call() { new Main().run(); } }",
+                    },
+                ),
+                action("complete", {"summary": "aligned the related caller"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_related_approved_path",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], "developer_execution_manifest_v5")
+        self.assertIn("src/Caller.java", manifest["items"][0]["context_paths"])
+        self.assertIn("new Main().run()", caller.read_text(encoding="utf-8"))
+        self.assertIn("workspace_allowed_paths", llm.prompts[0])
 
 
     def test_same_hash_write_is_not_counted_as_repair_progress(self) -> None:

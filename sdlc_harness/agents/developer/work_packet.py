@@ -57,9 +57,7 @@ def build_developer_work_packet(
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
     coverage_by_file = _group_requirement_coverage_by_file(requirement_coverage)
-    required_fields = ["path", "operation", "content", "reason", "covered_design_elements"]
-    if requirement_contract.get("version") == "v2":
-        required_fields.append("covered_requirement_ids")
+    required_fields = ["path", "content"]
     return {
         "version": "developer_work_packet_v1",
         "mode": "approved_implementation_plan_to_developer_act_v1",
@@ -100,7 +98,7 @@ def build_developer_work_packet(
             for item in enriched_files
         ],
         "output_contract": {
-            "format": "changed_files_json_v1",
+            "format": "changed_file_blocks_v1",
             "changed_files_only": True,
             "allowed_paths": allowed_paths,
             "required_fields": required_fields,

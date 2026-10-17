@@ -122,25 +122,47 @@ class QaTesterAgent:
             generated = _deterministic_generated_tests(context)
             _require_v2_scenario_coverage(generated.scenarios, context=context)
             return generated
-        raw = self.llm_client.complete(
-            system=(
-                "You are QA/Tester in a TraceDev-style SDLC harness. "
-                "Return JSON only. Generate executable tests from the approved context."
-            ),
-            prompt=_qa_generation_prompt(context),
+        system = (
+            "You are QA/Tester in a TraceDev-style SDLC harness. "
+            "Return JSON only. Generate executable tests from the approved context."
         )
-        payload = _parse_generated_tests_payload(raw)
-        generated = QaGeneratedTestSuite(
-            summary=str(payload.get("summary") or "").strip(),
-            test_files=_dict_items(payload.get("test_files")),
-            scenarios=_dict_items(payload.get("scenarios")),
-            risks=_string_items(payload.get("risks")),
-            raw_response=raw,
-            generation_context=_dict_value(context.get("context_budget")),
-            requirement_contract=_dict_value(context.get("requirement_contract")),
-        )
-        _require_v2_scenario_coverage(generated.scenarios, context=context)
-        return generated
+        prompt = _qa_generation_prompt(context)
+        for attempt in range(2):
+            raw = self.llm_client.complete(system=system, prompt=prompt)
+            try:
+                return _generated_suite_from_raw(raw=raw, context=context)
+            except HarnessError as exc:
+                recoverable = exc.error_code in {
+                    "qa_tester_llm_failed",
+                    "qa_requirement_coverage_invalid",
+                }
+                if not recoverable or attempt == 1:
+                    if not str(getattr(exc, "raw_response", "")):
+                        exc.raw_response = raw
+                    raise
+                prompt = _qa_generation_repair_prompt(
+                    context=context,
+                    invalid_output=raw,
+                    validation_error=exc.message,
+                )
+        raise AssertionError("QA generation retry loop must return or raise")
+
+
+def _generated_suite_from_raw(*, raw: str, context: dict[str, object]) -> QaGeneratedTestSuite:
+    """Parse and validate one complete QA response before any test file is applied."""
+
+    payload = _parse_generated_tests_payload(raw)
+    generated = QaGeneratedTestSuite(
+        summary=str(payload.get("summary") or "").strip(),
+        test_files=_dict_items(payload.get("test_files")),
+        scenarios=_dict_items(payload.get("scenarios")),
+        risks=_string_items(payload.get("risks")),
+        raw_response=raw,
+        generation_context=_dict_value(context.get("context_budget")),
+        requirement_contract=_dict_value(context.get("requirement_contract")),
+    )
+    _require_v2_scenario_coverage(generated.scenarios, context=context)
+    return generated
 
 
 def _qa_generation_prompt(context: dict[str, object]) -> str:
@@ -185,6 +207,33 @@ Rules:
 
 QA Generation Packet:
 {json.dumps(context, ensure_ascii=False, indent=2)}
+""".strip()
+
+
+def _qa_generation_repair_prompt(
+    *,
+    context: dict[str, object],
+    invalid_output: str,
+    validation_error: str,
+) -> str:
+    canonical_ids = [
+        str(item.get("id") or "").strip()
+        for item in _dict_items(context.get("canonical_requirements"))
+        if str(item.get("id") or "").strip()
+    ]
+    return f"""QA Tester Repair Invalid Acceptance Test JSON
+
+The previous response failed validation:
+{validation_error}
+
+Return one corrected JSON object only, using the same schema as the original
+request. Preserve complete executable test file content when it is valid.
+Every scenario must contain a non-empty `requirement_ids` array. Across all
+scenarios, use every canonical ID exactly from this list and invent no IDs:
+{json.dumps(canonical_ids, ensure_ascii=False)}
+
+Previous response:
+{invalid_output}
 """.strip()
 
 

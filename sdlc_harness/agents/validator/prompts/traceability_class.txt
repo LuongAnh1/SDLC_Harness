@@ -32,9 +32,11 @@ Map them to UI-related classes/methods or explicit state attributes when the cla
 
 ## **Output Format**
 
-Return only a **JSON array** , where each element contains:
+Return exactly one complete JSON object with a top-level `traceability` array:
 ```json
 {
+  "traceability": [
+  {
   "requirement": "<requirement id>",
   "content": "<original text>",
   "links": [
@@ -43,14 +45,19 @@ Return only a **JSON array** , where each element contains:
       "reason": "<why they match>"
     }
   ]
+  }
+  ]
 }
 ```
 ## **Very Important**
 
+* Output exactly one item for every supplied requirement ID and copy each ID verbatim.
+* Never emit a blank, placeholder, duplicate, or invented requirement ID.
 * Do NOT invent new classes, methods, or attributes that do not exist in the class diagram JSON.
 * If no match can be found, output `"links": []`.
 * Explanations must reference Rules A–D.
+* Keep each reason to one short sentence and include only directly supporting targets.
 
-Please begin, only output Json obejct without any explanations.
+Return only the JSON object without markdown fences or explanations.
 
 

@@ -466,9 +466,21 @@ class PhaseOneWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "developer_execution": state.get("developer_execution", {}),
+            "traceability_diagnostics": state.get("traceability_diagnostics", []),
         }
         checkpoint = response.get("pending_checkpoint")
         last_sync = response.get("last_sync")
+        last_error = response.get("last_error")
+        if (
+            response.get("status") == "failed"
+            and str(response.get("current_phase") or "").startswith("design_")
+            and isinstance(last_error, dict)
+            and last_error.get("error_code") == "validator_traceability_failed"
+        ):
+            allowed_actions = [str(action) for action in response["allowed_next_actions"]]
+            if "revalidate_design" not in allowed_actions:
+                allowed_actions.insert(0, "revalidate_design")
+            response["allowed_next_actions"] = allowed_actions
         if response.get("current_phase") == "implementation_planning" and response.get("status") in {
             "waiting_implementation_plan_review",
             "blocked",

@@ -16,7 +16,7 @@ from ..agents.validator import (
     build_requirement_graph_v2,
 )
 from ..artifacts import read_approved_requirement_input, read_frozen_requirement_input
-from ..artifacts.writers import write_phase2_design_artifacts
+from ..artifacts.writers import write_phase2_design_artifacts, write_phase2_traceability_attempt
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
@@ -101,7 +101,15 @@ class PhaseTwoWorkflow:
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
         phase = str(state.get("current_phase") or "")
-        if phase != "design_review" or status not in {"waiting_design_approval", "blocked"}:
+        last_error = _dict_value(state.get("last_error"))
+        recoverable_trace_failure = (
+            status == "failed"
+            and phase.startswith("design_")
+            and str(last_error.get("error_code") or "") == "validator_traceability_failed"
+        )
+        if not recoverable_trace_failure and (
+            phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
+        ):
             raise HarnessError(
                 "design_revalidation_not_allowed",
                 f"Run is not waiting on a design checkpoint: {run_id}",
@@ -286,6 +294,11 @@ class PhaseTwoWorkflow:
                     class_graph=parsed.class_graph,
                     sequence_graph=parsed.sequence_graph,
                     canonical_requirement=approved.canonical_model,
+                    attempt_recorder=self._traceability_attempt_recorder(
+                        state=state,
+                        run_id=run_id,
+                        design_version=version,
+                    ),
                 )
                 selected_findings = _missing_link_findings(traceability)[:3]
 
@@ -555,6 +568,11 @@ class PhaseTwoWorkflow:
                 class_graph=parsed.class_graph,
                 sequence_graph=parsed.sequence_graph,
                 canonical_requirement=approved.canonical_model,
+                attempt_recorder=self._traceability_attempt_recorder(
+                    state=state,
+                    run_id=run_id,
+                    design_version=version,
+                ),
             )
             validation = self.design_validator.review(
                 requirement_packet=approved.requirement_packet,
@@ -834,6 +852,41 @@ class PhaseTwoWorkflow:
         latest["design_consensus_experiment_markdown"] = self.store.relative(markdown_path)
         state["latest_artifacts"] = latest
 
+    def _traceability_attempt_recorder(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        design_version: int,
+    ):
+        """Return a sink that persists each raw trace attempt before later gates."""
+
+        def record(attempt: dict[str, object]) -> None:
+            refs = write_phase2_traceability_attempt(
+                store=self.store,
+                run_id=run_id,
+                design_version=design_version,
+                attempt=attempt,
+            )
+            history_value = state.get("traceability_diagnostics")
+            history = list(history_value) if isinstance(history_value, list) else []
+            history.append(
+                {
+                    "design_version": f"v{design_version}",
+                    "diagram": attempt.get("diagram"),
+                    "attempt": attempt.get("attempt"),
+                    "finish_reason": attempt.get("finish_reason"),
+                    "usage": attempt.get("usage") if isinstance(attempt.get("usage"), dict) else {},
+                    "parse_status": attempt.get("parse_status"),
+                    "error": attempt.get("error"),
+                    **refs,
+                }
+            )
+            state["traceability_diagnostics"] = history[-12:]
+            self.store.write_state(state)
+
+        return record
+
     def _handle_error(
         self,
         state: dict[str, object],
@@ -845,6 +898,7 @@ class PhaseTwoWorkflow:
         retryable_validator = error.error_code in {
             "design_semantic_review_failed",
             "design_llm_budget_exhausted",
+            "validator_traceability_failed",
         }
         if requirement_error is not None or retryable_validator:
             effective = requirement_error or error
@@ -909,6 +963,7 @@ class PhaseTwoWorkflow:
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
             "design_progressive_validation": state.get("design_progressive_validation"),
+            "traceability_diagnostics": state.get("traceability_diagnostics", []),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),

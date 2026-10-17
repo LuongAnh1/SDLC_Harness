@@ -310,7 +310,7 @@ class PhaseFourTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
-    def test_verification_feedback_preserves_validator_repair_objective(self) -> None:
+    def test_verification_feedback_uses_current_diagnostic_and_keeps_validator_objective_as_lineage(self) -> None:
         objective = {
             "objective_id": "repair:approved-contract",
             "source": "validator_code_trace",
@@ -353,12 +353,14 @@ class PhaseFourTest(unittest.TestCase):
             prior_feedback_ref="feedback_v1.json",
         )
 
-        self.assertEqual(feedback["repair_objective"], objective)
-        self.assertEqual(feedback["repair_lineage"]["objective_id"], "repair:approved-contract")
+        self.assertEqual(feedback["repair_objective"]["source"], "verification")
+        self.assertIn("FakeView does not override", feedback["verification"]["stderr"])
+        self.assertEqual(feedback["repair_lineage"]["objective_id"], feedback["repair_objective"]["objective_id"])
+        self.assertEqual(feedback["repair_lineage"]["previous_objective_id"], "repair:approved-contract")
         self.assertEqual(feedback["repair_lineage"]["root_feedback_artifact"], "feedback_v1.json")
-        self.assertIn("Do not revert", feedback["required_action"])
+        self.assertIn("audit lineage only", feedback["required_action"])
 
-    def test_verification_feedback_backfills_legacy_validator_objective_and_refreshes_diagnostic(self) -> None:
+    def test_verification_feedback_refreshes_diagnostic_without_reviving_legacy_validator_objective(self) -> None:
         old_diagnostic = "FlowTest.java:12: old compiler diagnostic"
         current_diagnostic = "Controller.java:52: current compiler diagnostic"
         result = VerificationResult(
@@ -417,12 +419,11 @@ class PhaseFourTest(unittest.TestCase):
         )
 
         objective = feedback["repair_objective"]
-        self.assertEqual(objective["source"], "validator_code_trace")
-        self.assertEqual(objective["canonical_keys"], ["contract:EditFormView.showConfirmation"])
-        self.assertNotIn("diagnostic_anchor", objective)
+        self.assertEqual(objective["source"], "verification")
         self.assertEqual(feedback["verification"]["stderr"], current_diagnostic)
         self.assertNotIn(old_diagnostic, json.dumps(feedback, ensure_ascii=False))
         self.assertEqual(feedback["repair_lineage"]["root_feedback_artifact"], "feedback_v21.json")
+        self.assertEqual(feedback["repair_lineage"]["previous_objective_id"], "repair:stale-verification")
 
 
     def test_verification_attempt_count_ignores_phase4_artifact_version_gaps(self) -> None:
@@ -917,7 +918,10 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "implementation_testing")
         self.assertEqual(response["status"], "implementation_traced")
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        self.assertEqual(
+            response["allowed_next_actions"],
+            ["continue_run", "revalidate_implementation", "get_status", "cancel_run"],
+        )
         self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["implementation_traceability"]["ok"])
         trace_path = self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])

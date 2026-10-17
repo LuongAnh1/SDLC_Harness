@@ -30,18 +30,18 @@ import json
 from pathlib import Path
 import re
 import subprocess
+from uuid import uuid4
 
 from ..agents.developer import (
     DeveloperActAgent,
     DeveloperActLlmError,
     DeveloperActResult,
     DeveloperExecutionError,
-    DeveloperToolLoopExecutor,
     build_developer_work_packet,
     repair_scope_mismatch_retry_allowed,
     refresh_developer_work_packet,
 )
-from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent, QaTesterLlmError
+from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
 from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
@@ -96,6 +96,7 @@ ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = [
 ]
 ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
 ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_QA_GENERATION_RETRY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
@@ -114,6 +115,10 @@ REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "validator_evidence_or_mapping_issue",
     "implementation_traceability_llm_failed",
     "implementation_validation_inconclusive",
+}
+RETRYABLE_QA_GENERATION_ERROR_CODES = {
+    "qa_tester_llm_failed",
+    "qa_requirement_coverage_invalid",
 }
 CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "requirement_packet": 12000,
@@ -138,11 +143,6 @@ class PhaseFourWorkflow:
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
         self.developer = DeveloperActAgent(self.llm_client)
-        self.developer_executor = DeveloperToolLoopExecutor(
-            settings=settings,
-            store=self.store,
-            llm_client=self.llm_client,
-        )
         self.verification_runner = VerificationRunner()
         self.code_trace_validator = CodeTraceValidator(
             self.llm_client,
@@ -546,6 +546,8 @@ class PhaseFourWorkflow:
             return self._continue_developer_act(state=state, run_id=run_id)
         if status == "blocked" and self._legacy_developer_retry_allowed(state):
             return self._continue_developer_act(state=state, run_id=run_id)
+        if status == "blocked" and self._qa_generation_retry_allowed(state):
+            return self._continue_qa_test(state=state, run_id=run_id)
         if status == "blocked" and repair_scope_mismatch_retry_allowed(state):
             execution = _dict_value(state.get("developer_execution"))
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
@@ -1015,203 +1017,12 @@ class PhaseFourWorkflow:
             return self._revalidate_current_implementation(state=state, run_id=run_id)
 
     def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
-        if self.settings.developer_execution_mode == "tool_loop":
-            return self._continue_developer_tool_loop(state=state, run_id=run_id)
-        return self._continue_developer_act_legacy(state=state, run_id=run_id)
+        """Run one TraceDev-style Developer batch without LLM tool actions."""
 
-    def _continue_developer_tool_loop(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
-        """Run or resume budget-aware Developer actions with per-file checkpoints."""
+        return self._continue_developer_batch(state=state, run_id=run_id)
 
-        artifact_paths = _string_dict(state.get("latest_artifacts"))
-        latest_artifacts = dict(artifact_paths)
-        try:
-            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
-            work_packet = _read_json_artifact(
-                self._existing_artifact_path(packet_path, run_id=run_id),
-                run_id=run_id,
-            )
-            resuming = str(state.get("status") or "") in {"implementation_executing", "implementation_paused"}
-            resuming = resuming or bool(artifact_paths.get("developer_execution_journal"))
-            target_info = self._workspace_target_info(
-                run_id=run_id,
-                work_packet=work_packet,
-                allow_dirty=resuming,
-            )
-            branch = target_info.current_branch
 
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_writing",
-                    "status": "implementation_executing",
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
-                    "last_error": None,
-                    "developer_execution": {
-                        **_dict_value(state.get("developer_execution")),
-                        "mode": "act",
-                        "status": "running",
-                    },
-                    "summary_for_user": f"Developer tool loop đang triển khai code cho run {run_id}.",
-                }
-            )
-            self.store.write_state(state)
-
-            def record_progress(progress: dict[str, object], manifest_path: str, journal_path: str) -> None:
-                latest_artifacts.update(
-                    {
-                        "developer_execution_manifest": manifest_path,
-                        "developer_execution_journal": journal_path,
-                    }
-                )
-                state.update(
-                    {
-                        "updated_at": utc_now_iso(),
-                        "current_phase": "implementation_writing",
-                        "status": "implementation_executing",
-                        "latest_artifacts": dict(latest_artifacts),
-                        "allowed_next_actions": ["get_status", "cancel_run"],
-                        "developer_execution": {"mode": "act", **progress},
-                        "summary_for_user": (
-                            f"Developer tool loop đã hoàn thành {progress.get('completed_items', 0)}/"
-                            f"{progress.get('total_items', 0)} execution task cho run {run_id}."
-                        ),
-                    }
-                )
-                self.store.write_state(state)
-
-            result = self.developer_executor.execute(
-                run_id=run_id,
-                work_packet=work_packet,
-                target_path=target_info.path,
-                on_progress=record_progress,
-            )
-            latest_artifacts.update(
-                {
-                    "developer_execution_manifest": result.manifest_path,
-                    "developer_execution_journal": result.journal_path,
-                }
-            )
-            report = {
-                "run_id": run_id,
-                "source_ref": state.get("source_ref"),
-                "issue_key": work_packet.get("issue_key"),
-                "target_repo": str(target_info.path),
-                "branch": branch,
-                "summary": result.summary,
-                "files": result.files,
-                "execution_mode": "tool_loop",
-                "execution_manifest": result.manifest_path,
-                "execution_journal": result.journal_path,
-                "progress": result.progress,
-            }
-            report_path = write_phase4_code_change_report(
-                store=self.store,
-                run_id=run_id,
-                report=report,
-                version=1,
-            )
-        except DeveloperExecutionError as exc:
-            if exc.manifest_path:
-                latest_artifacts["developer_execution_manifest"] = exc.manifest_path
-            if exc.journal_path:
-                latest_artifacts["developer_execution_journal"] = exc.journal_path
-            paused = exc.retriable
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_writing",
-                    "status": "implementation_paused" if paused else "blocked",
-                    "latest_artifacts": latest_artifacts,
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS if paused else ["get_status", "cancel_run"],
-                    "last_error": exc.to_response(),
-                    "developer_execution": {"mode": "act", **exc.progress},
-                    "summary_for_user": (
-                        f"Developer tool loop đã tạm dừng cho run {run_id}: {exc.message}"
-                        if paused
-                        else f"Developer tool loop bị chặn cho run {run_id}: {exc.message}"
-                    ),
-                }
-            )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
-        except HarnessError as exc:
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_writing",
-                    "status": "blocked",
-                    "latest_artifacts": latest_artifacts,
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
-                    "last_error": exc.to_response(),
-                    "summary_for_user": f"Phase 4 bị chặn khi chuẩn bị Developer tool loop: {exc.message}",
-                }
-            )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
-        except Exception as exc:  # Last-resort state recovery for executor defects.
-            error = HarnessError(
-                "developer_execution_internal_error",
-                f"Unexpected Developer executor failure ({type(exc).__name__}): {exc}",
-                run_id=run_id,
-            )
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_writing",
-                    "status": "implementation_paused",
-                    "latest_artifacts": latest_artifacts,
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS,
-                    "last_error": error.to_response(),
-                    "developer_execution": {
-                        **_dict_value(state.get("developer_execution")),
-                        "mode": "act",
-                        "status": "paused",
-                    },
-                    "summary_for_user": (
-                        f"Developer tool loop đã tạm dừng an toàn cho run {run_id} vì lỗi executor nội bộ."
-                    ),
-                }
-            )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
-
-        latest_artifacts["code_change_report"] = report_path
-        quality_reports = {
-            **_dict_value(state.get("quality_reports")),
-            "developer_execution": {
-                "ok": True,
-                "mode": "tool_loop",
-                **result.progress,
-                "manifest": result.manifest_path,
-                "journal": result.journal_path,
-            },
-        }
-        state.update(
-            {
-                "updated_at": utc_now_iso(),
-                "current_phase": "implementation_writing",
-                "status": "implementation_written",
-                "latest_artifacts": latest_artifacts,
-                "quality_reports": quality_reports,
-                "pending_checkpoint": None,
-                "allowed_next_actions": ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS,
-                "last_error": None,
-                "developer_execution": {"mode": "act", **result.progress},
-                "summary_for_user": (
-                    f"Developer tool loop đã hoàn thành {result.progress.get('completed_items', 0)}/"
-                    f"{result.progress.get('total_items', 0)} execution task cho run {run_id} trên branch `{branch}`. "
-                    "Code chưa commit và chưa mở PR; bước tiếp theo là Verification Runner."
-                ),
-            }
-        )
-        self.store.write_state(state)
-        return self._status_response(state, created_new_run=False)
-
-    def _continue_developer_act_legacy(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+    def _continue_developer_batch(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
 
         artifact_paths = _string_dict(state.get("latest_artifacts"))
@@ -1243,6 +1054,7 @@ class PhaseFourWorkflow:
                 "branch": branch,
                 "summary": result.summary,
                 "files": applied_files,
+                "execution_mode": "batch",
             }
             report_path = write_phase4_code_change_report(
                 store=self.store,
@@ -1787,98 +1599,26 @@ class PhaseFourWorkflow:
                 **latest_artifacts,
                 "developer_work_packet": refreshed_packet_path,
             }
-            if self.settings.developer_execution_mode == "tool_loop":
-                state.update(
-                    {
-                        "updated_at": utc_now_iso(),
-                        "current_phase": "qa_repair",
-                        "status": "implementation_executing",
-                        "latest_artifacts": latest_artifacts,
-                        "pending_checkpoint": None,
-                        "allowed_next_actions": ["get_status", "cancel_run"],
-                        "developer_execution": {
-                            "mode": "qa_repair",
-                            "repair_iteration": repair_iteration,
-                            "status": "running",
-                        },
-                        "last_error": None,
-                        "summary_for_user": (
-                            f"Developer tool loop đang xử lý QA repair iteration {repair_iteration} "
-                            f"cho run {run_id}."
-                        ),
-                    }
-                )
-                self.store.write_state(state)
-
-                def record_qa_repair_progress(
-                    progress: dict[str, object],
-                    manifest_path: str,
-                    journal_path: str,
-                ) -> None:
-                    latest_artifacts.update(
-                        {
-                            "developer_qa_repair_execution_manifest": manifest_path,
-                            "developer_qa_repair_execution_journal": journal_path,
-                        }
-                    )
-                    state.update(
-                        {
-                            "updated_at": utc_now_iso(),
-                            "current_phase": "qa_repair",
-                            "status": "implementation_executing",
-                            "latest_artifacts": dict(latest_artifacts),
-                            "developer_execution": {
-                                "mode": "qa_repair",
-                                "repair_iteration": repair_iteration,
-                                **progress,
-                            },
-                            "summary_for_user": (
-                                f"Developer QA repair đã hoàn thành {progress.get('completed_items', 0)}/"
-                                f"{progress.get('total_items', 0)} execution task cho run {run_id}."
-                            ),
-                        }
-                    )
-                    self.store.write_state(state)
-
-                execution_result = self.developer_executor.execute(
-                    run_id=run_id,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    repair_feedback=qa_feedback,
-                    repair_iteration=repair_iteration,
-                    repair_scope="qa",
-                    on_progress=record_qa_repair_progress,
-                )
-                latest_artifacts.update(
-                    {
-                        "developer_qa_repair_execution_manifest": execution_result.manifest_path,
-                        "developer_qa_repair_execution_journal": execution_result.journal_path,
-                    }
-                )
-                applied_files = execution_result.files
-                developer_summary = execution_result.summary
-                developer_raw_response = ""
-            else:
-                result = self.developer.repair(
-                    work_packet=work_packet,
-                    repair_feedback=qa_feedback,
-                    repair_iteration=repair_iteration,
-                )
-                latest_artifacts = self._persist_developer_llm_artifacts(
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    action="qa_repair",
-                    version=artifact_version,
-                    value=result,
-                )
-                applied_files = _apply_developer_changes(
-                    result=result,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    run_id=run_id,
-                )
-                developer_summary = result.summary
-                developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
+            result = self.developer.repair(
+                work_packet=work_packet,
+                repair_feedback=qa_feedback,
+                repair_iteration=repair_iteration,
+            )
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="qa_repair",
+                version=artifact_version,
+                value=result,
+            )
+            applied_files = _apply_developer_changes(
+                result=result,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                run_id=run_id,
+            )
+            developer_summary = result.summary
+            developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
             change_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -2423,7 +2163,7 @@ class PhaseFourWorkflow:
         """Block a QA step and persist raw LLM output when available."""
 
         raw_response = getattr(exc, "raw_response", "")
-        if isinstance(exc, QaTesterLlmError) and raw_response:
+        if raw_response:
             latest_artifacts = {
                 **latest_artifacts,
                 "qa_tester_raw_response": write_phase4_qa_raw_response(
@@ -2439,7 +2179,11 @@ class PhaseFourWorkflow:
             "status": "blocked",
             "latest_artifacts": latest_artifacts,
             "pending_checkpoint": None,
-            "allowed_next_actions": ["get_status", "cancel_run"],
+            "allowed_next_actions": (
+                ALLOWED_QA_GENERATION_RETRY_ACTIONS
+                if exc.error_code in RETRYABLE_QA_GENERATION_ERROR_CODES
+                else ["get_status", "cancel_run"]
+            ),
             "last_error": exc.to_response(),
             "summary_for_user": f"{summary_prefix}: {exc.message}",
         }
@@ -2767,94 +2511,26 @@ class PhaseFourWorkflow:
                 **artifact_paths,
                 "developer_work_packet": refreshed_packet_path,
             }
-            if self.settings.developer_execution_mode == "tool_loop":
-                state.update(
-                    {
-                        "updated_at": utc_now_iso(),
-                        "current_phase": "implementation_repair",
-                        "status": "implementation_executing",
-                        "latest_artifacts": latest_artifacts,
-                        "pending_checkpoint": None,
-                        "allowed_next_actions": ["get_status", "cancel_run"],
-                        "developer_execution": {
-                            "mode": "implementation_repair",
-                            "repair_iteration": repair_iteration,
-                            "status": "running",
-                        },
-                        "last_error": None,
-                        "summary_for_user": (
-                            f"Developer tool loop đang repair implementation iteration {repair_iteration} "
-                            f"cho run {run_id}."
-                        ),
-                    }
-                )
-                self.store.write_state(state)
-
-                def record_repair_progress(progress: dict[str, object], manifest_path: str, journal_path: str) -> None:
-                    latest_artifacts.update(
-                        {
-                            "developer_repair_execution_manifest": manifest_path,
-                            "developer_repair_execution_journal": journal_path,
-                        }
-                    )
-                    state.update(
-                        {
-                            "updated_at": utc_now_iso(),
-                            "current_phase": "implementation_repair",
-                            "status": "implementation_executing",
-                            "latest_artifacts": dict(latest_artifacts),
-                            "developer_execution": {
-                                "mode": "implementation_repair",
-                                "repair_iteration": repair_iteration,
-                                **progress,
-                            },
-                            "summary_for_user": (
-                                f"Developer repair đã hoàn thành {progress.get('completed_items', 0)}/"
-                                f"{progress.get('total_items', 0)} execution task cho run {run_id}."
-                            ),
-                        }
-                    )
-                    self.store.write_state(state)
-
-                execution_result = self.developer_executor.execute(
-                    run_id=run_id,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    repair_feedback=repair_feedback,
-                    repair_iteration=repair_iteration,
-                    repair_scope="implementation",
-                    on_progress=record_repair_progress,
-                )
-                latest_artifacts.update(
-                    {
-                        "developer_repair_execution_manifest": execution_result.manifest_path,
-                        "developer_repair_execution_journal": execution_result.journal_path,
-                    }
-                )
-                applied_files = execution_result.files
-                developer_summary = execution_result.summary
-                developer_raw_response = ""
-            else:
-                result = self.developer.repair(
-                    work_packet=work_packet,
-                    repair_feedback=repair_feedback,
-                    repair_iteration=repair_iteration,
-                )
-                latest_artifacts = self._persist_developer_llm_artifacts(
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    action="repair",
-                    version=artifact_version,
-                    value=result,
-                )
-                applied_files = _apply_developer_changes(
-                    result=result,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    run_id=run_id,
-                )
-                developer_summary = result.summary
-                developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
+            result = self.developer.repair(
+                work_packet=work_packet,
+                repair_feedback=repair_feedback,
+                repair_iteration=repair_iteration,
+            )
+            latest_artifacts = self._persist_developer_llm_artifacts(
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                action="repair",
+                version=artifact_version,
+                value=result,
+            )
+            applied_files = _apply_developer_changes(
+                result=result,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                run_id=run_id,
+            )
+            developer_summary = result.summary
+            developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
             change_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -3295,6 +2971,8 @@ class PhaseFourWorkflow:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
         if self._legacy_developer_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
+        if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
         if self._legacy_verification_repair_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
@@ -3338,6 +3016,17 @@ class PhaseFourWorkflow:
             and bool(artifacts.get("developer_work_packet"))
             and not bool(artifacts.get("code_change_report"))
         )
+
+    @staticmethod
+    def _qa_generation_retry_allowed(state: dict[str, object]) -> bool:
+        """Retry malformed QA generation without rerunning Developer or Validator."""
+
+        if str(state.get("status") or "") != "blocked":
+            return False
+        if str(state.get("current_phase") or "") != "qa_testing":
+            return False
+        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
+        return error_code in RETRYABLE_QA_GENERATION_ERROR_CODES
 
     @staticmethod
     def _legacy_verification_repair_allowed(state: dict[str, object]) -> bool:
@@ -3999,10 +3688,12 @@ def _apply_developer_changes(
     target_path: Path,
     run_id: str,
 ) -> list[dict[str, object]]:
+    """Validate a complete Developer batch, then apply it with rollback on failure."""
+
     allowed_paths = set(_allowed_paths(work_packet))
     if not allowed_paths:
         raise HarnessError("developer_act_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.")
-    applied: list[dict[str, object]] = []
+
     requirement_contract = _dict_value(work_packet.get("requirement_contract"))
     v2 = requirement_contract.get("version") == "v2"
     assigned_by_file = _requirement_ids_by_file(work_packet) if v2 else {}
@@ -4011,12 +3702,31 @@ def _apply_developer_changes(
         for item in _dict_items(work_packet.get("canonical_requirements"))
         if str(item.get("id") or "").strip()
     }
-    if v2:
-        for item in result.files:
-            rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
-            covered_requirement_ids = _string_items(item.get("covered_requirement_ids"))
-            invalid = set(covered_requirement_ids) - assigned_by_file.get(rel_path, set())
-            invented = set(covered_requirement_ids) - canonical_ids
+    design_by_file = _dict_value(work_packet.get("design_mappings_by_file"))
+    root = target_path.resolve()
+    prepared: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+
+    for item in result.files:
+        rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
+        if rel_path in seen_paths:
+            raise HarnessError(
+                "developer_act_duplicate_path",
+                f"Developer.act returned the same file more than once: {rel_path}",
+                run_id=run_id,
+            )
+        seen_paths.add(rel_path)
+        if rel_path not in allowed_paths:
+            raise HarnessError(
+                "developer_act_out_of_scope",
+                f"Developer.act tried to modify a file outside allowed_paths: {rel_path}",
+                run_id=run_id,
+            )
+
+        returned_requirement_ids = _string_items(item.get("covered_requirement_ids"))
+        if v2:
+            invalid = set(returned_requirement_ids) - assigned_by_file.get(rel_path, set())
+            invented = set(returned_requirement_ids) - canonical_ids
             if invalid or invented:
                 raise HarnessError(
                     "developer_act_requirement_coverage_invalid",
@@ -4026,39 +3736,116 @@ def _apply_developer_changes(
                     ),
                     run_id=run_id,
                 )
-    for item in result.files:
-        rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
-        if rel_path not in allowed_paths:
-            raise HarnessError(
-                "developer_act_out_of_scope",
-                f"Developer.act tried to modify a file outside allowed_paths: {rel_path}",
-                run_id=run_id,
-            )
-        covered_requirement_ids = _string_items(item.get("covered_requirement_ids"))
-        target_file = (target_path / rel_path).resolve()
+
+        target_file = (root / rel_path).resolve()
         try:
-            target_file.relative_to(target_path.resolve())
+            target_file.relative_to(root)
         except ValueError as exc:
             raise HarnessError(
                 "developer_act_unsafe_path",
                 f"Developer.act path escapes target repo: {rel_path}",
                 run_id=run_id,
             ) from exc
-        content = str(item.get("content") or "")
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        target_file.write_text(content.rstrip() + "\n", encoding="utf-8")
-        applied.append(
+
+        content_value = item.get("content")
+        if not isinstance(content_value, str) or not content_value.strip():
+            raise HarnessError(
+                "developer_act_failed",
+                f"Developer.act returned empty or invalid content for {rel_path}.",
+                run_id=run_id,
+            )
+        final_bytes = (content_value.rstrip() + "\n").encode("utf-8")
+        previous_bytes = target_file.read_bytes() if target_file.is_file() else None
+        if previous_bytes == final_bytes:
+            continue
+
+        design_ids: list[str] = []
+        for mapping in _dict_items(design_by_file.get(rel_path)):
+            design_id = str(mapping.get("design_element_id") or "").strip()
+            if design_id and design_id not in design_ids:
+                design_ids.append(design_id)
+        approved_requirement_ids = sorted(assigned_by_file.get(rel_path, set())) if v2 else returned_requirement_ids
+        temp_file = target_file.with_name(f".{target_file.name}.sdlc-{uuid4().hex}.tmp")
+        prepared.append(
             {
                 "path": rel_path,
-                "operation": str(item.get("operation") or ""),
-                "reason": str(item.get("reason") or ""),
-                "covered_design_elements": _string_items(item.get("covered_design_elements")),
-                "covered_requirement_ids": covered_requirement_ids,
+                "target": target_file,
+                "temp": temp_file,
+                "previous": previous_bytes,
+                "content": final_bytes,
+                "reason": str(item.get("reason") or "Developer batch changed this file.").strip(),
+                "covered_design_elements": design_ids,
+                "covered_requirement_ids": approved_requirement_ids,
             }
         )
-    if not applied:
-        raise HarnessError("developer_act_failed", "Developer.act did not apply any file.")
-    return applied
+
+    if not prepared:
+        raise HarnessError("developer_act_failed", "Developer.act did not return any effective file change.")
+
+    try:
+        for change in prepared:
+            target_file = change["target"]
+            temp_file = change["temp"]
+            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
+            target_file.parent.mkdir(parents=True, exist_ok=True)
+            temp_file.write_bytes(change["content"])
+        for change in prepared:
+            temp_file = change["temp"]
+            target_file = change["target"]
+            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
+            temp_file.replace(target_file)
+    except OSError as exc:
+        rollback_errors: list[str] = []
+        for change in prepared:
+            target_file = change["target"]
+            temp_file = change["temp"]
+            previous = change["previous"]
+            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+                if previous is None:
+                    if target_file.exists():
+                        target_file.unlink()
+                else:
+                    rollback_file = target_file.with_name(f".{target_file.name}.rollback-{uuid4().hex}.tmp")
+                    rollback_file.write_bytes(previous)
+                    rollback_file.replace(target_file)
+            except OSError:
+                rollback_errors.append(str(change["path"]))
+        detail = f" Rollback failed for: {rollback_errors}." if rollback_errors else ""
+        raise HarnessError(
+            "developer_act_apply_failed",
+            f"Failed to apply Developer batch atomically: {exc}.{detail}",
+            run_id=run_id,
+        ) from exc
+    finally:
+        for change in prepared:
+            temp_file = change["temp"]
+            if isinstance(temp_file, Path) and temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except OSError:
+                    pass
+
+    return [
+        {
+            "path": str(change["path"]),
+            "operation": "update" if change["previous"] is not None else "create",
+            "reason": str(change["reason"]),
+            "covered_design_elements": change["covered_design_elements"],
+            "covered_requirement_ids": change["covered_requirement_ids"],
+            "before_sha256": (
+                hashlib.sha256(change["previous"]).hexdigest()
+                if isinstance(change["previous"], bytes)
+                else ""
+            ),
+            "after_sha256": hashlib.sha256(change["content"]).hexdigest(),
+        }
+        for change in prepared
+    ]
+
+
 
 
 def _requirement_ids_by_file(work_packet: dict[str, object]) -> dict[str, set[str]]:
@@ -4364,12 +4151,13 @@ def _verification_repair_feedback(
     root_feedback: dict[str, object] | None = None,
     root_feedback_ref: str = "",
 ) -> dict[str, object]:
-    """Package the latest Verification diagnostic while preserving only approved contract objectives."""
+    """Package the latest Verification diagnostic and retain older feedback as audit lineage."""
 
     output_contract = _dict_value(work_packet.get("output_contract"))
     prior = _dict_value(prior_feedback)
     root = _dict_value(root_feedback)
-    objective = _persistent_repair_objective(prior=prior, root=root, result=result)
+    objective = _verification_repair_objective(result)
+    prior_objective = _dict_value(prior.get("repair_objective")) or _dict_value(root.get("repair_objective"))
     previous_lineage = _dict_value(prior.get("repair_lineage"))
     root_artifact = str(
         previous_lineage.get("root_feedback_artifact")
@@ -4389,9 +4177,9 @@ def _verification_repair_feedback(
         "summary": result.reason,
         "required_action": (
             "Developer must repair the latest compile/unit-test diagnostic from the current worktree with the "
-            "smallest coherent mutation. The persistent repair_objective is the approved contract authority; the "
-            "verification field below is the current diagnostic and replaces older diagnostics. Related context paths "
-            "may remain unchanged. Do not revert an approved expected contract to match a stale caller or test."
+            "smallest coherent cross-file mutation. The approved requirement, design, and Developer Work Packet are "
+            "the contract authority. The verification field below is the current diagnostic and replaces older "
+            "diagnostics; prior Validator objectives remain audit lineage only."
         ),
         "target_repo": target_repo,
         "branch": branch,
@@ -4403,6 +4191,7 @@ def _verification_repair_feedback(
             "previous_feedback_artifact": prior_feedback_ref,
             "previous_feedback_version": prior.get("version"),
             "previous_feedback_source": prior.get("feedback_source"),
+            "previous_objective_id": prior_objective.get("objective_id"),
         },
         "verification": {
             "status": result.status,
@@ -4420,28 +4209,6 @@ def _verification_repair_feedback(
             "format": output_contract.get("format"),
         },
     }
-
-
-def _persistent_repair_objective(
-    *,
-    prior: dict[str, object],
-    root: dict[str, object],
-    result: VerificationResult,
-) -> dict[str, object]:
-    for feedback in (prior, root):
-        objective = _dict_value(feedback.get("repair_objective"))
-        if (
-            str(objective.get("source") or "") == "validator_code_trace"
-            and bool(_dict_items(objective.get("contract_findings")))
-        ):
-            return objective
-    for feedback in (prior, root):
-        if str(feedback.get("feedback_source") or "") != "validator_code_trace":
-            continue
-        objective = _validator_repair_objective(list(feedback.get("missing_links") or []))
-        if objective.get("canonical_keys"):
-            return objective
-    return _verification_repair_objective(result)
 
 
 def _bounded_diagnostic(value: str, *, limit: int = MAX_VERIFICATION_DIAGNOSTIC_CHARS) -> str:

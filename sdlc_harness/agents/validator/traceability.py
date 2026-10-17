@@ -12,12 +12,11 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
 from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
-from ...llm.client import LlmClient
-from ...llm.json_utils import parse_first_json_array, parse_first_json_object
+from ...llm.client import LlmClient, LlmCompletion, strip_code_fence
 
 _PROMPT_DIR = Path(__file__).with_name("prompts")
 _CLASS_TRACE_PROMPT_PATH = _PROMPT_DIR / "traceability_class.txt"
@@ -61,6 +60,7 @@ class ValidatorAgent:
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         canonical_requirement: RequirementModelV2 | None = None,
+        attempt_recorder: Callable[[dict[str, object]], None] | None = None,
     ) -> TraceabilityResult:
         """Tạo requirement graph, trace class/sequence và missing-link report."""
 
@@ -71,14 +71,19 @@ class ValidatorAgent:
         )
         requirements = requirement_graph["requirements"]
         requirement_json = json.dumps(requirements, ensure_ascii=False, indent=2)
+        requirement_ids = {str(item["id"]) for item in requirements}
 
         class_trace = self._trace_class(
             requirement_json=requirement_json,
             class_graph=class_graph,
+            requirement_ids=requirement_ids,
+            attempt_recorder=attempt_recorder,
         )
         sequence_trace = self._trace_sequence(
             requirement_json=requirement_json,
             sequence_graph=sequence_graph,
+            requirement_ids=requirement_ids,
+            attempt_recorder=attempt_recorder,
         )
 
         class_trace = _normalize_trace(
@@ -106,25 +111,147 @@ class ValidatorAgent:
             mode="traceability_v2" if canonical_requirement is not None else "traceability_v1",
         )
 
-    def _trace_class(self, *, requirement_json: str, class_graph: dict[str, object]) -> list[dict[str, object]]:
+    def _trace_class(
+        self,
+        *,
+        requirement_json: str,
+        class_graph: dict[str, object],
+        requirement_ids: set[str],
+        attempt_recorder: Callable[[dict[str, object]], None] | None,
+    ) -> list[dict[str, object]]:
         prompt = _CLASS_TRACE_PROMPT_PATH.read_text(encoding="utf-8")
         prompt = prompt.replace("{requirement}", requirement_json)
         prompt = prompt.replace("{class_diagram_json}", json.dumps(class_graph, ensure_ascii=False, indent=2))
-        raw = self.llm_client.complete(
-            system="You are Validator.traceability_class. Return only JSON.",
+        return self._generate_trace(
+            diagram_name="class diagram",
+            system="You are Validator.traceability_class. Return exactly one JSON object.",
             prompt=prompt,
+            requirement_ids=requirement_ids,
+            attempt_recorder=attempt_recorder,
         )
-        return _parse_trace_json(raw, diagram_name="class diagram")
 
-    def _trace_sequence(self, *, requirement_json: str, sequence_graph: dict[str, object]) -> list[dict[str, object]]:
+    def _trace_sequence(
+        self,
+        *,
+        requirement_json: str,
+        sequence_graph: dict[str, object],
+        requirement_ids: set[str],
+        attempt_recorder: Callable[[dict[str, object]], None] | None,
+    ) -> list[dict[str, object]]:
         prompt = _SEQUENCE_TRACE_PROMPT_PATH.read_text(encoding="utf-8")
         prompt = prompt.replace("{requirement}", requirement_json)
         prompt = prompt.replace("{sequence_diagram_json}", json.dumps(sequence_graph, ensure_ascii=False, indent=2))
-        raw = self.llm_client.complete(
-            system="You are Validator.traceability_sequence. Return only JSON.",
+        return self._generate_trace(
+            diagram_name="sequence diagram",
+            system="You are Validator.traceability_sequence. Return exactly one JSON object.",
             prompt=prompt,
+            requirement_ids=requirement_ids,
+            attempt_recorder=attempt_recorder,
         )
-        return _parse_trace_json(raw, diagram_name="sequence diagram")
+
+    def _generate_trace(
+        self,
+        *,
+        diagram_name: str,
+        system: str,
+        prompt: str,
+        requirement_ids: set[str],
+        attempt_recorder: Callable[[dict[str, object]], None] | None,
+    ) -> list[dict[str, object]]:
+        """Generate strict structured traceability and retry one malformed response."""
+
+        last_error: HarnessError | None = None
+        for attempt in (1, 2):
+            attempt_prompt = prompt
+            if last_error is not None:
+                attempt_prompt = (
+                    f"{prompt.rstrip()}\n\n"
+                    "## Contract recovery\n"
+                    f"The previous response was rejected: {last_error.message}\n"
+                    "Return one complete JSON object with top-level key `traceability`. "
+                    "Every item must contain a non-empty requirement ID copied from the input and a links array. "
+                    "Keep each reason to one short sentence and include only directly supporting targets."
+                )
+            completion = _complete_trace_request(
+                self.llm_client,
+                system=system,
+                prompt=attempt_prompt,
+            )
+            try:
+                if completion.finish_reason.strip().lower() == "length":
+                    raise HarnessError(
+                        "validator_traceability_failed",
+                        f"Validator {diagram_name} trace output was truncated by the model output limit.",
+                    )
+                parsed = _parse_trace_json(
+                    completion.content,
+                    diagram_name=diagram_name,
+                    expected_requirement_ids=requirement_ids,
+                )
+            except HarnessError as exc:
+                last_error = exc
+                _record_trace_attempt(
+                    attempt_recorder,
+                    diagram_name=diagram_name,
+                    attempt=attempt,
+                    completion=completion,
+                    parse_status="rejected",
+                    error=exc.message,
+                )
+                continue
+            _record_trace_attempt(
+                attempt_recorder,
+                diagram_name=diagram_name,
+                attempt=attempt,
+                completion=completion,
+                parse_status="parsed",
+                error="",
+            )
+            return parsed
+
+        assert last_error is not None
+        raise HarnessError(
+            "validator_traceability_failed",
+            f"Validator {diagram_name} trace failed its JSON contract after 2 attempts: {last_error.message}",
+        )
+
+
+def _complete_trace_request(client: Any, *, system: str, prompt: str) -> LlmCompletion:
+    complete_with_metadata = getattr(client, "complete_with_metadata", None)
+    if callable(complete_with_metadata):
+        settings = getattr(client, "settings", None)
+        max_tokens = getattr(settings, "llm_structured_max_tokens", None)
+        return complete_with_metadata(
+            system=system,
+            prompt=prompt,
+            json_mode=True,
+            max_tokens=max_tokens,
+        )
+    return LlmCompletion(content=str(client.complete(system=system, prompt=prompt)))
+
+
+def _record_trace_attempt(
+    recorder: Callable[[dict[str, object]], None] | None,
+    *,
+    diagram_name: str,
+    attempt: int,
+    completion: LlmCompletion,
+    parse_status: str,
+    error: str,
+) -> None:
+    if recorder is None:
+        return
+    recorder(
+        {
+            "diagram": diagram_name,
+            "attempt": attempt,
+            "raw_response": completion.content,
+            "finish_reason": completion.finish_reason,
+            "usage": completion.usage,
+            "parse_status": parse_status,
+            "error": error,
+        }
+    )
 
 
 def build_requirement_graph(requirement_packet: str) -> dict[str, object]:
@@ -262,30 +389,64 @@ def compute_missing_links(
     }
 
 
-def _parse_trace_json(raw: str, *, diagram_name: str) -> list[dict[str, object]]:
+def _parse_trace_json(
+    raw: str,
+    *,
+    diagram_name: str,
+    expected_requirement_ids: set[str] | None = None,
+) -> list[dict[str, object]]:
+    """Parse only the complete outer payload; never salvage a nested links array."""
+
     try:
-        parsed: object = parse_first_json_object(raw, expected_keys={"traceability", "items", "results"})
-    except json.JSONDecodeError:
-        try:
-            parsed = parse_first_json_array(raw)
-        except json.JSONDecodeError as exc:
-            raise HarnessError(
-                "validator_traceability_failed",
-                f"Validator {diagram_name} trace output is not valid JSON.",
-            ) from exc
+        parsed: object = json.loads(strip_code_fence(raw).strip())
+    except json.JSONDecodeError as exc:
+        raise HarnessError(
+            "validator_traceability_failed",
+            f"Validator {diagram_name} trace output is not one complete JSON payload.",
+        ) from exc
 
     if isinstance(parsed, dict):
-        for key in ("traceability", "items", "results"):
-            value = parsed.get(key)
-            if isinstance(value, list):
-                parsed = value
-                break
+        parsed = parsed.get("traceability")
     if not isinstance(parsed, list):
         raise HarnessError(
             "validator_traceability_failed",
-            f"Validator {diagram_name} trace output must be a JSON array.",
+            f"Validator {diagram_name} trace output must contain a top-level traceability array.",
         )
-    return [item for item in parsed if isinstance(item, dict)]
+
+    items: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(parsed):
+        if not isinstance(item, dict):
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace item {index} must be an object.",
+            )
+        requirement = item.get("requirement")
+        req_id = requirement.strip() if isinstance(requirement, str) else ""
+        if not req_id:
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace item {index} has a blank or missing requirement ID.",
+            )
+        if expected_requirement_ids is not None and req_id not in expected_requirement_ids:
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace references unknown requirement: {req_id}",
+            )
+        if req_id in seen:
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace repeats requirement: {req_id}",
+            )
+        links = item.get("links")
+        if not isinstance(links, list) or any(not isinstance(link, dict) for link in links):
+            raise HarnessError(
+                "validator_traceability_failed",
+                f"Validator {diagram_name} trace item {req_id} must contain an array of link objects.",
+            )
+        seen.add(req_id)
+        items.append(item)
+    return items
 
 
 def _normalize_trace(

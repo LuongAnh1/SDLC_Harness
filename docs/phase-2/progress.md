@@ -532,4 +532,52 @@ Test:
 - `rtk python -m pytest tests/test_phase2.py -q` -> 29 passed.
 - `rtk python -m pytest -q` -> 79 passed.
 
+## 2026-10-17 - Patch: semantic evidence catalog cho progressive Design Validator
+
+Live E2E phát hiện Design V5 sạch deterministic nhưng semantic consensus thu được
+`0/3` trial hợp lệ. Semantic Judge viện dẫn các sequence edge có thật trong trace,
+nhưng edge được gắn với requirement liên quan khác nên claim-local
+`allowed_design_refs` loại nhầm toàn bộ trial.
+
+Đã sửa:
+
+- Sinh Evidence Catalog chung từ toàn bộ class/sequence trace của Design hiện tại.
+  Mỗi evidence có ID ổn định từ SHA-256 của reference đã chuẩn hóa, cùng owner
+  `claim_ids` và `requirement_ids`.
+- Claim-local evidence chuyển thành `recommended_evidence_ids`; Semantic Judge có
+  thể viện dẫn evidence có thật của requirement liên quan cho đánh giá chéo.
+- Prompt mới yêu cầu `evidence_ids`. `design_refs` cũ vẫn được resolve qua catalog
+  để giữ tương thích trong giai đoạn chuyển đổi.
+- Evidence ngoài catalog không tạo blocker: assessment được hạ thành `uncertain`
+  và trial được lưu ở `degraded_trials`. Trial degraded không tham gia consensus
+  và không thể chứng nhận zero-blocker pass.
+- Giữ fail-closed nếu không thu được đủ trial sạch; bổ sung diagnostics
+  `degraded_trial_count`, `degraded_trials` và `evidence_catalog_size`.
+
+Xác minh hiện tại:
+
+- Module đã qua kiểm tra cú pháp và `git diff --check`.
+- Chưa chạy automated test hoặc live DeepSeek revalidation; cần thực hiện riêng
+  trước khi coi patch đã ổn định.
+
+
+## 2026-10-17 - Traceability structured-output recovery
+
+- The UC53 live run exposed an intermittent Phase 2 traceability failure where
+  the normalizer received a blank requirement ID. The original raw completion
+  was not persisted, so its exact malformed payload could not be audited.
+- A parser probe showed that the previous recovery parser could accept a nested
+  `links` array from a broken outer trace array and then report its link objects
+  as trace items with blank requirement IDs.
+- Traceability prompts now request one JSON object with a top-level
+  `traceability` array. Calls request provider JSON mode, preserve
+  `finish_reason`/usage, validate every trace item before normalization and
+  retry one malformed response with explicit contract feedback.
+- The parser only accepts a complete outer payload. It no longer salvages an
+  arbitrary nested array. Non-empty unknown requirement IDs and invented design
+  targets remain fail-closed.
+- Every trace attempt is persisted as raw text plus metadata before
+  normalization. A failed traceability run is exposed as a recoverable Phase 2
+  block, and `revalidate-design` can resume an existing failed design run from
+  its frozen approved requirement and latest persisted design.
 

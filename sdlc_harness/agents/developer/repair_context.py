@@ -1,4 +1,9 @@
-"""Build bounded repair targets and read-only context for Developer execution."""
+"""Build diagnostic hints for Developer repair execution.
+
+The approved work-packet allowlist remains the repair boundary.  Compiler and
+validator evidence only ranks useful starting points; it must never hide an
+approved file that may need a coherent cross-file change.
+"""
 
 from __future__ import annotations
 
@@ -27,11 +32,19 @@ def build_repair_closure(
         return {
             "direct_paths": allowed,
             "direct_repair_paths": allowed,
+            "diagnostic_paths": allowed,
             "context_paths": allowed,
             "contract_anchor_paths": [],
             "path_reasons": {path: ["approved_implementation"] for path in allowed},
             "symbols": [],
             "excerpts": [],
+            "repair_hints": {
+                "diagnostic_paths": allowed,
+                "contract_anchor_paths": [],
+                "path_reasons": {path: ["approved_implementation"] for path in allowed},
+                "symbols": [],
+                "excerpts": [],
+            },
         }
 
     current_evidence = _current_repair_evidence(feedback)
@@ -78,17 +91,27 @@ def build_repair_closure(
             reasons.setdefault(path, set()).add("allowed_scope_fallback")
 
     direct_ordered = [path for path in allowed if path in direct]
-    context_ordered = [path for path in allowed if path in selected]
+    hinted_ordered = [path for path in allowed if path in selected]
     anchor_ordered = [path for path in allowed if path in anchors]
-    excerpts = _repair_excerpts(target_path=target_path, paths=context_ordered, symbols=symbols)
+    excerpts = _repair_excerpts(target_path=target_path, paths=hinted_ordered, symbols=symbols)
+    path_reasons = {path: sorted(reasons.get(path, {"dependency_context"})) for path in hinted_ordered}
     return {
         "direct_paths": direct_ordered,
+        # Kept for V4 artifact readers. In V5 this is advisory only.
         "direct_repair_paths": direct_ordered,
-        "context_paths": context_ordered,
+        "diagnostic_paths": hinted_ordered,
+        "context_paths": allowed,
         "contract_anchor_paths": anchor_ordered,
-        "path_reasons": {path: sorted(reasons.get(path, {"dependency_context"})) for path in context_ordered},
+        "path_reasons": path_reasons,
         "symbols": symbols,
         "excerpts": excerpts,
+        "repair_hints": {
+            "diagnostic_paths": hinted_ordered,
+            "contract_anchor_paths": anchor_ordered,
+            "path_reasons": path_reasons,
+            "symbols": symbols,
+            "excerpts": excerpts,
+        },
     }
 
 
