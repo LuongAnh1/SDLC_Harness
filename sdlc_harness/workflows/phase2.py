@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import shutil
 
 from ..agents.designer import DesignerAgent, parse_design_model
 from ..agents.validator import DesignValidationResult, DesignValidator, ValidatorAgent
@@ -129,6 +130,110 @@ class PhaseTwoWorkflow:
         except HarnessError as exc:
             return self._handle_error(state, run_id=run_id, error=exc)
 
+    def experiment_design_consensus(self, *, source_run_id: str) -> dict[str, object]:
+        """Generate a fresh design from a frozen requirement in an isolated run."""
+
+        source_state = self.store.read_state(source_run_id)
+        approved = read_frozen_requirement_input(
+            store=self.store,
+            state=source_state,
+            run_id=source_run_id,
+        )
+        run_id = self.store.new_run_id()
+        now = utc_now_iso()
+        copied_artifacts = self._copy_requirement_snapshot(
+            source_run_id=source_run_id,
+            experiment_run_id=run_id,
+            approved_artifacts=approved.approved_artifacts,
+            source_artifact_ref=str(approved.canonical_model.source.get("artifact_ref") or ""),
+        )
+        state: dict[str, object] = {
+            "ok": True,
+            "run_id": run_id,
+            "source_ref": source_state.get("source_ref"),
+            "dataset": source_state.get("dataset"),
+            "use_case": source_state.get("use_case"),
+            "requirement_contract_version": approved.contract_version,
+            "approved_artifacts": copied_artifacts,
+            "latest_artifacts": dict(copied_artifacts),
+            "created_at": now,
+            "updated_at": now,
+            "current_phase": "design_experiment",
+            "status": "design_experiment_drafting",
+            "pending_checkpoint": None,
+            "allowed_next_actions": ["get_status"],
+            "last_sync": {"status": "disabled", "mode": "none"},
+            "last_error": None,
+            "llm": {"mode": self.settings.llm_mode, "model": self.settings.llm_model},
+            "experiment": {
+                "kind": "design_validator_consensus",
+                "source_run_id": source_run_id,
+                "validation_trials": self.settings.design_validation_trials,
+                "quorum": self.settings.design_validation_trials // 2 + 1,
+                "repair_limit": self.settings.design_repair_limit,
+                "sync_disabled": True,
+                "trajectory": [],
+            },
+            "summary_for_user": "Đang sinh design mới để đo độ hội tụ của validator consensus.",
+        }
+        self.store.write_state(state)
+        try:
+            draft = self.designer.draft(
+                requirement_packet=approved.requirement_packet,
+                formal_use_case=approved.formal_use_case,
+                canonical_requirement=approved.canonical_model,
+            )
+            return self._run_validation_loop(
+                state=state,
+                approved=approved,
+                design_model=draft.design_model,
+                base_analysis=draft.analysis_report,
+                artifact_paths=copied_artifacts,
+                start_version=1,
+                existing_versions=[],
+                sync_checkpoint=False,
+                experiment_mode=True,
+            )
+        except HarnessError as exc:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "status": "design_experiment_failed",
+                    "last_error": HarnessError(exc.error_code, exc.message, run_id=run_id).to_response(),
+                    "summary_for_user": f"Thử nghiệm design consensus lỗi: {exc.message}",
+                }
+            )
+            self._write_experiment_report(state)
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=True)
+
+    def _copy_requirement_snapshot(
+        self,
+        *,
+        source_run_id: str,
+        experiment_run_id: str,
+        approved_artifacts: dict[str, str],
+        source_artifact_ref: str,
+    ) -> dict[str, str]:
+        destination = self.store.run_dir(experiment_run_id) / "artifacts" / "requirement_snapshot"
+        destination.mkdir(parents=True, exist_ok=True)
+        copied: dict[str, str] = {}
+        refs = {**approved_artifacts}
+        if source_artifact_ref:
+            refs["source_snapshot"] = source_artifact_ref
+        for key, artifact_ref in refs.items():
+            source = (self.store.repo_root / artifact_ref).resolve()
+            if not source.is_file():
+                raise HarnessError(
+                    "approved_requirement_not_found",
+                    f"Cannot copy frozen requirement artifact: {artifact_ref}",
+                    run_id=source_run_id,
+                )
+            target = destination / source.name
+            shutil.copy2(source, target)
+            copied[key] = self.store.relative(target)
+        return copied
+
     def _run_validation_loop(
         self,
         *,
@@ -139,6 +244,8 @@ class PhaseTwoWorkflow:
         artifact_paths: dict[str, str],
         start_version: int,
         existing_versions: list[str],
+        sync_checkpoint: bool = True,
+        experiment_mode: bool = False,
     ) -> dict[str, object]:
         run_id = str(state.get("run_id") or "")
         versions = list(existing_versions)
@@ -148,9 +255,12 @@ class PhaseTwoWorkflow:
         design_paths: dict[str, str] = {}
         validation: DesignValidationResult | None = None
         previous_quality_report = ""
-        seen_states: set[str] = set()
+        seen_states: dict[str, int] = {}
         stalled = False
+        oscillating = False
         passed = False
+        inconclusive = False
+        trajectory: list[dict[str, object]] = []
         repair_limit = self.settings.design_repair_limit
 
         for repair_iteration in range(repair_limit + 1):
@@ -194,6 +304,7 @@ class PhaseTwoWorkflow:
                 traceability=traceability,
                 canonical_requirement=approved.canonical_model,
                 repair_iterations=repair_iteration,
+                validation_trials=self.settings.design_validation_trials,
             )
             design_paths = write_phase2_design_artifacts(
                 store=self.store,
@@ -236,17 +347,39 @@ class PhaseTwoWorkflow:
                     "quality_reports": quality_reports,
                 }
             )
+            repair_state = _repair_state_fingerprint(validation=validation)
+            consensus = validation.semantic_consensus
+            trajectory_entry = {
+                "version": version_label,
+                "repair_iteration": repair_iteration,
+                "blocking_count": len(validation.blocking_findings),
+                "warning_count": len(validation.warnings),
+                "disputed_count": len(validation.disputed_findings),
+                "inconclusive": validation.inconclusive,
+                "blocker_keys": sorted(item.canonical_key for item in validation.blocking_findings),
+                "fingerprint": repair_state,
+                "requested_trials": consensus.get("requested_trials", 1),
+                "valid_trials": consensus.get("valid_trials", 1),
+                "quorum": consensus.get("quorum", 1),
+                "consistency_score": consensus.get("consistency_score", 1.0),
+            }
+            trajectory.append(trajectory_entry)
+            if experiment_mode:
+                experiment = _dict_value(state.get("experiment"))
+                experiment["trajectory"] = trajectory
+                state["experiment"] = experiment
             self.store.write_state(state)
+            if validation.inconclusive:
+                inconclusive = True
+                break
             if validation.ok:
                 passed = True
                 break
-            repair_state = _repair_state_fingerprint(
-                validation=validation,
-            )
             if repair_state in seen_states:
-                stalled = True
+                stalled = seen_states[repair_state] == repair_iteration - 1
+                oscillating = not stalled
                 break
-            seen_states.add(repair_state)
+            seen_states[repair_state] = repair_iteration
             if repair_iteration >= repair_limit:
                 break
             previous_quality_report = design_paths["design_quality_report"]
@@ -254,20 +387,41 @@ class PhaseTwoWorkflow:
         if validation is None:
             raise HarnessError("designer_failed", "Phase 2 did not produce a design validation result.", run_id=run_id)
         if not passed:
-            error_code = "design_repair_stalled" if stalled else "design_repair_exhausted"
+            if inconclusive:
+                error_code = "design_validation_inconclusive"
+            elif stalled:
+                error_code = "design_repair_stalled"
+            elif oscillating:
+                error_code = "design_repair_oscillating"
+            else:
+                error_code = "design_repair_exhausted"
             error = HarnessError(
                 error_code,
                 f"Design still has {len(validation.blocking_findings)} blocking finding(s).",
                 run_id=run_id,
             )
+            terminal_status = (
+                {
+                    "design_validation_inconclusive": "design_experiment_inconclusive",
+                    "design_repair_stalled": "design_experiment_stalled",
+                    "design_repair_oscillating": "design_experiment_oscillating",
+                    "design_repair_exhausted": "design_experiment_exhausted",
+                }[error_code]
+                if experiment_mode
+                else "blocked"
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
                     "current_phase": "design_review",
-                    "status": "blocked",
+                    "status": terminal_status,
                     "latest_artifacts": merged_artifacts,
                     "pending_checkpoint": None,
-                    "allowed_next_actions": ["revalidate_design", "get_status", "request_change", "cancel_run"],
+                    "allowed_next_actions": (
+                        ["get_status"]
+                        if experiment_mode
+                        else ["revalidate_design", "get_status", "request_change", "cancel_run"]
+                    ),
                     "last_error": error.to_response(),
                     "summary_for_user": (
                         f"Design chưa pass hybrid validator: còn {len(validation.blocking_findings)} blocker, "
@@ -275,9 +429,43 @@ class PhaseTwoWorkflow:
                     ),
                 }
             )
+            if experiment_mode:
+                self._write_experiment_report(state)
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
 
+        if experiment_mode:
+            disputed_blockers = sum(
+                1 for item in validation.disputed_findings if item.severity == "blocking"
+            )
+            status = (
+                "design_experiment_converged_strong"
+                if disputed_blockers == 0
+                else "design_experiment_converged_by_consensus"
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_experiment",
+                    "status": status,
+                    "latest_artifacts": merged_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status"],
+                    "last_error": None,
+                    "last_sync": {"status": "disabled", "mode": "none"},
+                    "quality_reports": _quality_reports(state, validation, versions, design_paths),
+                    "summary_for_user": (
+                        f"Thử nghiệm design consensus hội tụ tại {versions[-1]}: "
+                        f"0 blocker đồng thuận, {len(validation.disputed_findings)} finding còn tranh chấp."
+                    ),
+                }
+            )
+            self._write_experiment_report(state)
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=True)
+
+        if not sync_checkpoint:
+            raise HarnessError("internal_error", "Checkpoint sync disabled outside experiment mode.", run_id=run_id)
         last_sync = sync_design_checkpoint(
             store=self.store,
             settings=self.settings,
@@ -316,6 +504,74 @@ class PhaseTwoWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _write_experiment_report(self, state: dict[str, object]) -> None:
+        run_id = str(state.get("run_id") or "")
+        experiment = _dict_value(state.get("experiment"))
+        trajectory = experiment.get("trajectory") if isinstance(experiment.get("trajectory"), list) else []
+        payload = {
+            "version": "design_consensus_experiment_v1",
+            "run_id": run_id,
+            "source_run_id": experiment.get("source_run_id"),
+            "source_ref": state.get("source_ref"),
+            "status": state.get("status"),
+            "stop_reason": _experiment_stop_reason(str(state.get("status") or "")),
+            "llm": state.get("llm"),
+            "validation_trials": experiment.get("validation_trials"),
+            "quorum": experiment.get("quorum"),
+            "repair_limit": experiment.get("repair_limit"),
+            "sync_disabled": True,
+            "trajectory": trajectory,
+            "quality_reports": state.get("quality_reports", {}),
+            "last_error": state.get("last_error"),
+            "completed_at": utc_now_iso(),
+        }
+        json_path = self.store.write_json_artifact(run_id, "design_consensus_experiment.json", payload)
+        markdown_path = self.store.artifact_path(run_id, "design_consensus_experiment.md")
+        rows = [
+            "| Version | Blockers | Warnings | Disputed | Valid trials | Consistency |",
+            "| --- | ---: | ---: | ---: | ---: | ---: |",
+        ]
+        for item in trajectory:
+            if not isinstance(item, dict):
+                continue
+            rows.append(
+                "| "
+                + " | ".join(
+                    [
+                        str(item.get("version") or ""),
+                        str(item.get("blocking_count") or 0),
+                        str(item.get("warning_count") or 0),
+                        str(item.get("disputed_count") or 0),
+                        f"{item.get('valid_trials', 0)}/{item.get('requested_trials', 0)}",
+                        str(item.get("consistency_score") or 0),
+                    ]
+                )
+                + " |"
+            )
+        markdown_path.write_text(
+            "\n".join(
+                [
+                    "# Design Validator Consensus Experiment",
+                    "",
+                    f"- Experiment run: `{run_id}`",
+                    f"- Source run: `{experiment.get('source_run_id', '')}`",
+                    f"- Status: `{state.get('status', '')}`",
+                    f"- Stop reason: `{payload['stop_reason']}`",
+                    f"- Trials/quorum: `{experiment.get('validation_trials', '')}/{experiment.get('quorum', '')}`",
+                    f"- Repair limit: `{experiment.get('repair_limit', '')}`",
+                    "- External sync: `disabled`",
+                    "",
+                    *rows,
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        latest = _string_dict(state.get("latest_artifacts"))
+        latest["design_consensus_experiment"] = self.store.relative(json_path)
+        latest["design_consensus_experiment_markdown"] = self.store.relative(markdown_path)
+        state["latest_artifacts"] = latest
 
     def _handle_error(
         self,
@@ -420,6 +676,12 @@ def _quality_reports(
             "versions": versions,
             "blocking_count": len(validation.blocking_findings),
             "warning_count": len(validation.warnings),
+            "disputed_count": len(validation.disputed_findings),
+            "inconclusive": validation.inconclusive,
+            "requested_trials": validation.semantic_consensus.get("requested_trials", 1),
+            "valid_trials": validation.semantic_consensus.get("valid_trials", 1),
+            "quorum": validation.semantic_consensus.get("quorum", 1),
+            "consistency_score": validation.semantic_consensus.get("consistency_score", 1.0),
             "summary": summary,
             "report": paths["design_validation_report"],
         },
@@ -463,19 +725,21 @@ def _repair_state_fingerprint(
 ) -> str:
     signatures = []
     for finding in validation.blocking_findings:
-        signatures.append(
-            "|".join(
-                [
-                    finding.category.strip().casefold(),
-                    ",".join(sorted(item.strip().casefold() for item in finding.requirement_ids)),
-                    ",".join(sorted(item.strip().casefold() for item in finding.diagram_ids)),
-                    finding.message.strip().casefold(),
-                    finding.expected_change.strip().casefold(),
-                ]
-            )
-        )
+        signatures.append(finding.canonical_key)
     content = "\n".join(sorted(signatures))
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _experiment_stop_reason(status: str) -> str:
+    return {
+        "design_experiment_converged_strong": "zero_consensus_blockers_without_disputed_blockers",
+        "design_experiment_converged_by_consensus": "zero_consensus_blockers_with_minority_blocker_observations",
+        "design_experiment_stalled": "same_blocker_set_repeated_consecutively",
+        "design_experiment_oscillating": "previous_blocker_set_reappeared",
+        "design_experiment_exhausted": "repair_limit_reached",
+        "design_experiment_inconclusive": "one_or_more_semantic_trials_failed",
+        "design_experiment_failed": "workflow_error",
+    }.get(status, status or "unknown")
 
 
 def _design_versions(state: dict[str, object]) -> list[str]:

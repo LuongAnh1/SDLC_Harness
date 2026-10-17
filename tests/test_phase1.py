@@ -373,7 +373,14 @@ class PhaseOneTest(unittest.TestCase):
 
         self.assertEqual(
             response["allowed_next_actions"],
-            ["approve_checkpoint", "request_change", "sync_run", "cancel_run", "get_status"],
+            [
+                "revalidate_design",
+                "approve_checkpoint",
+                "request_change",
+                "sync_run",
+                "cancel_run",
+                "get_status",
+            ],
         )
         self.assertEqual(state_path.read_text(encoding="utf-8"), persisted_before)
 

@@ -30,6 +30,7 @@ class Settings:
     developer_max_action_retries: int
     requirement_contract_version: str
     design_repair_limit: int
+    design_validation_trials: int
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
     qa_repair_limit: int
@@ -116,6 +117,7 @@ def load_settings(
         "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM",
         "SDLC_DEVELOPER_MAX_ACTION_RETRIES",
         "SDLC_DESIGN_REPAIR_LIMIT",
+        "SDLC_DESIGN_VALIDATION_TRIALS",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
         "SDLC_QA_REPAIR_LIMIT",
@@ -189,6 +191,11 @@ def load_settings(
         ),
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
+        design_validation_trials=_int_value(
+            merged.get("SDLC_DESIGN_VALIDATION_TRIALS"),
+            default=1,
+            minimum=1,
+        ),
         implementation_plan_repair_limit=_int_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"),
             default=2,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import json
+from itertools import combinations
 import re
 from typing import Any
 
@@ -30,6 +31,10 @@ class DesignFinding:
     requirement_ids: list[str] = field(default_factory=list)
     diagram_ids: list[str] = field(default_factory=list)
     evidence: list[dict[str, str]] = field(default_factory=list)
+    subject_ref: str = ""
+    support_count: int = 1
+    trial_ids: list[str] = field(default_factory=list)
+    origin: str = "semantic"
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -41,7 +46,15 @@ class DesignFinding:
             "requirement_ids": self.requirement_ids,
             "diagram_ids": self.diagram_ids,
             "evidence": self.evidence,
+            "subject_ref": self.subject_ref,
+            "support_count": self.support_count,
+            "trial_ids": self.trial_ids,
+            "origin": self.origin,
         }
+
+    @property
+    def canonical_key(self) -> str:
+        return _canonical_finding_key(self)
 
 
 @dataclass(frozen=True)
@@ -55,10 +68,13 @@ class DesignValidationResult:
     llm_review: dict[str, object]
     repair_iterations: int = 0
     mode: str = "design_validation_hybrid_v2"
+    semantic_consensus: dict[str, object] = field(default_factory=dict)
+    disputed_findings: list[DesignFinding] = field(default_factory=list)
+    inconclusive: bool = False
 
     @property
     def ok(self) -> bool:
-        return not self.blocking_findings
+        return not self.blocking_findings and not self.inconclusive
 
     @property
     def feedback(self) -> str:
@@ -80,13 +96,20 @@ class DesignValidationResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "version": "design_validation_report_v2",
+            "version": (
+                "design_validation_report_v3_consensus"
+                if self.mode == "design_validation_consensus_v1"
+                else "design_validation_report_v2"
+            ),
             "ok": self.ok,
             "mode": self.mode,
             "blocking_count": len(self.blocking_findings),
             "warning_count": len(self.warnings),
             "blocking_findings": [item.to_dict() for item in self.blocking_findings],
             "warnings": [item.to_dict() for item in self.warnings],
+            "disputed_findings": [item.to_dict() for item in self.disputed_findings],
+            "inconclusive": self.inconclusive,
+            "semantic_consensus": self.semantic_consensus,
             "rule_review": self.rule_review,
             "llm_review": self.llm_review,
             "repair_iterations": self.repair_iterations,
@@ -115,6 +138,7 @@ class DesignValidator:
         traceability: TraceabilityResult,
         canonical_requirement: object | None = None,
         repair_iterations: int = 0,
+        validation_trials: int = 1,
     ) -> DesignValidationResult:
         rule_findings = _rule_findings(
             class_graph=class_graph,
@@ -125,24 +149,81 @@ class DesignValidator:
             "ok": not any(item.severity == "blocking" for item in rule_findings),
             "findings": [item.to_dict() for item in rule_findings],
         }
-        llm_payload = self._semantic_review(
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            traceability=traceability,
-            canonical_requirement=canonical_requirement,
-            rule_review=rule_payload,
+        requested_trials = max(1, int(validation_trials))
+        trial_payloads: list[dict[str, object]] = []
+        valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]] = []
+        for index in range(requested_trials):
+            trial_id = f"trial-{index + 1}"
+            try:
+                payload = self._semantic_review(
+                    requirement_packet=requirement_packet,
+                    design_artifact=design_artifact,
+                    class_graph=class_graph,
+                    sequence_graph=sequence_graph,
+                    traceability=traceability,
+                    canonical_requirement=canonical_requirement,
+                    rule_review=rule_payload,
+                )
+                normalized = _normalize_llm_findings(payload)
+                if requested_trials > 1:
+                    normalized = _prepare_consensus_trial(normalized, trial_id=trial_id)
+                trial_payloads.append(
+                    {
+                        "trial_id": trial_id,
+                        "ok": True,
+                        "review": payload,
+                        "canonical_keys": sorted({item.canonical_key for item in normalized}),
+                    }
+                )
+                valid_trials.append((trial_id, payload, normalized))
+            except HarnessError as exc:
+                if requested_trials == 1:
+                    raise
+                trial_payloads.append(
+                    {
+                        "trial_id": trial_id,
+                        "ok": False,
+                        "error": exc.to_response(),
+                        "canonical_keys": [],
+                    }
+                )
+
+        if requested_trials == 1:
+            llm_payload = valid_trials[0][1]
+            llm_findings = valid_trials[0][2]
+            findings = _deduplicate_findings([*rule_findings, *llm_findings])
+            return DesignValidationResult(
+                traceability=traceability,
+                blocking_findings=[item for item in findings if item.severity == "blocking"],
+                warnings=[item for item in findings if item.severity == "warning"],
+                rule_review=rule_payload,
+                llm_review=llm_payload,
+                repair_iterations=repair_iterations,
+            )
+
+        consensus = _aggregate_semantic_trials(
+            requested_trials=requested_trials,
+            valid_trials=valid_trials,
         )
-        llm_findings = _normalize_llm_findings(llm_payload)
-        findings = _deduplicate_findings([*rule_findings, *llm_findings])
+        semantic_findings = [*consensus["blocking_findings"], *consensus["warnings"]]
+        findings = _deduplicate_findings([*rule_findings, *semantic_findings])
+        semantic_payload = {
+            "ok": not consensus["blocking_findings"] and len(valid_trials) == requested_trials,
+            "summary": "Semantic findings aggregated by majority vote.",
+            "trials": trial_payloads,
+            **consensus["metrics"],
+        }
         return DesignValidationResult(
             traceability=traceability,
             blocking_findings=[item for item in findings if item.severity == "blocking"],
             warnings=[item for item in findings if item.severity == "warning"],
             rule_review=rule_payload,
-            llm_review=llm_payload,
+            llm_review=semantic_payload,
             repair_iterations=repair_iterations,
+            mode="design_validation_consensus_v1",
+            semantic_consensus=consensus["metrics"],
+            disputed_findings=consensus["disputed_findings"],
+            inconclusive=len(valid_trials) != requested_trials,
         )
 
     def _semantic_review(
@@ -179,6 +260,7 @@ Return one JSON object only:
       "expected_change": "specific UML correction",
       "requirement_ids": ["MAIN-1"],
       "diagram_ids": ["sequence_diagram_1"],
+      "subject_ref": "sequence_diagram_1:event-or-fragment-id",
       "evidence": [{{"source": "requirement|design", "ref": "stable id", "excerpt": "short exact evidence"}}]
     }}
   ]
@@ -191,6 +273,7 @@ Blocking policy:
 - Block transaction/rollback ambiguity only when the approved requirement or the design itself explicitly promises atomicity, all-or-nothing behavior, or a single consistency boundary.
 - If transaction behavior is merely an architectural improvement not required by either input, emit a warning.
 - Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
+- Give every finding a stable subject_ref naming the UML node, message, fragment, or class contract being judged.
 - An uncertainty without evidence is a warning, not a blocker.
 
 Canonical Requirement V2:
@@ -261,6 +344,8 @@ def _rule_findings(
                 ]
                 if evidence
                 else [],
+                subject_ref=f"{diagram}:{evidence}" if evidence else diagram,
+                origin="deterministic",
             )
         )
 
@@ -277,6 +362,8 @@ def _rule_findings(
                     expected_change="Add the UML element and trace target that implement this approved requirement.",
                     requirement_ids=[req_id] if req_id else [],
                     evidence=[{"source": "requirement", "ref": req_id, "excerpt": str(item.get("content") or "")}],
+                    subject_ref=f"{diagram_name}:{req_id}",
+                    origin="deterministic",
                 )
             )
 
@@ -348,6 +435,10 @@ def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
                     "excerpt": str(item.get("excerpt") or "").strip()[:500],
                 }
             )
+        diagram_ids = _string_items(raw.get("diagram_ids"))
+        subject_ref = str(raw.get("subject_ref") or "").strip()
+        if not subject_ref:
+            subject_ref = _subject_ref_from_evidence(evidence, diagram_ids)
         findings.append(
             DesignFinding(
                 finding_id=str(raw.get("id") or f"SEM-{index:03d}").strip(),
@@ -356,8 +447,9 @@ def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
                 message=str(raw.get("message") or "Semantic design issue.").strip(),
                 expected_change=str(raw.get("expected_change") or "Correct the design consistently.").strip(),
                 requirement_ids=requirement_ids,
-                diagram_ids=_string_items(raw.get("diagram_ids")),
+                diagram_ids=diagram_ids,
                 evidence=evidence,
+                subject_ref=subject_ref,
             )
         )
     if not bool(payload.get("ok")) and not findings:
@@ -366,6 +458,145 @@ def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
             "Design semantic validator rejected the design without actionable findings.",
         )
     return findings
+
+
+def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) -> list[DesignFinding]:
+    """Normalize one semantic vote and ensure one vote per canonical subject."""
+
+    prepared: list[DesignFinding] = []
+    for finding in findings:
+        severity = finding.severity
+        if severity == "blocking" and (not finding.requirement_ids or not finding.subject_ref):
+            severity = "warning"
+        prepared.append(
+            DesignFinding(
+                finding_id=finding.finding_id,
+                category=finding.category,
+                severity=severity,
+                message=finding.message,
+                expected_change=finding.expected_change,
+                requirement_ids=finding.requirement_ids,
+                diagram_ids=finding.diagram_ids,
+                evidence=finding.evidence,
+                subject_ref=finding.subject_ref,
+                support_count=1,
+                trial_ids=[trial_id],
+                origin="semantic",
+            )
+        )
+    unique: dict[str, DesignFinding] = {}
+    for finding in prepared:
+        current = unique.get(finding.canonical_key)
+        if current is None or _evidence_score(finding) > _evidence_score(current):
+            unique[finding.canonical_key] = finding
+    return list(unique.values())
+
+
+def _aggregate_semantic_trials(
+    *,
+    requested_trials: int,
+    valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]],
+) -> dict[str, object]:
+    """Majority-vote semantic findings while retaining minority observations."""
+
+    quorum = requested_trials // 2 + 1
+    groups: dict[str, list[tuple[str, DesignFinding]]] = {}
+    trial_key_sets: list[tuple[str, set[str]]] = []
+    for trial_id, _payload, findings in valid_trials:
+        key_set = {item.canonical_key for item in findings}
+        trial_key_sets.append((trial_id, key_set))
+        for finding in findings:
+            groups.setdefault(finding.canonical_key, []).append((trial_id, finding))
+
+    blockers: list[DesignFinding] = []
+    warnings: list[DesignFinding] = []
+    disputed: list[DesignFinding] = []
+    for ordinal, (key, votes) in enumerate(sorted(groups.items()), start=1):
+        blocker_votes = [(trial_id, item) for trial_id, item in votes if item.severity == "blocking"]
+        representative = max((item for _trial, item in votes), key=_evidence_score)
+        if len(blocker_votes) >= quorum:
+            severity = "blocking"
+            target = blockers
+        elif len(votes) >= quorum:
+            severity = "warning"
+            target = warnings
+        else:
+            severity = representative.severity
+            target = disputed
+        target.append(
+            DesignFinding(
+                finding_id=f"CONS-{ordinal:03d}",
+                category=representative.category,
+                severity=severity,
+                message=representative.message,
+                expected_change=representative.expected_change,
+                requirement_ids=representative.requirement_ids,
+                diagram_ids=representative.diagram_ids,
+                evidence=representative.evidence,
+                subject_ref=representative.subject_ref,
+                support_count=len(votes),
+                trial_ids=[trial_id for trial_id, _item in votes],
+                origin="semantic",
+            )
+        )
+
+    pairwise = []
+    for (left_id, left), (right_id, right) in combinations(trial_key_sets, 2):
+        union = left | right
+        score = 1.0 if not union else len(left & right) / len(union)
+        pairwise.append(
+            {
+                "left_trial": left_id,
+                "right_trial": right_id,
+                "jaccard": round(score, 4),
+            }
+        )
+    consistency = (
+        round(sum(float(item["jaccard"]) for item in pairwise) / len(pairwise), 4)
+        if pairwise
+        else (1.0 if len(valid_trials) == requested_trials else 0.0)
+    )
+    metrics = {
+        "requested_trials": requested_trials,
+        "valid_trials": len(valid_trials),
+        "quorum": quorum,
+        "consensus_blocking_count": len(blockers),
+        "consensus_warning_count": len(warnings),
+        "disputed_count": len(disputed),
+        "pairwise_jaccard": pairwise,
+        "consistency_score": consistency,
+    }
+    return {
+        "blocking_findings": blockers,
+        "warnings": warnings,
+        "disputed_findings": disputed,
+        "metrics": metrics,
+    }
+
+
+def _subject_ref_from_evidence(evidence: list[dict[str, str]], diagram_ids: list[str]) -> str:
+    for item in evidence:
+        if item.get("source") in {"design", "design_graph"} and item.get("ref"):
+            return str(item["ref"]).strip()
+    return diagram_ids[0] if len(diagram_ids) == 1 else ""
+
+
+def _canonical_finding_key(finding: DesignFinding) -> str:
+    values = [
+        finding.category.strip().casefold(),
+        ",".join(sorted(item.strip().casefold() for item in finding.requirement_ids)),
+        ",".join(sorted(item.strip().casefold() for item in finding.diagram_ids)),
+        _normalize_reference(finding.subject_ref),
+    ]
+    return "|".join(values)
+
+
+def _normalize_reference(value: str) -> str:
+    return re.sub(r"[^a-z0-9:_-]", "", value.strip().casefold())
+
+
+def _evidence_score(finding: DesignFinding) -> tuple[int, int, int]:
+    return (len(finding.evidence), len(finding.message), len(finding.expected_change))
 
 
 def _class_symbols(class_graph: dict[str, object]) -> dict[str, set[str]]:
