@@ -189,6 +189,8 @@ def fake_completion(prompt: str) -> str:
         return fake_traceability_class(prompt)
     if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
         return fake_traceability_sequence(prompt)
+    if "Design Semantic Review v2" in prompt:
+        return fake_design_semantic_review()
     if "Implementation Plan LLM Review v1" in prompt:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
@@ -459,6 +461,20 @@ def fake_implementation_plan_review() -> str:
             "test_issues": [],
             "scope_issues": [],
             "developer_feedback": "",
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_design_semantic_review() -> str:
+    """Semantic design review fixture for offline Phase 2 tests."""
+
+    return json.dumps(
+        {
+            "ok": True,
+            "summary": "The fake design is behaviorally consistent with the approved requirement.",
+            "findings": [],
         },
         ensure_ascii=False,
         indent=2,

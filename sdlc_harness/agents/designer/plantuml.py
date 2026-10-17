@@ -158,15 +158,18 @@ class ClassDiagramParser:
 
 
 class SequenceDiagramParser:
-    """Parse subset PlantUML sequence diagram thành lifeline/message graph."""
+    """Parse PlantUML sequence diagrams while preserving event order and nesting."""
 
     def parse(self, sequence_diagrams: list[str]) -> dict[str, object]:
         diagrams: list[dict[str, object]] = []
         for index, diagram in enumerate(sequence_diagrams, start=1):
             nodes: dict[str, dict[str, str]] = {}
-            messages: list[dict[str, str]] = []
-            control_flows: list[dict[str, str]] = []
-            control_stack: list[str] = []
+            messages: list[dict[str, object]] = []
+            control_flows: list[dict[str, object]] = []
+            events: list[dict[str, object]] = []
+            parse_issues: list[dict[str, str]] = []
+            control_stack: list[dict[str, object]] = []
+            event_order = 0
 
             for raw_line in diagram.splitlines():
                 line = raw_line.strip()
@@ -186,19 +189,68 @@ class SequenceDiagramParser:
                 first_word = lowered.split(" ", 1)[0]
                 if first_word in _CONTROL_START:
                     condition = line.split(" ", 1)[1].strip() if " " in line else ""
-                    control_stack.append(first_word)
-                    control_flows.append({"type": first_word, "condition": condition})
+                    event_order += 1
+                    fragment_id = f"sequence_diagram_{index}:fragment:{event_order:04d}"
+                    event = {
+                        "id": fragment_id,
+                        "order": event_order,
+                        "eventType": "control_start",
+                        "type": first_word,
+                        "condition": condition,
+                        "depth": len(control_stack),
+                        "parentId": str(control_stack[-1]["id"]) if control_stack else "",
+                    }
+                    control_stack.append(event)
+                    control_flows.append(dict(event))
+                    events.append(dict(event))
                     continue
                 if first_word == "else":
-                    control_flows.append({"type": "else", "condition": line.split(" ", 1)[1].strip() if " " in line else ""})
+                    event_order += 1
+                    condition = line.split(" ", 1)[1].strip() if " " in line else ""
+                    if not control_stack or str(control_stack[-1].get("type")) not in {"alt", "par"}:
+                        parse_issues.append({"code": "orphan_else", "message": "Sequence `else` is outside an alt/par fragment.", "line": line})
+                    event = {
+                        "id": f"sequence_diagram_{index}:control:{event_order:04d}",
+                        "order": event_order,
+                        "eventType": "control_else",
+                        "type": "else",
+                        "condition": condition,
+                        "depth": max(0, len(control_stack) - 1),
+                        "parentId": str(control_stack[-1]["id"]) if control_stack else "",
+                    }
+                    control_flows.append(dict(event))
+                    events.append(dict(event))
                     continue
                 if first_word == "end":
-                    if control_stack:
-                        control_stack.pop()
-                    control_flows.append({"type": "end", "condition": ""})
+                    event_order += 1
+                    closed = control_stack.pop() if control_stack else None
+                    if closed is None:
+                        parse_issues.append({"code": "orphan_end", "message": "Sequence `end` has no open control fragment.", "line": line})
+                    event = {
+                        "id": f"sequence_diagram_{index}:control:{event_order:04d}",
+                        "order": event_order,
+                        "eventType": "control_end",
+                        "type": "end",
+                        "condition": "",
+                        "depth": len(control_stack),
+                        "parentId": str(closed.get("id")) if closed else "",
+                    }
+                    control_flows.append(dict(event))
+                    events.append(dict(event))
                     continue
                 if lowered.startswith("note "):
-                    control_flows.append({"type": "note", "condition": line})
+                    event_order += 1
+                    event = {
+                        "id": f"sequence_diagram_{index}:note:{event_order:04d}",
+                        "order": event_order,
+                        "eventType": "note",
+                        "type": "note",
+                        "condition": line,
+                        "depth": len(control_stack),
+                        "parentId": str(control_stack[-1]["id"]) if control_stack else "",
+                    }
+                    control_flows.append(dict(event))
+                    events.append(dict(event))
                     continue
 
                 message_match = _MESSAGE_RE.match(line)
@@ -206,15 +258,29 @@ class SequenceDiagramParser:
                     source, arrow, target, message = message_match.groups()
                     nodes.setdefault(source, {"id": source, "type": "participant", "label": source})
                     nodes.setdefault(target, {"id": target, "type": "participant", "label": target})
-                    messages.append(
-                        {
-                            "from": source,
-                            "to": target,
-                            "arrow": arrow,
-                            "type": _message_type(arrow),
-                            "message": message.strip(),
-                        }
-                    )
+                    event_order += 1
+                    event = {
+                        "id": f"sequence_diagram_{index}:message:{event_order:04d}",
+                        "order": event_order,
+                        "eventType": "message",
+                        "from": source,
+                        "to": target,
+                        "arrow": arrow,
+                        "type": _message_type(arrow),
+                        "message": message.strip(),
+                        "controlPath": [str(item["id"]) for item in control_stack],
+                    }
+                    messages.append(dict(event))
+                    events.append(dict(event))
+
+            for fragment in control_stack:
+                parse_issues.append(
+                    {
+                        "code": "unclosed_fragment",
+                        "message": f"Sequence control fragment `{fragment.get('type')}` is not closed.",
+                        "line": str(fragment.get("condition") or ""),
+                    }
+                )
 
             diagrams.append(
                 {
@@ -222,10 +288,12 @@ class SequenceDiagramParser:
                     "nodes": list(nodes.values()),
                     "messages": messages,
                     "controlFlows": control_flows,
+                    "events": events,
+                    "parseIssues": parse_issues,
                 }
             )
 
-        return {"version": "sequence_diagram_graph_v1", "sequenceDiagrams": diagrams}
+        return {"version": "sequence_diagram_graph_v2", "sequenceDiagrams": diagrams}
 
 
 def _parse_parameters(raw: str) -> list[dict[str, str]]:

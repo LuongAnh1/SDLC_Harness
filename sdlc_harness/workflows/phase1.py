@@ -477,6 +477,14 @@ class PhaseOneWorkflow:
             if "revalidate_implementation_plan" not in allowed_actions:
                 allowed_actions.insert(0, "revalidate_implementation_plan")
             response["allowed_next_actions"] = allowed_actions
+        if response.get("current_phase") == "design_review" and response.get("status") in {
+            "waiting_design_approval",
+            "blocked",
+        }:
+            allowed_actions = [str(action) for action in response["allowed_next_actions"]]
+            if "revalidate_design" not in allowed_actions:
+                allowed_actions.insert(0, "revalidate_design")
+            response["allowed_next_actions"] = allowed_actions
         if (
             isinstance(checkpoint, dict)
             and isinstance(last_sync, dict)

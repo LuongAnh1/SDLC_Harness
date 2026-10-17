@@ -630,6 +630,20 @@ class PhaseThreeWorkflow:
                 f"Run is not waiting for design approval: {run_id}",
                 run_id=run_id,
             )
+        quality_reports = _dict_value(state.get("quality_reports"))
+        design_validation = _dict_value(quality_reports.get("design_validation"))
+        latest_artifacts = _dict_value(state.get("latest_artifacts"))
+        if (
+            not bool(design_validation.get("ok"))
+            or str(design_validation.get("mode") or "")
+            != "design_validation_hybrid_v2"
+            or not str(latest_artifacts.get("design_validation_report") or "").strip()
+        ):
+            raise HarnessError(
+                "design_validation_required",
+                "Design must pass the hybrid Design Validator before Phase 3 approval. Run revalidate-design first.",
+                run_id=run_id,
+            )
         checkpoint = _dict_value(state.get("pending_checkpoint"))
         if not checkpoint:
             raise HarnessError(

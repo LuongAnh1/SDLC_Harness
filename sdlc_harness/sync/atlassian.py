@@ -39,6 +39,7 @@ _DESIGN_ARTIFACT_KEYS = {
     "sequence_diagram_graph",
     "requirement_design_trace",
     "missing_design_links",
+    "design_validation_report",
     "design_quality_report",
 }
 _IMPLEMENTATION_PLAN_ARTIFACT_KEYS = {
@@ -1232,13 +1233,13 @@ def _jira_design_comment_body(
         "content": [
             _adf_heading("SDLC Harness checkpoint: Design review", level=2),
             _adf_paragraph(_checkpoint_marker(source_ref, "design")),
-            _adf_paragraph("Design artifacts passed traceability validation and are waiting for human approval."),
+            _adf_paragraph("Design artifacts passed hybrid validation and confirmation and are waiting for human approval."),
             _adf_bullet_list(
                 [
                     f"Run: {run_id}",
                     f"Source: {source_ref}",
                     "Status: waiting_design_approval",
-                    "Next action: approve_checkpoint, request_change, cancel_run, or get_status",
+                    "Next action: approve_checkpoint, revalidate_design, request_change, cancel_run, or get_status",
                 ]
             ),
             _adf_heading("Traceability summary", level=3),

@@ -19,6 +19,7 @@ from ..core.config import load_settings, repo_root
 from ..core.errors import HarnessError
 from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
+from ..workflows.phase2 import PhaseTwoWorkflow
 from ..workflows.phase3 import PhaseThreeWorkflow
 from ..workflows.phase4 import PhaseFourWorkflow
 from ..workflows.target_repo import TargetRepoPreparationWorkflow
@@ -75,6 +76,13 @@ def build_parser() -> argparse.ArgumentParser:
     revalidate_plan.add_argument("--implementation-plan-repair-limit", default=None)
     _add_sync_mode_argument(revalidate_plan)
     revalidate_plan.add_argument("--runtime-root", default=None)
+
+    revalidate_design = subparsers.add_parser("revalidate-design")
+    revalidate_design.add_argument("--run-id", required=True)
+    revalidate_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    revalidate_design.add_argument("--design-repair-limit", default=None)
+    _add_sync_mode_argument(revalidate_design)
+    revalidate_design.add_argument("--runtime-root", default=None)
 
     approve = subparsers.add_parser("approve-checkpoint")
     approve.add_argument("--run-id", required=True)
@@ -172,6 +180,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     if args.command == "revalidate-implementation-plan":
         workflow = PhaseThreeWorkflow(settings)
         return workflow.revalidate_implementation_plan(run_id=args.run_id)
+    if args.command == "revalidate-design":
+        return PhaseTwoWorkflow(settings).revalidate_design(run_id=args.run_id)
     if args.command == "approve-checkpoint":
         workflow = CheckpointApprovalWorkflow(settings)
         return workflow.approve_checkpoint(

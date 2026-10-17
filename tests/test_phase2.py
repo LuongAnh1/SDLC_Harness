@@ -11,13 +11,21 @@ import unittest
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import DesignDraft, DesignerAgent, parse_design_model
-from sdlc_harness.agents.validator import TraceabilityResult, ValidatorAgent, build_requirement_graph
+from sdlc_harness.agents.validator import (
+    DesignFinding,
+    DesignValidationResult,
+    DesignValidator,
+    TraceabilityResult,
+    ValidatorAgent,
+    build_requirement_graph,
+)
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmClient, fake_design_model, fake_refined_requirement
 from sdlc_harness.sync.atlassian import real_sync_design_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
+from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 
 
 class StaticLlmClient:
@@ -107,6 +115,37 @@ class SequencedTraceabilityValidator:
         )
 
 
+class SequencedDesignValidator:
+    def __init__(self, findings_by_call: list[list[DesignFinding]]):
+        self.findings_by_call = findings_by_call
+        self.calls = 0
+
+    def review(self, *, traceability: TraceabilityResult, repair_iterations: int = 0, **kwargs) -> DesignValidationResult:
+        findings = self.findings_by_call[min(self.calls, len(self.findings_by_call) - 1)]
+        self.calls += 1
+        return DesignValidationResult(
+            traceability=traceability,
+            blocking_findings=findings,
+            warnings=[],
+            rule_review={"ok": not findings, "findings": []},
+            llm_review={"ok": not findings, "summary": "test", "findings": []},
+            repair_iterations=repair_iterations,
+        )
+
+
+def design_finding(name: str, *, excerpt: str = "") -> DesignFinding:
+    return DesignFinding(
+        finding_id=f"SEM-{name}",
+        category="cross_diagram_contract",
+        severity="blocking",
+        message=f"Problem {name}",
+        expected_change=f"Fix {name}",
+        requirement_ids=["REQ-1"],
+        diagram_ids=["sequence_diagram_1"],
+        evidence=[{"source": "design", "ref": f"contract:{name}", "excerpt": excerpt}],
+    )
+
+
 class PhaseTwoTest(unittest.TestCase):
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
@@ -177,6 +216,83 @@ class PhaseTwoTest(unittest.TestCase):
         messages = [message["message"] for message in sequence_diagram["messages"]]
         self.assertIn("requestDeletion(heritageId)", messages)
         self.assertIn("showResult(success message)", messages)
+        self.assertEqual(
+            [event["order"] for event in sequence_diagram["events"]],
+            list(range(1, len(sequence_diagram["events"]) + 1)),
+        )
+
+    def test_sequence_parser_preserves_nested_control_path_and_reports_unclosed_fragment(self) -> None:
+        design = fake_design_model().replace(
+            "AO -> Boundary: requestDeletion(heritageId)",
+            "alt selected\nopt confirmed\nAO -> Boundary: requestDeletion(heritageId)\nend",
+        )
+
+        parsed = parse_design_model(design)
+        sequence = parsed.sequence_graph["sequenceDiagrams"][0]
+        request = next(item for item in sequence["messages"] if item["message"] == "requestDeletion(heritageId)")
+
+        self.assertEqual(len(request["controlPath"]), 2)
+        self.assertEqual(sequence["parseIssues"][0]["code"], "unclosed_fragment")
+
+    def test_design_validator_blocks_sequence_operation_missing_from_class_contract(self) -> None:
+        design = fake_design_model().replace("delete(heritageId)", "deleteUnknown(heritageId)")
+        parsed = parse_design_model(design)
+        traceability = TraceabilityResult(
+            requirement_graph={"requirements": [], "count": 0},
+            class_trace=[],
+            sequence_trace=[],
+            missing_links={"class_diagram": [], "sequence_diagram": []},
+        )
+        semantic = json.dumps({"ok": True, "summary": "semantic pass", "findings": []})
+
+        result = DesignValidator(StaticLlmClient([semantic])).review(
+            requirement_packet="approved requirement",
+            design_artifact=design,
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+            traceability=traceability,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertTrue(any(item.category == "cross_diagram_contract" for item in result.blocking_findings))
+
+    def test_semantic_validator_downgrades_unsupported_blocker_without_requirement_id(self) -> None:
+        parsed = parse_design_model(fake_design_model())
+        traceability = TraceabilityResult(
+            requirement_graph={"requirements": [], "count": 0},
+            class_trace=[],
+            sequence_trace=[],
+            missing_links={"class_diagram": [], "sequence_diagram": []},
+        )
+        semantic = json.dumps(
+            {
+                "ok": False,
+                "summary": "transaction suggestion",
+                "findings": [
+                    {
+                        "id": "SEM-001",
+                        "category": "transaction_boundary",
+                        "severity": "blocking",
+                        "message": "Consider a transaction.",
+                        "expected_change": "Document transaction behavior.",
+                        "requirement_ids": [],
+                        "diagram_ids": ["sequence_diagram_1"],
+                        "evidence": [],
+                    }
+                ],
+            }
+        )
+
+        result = DesignValidator(StaticLlmClient([semantic])).review(
+            requirement_packet="approved requirement",
+            design_artifact=fake_design_model(),
+            class_graph=parsed.class_graph,
+            sequence_graph=parsed.sequence_graph,
+            traceability=traceability,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.warnings[0].severity, "warning")
 
     def test_parse_design_model_rejects_missing_sequence_diagram(self) -> None:
         with self.assertRaises(HarnessError) as ctx:
@@ -512,7 +628,8 @@ class OnlyClass {
         self.assertEqual(response["pending_checkpoint"]["artifact_ref"], "design_artifact_v2")
         self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
         self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
-        self.assertIn("Missing design links: 1", designer.last_audit_report)
+        self.assertIn("Design Validation Feedback", designer.last_audit_report)
+        self.assertIn("traceability_missing", designer.last_audit_report)
 
         run_dir = self.runtime_root / "runs" / str(created["run_id"])
         self.assertTrue((run_dir / "artifacts" / "design_artifact_v1.md").exists())
@@ -535,17 +652,17 @@ class OnlyClass {
         self.assertEqual(response["status"], "blocked")
         self.assertEqual(response["current_phase"], "design_review")
         self.assertIsNone(response["pending_checkpoint"])
-        self.assertEqual(response["last_error"]["error_code"], "design_traceability_blocked")
-        self.assertEqual(designer.update_calls, 2)
-        self.assertEqual(validator.calls, 3)
-        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v3.md"))
-        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2", "v3"])
+        self.assertEqual(response["last_error"]["error_code"], "design_repair_stalled")
+        self.assertEqual(designer.update_calls, 1)
+        self.assertEqual(validator.calls, 2)
+        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
+        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
         self.assertFalse(response["quality_reports"]["design_traceability"]["ok"])
 
         run_dir = self.runtime_root / "runs" / str(created["run_id"])
-        self.assertTrue((run_dir / "artifacts" / "design_artifact_v3.md").exists())
-        quality_v3 = (run_dir / "artifacts" / "design_quality_report_v3.md").read_text(encoding="utf-8")
-        self.assertIn("Repair iterations: 2", quality_v3)
+        self.assertTrue((run_dir / "artifacts" / "design_artifact_v2.md").exists())
+        quality_v2 = (run_dir / "artifacts" / "design_quality_report_v2.md").read_text(encoding="utf-8")
+        self.assertIn("Repair iterations: 1", quality_v2)
         self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
     def test_projection_tampering_is_rejected_before_design_state_mutation(self) -> None:
@@ -804,6 +921,71 @@ class OnlyClass {
             )
 
         self.assertEqual(ctx.exception.error_code, "checkpoint_not_current")
+
+    def test_revalidate_design_creates_next_version_without_restarting_requirement(self) -> None:
+        created = self._create_phase1_run()
+        initial = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        response = PhaseTwoWorkflow(self.settings).revalidate_design(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
+        self.assertTrue(response["latest_artifacts"]["design_validation_report"].endswith("design_validation_report_v2.json"))
+        self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
+        self.assertNotEqual(initial["pending_checkpoint"]["artifact_ref"], response["pending_checkpoint"]["artifact_ref"])
+
+    def test_get_status_adds_revalidate_design_to_legacy_design_checkpoint(self) -> None:
+        created = self._create_phase1_run()
+        designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        store = PhaseTwoWorkflow(self.settings).store
+        state = store.read_state(str(designed["run_id"]))
+        state["allowed_next_actions"] = [
+            action for action in state["allowed_next_actions"] if action != "revalidate_design"
+        ]
+        store.write_state(state)
+
+        status = PhaseOneWorkflow(self.settings).get_status(run_id=str(designed["run_id"]))
+
+        self.assertEqual(status["allowed_next_actions"][0], "revalidate_design")
+
+    def test_cli_revalidate_design_returns_json_contract(self) -> None:
+        created = self._create_phase1_run()
+        PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        stdout = io.StringIO()
+
+        with contextlib.redirect_stdout(stdout):
+            code = cli_main(
+                [
+                    "revalidate-design",
+                    "--run-id",
+                    str(created["run_id"]),
+                    "--llm-mode",
+                    "fake",
+                    "--sync-mode",
+                    "mock",
+                    "--runtime-root",
+                    str(self.runtime_root),
+                ]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["status"], "waiting_design_approval")
+        self.assertIn("revalidate_design", payload["allowed_next_actions"])
+
+    def test_phase3_rejects_legacy_design_without_hybrid_validation_report(self) -> None:
+        created = self._create_phase1_run()
+        designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        store = PhaseTwoWorkflow(self.settings).store
+        state = store.read_state(str(designed["run_id"]))
+        state["quality_reports"].pop("design_validation")
+        state["latest_artifacts"].pop("design_validation_report")
+        store.write_state(state)
+
+        with self.assertRaises(HarnessError) as ctx:
+            PhaseThreeWorkflow(self.settings).approve_design_checkpoint(run_id=str(designed["run_id"]))
+
+        self.assertEqual(ctx.exception.error_code, "design_validation_required")
 
     def test_approve_checkpoint_rejects_missing_pending_checkpoint(self) -> None:
         created = self._create_phase1_run()

@@ -340,7 +340,10 @@ class RequirementClarificationUpdater:
         data["validation"] = {"status": "invalid", "errors": []}
         validation = normalize_and_validate_requirement_model_v2(data, source_text)
         if not validation.report.ok:
-            details = "; ".join(f"{item.code}@{item.path}" for item in validation.report.issues)
+            details = "; ".join(
+                f"{item.code}@{item.path}: {item.message}"
+                for item in validation.report.issues
+            )
             raise HarnessError(
                 "requirement_answer_update_failed",
                 "Updated model failed validation: " + details,

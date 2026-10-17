@@ -57,6 +57,7 @@ def write_phase2_design_artifacts(
     requirement_contract_version: str = "v2",
     requirement_artifact_refs: dict[str, str] | None = None,
     requirement_revision: int | None = None,
+    design_validation: dict[str, object] | None = None,
 ) -> dict[str, str]:
     """Ghi artifact design theo version từ Designer, parser PlantUML và Validator."""
 
@@ -144,11 +145,34 @@ def write_phase2_design_artifacts(
     }
     missing_path.write_text(json.dumps(missing, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+    validation_payload = design_validation or {
+        "version": "design_validation_report_v2",
+        "ok": missing_count == 0,
+        "mode": "traceability_compatibility",
+        "blocking_count": missing_count,
+        "warning_count": 0,
+        "blocking_findings": [],
+        "warnings": [],
+    }
+    validation_path = artifact_dir / f"design_validation_report_{suffix}.json"
+    validation_path.write_text(
+        json.dumps(
+            {**validation_payload, "created_at": utc_now_iso(), "design_version": suffix},
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    blocking_count = int(validation_payload.get("blocking_count") or 0)
+    warning_count = int(validation_payload.get("warning_count") or 0)
+    validator_mode = str(validation_payload.get("mode") or traceability_mode)
+
     quality_path = artifact_dir / f"design_quality_report_{suffix}.md"
     quality_path.write_text(
         f"""# Design Quality Report {suffix.upper()}
 
-- Validator mode: {traceability_mode}
+- Validator mode: {validator_mode}
 - Requirement contract: {requirement_contract_version}
 - Requirement revision: {requirement_revision if requirement_revision is not None else "n/a"}
 - Requirement items checked: {requirement_count}
@@ -156,13 +180,21 @@ def write_phase2_design_artifacts(
 - Sequence graph parser: passed
 - Traceability LLM: passed
 - Missing design links: {missing_count}
+- Hybrid validation blockers: {blocking_count}
+- Hybrid validation warnings: {warning_count}
 - Repair iterations: {repair_iterations}
 
 ## Result
-{_traceability_result_text(missing_count)}
+{"Design validation passed." if bool(validation_payload.get("ok")) else "Design validation found blocking issues."}
 
 ## Missing Links
 {_missing_links_markdown(missing_links)}
+
+## Blocking Findings
+{_design_findings_markdown(validation_payload.get("blocking_findings"))}
+
+## Warnings
+{_design_findings_markdown(validation_payload.get("warnings"))}
 """,
         encoding="utf-8",
     )
@@ -175,6 +207,7 @@ def write_phase2_design_artifacts(
         "sequence_diagram_graph": store.relative(sequence_graph_path),
         "requirement_design_trace": store.relative(trace_path),
         "missing_design_links": store.relative(missing_path),
+        "design_validation_report": store.relative(validation_path),
         "design_quality_report": store.relative(quality_path),
     }
 
@@ -878,6 +911,23 @@ def _traceability_result_text(missing_count: int) -> str:
     if missing_count == 0:
         return "Validator traceability V1 không phát hiện missing link ở class hoặc sequence diagram."
     return "Validator traceability V1 còn phát hiện missing link cần Designer repair hoặc human review."
+
+
+def _design_findings_markdown(value: object) -> str:
+    if not isinstance(value, list) or not value:
+        return "- None"
+    lines: list[str] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        finding_id = str(item.get("id") or "finding")
+        category = str(item.get("category") or "design")
+        message = str(item.get("message") or "").strip()
+        expected = str(item.get("expected_change") or "").strip()
+        lines.append(f"- **{finding_id} / {category}:** {message}")
+        if expected:
+            lines.append(f"  - Required correction: {expected}")
+    return "\n".join(lines) if lines else "- None"
 
 
 def _missing_links_markdown(missing_links: dict[str, list[dict[str, str]]]) -> str:

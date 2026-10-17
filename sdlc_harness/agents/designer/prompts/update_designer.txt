@@ -15,6 +15,10 @@ Your task is to **update both diagrams** according to the report, making the nec
 ### Requirements for Output:
 - Output **updated Class Diagram** and **updated Sequence Diagram** in **PlantUML syntax**.
 - Keep all existing correct elements; **only modify or add what is necessary**.
+- Treat every item under "Resolved contracts that must not regress" as an invariant.
+- Treat every item under "Rejected-candidate regressions to avoid" as a prohibited change.
+- Before returning, compare every changed operation, argument, return value, persistence call, guard, and terminal state across both diagrams.
+- If one blocker has several possible fixes, choose the smallest fix that preserves the current architecture and established transaction boundary.
 - For added elements, include comments indicating which requirement they satisfy (e.g., `'// Added to satisfy requirement REQ-001'`).
 - Preserve formatting, notes, and actor/lifeline names from the original diagrams.
 - Ensure all modifications are consistent between Class Diagram and Sequence Diagram.
