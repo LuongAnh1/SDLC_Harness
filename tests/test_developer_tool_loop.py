@@ -288,6 +288,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         llm = ScriptedLlm(
             [
+                action("read_file", {"path": "src/Main.java"}),
                 action("write_file", {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"}),
                 action("complete", {"summary": "test repaired"}),
             ]
@@ -519,6 +520,153 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
 
         self.assertEqual(manifest["items"][0]["files"][0]["purpose"], "Repair the compile failure.")
+
+    def test_verification_repair_uses_dependencies_as_context_without_forcing_mutation(self) -> None:
+        paths = ["src/EditFormView.java", "src/Controller.java", "src/FlowTest.java", "src/Unrelated.java"]
+        packet = self.work_packet()
+        packet["output_contract"] = {"allowed_paths": paths}
+        packet["proposed_files"] = [{"path": path, "operation": "update", "purpose": "repair"} for path in paths]
+        packet["implementation_steps"] = [{"order": 1, "files": paths, "description": "repair contract"}]
+        packet["requirement_coverage_by_file"] = {path: [{"requirement_id": "REQ-1"}] for path in paths}
+        packet["design_mappings_by_file"] = {path: [] for path in paths}
+        contents = {
+            "src/EditFormView.java": "interface EditFormView { void showConfirmation(); }\n",
+            "src/Controller.java": "class Controller { void run(EditFormView view) { view.showConfirmation(); } }\n",
+            "src/FlowTest.java": "class FlowTest { class FakeView implements EditFormView { public void showConfirmation(Object value) {} } }\n",
+            "src/Unrelated.java": "class Unrelated {}\n",
+        }
+        for path, content in contents.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        interface_before = (self.repo / "src/EditFormView.java").read_text(encoding="utf-8")
+        controller_before = (self.repo / "src/Controller.java").read_text(encoding="utf-8")
+        test_hash = hashlib.sha256((self.repo / "src/FlowTest.java").read_bytes()).hexdigest()
+        feedback = {
+            "feedback_source": "verification",
+            "repair_objective": {
+                "objective_id": "repair:contract",
+                "source": "validator_code_trace",
+                "status": "open",
+                "canonical_keys": ["contract:showConfirmation"],
+                "contract_findings": [
+                    {
+                        "canonical_key": "contract:showConfirmation",
+                        "code_ref": "src/EditFormView.java#showConfirmation",
+                        "expected_signature": {"name": "showConfirmation", "parameters": [], "return_type": "void"},
+                    }
+                ],
+            },
+            "verification": {
+                "stderr": "src/FlowTest.java:1: error: FakeView does not override showConfirmation() in EditFormView"
+            },
+        }
+        llm = ScriptedLlm(
+            [
+                action(
+                    "write_file",
+                    {
+                        "path": "src/FlowTest.java",
+                        "expected_sha256": test_hash,
+                        "content": "class FlowTest { class FakeView implements EditFormView { public void showConfirmation() {} } }",
+                    },
+                ),
+                action("complete", {"summary": "updated only the failing test double"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_contract_context",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        item = manifest["items"][0]
+        self.assertEqual(
+            set(item["context_paths"]),
+            {"src/EditFormView.java", "src/Controller.java", "src/FlowTest.java"},
+        )
+        self.assertEqual(item["direct_repair_paths"], ["src/FlowTest.java"])
+        self.assertEqual(item["contract_anchor_paths"], ["src/EditFormView.java"])
+        self.assertNotIn("src/Unrelated.java", item["context_paths"])
+        self.assertEqual((self.repo / "src/EditFormView.java").read_text(encoding="utf-8"), interface_before)
+        self.assertEqual((self.repo / "src/Controller.java").read_text(encoding="utf-8"), controller_before)
+        self.assertEqual([row["path"] for row in result.files], ["src/FlowTest.java"])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(len(journal["items"][0]["actions"]), 2)
+        self.assertEqual(journal["items"][0]["unresolved_paths"], [])
+
+
+    def test_same_hash_write_is_not_counted_as_repair_progress(self) -> None:
+        packet = self.one_file_packet()
+        target = self.repo / "src/Main.java"
+        target.parent.mkdir(parents=True)
+        target.write_text("class Main {}\n", encoding="utf-8")
+        initial_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        feedback = {"feedback_source": "verification", "verification": {"stderr": "src/Main.java:1: error"}}
+        llm = ScriptedLlm(
+            [
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": initial_hash, "content": "class Main {}"},
+                ),
+                action(
+                    "write_file",
+                    {"path": "src/Main.java", "expected_sha256": initial_hash, "content": "class Main { int value; }"},
+                ),
+                action("complete", {"summary": "real change applied"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_no_effect_write",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertIn("no_effect_mutation", llm.prompts[1])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["items"][0]["no_effect_actions"], 1)
+        self.assertIn("int value", target.read_text(encoding="utf-8"))
+
+    def test_repair_can_keep_an_inspected_path_with_an_explicit_reason(self) -> None:
+        packet = self.one_file_packet()
+        target = self.repo / "src/Main.java"
+        target.parent.mkdir(parents=True)
+        target.write_text("class Main {}\n", encoding="utf-8")
+        llm = ScriptedLlm(
+            [
+                action("read_file", {"path": "src/Main.java"}),
+                action(
+                    "complete",
+                    {
+                        "summary": "diagnostic is stale",
+                        "no_change_required": True,
+                        "unchanged_paths": [
+                            {"path": "src/Main.java", "reason": "The reported symbol already exists."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_explicit_unchanged",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback={"feedback_source": "verification", "verification": {"stderr": "src/Main.java"}},
+            repair_iteration=1,
+        )
+
+        self.assertEqual(result.files, [])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["items"][0]["unchanged_paths"], ["src/Main.java"])
+        self.assertTrue(journal["items"][0]["no_change_required"])
 
 
 if __name__ == "__main__":

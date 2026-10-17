@@ -6,7 +6,9 @@ gần code nhất, chạy trong target repo và trả kết quả có cấu trú
 `test_report_v{n}.md`. Trên Windows, runner cố gắng thêm JDK phổ biến vào PATH
 để các lần chạy sau không kẹt vì shell chưa nhận `javac`.
 
-Khi QA truyền `required_test_files`, runner còn chạy trực tiếp từng Java class vừa sinh sau command baseline; chỉ compile file QA không còn đủ để báo pass.
+Sau command baseline, runner khám phá mọi Java test entrypoint có `main()` dưới
+`src/test/java`, hợp nhất chúng với `required_test_files` của QA và chạy trực tiếp
+từng class. Chỉ compile test source không còn đủ để báo pass.
 """
 
 from __future__ import annotations
@@ -29,6 +31,13 @@ FATAL_OUTPUT_MARKERS = (
     "classnotfoundexception",
     "invalidpathexception",
 )
+JAVA_MAIN_METHOD_PATTERN = re.compile(
+    r"\bpublic\s+static\s+void\s+main\s*\(\s*"
+    r"(?:final\s+)?(?:java\.lang\.)?String\s*"
+    r"(?:\[\s*\]\s*[A-Za-z_$][\w$]*|\.\.\.\s*[A-Za-z_$][\w$]*|"
+    r"[A-Za-z_$][\w$]*\s*\[\s*\])\s*\)",
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
@@ -44,6 +53,8 @@ class VerificationResult:
     stderr: str
     reason: str
     timed_out: bool = False
+    discovered_test_entrypoints: tuple[str, ...] = ()
+    executed_test_entrypoints: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +67,8 @@ class VerificationResult:
             "stderr": self.stderr,
             "reason": self.reason,
             "timed_out": self.timed_out,
+            "discovered_test_entrypoints": list(self.discovered_test_entrypoints),
+            "executed_test_entrypoints": list(self.executed_test_entrypoints),
         }
 
 
@@ -72,7 +85,7 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
     ) -> VerificationResult:
-        """Chạy command test trong target repo và các class QA bắt buộc nếu có."""
+        """Chạy baseline command rồi chạy mọi Java test entrypoint đã khám phá."""
 
         command = _test_command_from_work_packet(work_packet)
         if not command:
@@ -127,25 +140,60 @@ class VerificationRunner:
             stderr=stderr,
             reason=reason,
         )
-        if baseline.status != "passed" or not required_test_files:
+        if baseline.status != "passed":
             return baseline
-        return self._run_required_java_tests(
+
+        discovered_test_files = _discover_java_main_test_files(target_path)
+        test_files: list[str] = []
+        for discovered_path in [*discovered_test_files, *(required_test_files or [])]:
+            normalized = discovered_path.strip().replace("\\", "/")
+            if normalized and normalized not in test_files:
+                test_files.append(normalized)
+        if not test_files:
+            return baseline
+
+        # Discovery execution uses ``java -cp build`` below. A non-Java or
+        # placeholder baseline may coexist with fixture source files without
+        # producing bytecode; treating those sources as executable would turn
+        # a successful baseline into a synthetic ClassNotFoundException. Real
+        # Java verification remains strict once the baseline has populated the
+        # build directory.
+        if not _has_compiled_java_output(target_path):
+            if required_test_files:
+                return VerificationResult(
+                    status="failed",
+                    command=baseline.command,
+                    cwd=str(target_path),
+                    exit_code=1,
+                    duration_seconds=baseline.duration_seconds,
+                    stdout=baseline.stdout,
+                    stderr=baseline.stderr,
+                    reason=(
+                        "Baseline verification did not produce Java bytecode in build; "
+                        "required QA test entrypoints cannot be executed."
+                    ),
+                    discovered_test_entrypoints=tuple(
+                        filter(None, (_java_test_class_name(path) for path in test_files))
+                    ),
+                )
+            return baseline
+
+        return self._run_java_tests(
             target_path=target_path,
-            required_test_files=required_test_files,
+            test_files=test_files,
             baseline=baseline,
         )
-
-    def _run_required_java_tests(
+    def _run_java_tests(
         self,
         *,
         target_path: Path,
-        required_test_files: list[str],
+        test_files: list[str],
         baseline: VerificationResult,
     ) -> VerificationResult:
-        """Chạy trực tiếp từng class Java do QA sinh sau command baseline."""
+        """Chạy trực tiếp mọi Java test class đã khám phá hoặc được QA yêu cầu."""
 
         class_names: list[str] = []
-        for path in required_test_files:
+        for path in test_files:
             class_name = _java_test_class_name(path)
             if not class_name:
                 return VerificationResult(
@@ -156,7 +204,7 @@ class VerificationRunner:
                     duration_seconds=baseline.duration_seconds,
                     stdout=baseline.stdout,
                     stderr=baseline.stderr,
-                    reason=f"Cannot derive Java test class from QA-generated path: {path}",
+                    reason=f"Cannot derive Java test class from discovered test path: {path}",
                 )
             if class_name not in class_names:
                 class_names.append(class_name)
@@ -165,9 +213,12 @@ class VerificationRunner:
         stderr_parts = [baseline.stderr.rstrip()] if baseline.stderr.strip() else []
         total_duration = baseline.duration_seconds
         commands = [baseline.command]
+        executed_class_names: list[str] = []
+        stdout_parts.append(f"[verification-discovery] discovered={len(class_names)} executed=0")
         for class_name in class_names:
             command = ["java", "-cp", "build", class_name]
             commands.append(" ".join(command))
+            executed_class_names.append(class_name)
             start = time.monotonic()
             try:
                 completed = subprocess.run(
@@ -191,8 +242,10 @@ class VerificationRunner:
                     duration_seconds=total_duration,
                     stdout=_truncate_output("\n".join(stdout_parts)),
                     stderr=_truncate_output("\n".join(stderr_parts)),
-                    reason=f"QA-generated test class timed out: {class_name}",
+                    reason=f"Discovered Java test class timed out: {class_name}",
                     timed_out=True,
+                    discovered_test_entrypoints=tuple(class_names),
+                    executed_test_entrypoints=tuple(executed_class_names),
                 )
             total_duration += time.monotonic() - start
             if completed.stdout.strip():
@@ -208,8 +261,14 @@ class VerificationRunner:
                     duration_seconds=total_duration,
                     stdout=_truncate_output("\n".join(stdout_parts)),
                     stderr=_truncate_output("\n".join(stderr_parts)),
-                    reason=f"QA-generated test class failed: {class_name}",
+                    reason=f"Discovered Java test class failed: {class_name}",
+                    discovered_test_entrypoints=tuple(class_names),
+                    executed_test_entrypoints=tuple(executed_class_names),
                 )
+        stdout_parts.append(
+            f"[verification-discovery] discovered={len(class_names)} "
+            f"executed={len(executed_class_names)} passed={len(executed_class_names)}"
+        )
         return VerificationResult(
             status="passed",
             command=" && ".join(commands),
@@ -218,8 +277,34 @@ class VerificationRunner:
             duration_seconds=total_duration,
             stdout=_truncate_output("\n".join(stdout_parts)),
             stderr=_truncate_output("\n".join(stderr_parts)),
-            reason=f"Baseline verification and {len(class_names)} required QA test class(es) passed.",
+            reason=f"Baseline verification and {len(class_names)} discovered Java test entrypoint(s) passed.",
+            discovered_test_entrypoints=tuple(class_names),
+            executed_test_entrypoints=tuple(executed_class_names),
         )
+
+
+def _has_compiled_java_output(target_path: Path) -> bool:
+    build_path = target_path / "build"
+    return build_path.is_dir() and any(build_path.rglob("*.class"))
+
+
+def _discover_java_main_test_files(target_path: Path) -> list[str]:
+    """Tìm Java test source có main() để fallback runner không bỏ sót test."""
+
+    test_root = target_path / "src" / "test" / "java"
+    if not test_root.is_dir():
+        return []
+
+    discovered: list[str] = []
+    for source_path in sorted(test_root.rglob("*.java")):
+        if not source_path.is_file():
+            continue
+        source = source_path.read_text(encoding="utf-8", errors="replace")
+        source_without_comments = re.sub(r"/\*.*?\*/|//[^\r\n]*", "", source, flags=re.DOTALL)
+        if not JAVA_MAIN_METHOD_PATTERN.search(source_without_comments):
+            continue
+        discovered.append(source_path.relative_to(target_path).as_posix())
+    return discovered
 
 
 def _java_test_class_name(path: str) -> str:

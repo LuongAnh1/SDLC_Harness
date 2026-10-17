@@ -25,6 +25,8 @@ gọi Developer sửa thêm.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -80,7 +82,12 @@ ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_ru
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_IMPLEMENTATION_TRACED_ACTIONS = [
+    "continue_run",
+    "revalidate_implementation",
+    "get_status",
+    "cancel_run",
+]
 ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = [
     "continue_run",
     "revalidate_implementation",
@@ -106,6 +113,7 @@ REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "test_skipped",
     "validator_evidence_or_mapping_issue",
     "implementation_traceability_llm_failed",
+    "implementation_validation_inconclusive",
 }
 CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "requirement_packet": 12000,
@@ -136,7 +144,11 @@ class PhaseFourWorkflow:
             llm_client=self.llm_client,
         )
         self.verification_runner = VerificationRunner()
-        self.code_trace_validator = CodeTraceValidator(self.llm_client)
+        self.code_trace_validator = CodeTraceValidator(
+            self.llm_client,
+            validation_trials=settings.implementation_validation_trials,
+            llm_call_budget=settings.implementation_validation_call_budget,
+        )
         self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
         self.github_approver = GitHubCodeReviewApprover()
@@ -923,10 +935,64 @@ class PhaseFourWorkflow:
         if feedback_ref:
             feedback_path = self._existing_artifact_path(feedback_ref, run_id=run_id)
             context["prior_validator_feedback"] = _read_json_artifact(feedback_path, run_id=run_id)
+        class_graph_ref = _required_phase4_artifact(artifact_paths, "class_diagram_graph", run_id=run_id)
+        context["class_diagram_graph_data"] = _read_json_artifact(
+            self._existing_artifact_path(class_graph_ref, run_id=run_id),
+            run_id=run_id,
+        )
+        ledger_ref = str(artifact_paths.get("implementation_validation_ledger") or "").strip()
+        if ledger_ref:
+            context["prior_implementation_validation_ledger"] = _read_json_artifact(
+                self._existing_artifact_path(ledger_ref, run_id=run_id),
+                run_id=run_id,
+            )
         return context
 
+    def _validate_code_trace_snapshot(
+        self,
+        *,
+        state: dict[str, object],
+        artifact_paths: dict[str, str],
+        run_id: str,
+        target_path: Path,
+        work_packet: dict[str, object],
+        verification_evidence: dict[str, object] | None = None,
+    ) -> object:
+        approved_context = self._code_trace_approved_context(
+            artifact_paths=artifact_paths,
+            run_id=run_id,
+        )
+        verification = (
+            _dict_value(verification_evidence)
+            if verification_evidence is not None
+            else _dict_value(_dict_value(state.get("quality_reports")).get("verification"))
+        )
+        return self.code_trace_validator.validate(
+            target_path=target_path,
+            work_packet=work_packet,
+            approved_context=approved_context,
+            verification_evidence=verification,
+            previous_ledger=_dict_value(approved_context.get("prior_implementation_validation_ledger")),
+        )
+
+    def _write_implementation_validation_ledger(
+        self,
+        *,
+        run_id: str,
+        trace_result: object,
+        version: int,
+    ) -> str:
+        ledger = getattr(trace_result, "ledger", {})
+        payload = dict(ledger) if isinstance(ledger, dict) else {}
+        path = self.store.write_json_artifact(
+            run_id,
+            f"implementation_validation_ledger_v{version}.json",
+            payload,
+        )
+        return self.store.relative(path)
+
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
-        """Re-run Verification and Validator for a blocked or disputed Validator result."""
+        """Re-run Verification and Validator for a blocked, pending-repair, or traced snapshot."""
 
         with self.workspace_manager.locked_workspace(run_id):
             state = self.store.read_state(run_id)
@@ -936,12 +1002,13 @@ class PhaseFourWorkflow:
                 and last_error.get("error_code") in REVALIDATABLE_IMPLEMENTATION_ERROR_CODES
             )
             repair_feedback_revalidation = str(state.get("status") or "") == "implementation_repair_needed"
-            if not blocked_revalidation and not repair_feedback_revalidation:
+            traced_revalidation = str(state.get("status") or "") == "implementation_traced"
+            if not blocked_revalidation and not repair_feedback_revalidation and not traced_revalidation:
                 raise HarnessError(
                     "implementation_revalidate_not_allowed",
                     (
-                        "Implementation revalidate is only allowed for a revalidatable Phase 4 block or "
-                        f"pending Validator repair feedback: {run_id}"
+                        "Implementation revalidate is only allowed for a revalidatable Phase 4 block, "
+                        f"pending Validator repair feedback, or traced implementation: {run_id}"
                     ),
                     run_id=run_id,
                 )
@@ -1384,6 +1451,19 @@ class PhaseFourWorkflow:
             "repairable": repairable,
         }
         if repairable and repair_iteration < self.settings.implementation_repair_limit:
+            prior_feedback_ref = str(latest_artifacts.get("implementation_repair_feedback") or "").strip()
+            prior_feedback = _read_previous_repair_feedback(
+                store=self.store,
+                artifact_ref=prior_feedback_ref,
+                run_id=run_id,
+            )
+            previous_lineage = _dict_value(prior_feedback.get("repair_lineage"))
+            root_feedback_ref = str(previous_lineage.get("root_feedback_artifact") or "").strip()
+            root_feedback = _read_previous_repair_feedback(
+                store=self.store,
+                artifact_ref=root_feedback_ref,
+                run_id=run_id,
+            ) if root_feedback_ref and root_feedback_ref != prior_feedback_ref else prior_feedback
             feedback = _verification_repair_feedback(
                 run_id=run_id,
                 state=state,
@@ -1394,6 +1474,10 @@ class PhaseFourWorkflow:
                 branch=branch,
                 feedback_version=artifact_version,
                 repair_iteration=repair_iteration,
+                prior_feedback=prior_feedback,
+                prior_feedback_ref=prior_feedback_ref,
+                root_feedback=root_feedback,
+                root_feedback_ref=root_feedback_ref,
             )
             feedback_path = write_phase4_repair_feedback(
                 store=self.store,
@@ -1483,13 +1567,12 @@ class PhaseFourWorkflow:
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
-            trace_result = self.code_trace_validator.validate(
+            trace_result = self._validate_code_trace_snapshot(
+                state=state,
+                artifact_paths=artifact_paths,
+                run_id=run_id,
                 target_path=target_info.path,
                 work_packet=work_packet,
-                approved_context=self._code_trace_approved_context(
-                    artifact_paths=artifact_paths,
-                    run_id=run_id,
-                ),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -1503,6 +1586,11 @@ class PhaseFourWorkflow:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
+                version=1,
+            )
+            ledger_path = self._write_implementation_validation_ledger(
+                run_id=run_id,
+                trace_result=trace_result,
                 version=1,
             )
         except HarnessError as exc:
@@ -1523,6 +1611,7 @@ class PhaseFourWorkflow:
         latest_artifacts = {
             **artifact_paths,
             "requirement_design_code_trace": trace_path,
+            "implementation_validation_ledger": ledger_path,
         }
         quality_reports = {
             **_dict_value(state.get("quality_reports")),
@@ -1916,13 +2005,13 @@ class PhaseFourWorkflow:
             return self._status_response(state, created_new_run=False)
 
         try:
-            trace_result = self.code_trace_validator.validate(
+            trace_result = self._validate_code_trace_snapshot(
+                state=state,
+                artifact_paths=latest_artifacts,
+                run_id=run_id,
                 target_path=target_info.path,
                 work_packet=work_packet,
-                approved_context=self._code_trace_approved_context(
-                    artifact_paths=latest_artifacts,
-                    run_id=run_id,
-                ),
+                verification_evidence=_dict_value(quality_reports.get("verification")),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -1938,6 +2027,11 @@ class PhaseFourWorkflow:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
+                version=artifact_version,
+            )
+            ledger_path = self._write_implementation_validation_ledger(
+                run_id=run_id,
+                trace_result=trace_result,
                 version=artifact_version,
             )
         except HarnessError as exc:
@@ -1960,6 +2054,7 @@ class PhaseFourWorkflow:
         latest_artifacts = {
             **latest_artifacts,
             "requirement_design_code_trace": trace_path,
+            "implementation_validation_ledger": ledger_path,
         }
         quality_reports = {
             **quality_reports,
@@ -2458,13 +2553,13 @@ class PhaseFourWorkflow:
             return self._status_response(state, created_new_run=False)
 
         try:
-            trace_result = self.code_trace_validator.validate(
+            trace_result = self._validate_code_trace_snapshot(
+                state=state,
+                artifact_paths=latest_artifacts,
+                run_id=run_id,
                 target_path=target_info.path,
                 work_packet=work_packet,
-                approved_context=self._code_trace_approved_context(
-                    artifact_paths=latest_artifacts,
-                    run_id=run_id,
-                ),
+                verification_evidence=_dict_value(quality_reports.get("verification")),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -2480,6 +2575,11 @@ class PhaseFourWorkflow:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
+                version=artifact_version,
+            )
+            ledger_path = self._write_implementation_validation_ledger(
+                run_id=run_id,
+                trace_result=trace_result,
                 version=artifact_version,
             )
         except HarnessError as exc:
@@ -2502,6 +2602,7 @@ class PhaseFourWorkflow:
         latest_artifacts = {
             **latest_artifacts,
             "requirement_design_code_trace": trace_path,
+            "implementation_validation_ledger": ledger_path,
         }
         quality_reports = {
             **quality_reports,
@@ -2908,13 +3009,13 @@ class PhaseFourWorkflow:
             return self._status_response(state, created_new_run=False)
 
         try:
-            trace_result = self.code_trace_validator.validate(
+            trace_result = self._validate_code_trace_snapshot(
+                state=state,
+                artifact_paths=latest_artifacts,
+                run_id=run_id,
                 target_path=target_info.path,
                 work_packet=work_packet,
-                approved_context=self._code_trace_approved_context(
-                    artifact_paths=latest_artifacts,
-                    run_id=run_id,
-                ),
+                verification_evidence=_dict_value(quality_reports.get("verification")),
             )
             trace_payload = {
                 **trace_result.to_dict(),
@@ -2930,6 +3031,11 @@ class PhaseFourWorkflow:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
+                version=artifact_version,
+            )
+            ledger_path = self._write_implementation_validation_ledger(
+                run_id=run_id,
+                trace_result=trace_result,
                 version=artifact_version,
             )
         except HarnessError as exc:
@@ -2952,6 +3058,7 @@ class PhaseFourWorkflow:
         latest_artifacts = {
             **latest_artifacts,
             "requirement_design_code_trace": trace_path,
+            "implementation_validation_ledger": ledger_path,
         }
         quality_reports = {
             **quality_reports,
@@ -3193,7 +3300,7 @@ class PhaseFourWorkflow:
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if (
-            str(state.get("status") or "") == "implementation_repair_needed"
+            str(state.get("status") or "") in {"implementation_repair_needed", "implementation_traced"}
             and "revalidate_implementation" not in allowed_next_actions
         ):
             allowed_next_actions.insert(1 if allowed_next_actions else 0, "revalidate_implementation")
@@ -4166,7 +4273,12 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
     missing_links = getattr(trace_result, "missing_links", [])
     if not isinstance(missing_links, list) or not missing_links:
         return False
-    repairable_types = {"missing_source_file", "missing_test_file", "llm_semantic_gap"}
+    repairable_types = {
+        "missing_source_file",
+        "missing_test_file",
+        "llm_semantic_gap",
+        "contract_signature_mismatch",
+    }
     for item in missing_links:
         if not isinstance(item, dict):
             return False
@@ -4180,6 +4292,8 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
 
 
 def _nonrepairable_code_trace_error_code(trace_result: object) -> str:
+    if bool(getattr(trace_result, "inconclusive", False)):
+        return "implementation_validation_inconclusive"
     missing_links = getattr(trace_result, "missing_links", [])
     if not isinstance(missing_links, list):
         return "implementation_traceability_failed"
@@ -4225,6 +4339,8 @@ def _verification_quality_report(
         "command": result.command,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
+        "discovered_test_entrypoints": list(result.discovered_test_entrypoints),
+        "executed_test_entrypoints": list(result.executed_test_entrypoints),
         "attempt": attempt,
         "repair_iteration": repair_iteration,
         "repairable": _is_repairable_verification_failure(result),
@@ -4243,10 +4359,23 @@ def _verification_repair_feedback(
     branch: str,
     feedback_version: int,
     repair_iteration: int,
+    prior_feedback: dict[str, object] | None = None,
+    prior_feedback_ref: str = "",
+    root_feedback: dict[str, object] | None = None,
+    root_feedback_ref: str = "",
 ) -> dict[str, object]:
-    """Package bounded Verification Runner diagnostics for Developer.repair."""
+    """Package the latest Verification diagnostic while preserving only approved contract objectives."""
 
     output_contract = _dict_value(work_packet.get("output_contract"))
+    prior = _dict_value(prior_feedback)
+    root = _dict_value(root_feedback)
+    objective = _persistent_repair_objective(prior=prior, root=root, result=result)
+    previous_lineage = _dict_value(prior.get("repair_lineage"))
+    root_artifact = str(
+        previous_lineage.get("root_feedback_artifact")
+        or root_feedback_ref
+        or (prior_feedback_ref if str(prior.get("feedback_source") or "") == "validator_code_trace" else "")
+    )
     return {
         "version": f"implementation_repair_feedback_v{feedback_version}",
         "run_id": run_id,
@@ -4259,15 +4388,22 @@ def _verification_repair_feedback(
         "severity": "repair_required",
         "summary": result.reason,
         "required_action": (
-            "Developer must use the code currently in the worktree and repair the reported compile/unit-test "
-            "failure within allowed_paths. Make the smallest coherent cross-file fix needed for the reported "
-            "Verification command to pass; the harness will rerun Verification afterward. Preserve existing test "
-            "assertions unless approved requirements or design prove that the test is incorrect. Do not edit the "
-            "requirement or approved design and do not work on unrelated design-completeness findings in this pass."
+            "Developer must repair the latest compile/unit-test diagnostic from the current worktree with the "
+            "smallest coherent mutation. The persistent repair_objective is the approved contract authority; the "
+            "verification field below is the current diagnostic and replaces older diagnostics. Related context paths "
+            "may remain unchanged. Do not revert an approved expected contract to match a stale caller or test."
         ),
         "target_repo": target_repo,
         "branch": branch,
         "verification_artifact": report_path,
+        "repair_objective": objective,
+        "repair_lineage": {
+            "objective_id": objective.get("objective_id"),
+            "root_feedback_artifact": root_artifact,
+            "previous_feedback_artifact": prior_feedback_ref,
+            "previous_feedback_version": prior.get("version"),
+            "previous_feedback_source": prior.get("feedback_source"),
+        },
         "verification": {
             "status": result.status,
             "command": result.command,
@@ -4286,12 +4422,113 @@ def _verification_repair_feedback(
     }
 
 
+def _persistent_repair_objective(
+    *,
+    prior: dict[str, object],
+    root: dict[str, object],
+    result: VerificationResult,
+) -> dict[str, object]:
+    for feedback in (prior, root):
+        objective = _dict_value(feedback.get("repair_objective"))
+        if (
+            str(objective.get("source") or "") == "validator_code_trace"
+            and bool(_dict_items(objective.get("contract_findings")))
+        ):
+            return objective
+    for feedback in (prior, root):
+        if str(feedback.get("feedback_source") or "") != "validator_code_trace":
+            continue
+        objective = _validator_repair_objective(list(feedback.get("missing_links") or []))
+        if objective.get("canonical_keys"):
+            return objective
+    return _verification_repair_objective(result)
+
+
 def _bounded_diagnostic(value: str, *, limit: int = MAX_VERIFICATION_DIAGNOSTIC_CHARS) -> str:
     text = str(value or "")
     if len(text) <= limit:
         return text
     edge = max(1, limit // 2)
     return text[:edge].rstrip() + "\n... diagnostic truncated ...\n" + text[-edge:].lstrip()
+
+
+def _read_previous_repair_feedback(
+    *,
+    store: RuntimeStore,
+    artifact_ref: str,
+    run_id: str,
+) -> dict[str, object]:
+    if not artifact_ref:
+        return {}
+    path = Path(artifact_ref)
+    if not path.is_absolute():
+        path = store.repo_root / path
+    if not path.is_file():
+        return {}
+    try:
+        return _read_json_artifact(path, run_id=run_id)
+    except (HarnessError, OSError):
+        return {}
+
+
+def _validator_repair_objective(missing_links: list[object]) -> dict[str, object]:
+    findings: list[dict[str, object]] = []
+    keys: list[str] = []
+    for raw in missing_links:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("blocking") is False:
+            continue
+        if str(raw.get("owner") or "developer").strip().lower() != "developer":
+            continue
+        finding = {
+            key: raw.get(key)
+            for key in (
+                "canonical_key",
+                "type",
+                "message",
+                "requirement_ref",
+                "design_element_id",
+                "code_ref",
+                "evidence_ref",
+                "evidence_quote",
+                "expected_signature",
+                "actual_signatures",
+            )
+            if raw.get(key) not in (None, "", [])
+        }
+        key = str(raw.get("canonical_key") or _stable_repair_id(finding))
+        finding["canonical_key"] = key
+        keys.append(key)
+        findings.append(finding)
+    canonical_keys = sorted(dict.fromkeys(keys))
+    objective_id = _stable_repair_id({"source": "validator_code_trace", "canonical_keys": canonical_keys})
+    return {
+        "objective_id": objective_id,
+        "source": "validator_code_trace",
+        "status": "open",
+        "canonical_keys": canonical_keys,
+        "contract_findings": findings,
+        "must_preserve": "Keep every approved expected contract while repairing all affected callers, implementations, and tests.",
+    }
+
+
+def _verification_repair_objective(result: VerificationResult) -> dict[str, object]:
+    """Create a generic objective; the changing diagnostic stays in feedback.verification."""
+
+    return {
+        "objective_id": _stable_repair_id({"source": "verification", "command": result.command}),
+        "source": "verification",
+        "status": "open",
+        "canonical_keys": [],
+        "contract_findings": [],
+        "must_preserve": "Repair the current diagnostic without regressing approved requirements or design.",
+    }
+
+
+def _stable_repair_id(value: object) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "repair:" + hashlib.sha256(payload).hexdigest()[:20]
 
 
 def _verification_result_from_markdown(markdown: str, *, cwd: str) -> VerificationResult:
@@ -4372,6 +4609,7 @@ def _implementation_repair_feedback(
     if actionable_messages:
         developer_summary += " " + " | ".join(actionable_messages)
     output_contract = _dict_value(work_packet.get("output_contract"))
+    objective = _validator_repair_objective(missing_links)
     return {
         "version": f"implementation_repair_feedback_v{feedback_version}",
         "run_id": run_id,
@@ -4393,6 +4631,16 @@ def _implementation_repair_feedback(
         "target_repo": target_repo,
         "branch": branch,
         "trace_artifact": trace_path,
+        "repair_objective": objective,
+        "repair_lineage": {
+            "objective_id": objective.get("objective_id"),
+            "root_feedback_artifact": "",
+            "previous_feedback_artifact": "",
+            "previous_feedback_version": None,
+            "previous_feedback_source": "",
+        },
+        "snapshot_fingerprint": getattr(trace_result, "snapshot_fingerprint", ""),
+        "semantic_consensus": getattr(trace_result, "semantic_consensus", {}),
         "missing_links": missing_links,
         "llm_review": {
             "ok": llm_review.get("ok"),

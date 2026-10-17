@@ -25,9 +25,9 @@ rule + LLM, QA sinh acceptance test thật, và hai repair loop đều đã có 
 - vòng nhỏ Validator -> Developer qua `SDLC_IMPLEMENTATION_REPAIR_LIMIT`;
 - vòng lớn QA -> Developer -> Runner -> Validator -> QA qua `SDLC_QA_REPAIR_LIMIT`.
 
-Verification Runner hiện bắt buộc execute từng Java class do QA vừa sinh sau
-command baseline. Việc chỉ compile file QA hoặc chạy một unit-test class cũ không
-còn được tính là QA pass.
+Verification Runner hiện chạy command baseline rồi tự khám phá mọi Java test entrypoint
+có `main()` dưới `src/test/java`, hợp nhất với các class QA bắt buộc và execute từng
+class. Việc chỉ compile test source hoặc chạy một test class cũ không còn được tính là pass.
 
 Slice 4.8A đã được live-test để commit target repo, push branch và tạo/cập nhật
 Draft PR thật. Slice 4.8B cũng đã được live-test cho bước
@@ -347,8 +347,10 @@ compile/unit, Validator trace và QA/Tester đều đủ điều kiện.
 Phase 4 tách rõ ba vai để gần thực tế doanh nghiệp hơn TraceDev gốc:
 
 - Developer sinh/sửa code và unit test gần code.
-- Verification Runner chỉ chạy command compile/unit test của target repo và tạo
-  `test_report_v1.md`; nó không phải AI Tester và không tự sửa source.
+- Verification Runner chạy command compile/unit test của target repo, sau đó khám phá và
+  execute mọi Java test entrypoint có `main()` dưới `src/test/java`; kết quả ghi rõ
+  `discovered_test_entrypoints` và `executed_test_entrypoints` trong report payload. Nó
+  không phải AI Tester và không tự sửa source.
 - Validator kiểm traceability từ approved requirement/design sang code/unit test;
   LLM graph review là bắt buộc, rule-based evidence chỉ là lớp đầu.
 - Developer repair loop đứng ngay sau Validator fail do code/test thiếu: Developer
@@ -572,3 +574,96 @@ số canonical requirements đã được phủ.
 Artifact filename/version công khai vẫn giữ V1 để không phá caller hiện tại.
 `requirement_contract.version` và mode V2 bên trong artifact quyết định semantics.
 Requirement Contract V2 hiện là contract runtime duy nhất.
+
+## Developer Test Discovery Update - 2026-10-17
+
+E2E UC3 phát hiện cùng lớp false positive xuất hiện trước QA: Developer tạo hai Java test
+class có `main()`, nhưng `scripts/test.ps1` chỉ execute một class. Baseline trả exit code `0`
+nên Verification báo pass dù flow test AC-1…AC-5 chỉ được compile và chưa từng chạy.
+
+`VerificationRunner` đã được mở rộng ở owner chung thay vì vá riêng script của UC3:
+
+- sau khi baseline pass, quét `src/test/java/**/*.java`;
+- chọn mọi source khai báo `public static void main(String[]|String... args)`;
+- hợp nhất, loại trùng với `required_test_files` do QA truyền;
+- chạy từng fully-qualified class bằng `java -cp build <class>`;
+- fail ngay khi một entrypoint fail/timeout và lưu danh sách đã khám phá/đã thực thi;
+- chỉ trả pass khi toàn bộ entrypoint đã khám phá đều pass.
+
+Run `run_20261016_160848_bc53f4dc` đã dừng ở V11 vì repair limit trước khi thay đổi này
+được áp dụng. Action tiếp theo của run là `revalidate_implementation`; lần revalidate mới sẽ
+dùng discovery ở Verification Runner và không cần sửa cứng tên flow test vào target script.
+
+Discovery trực tiếp chỉ được kích hoạt khi baseline đã tạo Java bytecode trong `build/`.
+Điều kiện này giữ kiểm tra nghiêm ở target Java thật và không tạo lỗi
+`ClassNotFoundException` giả cho fixture hoặc baseline không biên dịch Java.
+
+## Implementation Validator Consensus V3 - 2026-10-17
+
+Code Trace Validator V3 đánh giá một code snapshot theo hai lớp:
+
+- deterministic gate kiểm tra parameter shape của method tại Java interface boundary;
+- semantic gate chạy adaptive `2+1`, chỉ dùng lượt thứ ba khi hai lượt đầu bất đồng và
+  chỉ giữ blocker đạt quorum `2/3`.
+
+Mỗi semantic trial dùng cùng fixed validation claims, approved artifacts, code snapshot
+fingerprint và Verification evidence. Finding không gắn được vào claim bị hạ thành
+observation; finding nói một test chưa chạy nhưng entrypoint đã có trong Verification
+evidence bị reject. Finding thuộc chính Validator như `trace_mapping_issue` chỉ được giữ
+khi đã có quote từ approved evidence và không trở thành Developer repair feedback.
+
+Hai cấu hình mới:
+
+- `SDLC_IMPLEMENTATION_VALIDATION_TRIALS=3`;
+- `SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET=6`.
+
+Format retry cũng tiêu call budget. Nếu không thu đủ valid trial, workflow trả
+`implementation_validation_inconclusive` và không cho Developer sửa dựa trên tập phiếu
+thiếu. Mỗi lượt ghi `implementation_validation_ledger_v{n}.json`, theo dõi finding
+`active`, `disputed`, `rejected`, `resolved` và `regressed`.
+
+Phép thử DeepSeek thật trên bản copy UC3 dùng hai lượt semantic (`2/6` call), consistency
+`1.0`, không có semantic blocker hoặc disputed finding. Deterministic gate giữ bốn
+parameter-shape mismatch của `EditFormView`, vì vậy snapshot vẫn block bằng bằng chứng
+ổn định thay vì một phiếu LLM đơn lẻ.
+
+Regression cuối: toàn bộ Phase 4 `62 passed`; full suite `317 passed`.
+
+## Developer Repair Context V4
+
+Developer repair vẫn dùng symbol closure để tìm file liên quan, nhưng manifest không biến closure
+thành danh sách file bắt buộc phải ghi. Ba nhóm có vai trò riêng:
+
+- `direct_repair_paths`: file được diagnostic hiện tại chỉ trực tiếp;
+- `context_paths`: declaration, caller, implementation và test double cho Developer đọc khi cần;
+- `contract_anchor_paths`: file chứa contract đã được Validator duyệt và cần được giữ ổn định.
+
+`allowed_paths` vẫn là biên quyền ghi. Developer có thể sửa bất kỳ approved path nào cần cho một
+mutation nhất quán, nhưng không phải mutate toàn bộ `context_paths`. Manifest V4 và journal V3 bỏ
+`required_paths`/`unresolved_paths` như completion gate và không còn tự complete khi mọi dependency
+đã từng được ghi. Sau ít nhất một mutation thật, Developer chủ động `complete`; Verification mới là
+owner quyết định code/test đã pass hay chưa. `no_effect_mutation` và completion không thay đổi có
+fresh inspected evidence vẫn được giữ để ngăn tiến độ giả.
+
+Feedback cũng tách hai loại authority. `repair_objective` do Validator tạo là contract ổn định qua
+các iteration; trường `verification` chỉ chứa compile/test diagnostic mới nhất và thay thế diagnostic
+cũ. Prompt ưu tiên approved objective, rồi diagnostic hiện hành, sau đó mới dùng worktree như trạng
+thái bắt đầu. Với artifact legacy chưa có objective, Harness lần theo
+`repair_lineage.root_feedback_artifact` và dựng lại objective từ blocking `missing_links`; vì vậy
+expected signature không bị mất khi run cũ đi vào logic mới.
+
+Cách này giữ bài học của TraceDev: traceability repair và compile/test repair có trách nhiệm khác
+nhau; compiler báo file nào thì Developer sửa mutation nhỏ nhất quanh lỗi đó, rồi chạy Verification
+lại. Symbol closure chỉ bổ sung context để không bỏ sót caller/test double, không ép declaration đúng
+sẵn phải thay đổi.
+
+Phép thử DeepSeek thật dùng bản copy snapshot UC3 tại Verification V25 fail, Git/runtime riêng và
+`sync_mode=mock`. Objective legacy được backfill thành `4` Validator contract finding. Closure chọn
+`2` direct repair path (controller và flow test), `3` context path, với `EditFormView` làm contract
+anchor. Developer hội tụ trong `1` repair iteration và chỉ sửa hai direct path; interface được giữ
+nguyên. Verification compile và chạy đủ `2/2` Java entrypoint đều pass. Validator V3 trả `ok=true`,
+`0` missing link, `0` deterministic blocker, `0` consensus blocker và không inconclusive; ba finding
+không đạt quorum được giữ ở disputed thay vì mở repair mới.
+
+Regression cuối sau nâng cấp: targeted repair tests `19 passed`; Phase 4 `58 passed`; toàn bộ
+SDLC_Harness `322 passed in 375.57s`; `git diff --check` sạch.

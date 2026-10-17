@@ -512,7 +512,7 @@ class PhaseThreeTest(unittest.TestCase):
             for scenario in qa_generated["scenarios"]
             for requirement_id in scenario["requirement_ids"]
         }
-        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v2")
+        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v3")
         self.assertEqual(trace_ids, qa_ids)
         self.assertEqual(trace["stats"]["requirements_covered"], trace["stats"]["requirement_count"])
 

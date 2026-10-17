@@ -82,6 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     revalidate_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     revalidate_design.add_argument("--design-repair-limit", default=None)
     revalidate_design.add_argument("--design-validation-trials", default=None)
+    revalidate_design.add_argument("--design-llm-call-budget", default=None)
     _add_sync_mode_argument(revalidate_design)
     revalidate_design.add_argument("--runtime-root", default=None)
 
@@ -101,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     approve.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     approve.add_argument("--design-repair-limit", default=None)
     approve.add_argument("--design-validation-trials", default=None)
+    approve.add_argument("--design-llm-call-budget", default=None)
     approve.add_argument("--implementation-plan-repair-limit", default=None)
     approve.add_argument("--implementation-repair-limit", default=None)
     _add_sync_mode_argument(approve)
@@ -147,6 +149,8 @@ def _settings_from_args(args: argparse.Namespace):
         overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
     if getattr(args, "design_validation_trials", None) is not None:
         overrides["SDLC_DESIGN_VALIDATION_TRIALS"] = str(args.design_validation_trials)
+    if getattr(args, "design_llm_call_budget", None) is not None:
+        overrides["SDLC_DESIGN_LLM_CALL_BUDGET"] = str(args.design_llm_call_budget)
     if getattr(args, "implementation_plan_repair_limit", None) is not None:
         overrides["SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"] = str(args.implementation_plan_repair_limit)
     if getattr(args, "implementation_repair_limit", None) is not None:

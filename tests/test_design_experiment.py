@@ -66,6 +66,41 @@ class ProgressiveFakeClient:
         return self.delegate.complete_messages(messages=messages, json_mode=json_mode, max_tokens=max_tokens)
 
 
+class RetrySemanticClient(ProgressiveFakeClient):
+    def __init__(self, settings, *, invalid_semantic_calls: int):
+        super().__init__(settings)
+        self.invalid_semantic_calls = invalid_semantic_calls
+        self.semantic_calls = 0
+
+    def complete_with_metadata(self, *, system: str, prompt: str, json_mode=False, max_tokens=None):
+        if "Progressive Design Semantic Judge" not in system:
+            return super().complete_with_metadata(
+                system=system,
+                prompt=prompt,
+                json_mode=json_mode,
+                max_tokens=max_tokens,
+            )
+        self.systems.append(system)
+        self.semantic_calls += 1
+        context = json.loads(prompt.split("INPUT:\n", 1)[1])
+        assessments = []
+        for item in context["claims"]:
+            refs = item["allowed_design_refs"][:1]
+            if self.semantic_calls <= self.invalid_semantic_calls:
+                refs = ["Invented.ref"]
+            assessments.append(
+                {
+                    "claim_id": item["claim_id"],
+                    "verdict": "satisfied",
+                    "category": "none",
+                    "message": "Covered by the traced design.",
+                    "expected_change": "",
+                    "design_refs": refs,
+                }
+            )
+        return LlmCompletion(content=json.dumps({"assessments": assessments}), finish_reason="fake")
+
+
 class MissingTraceValidator:
     def construct_traceability(self, *, canonical_requirement, **kwargs):
         graph = build_requirement_graph_v2(canonical_requirement)
@@ -196,6 +231,66 @@ class ProgressiveDesignExperimentTest(unittest.TestCase):
         with self.assertRaises(HarnessError):
             _validate_assessments({"assessments": [assessment]}, claims)
 
+    def test_semantic_trials_retry_invalid_evidence_without_counting_its_vote(self) -> None:
+        client = RetrySemanticClient(self.settings, invalid_semantic_calls=1)
+        workflow = ProgressiveDesignExperiment(
+            self.settings,
+            experiment_root=self.experiment_root,
+            llm_call_budget=16,
+            llm_client=client,
+        )
+
+        confirmed, disputed, report = workflow.semantic_trials(
+            claims=[
+                {
+                    "claim_id": "CLAIM-AC-1",
+                    "requirement_id": "AC-1",
+                    "allowed_design_refs": ["Service.finish"],
+                }
+            ],
+            requirement_model={},
+            design_model="design",
+            class_graph={},
+            sequence_graph={},
+        )
+
+        self.assertEqual(confirmed, [])
+        self.assertEqual(disputed, [])
+        self.assertTrue(report["complete"])
+        self.assertEqual(report["valid_trials"], 3)
+        self.assertEqual(report["attempt_count"], 4)
+        self.assertEqual(report["invalid_trial_count"], 1)
+        self.assertIn("CLAIM-AC-1", report["invalid_trials"][0]["message"])
+        self.assertEqual(workflow.llm.used, 4)
+
+    def test_semantic_trials_stop_inconclusive_when_valid_quorum_cannot_fit_budget(self) -> None:
+        client = RetrySemanticClient(self.settings, invalid_semantic_calls=10)
+        workflow = ProgressiveDesignExperiment(
+            self.settings,
+            experiment_root=self.experiment_root,
+            llm_call_budget=6,
+            llm_client=client,
+        )
+
+        _, _, report = workflow.semantic_trials(
+            claims=[
+                {
+                    "claim_id": "CLAIM-AC-1",
+                    "requirement_id": "AC-1",
+                    "allowed_design_refs": ["Service.finish"],
+                }
+            ],
+            requirement_model={},
+            design_model="design",
+            class_graph={},
+            sequence_graph={},
+        )
+
+        self.assertFalse(report["complete"])
+        self.assertEqual(report["valid_trials"], 0)
+        self.assertEqual(report["invalid_trial_count"], 4)
+        self.assertEqual(workflow.llm.remaining, 2)
+
     def test_adjudicator_cannot_introduce_candidate(self) -> None:
         class AdjudicationClient(ProgressiveFakeClient):
             def complete_with_metadata(self, **kwargs):
@@ -217,7 +312,7 @@ class ProgressiveDesignExperimentTest(unittest.TestCase):
         )
         candidate = _candidate("CAND-001")
         with self.assertRaises(HarnessError):
-            workflow._adjudicate([candidate], requirement_model={}, design_model="design")
+            workflow.adjudicate([candidate], requirement_model={}, design_model="design")
 
     def test_feedback_and_budget_are_bounded(self) -> None:
         candidates = [_candidate(f"CAND-{index:03d}") for index in range(1, 5)]

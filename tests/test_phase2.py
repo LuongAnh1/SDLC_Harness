@@ -60,6 +60,15 @@ class RepairingDesigner:
         return fake_design_model()
 
 
+class PreflightRepairDesigner(RepairingDesigner):
+    def draft(self, *, requirement_packet: str, formal_use_case: str = "", canonical_requirement=None) -> DesignDraft:
+        broken = fake_design_model().replace(
+            "Boundary -> Service: validateDeletion(heritageId)",
+            "Boundary -> Service: missingOperation(heritageId)",
+        )
+        return DesignDraft(analysis_report="test progressive architecture", design_model=broken)
+
+
 class SequencedTraceabilityValidator:
     def __init__(self, missing_by_call: list[bool]):
         self.missing_by_call = missing_by_call
@@ -158,6 +167,8 @@ class PhaseTwoTest(unittest.TestCase):
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
+                "SDLC_DESIGN_VALIDATION_TRIALS": "3",
+                "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
             },
         )
 
@@ -173,6 +184,8 @@ class PhaseTwoTest(unittest.TestCase):
 
     def test_settings_reads_design_repair_limit(self) -> None:
         self.assertEqual(self.settings.design_repair_limit, 2)
+        self.assertEqual(self.settings.design_validation_trials, 3)
+        self.assertEqual(self.settings.design_llm_call_budget, 16)
         settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
@@ -180,6 +193,87 @@ class PhaseTwoTest(unittest.TestCase):
         )
 
         self.assertEqual(settings.design_repair_limit, 0)
+
+    def test_production_flow_uses_progressive_gates_and_repairs_preflight_first(self) -> None:
+        created = self._create_phase1_run()
+        workflow = PhaseTwoWorkflow(self.settings)
+        designer = PreflightRepairDesigner()
+        workflow.designer = designer
+
+        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertEqual(designer.update_calls, 1)
+        progressive = response["design_progressive_validation"]
+        self.assertEqual(
+            [item["gate_stage"] for item in progressive["trajectory"]],
+            ["deterministic_preflight", "semantic_consensus"],
+        )
+        self.assertEqual(response["quality_reports"]["design_validation"]["mode"], "design_validation_progressive_v1")
+        self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
+
+    def test_production_flow_blocks_safely_when_design_llm_budget_is_exhausted(self) -> None:
+        settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGN_VALIDATION_TRIALS": "3",
+                "SDLC_DESIGN_LLM_CALL_BUDGET": "2",
+            },
+        )
+        created = PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        response = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "design_llm_budget_exhausted")
+        self.assertIn("revalidate_design", response["allowed_next_actions"])
+        self.assertIsNone(response["pending_checkpoint"])
+
+    def test_production_flow_persists_invalid_semantic_trial_diagnostics(self) -> None:
+        created = self._create_phase1_run()
+        workflow = PhaseTwoWorkflow(self.settings)
+
+        def incomplete_semantic_trials(**kwargs):
+            return [], [], {
+                "requested_trials": 3,
+                "valid_trials": 2,
+                "quorum": 2,
+                "confirmed_count": 0,
+                "disputed_count": 0,
+                "complete": False,
+                "attempt_count": 4,
+                "max_attempts": 6,
+                "invalid_trial_count": 2,
+                "invalid_trials": [
+                    {
+                        "attempt_id": "attempt-1",
+                        "error_code": "design_semantic_review_failed",
+                        "message": "Semantic judge cited evidence outside fixed claim CLAIM-AC-1.",
+                    },
+                    {
+                        "attempt_id": "attempt-4",
+                        "error_code": "design_semantic_review_failed",
+                        "message": "Semantic judge omitted one or more fixed claims.",
+                    },
+                ],
+                "trials": [],
+            }
+
+        workflow.progressive.semantic_trials = incomplete_semantic_trials
+
+        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "design_validation_inconclusive")
+        self.assertIsNone(response["pending_checkpoint"])
+        progressive = response["design_progressive_validation"]
+        details = progressive["trajectory"][-1]["details"]
+        self.assertEqual(details["valid_trials"], 2)
+        self.assertEqual(details["invalid_trial_count"], 2)
+        self.assertEqual(details["invalid_trials"][0]["attempt_id"], "attempt-1")
 
     def test_designer_fake_mode_creates_analysis_and_design_model(self) -> None:
         draft = DesignerAgent(LlmClient(self.settings)).draft(

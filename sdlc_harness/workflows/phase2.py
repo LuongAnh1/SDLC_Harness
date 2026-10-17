@@ -7,7 +7,14 @@ from pathlib import Path
 import shutil
 
 from ..agents.designer import DesignerAgent, parse_design_model
-from ..agents.validator import DesignValidationResult, DesignValidator, ValidatorAgent
+from ..agents.validator import (
+    DesignFinding,
+    DesignValidationResult,
+    DesignValidator,
+    TraceabilityResult,
+    ValidatorAgent,
+    build_requirement_graph_v2,
+)
 from ..artifacts import read_approved_requirement_input, read_frozen_requirement_input
 from ..artifacts.writers import write_phase2_design_artifacts
 from ..core.config import Settings
@@ -15,6 +22,11 @@ from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
+from .design_experiment import (
+    ProgressiveDesignReviewEngine,
+    SemanticCandidate,
+    _missing_link_findings,
+)
 
 ALLOWED_DESIGN_ACTIONS = [
     "approve_checkpoint",
@@ -31,10 +43,17 @@ class PhaseTwoWorkflow:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
-        llm_client = LlmClient(settings)
-        self.designer = DesignerAgent(llm_client)
-        self.validator = ValidatorAgent(llm_client)
-        self.design_validator = DesignValidator(llm_client)
+        self._reset_progressive_engine()
+
+    def _reset_progressive_engine(self) -> None:
+        self.progressive = ProgressiveDesignReviewEngine(
+            self.settings,
+            llm_call_budget=self.settings.design_llm_call_budget,
+            llm_client=LlmClient(self.settings),
+        )
+        self.designer = self.progressive.designer
+        self.validator = self.progressive.trace_validator
+        self.design_validator = self.progressive.design_validator
 
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
         """Approve the requirement checkpoint and create a validated design."""
@@ -57,12 +76,13 @@ class PhaseTwoWorkflow:
         )
         self.store.write_state(state)
         try:
+            self.progressive.llm.require(2, category="designer_draft")
             draft = self.designer.draft(
                 requirement_packet=approved.requirement_packet,
                 formal_use_case=approved.formal_use_case,
                 canonical_requirement=approved.canonical_model,
             )
-            return self._run_validation_loop(
+            return self._run_progressive_validation_loop(
                 state=state,
                 approved=approved,
                 design_model=draft.design_model,
@@ -77,6 +97,7 @@ class PhaseTwoWorkflow:
     def revalidate_design(self, *, run_id: str) -> dict[str, object]:
         """Validate and, when needed, repair the latest Phase 2 design version."""
 
+        self._reset_progressive_engine()
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
         phase = str(state.get("current_phase") or "")
@@ -118,7 +139,7 @@ class PhaseTwoWorkflow:
         )
         self.store.write_state(state)
         try:
-            return self._run_validation_loop(
+            return self._run_progressive_validation_loop(
                 state=state,
                 approved=approved,
                 design_model=design_model,
@@ -174,6 +195,304 @@ class PhaseTwoWorkflow:
             shutil.copy2(source, target)
             copied[key] = self.store.relative(target)
         return copied
+
+    def _run_progressive_validation_loop(
+        self,
+        *,
+        state: dict[str, object],
+        approved: object,
+        design_model: str,
+        base_analysis: str,
+        artifact_paths: dict[str, str],
+        start_version: int,
+        existing_versions: list[str],
+    ) -> dict[str, object]:
+        """Run production Phase 2 through the progressive validation gates."""
+
+        # Test doubles written for the legacy loop remain useful for focused unit
+        # tests; production always uses DesignValidator.preflight.
+        if not callable(getattr(self.design_validator, "preflight", None)):
+            return self._run_validation_loop(
+                state=state,
+                approved=approved,
+                design_model=design_model,
+                base_analysis=base_analysis,
+                artifact_paths=artifact_paths,
+                start_version=start_version,
+                existing_versions=existing_versions,
+            )
+
+        run_id = str(state.get("run_id") or "")
+        versions = list(existing_versions)
+        merged_artifacts = dict(artifact_paths)
+        for stale_key in ("design_repair_ledger", "last_design_candidate", "last_candidate_validation_report"):
+            merged_artifacts.pop(stale_key, None)
+        previous_quality_report = ""
+        repair_feedback = ""
+        pending_semantic: list[SemanticCandidate] = []
+        seen_states: dict[str, int] = {}
+        trajectory: list[dict[str, object]] = []
+        validation: DesignValidationResult | None = None
+        design_paths: dict[str, str] = {}
+        stalled = False
+        oscillating = False
+        passed = False
+        inconclusive = False
+        repair_limit = self.settings.design_repair_limit
+
+        for repair_iteration in range(repair_limit + 1):
+            version = start_version + repair_iteration
+            version_label = f"v{version}"
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_validating" if repair_iteration == 0 else "design_repairing",
+                    "status": "design_validating" if repair_iteration == 0 else "design_repairing",
+                    "summary_for_user": (
+                        f"Đang chạy progressive Design Validator cho V{version}."
+                        if repair_iteration == 0
+                        else f"Designer đang repair design vòng {repair_iteration}/{repair_limit}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+
+            if repair_iteration > 0:
+                self.progressive.llm.require(1, category="designer_repair")
+                design_model = self.designer.update_design(
+                    requirement_packet=approved.requirement_packet,
+                    formal_use_case=approved.formal_use_case,
+                    current_design=design_model,
+                    audit_report=repair_feedback,
+                    canonical_requirement=approved.canonical_model,
+                )
+
+            parsed = parse_design_model(design_model)
+            gate_stage = "deterministic_preflight"
+            gate_details: dict[str, object] = {}
+            disputed_findings: list[DesignFinding] = []
+            traceability = _traceability_not_run(approved.canonical_model)
+            selected_findings = self.design_validator.preflight(
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+            )[:3]
+            pending_after_gate: list[SemanticCandidate] = []
+
+            if not selected_findings:
+                gate_stage = "traceability"
+                self.progressive.llm.require(2, category="traceability")
+                traceability = self.validator.construct_traceability(
+                    requirement_packet=approved.requirement_packet,
+                    class_graph=parsed.class_graph,
+                    sequence_graph=parsed.sequence_graph,
+                    canonical_requirement=approved.canonical_model,
+                )
+                selected_findings = _missing_link_findings(traceability)[:3]
+
+            if not selected_findings and gate_stage == "traceability":
+                if pending_semantic:
+                    gate_stage = "semantic_targeted_verification"
+                    self.progressive.llm.require(1, category="semantic_targeted_verification")
+                    unresolved = self.progressive.verify_repair(
+                        pending_semantic,
+                        design_model=design_model,
+                        class_graph=parsed.class_graph,
+                        sequence_graph=parsed.sequence_graph,
+                    )
+                    if unresolved:
+                        pending_after_gate = unresolved[:2]
+                        selected_findings = _candidate_findings(pending_after_gate)
+                    else:
+                        pending_semantic = []
+
+                if not selected_findings:
+                    gate_stage = "semantic_consensus"
+                    self.progressive.llm.require(
+                        self.progressive.validation_trials,
+                        category="semantic_claim_reviews",
+                    )
+                    confirmed, disputed, semantic_report = self.progressive.semantic_trials(
+                        claims=_build_progressive_claims(traceability),
+                        requirement_model=approved.canonical_model.to_dict(),
+                        design_model=design_model,
+                        class_graph=parsed.class_graph,
+                        sequence_graph=parsed.sequence_graph,
+                    )
+                    gate_details = semantic_report
+                    disputed_findings = _candidate_findings(disputed)
+                    if not bool(semantic_report.get("complete")):
+                        inconclusive = True
+                    elif confirmed:
+                        pending_after_gate = confirmed[:2]
+                        selected_findings = _candidate_findings(pending_after_gate)
+                    elif disputed:
+                        gate_stage = "bounded_adjudication"
+                        candidates = _prioritize_candidates(disputed)[:3]
+                        self.progressive.llm.require(1, category="semantic_adjudication")
+                        supported, uncertain, adjudication = self.progressive.adjudicate(
+                            candidates,
+                            requirement_model=approved.canonical_model.to_dict(),
+                            design_model=design_model,
+                        )
+                        gate_details = {**semantic_report, "adjudication": adjudication}
+                        if supported:
+                            pending_after_gate = supported[:2]
+                            selected_findings = _candidate_findings(pending_after_gate)
+                            disputed_findings = _candidate_findings(uncertain)
+                        elif uncertain:
+                            disputed_findings = _candidate_findings(uncertain)
+                            inconclusive = True
+                        else:
+                            disputed_findings = []
+
+            validation = _progressive_validation_result(
+                traceability=traceability,
+                blockers=selected_findings,
+                disputed=disputed_findings,
+                gate_stage=gate_stage,
+                details=gate_details,
+                repair_iteration=repair_iteration,
+                inconclusive=inconclusive,
+                llm_calls=self.progressive.llm.summary(),
+            )
+            design_paths = write_phase2_design_artifacts(
+                store=self.store,
+                run_id=run_id,
+                designer_analysis=_analysis_for_version(
+                    base_analysis=base_analysis,
+                    version=version,
+                    previous_quality_report=previous_quality_report,
+                ),
+                design_model=design_model,
+                requirement_graph=traceability.requirement_graph,
+                class_graph=parsed.class_graph,
+                sequence_graph=parsed.sequence_graph,
+                class_trace=traceability.class_trace,
+                sequence_trace=traceability.sequence_trace,
+                missing_links=traceability.missing_links,
+                requirement_packet=approved.requirement_packet,
+                formal_use_case=approved.formal_use_case,
+                version=version,
+                repair_iterations=repair_iteration,
+                traceability_mode=traceability.mode,
+                requirement_contract_version=approved.contract_version,
+                requirement_artifact_refs=approved.approved_artifacts,
+                requirement_revision=approved.canonical_model.revision,
+                design_validation=validation.to_dict(),
+            )
+            if version_label not in versions:
+                versions.append(version_label)
+            merged_artifacts = {**merged_artifacts, **design_paths}
+            repair_state = _repair_state_fingerprint(validation=validation)
+            trajectory.append(
+                {
+                    "version": version_label,
+                    "repair_iteration": repair_iteration,
+                    "gate_stage": gate_stage,
+                    "blocking_count": len(validation.blocking_findings),
+                    "disputed_count": len(validation.disputed_findings),
+                    "fingerprint": repair_state if validation.blocking_findings else "",
+                    "llm_calls_used": self.progressive.llm.used,
+                    "details": gate_details,
+                }
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "latest_artifacts": merged_artifacts,
+                    "quality_reports": _quality_reports(state, validation, versions, design_paths),
+                    "design_progressive_validation": {
+                        "version": "progressive_design_validation_v1",
+                        "trajectory": trajectory,
+                        "llm_calls": self.progressive.llm.summary(),
+                    },
+                }
+            )
+            self.store.write_state(state)
+
+            if validation.inconclusive:
+                break
+            if validation.ok:
+                passed = True
+                break
+            if repair_state in seen_states:
+                stalled = seen_states[repair_state] == repair_iteration - 1
+                oscillating = not stalled
+                break
+            seen_states[repair_state] = repair_iteration
+            if repair_iteration >= repair_limit:
+                break
+            repair_feedback = validation.feedback
+            pending_semantic = pending_after_gate
+            previous_quality_report = design_paths["design_quality_report"]
+
+        if validation is None:
+            raise HarnessError("designer_failed", "Phase 2 did not produce a progressive validation result.", run_id=run_id)
+        if not passed:
+            if inconclusive:
+                error_code = "design_validation_inconclusive"
+            elif stalled:
+                error_code = "design_repair_stalled"
+            elif oscillating:
+                error_code = "design_repair_oscillating"
+            else:
+                error_code = "design_repair_exhausted"
+            error = HarnessError(
+                error_code,
+                f"Design progressive validation stopped with {len(validation.blocking_findings)} blocker(s).",
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_review",
+                    "status": "blocked",
+                    "latest_artifacts": merged_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["revalidate_design", "get_status", "request_change", "cancel_run"],
+                    "last_error": error.to_response(),
+                    "summary_for_user": (
+                        f"Design chưa pass progressive validator: {len(validation.blocking_findings)} blocker, "
+                        f"{len(validation.disputed_findings)} disputed; trạng thái={error_code}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        last_sync = sync_design_checkpoint(
+            store=self.store,
+            settings=self.settings,
+            run_id=run_id,
+            source_ref=str(state.get("source_ref") or ""),
+            artifact_paths=merged_artifacts,
+        )
+        checkpoint_id = f"checkpoint_design_{run_id}"
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "design_review",
+                "status": "waiting_design_approval",
+                "latest_artifacts": merged_artifacts,
+                "pending_checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "type": "design_approval",
+                    "artifact_ref": _artifact_ref(design_paths["design_artifact"]),
+                    "artifact_path": design_paths["design_artifact"],
+                },
+                "allowed_next_actions": ALLOWED_DESIGN_ACTIONS,
+                "last_error": None,
+                "last_sync": last_sync,
+                "quality_reports": _quality_reports(state, validation, versions, design_paths),
+                "summary_for_user": (
+                    f"Design {versions[-1]} đã pass progressive validator: 0 blocker, "
+                    f"0 disputed; sync status={last_sync.get('status')}. "
+                    "Run đang chờ anh review design trước khi sang Phase 3."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def _run_validation_loop(
         self,
@@ -464,6 +783,7 @@ class PhaseTwoWorkflow:
             "sync_disabled": True,
             "trajectory": trajectory,
             "quality_reports": state.get("quality_reports", {}),
+            "design_progressive_validation": state.get("design_progressive_validation"),
             "last_error": state.get("last_error"),
             "completed_at": utc_now_iso(),
         }
@@ -522,7 +842,10 @@ class PhaseTwoWorkflow:
         error: HarnessError,
     ) -> dict[str, object]:
         requirement_error = _requirement_blocking_error(error, run_id=run_id)
-        retryable_validator = error.error_code == "design_semantic_review_failed"
+        retryable_validator = error.error_code in {
+            "design_semantic_review_failed",
+            "design_llm_budget_exhausted",
+        }
         if requirement_error is not None or retryable_validator:
             effective = requirement_error or error
             state.update(
@@ -585,6 +908,7 @@ class PhaseTwoWorkflow:
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
+            "design_progressive_validation": state.get("design_progressive_validation"),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
@@ -598,14 +922,18 @@ def _quality_reports(
     versions: list[str],
     paths: dict[str, str],
 ) -> dict[str, object]:
+    gate_stage = str(validation.llm_review.get("gate_stage") or validation.rule_review.get("gate_stage") or "")
+    traceability_ran = validation.traceability.mode != "not_run_preflight_blocked"
     summary = (
         f"{len(validation.blocking_findings)} blocker(s), {len(validation.warnings)} warning(s); "
-        f"traceability={'passed' if validation.traceability.ok else 'failed'}."
+        f"gate={gate_stage or 'legacy'}; "
+        f"traceability={'not_run' if not traceability_ran else ('passed' if validation.traceability.ok else 'failed')}."
     )
     return {
         **_dict_value(state.get("quality_reports")),
         "design_traceability": {
-            "ok": validation.traceability.ok,
+            "ok": validation.traceability.ok if traceability_ran else False,
+            "ran": traceability_ran,
             "mode": validation.traceability.mode,
             "versions": versions,
             "summary": _traceability_summary(validation.traceability.missing_links),
@@ -614,6 +942,7 @@ def _quality_reports(
         "design_validation": {
             "ok": validation.ok,
             "mode": validation.mode,
+            "gate_stage": gate_stage,
             "versions": versions,
             "blocking_count": len(validation.blocking_findings),
             "warning_count": len(validation.warnings),
@@ -623,10 +952,126 @@ def _quality_reports(
             "valid_trials": validation.semantic_consensus.get("valid_trials", 1),
             "quorum": validation.semantic_consensus.get("quorum", 1),
             "consistency_score": validation.semantic_consensus.get("consistency_score", 1.0),
+            "llm_calls": validation.semantic_consensus.get("llm_calls", {}),
             "summary": summary,
             "report": paths["design_validation_report"],
         },
     }
+
+
+def _traceability_not_run(canonical_model: object) -> TraceabilityResult:
+    return TraceabilityResult(
+        requirement_graph=build_requirement_graph_v2(canonical_model),
+        class_trace=[],
+        sequence_trace=[],
+        missing_links={"class_diagram": [], "sequence_diagram": []},
+        mode="not_run_preflight_blocked",
+    )
+
+
+def _build_progressive_claims(traceability: TraceabilityResult) -> list[dict[str, object]]:
+    links: dict[str, set[str]] = {}
+    for trace_items in (traceability.class_trace, traceability.sequence_trace):
+        for item in trace_items:
+            requirement_id = str(item.get("requirement") or "")
+            for link in item.get("links", []) if isinstance(item.get("links"), list) else []:
+                if isinstance(link, dict) and str(link.get("target") or ""):
+                    links.setdefault(requirement_id, set()).add(str(link["target"]))
+    claims: list[dict[str, object]] = []
+    requirements = traceability.requirement_graph.get("requirements", [])
+    for item in requirements if isinstance(requirements, list) else []:
+        if not isinstance(item, dict):
+            continue
+        requirement_id = str(item.get("id") or "")
+        if requirement_id:
+            claims.append(
+                {
+                    "claim_id": f"CLAIM-{requirement_id}",
+                    "requirement_id": requirement_id,
+                    "section": str(item.get("section") or ""),
+                    "content": str(item.get("content") or ""),
+                    "allowed_design_refs": sorted(links.get(requirement_id, set())),
+                }
+            )
+    return claims
+
+
+def _candidate_findings(candidates: list[SemanticCandidate]) -> list[DesignFinding]:
+    return [
+        DesignFinding(
+            finding_id=item.candidate_id,
+            category=item.category,
+            severity="blocking",
+            message=item.message,
+            expected_change=item.expected_change,
+            requirement_ids=[item.requirement_id],
+            diagram_ids=[],
+            evidence=[{"source": "design", "ref": ref, "excerpt": ref} for ref in item.design_refs],
+            subject_ref=item.claim_id,
+            support_count=item.support_count,
+            trial_ids=item.trial_ids,
+            origin="semantic",
+        )
+        for item in candidates
+    ]
+
+
+def _prioritize_candidates(candidates: list[SemanticCandidate]) -> list[SemanticCandidate]:
+    priority = {
+        "terminal_state": 0,
+        "behavior_order": 1,
+        "data_consistency": 2,
+        "cross_diagram_contract": 3,
+        "transaction_boundary": 4,
+        "unsupported_assumption": 5,
+    }
+    return sorted(candidates, key=lambda item: (priority.get(item.category, 99), item.key))
+
+
+def _progressive_validation_result(
+    *,
+    traceability: TraceabilityResult,
+    blockers: list[DesignFinding],
+    disputed: list[DesignFinding],
+    gate_stage: str,
+    details: dict[str, object],
+    repair_iteration: int,
+    inconclusive: bool,
+    llm_calls: dict[str, object],
+) -> DesignValidationResult:
+    semantic_consensus = {
+        key: details[key]
+        for key in (
+            "requested_trials",
+            "valid_trials",
+            "quorum",
+            "confirmed_count",
+            "disputed_count",
+            "complete",
+            "attempt_count",
+            "max_attempts",
+            "invalid_trial_count",
+            "invalid_trials",
+        )
+        if key in details
+    }
+    semantic_consensus["llm_calls"] = llm_calls
+    return DesignValidationResult(
+        traceability=traceability,
+        blocking_findings=blockers,
+        warnings=[],
+        rule_review={
+            "ok": not blockers and gate_stage != "deterministic_preflight",
+            "gate_stage": gate_stage,
+            "findings": [item.to_dict() for item in blockers if item.origin == "deterministic"],
+        },
+        llm_review={"gate_stage": gate_stage, **details},
+        repair_iterations=repair_iteration,
+        mode="design_validation_progressive_v1",
+        semantic_consensus=semantic_consensus,
+        disputed_findings=disputed,
+        inconclusive=inconclusive,
+    )
 
 
 def _dict_value(value: object) -> dict[str, object]:

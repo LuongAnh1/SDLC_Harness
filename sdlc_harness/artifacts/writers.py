@@ -167,6 +167,21 @@ def write_phase2_design_artifacts(
     blocking_count = int(validation_payload.get("blocking_count") or 0)
     warning_count = int(validation_payload.get("warning_count") or 0)
     validator_mode = str(validation_payload.get("mode") or traceability_mode)
+    gate_stage = str(
+        validation_payload.get("llm_review", {}).get("gate_stage")
+        if isinstance(validation_payload.get("llm_review"), dict)
+        else ""
+    ) or str(
+        validation_payload.get("rule_review", {}).get("gate_stage")
+        if isinstance(validation_payload.get("rule_review"), dict)
+        else ""
+    )
+    traceability_status = (
+        "not run (blocked by deterministic preflight)"
+        if traceability_mode == "not_run_preflight_blocked"
+        else "passed"
+    )
+    semantic_status = "passed" if gate_stage in {"semantic_consensus", "bounded_adjudication"} and not blocking_count else "not reached or blocked"
 
     quality_path = artifact_dir / f"design_quality_report_{suffix}.md"
     quality_path.write_text(
@@ -178,7 +193,9 @@ def write_phase2_design_artifacts(
 - Requirement items checked: {requirement_count}
 - Class graph parser: passed
 - Sequence graph parser: passed
-- Traceability LLM: passed
+- Progressive gate: {gate_stage or "legacy"}
+- Traceability LLM: {traceability_status}
+- Semantic review: {semantic_status}
 - Missing design links: {missing_count}
 - Hybrid validation blockers: {blocking_count}
 - Hybrid validation warnings: {warning_count}
@@ -722,6 +739,16 @@ def _test_report_markdown(report: dict[str, object]) -> str:
             f"- Exit code: `{report.get('exit_code', '')}`",
             f"- Duration: `{report.get('duration_seconds', '')}` seconds",
             f"- Reason: {report.get('reason', '')}",
+            f"- Discovered test entrypoints: `{len(report.get('discovered_test_entrypoints') or [])}`",
+            f"- Executed test entrypoints: `{len(report.get('executed_test_entrypoints') or [])}`",
+            "",
+            "## Test Entrypoints",
+            "",
+            *(
+                [f"- `{item}`" for item in report.get('executed_test_entrypoints', [])]
+                if isinstance(report.get('executed_test_entrypoints'), list)
+                else []
+            ),
             "",
             "## Stdout",
             "",

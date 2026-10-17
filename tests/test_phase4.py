@@ -26,6 +26,7 @@ from sdlc_harness.workflows.phase4 import (
     PhaseFourWorkflow,
     _apply_developer_changes,
     _code_review_pr_body,
+    _verification_repair_feedback,
     _verification_attempt_count,
 )
 
@@ -309,6 +310,121 @@ class PhaseFourTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
 
+    def test_verification_feedback_preserves_validator_repair_objective(self) -> None:
+        objective = {
+            "objective_id": "repair:approved-contract",
+            "source": "validator_code_trace",
+            "status": "open",
+            "canonical_keys": ["contract:EditFormView.showConfirmation"],
+            "contract_findings": [
+                {
+                    "code_ref": "src/main/java/EditFormView.java#showConfirmation",
+                    "expected_signature": {"name": "showConfirmation", "parameters": [], "return_type": "void"},
+                }
+            ],
+        }
+        result = VerificationResult(
+            status="failed",
+            command="javac",
+            cwd=str(self.target_repo),
+            exit_code=1,
+            duration_seconds=0.01,
+            stdout="",
+            stderr="src/test/java/FlowTest.java:12: error: FakeView does not override showConfirmation()",
+            reason="Compilation failed.",
+        )
+
+        feedback = _verification_repair_feedback(
+            run_id="run_lineage",
+            state={"source_ref": "jira_issue:SDLC-3"},
+            work_packet={"issue_key": "SDLC-3", "output_contract": {"allowed_paths": ["src/main/java/EditFormView.java", "src/test/java/FlowTest.java"]}},
+            result=result,
+            report_path="test_report_v2.md",
+            target_repo=str(self.target_repo),
+            branch="run/run_lineage",
+            feedback_version=2,
+            repair_iteration=1,
+            prior_feedback={
+                "version": "implementation_repair_feedback_v1",
+                "feedback_source": "validator_code_trace",
+                "repair_objective": objective,
+                "repair_lineage": {"root_feedback_artifact": "feedback_v1.json"},
+            },
+            prior_feedback_ref="feedback_v1.json",
+        )
+
+        self.assertEqual(feedback["repair_objective"], objective)
+        self.assertEqual(feedback["repair_lineage"]["objective_id"], "repair:approved-contract")
+        self.assertEqual(feedback["repair_lineage"]["root_feedback_artifact"], "feedback_v1.json")
+        self.assertIn("Do not revert", feedback["required_action"])
+
+    def test_verification_feedback_backfills_legacy_validator_objective_and_refreshes_diagnostic(self) -> None:
+        old_diagnostic = "FlowTest.java:12: old compiler diagnostic"
+        current_diagnostic = "Controller.java:52: current compiler diagnostic"
+        result = VerificationResult(
+            status="failed",
+            command="javac",
+            cwd=str(self.target_repo),
+            exit_code=1,
+            duration_seconds=0.01,
+            stdout="",
+            stderr=current_diagnostic,
+            reason="Compilation failed.",
+        )
+        legacy_root = {
+            "version": "implementation_repair_feedback_v21",
+            "feedback_source": "validator_code_trace",
+            "missing_links": [
+                {
+                    "canonical_key": "contract:EditFormView.showConfirmation",
+                    "blocking": True,
+                    "owner": "developer",
+                    "code_ref": "src/main/java/EditFormView.java#showConfirmation",
+                    "expected_signature": {"name": "showConfirmation", "parameters": [], "return_type": "void"},
+                }
+            ],
+        }
+        prior = {
+            "version": "implementation_repair_feedback_v24",
+            "feedback_source": "verification",
+            "repair_objective": {
+                "objective_id": "repair:stale-verification",
+                "source": "verification",
+                "diagnostic_anchor": {"stderr": old_diagnostic},
+            },
+            "repair_lineage": {"root_feedback_artifact": "feedback_v21.json"},
+        }
+
+        feedback = _verification_repair_feedback(
+            run_id="run_legacy_lineage",
+            state={"source_ref": "jira_issue:SDLC-3"},
+            work_packet={
+                "issue_key": "SDLC-3",
+                "output_contract": {
+                    "allowed_paths": ["src/main/java/EditFormView.java", "src/main/java/Controller.java"]
+                },
+            },
+            result=result,
+            report_path="test_report_v25.md",
+            target_repo=str(self.target_repo),
+            branch="run/run_legacy_lineage",
+            feedback_version=25,
+            repair_iteration=20,
+            prior_feedback=prior,
+            prior_feedback_ref="feedback_v24.json",
+            root_feedback=legacy_root,
+            root_feedback_ref="feedback_v21.json",
+        )
+
+        objective = feedback["repair_objective"]
+        self.assertEqual(objective["source"], "validator_code_trace")
+        self.assertEqual(objective["canonical_keys"], ["contract:EditFormView.showConfirmation"])
+        self.assertNotIn("diagnostic_anchor", objective)
+        self.assertEqual(feedback["verification"]["stderr"], current_diagnostic)
+        self.assertNotIn(old_diagnostic, json.dumps(feedback, ensure_ascii=False))
+        self.assertEqual(feedback["repair_lineage"]["root_feedback_artifact"], "feedback_v21.json")
+
+
     def test_verification_attempt_count_ignores_phase4_artifact_version_gaps(self) -> None:
         workflow = PhaseFourWorkflow(self.settings)
         artifact_dir = workflow.store.run_dir("run_attempt_count") / "artifacts"
@@ -551,7 +667,7 @@ class PhaseFourTest(unittest.TestCase):
 
         payload = result.to_dict()
         self.assertTrue(result.ok)
-        self.assertEqual(payload["mode"], "hybrid_rule_llm_code_trace_v2")
+        self.assertEqual(payload["mode"], "hybrid_rule_llm_code_trace_v3")
         self.assertEqual(payload["requirement_contract"]["revision"], 3)
         self.assertEqual([item["requirement_ref"] for item in payload["mappings"]], ["REQ-1"])
         self.assertEqual(payload["stats"]["requirements_covered"], 1)
@@ -811,10 +927,15 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(trace["mappings"])
         self.assertFalse(trace["missing_links"])
         self.assertGreater(trace["stats"]["test_file_count"], 0)
-        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v2")
+        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v3")
         self.assertTrue(trace["llm_required"])
         self.assertTrue(trace["llm_review"]["ok"])
         self.assertTrue(trace["llm_review"]["review_context"]["code_snippets_included"])
+        self.assertIn("implementation_validation_ledger", response["latest_artifacts"])
+        ledger_path = self.repo_root / str(response["latest_artifacts"]["implementation_validation_ledger"])
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        self.assertEqual(ledger["version"], "implementation_validation_ledger_v1")
+        self.assertEqual(ledger["snapshot_fingerprint"], trace["snapshot_fingerprint"])
 
     def test_code_trace_llm_receives_source_and_test_snippets(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -1760,6 +1881,27 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("RequiredQaAcceptanceTest", result.reason)
         self.assertIn("qa generated failure", result.stderr)
+
+    def test_verification_runner_rejects_required_qa_test_without_bytecode(self) -> None:
+        qa_path = "src/test/java/com/sdlc/etour/heritage/RequiredQaAcceptanceTest.java"
+        work_packet = {
+            "test_intents": [
+                {"command": "powershell -NoProfile -Command \"Write-Host 'placeholder passed'\""},
+            ],
+        }
+
+        result = VerificationRunner(timeout_seconds=10).run(
+            target_path=self.target_repo,
+            work_packet=work_packet,
+            required_test_files=[qa_path],
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("did not produce Java bytecode", result.reason)
+        self.assertEqual(
+            result.discovered_test_entrypoints,
+            ("com.sdlc.etour.heritage.RequiredQaAcceptanceTest",),
+        )
 
     def test_continue_run_rejects_non_ready_state(self) -> None:
         phase3 = self._create_phase3_run()

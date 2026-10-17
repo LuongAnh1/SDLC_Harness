@@ -444,7 +444,7 @@ class PhaseOneWorkflow:
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if (
-            str(state.get("status") or "") == "implementation_repair_needed"
+            str(state.get("status") or "") in {"implementation_repair_needed", "implementation_traced"}
             and "revalidate_implementation" not in allowed_next_actions
         ):
             allowed_next_actions.insert(1 if allowed_next_actions else 0, "revalidate_implementation")

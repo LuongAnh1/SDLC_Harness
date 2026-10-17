@@ -633,15 +633,18 @@ class PhaseThreeWorkflow:
         quality_reports = _dict_value(state.get("quality_reports"))
         design_validation = _dict_value(quality_reports.get("design_validation"))
         latest_artifacts = _dict_value(state.get("latest_artifacts"))
+        accepted_validation_modes = {
+            "design_validation_hybrid_v2",
+            "design_validation_progressive_v1",
+        }
         if (
             not bool(design_validation.get("ok"))
-            or str(design_validation.get("mode") or "")
-            != "design_validation_hybrid_v2"
+            or str(design_validation.get("mode") or "") not in accepted_validation_modes
             or not str(latest_artifacts.get("design_validation_report") or "").strip()
         ):
             raise HarnessError(
                 "design_validation_required",
-                "Design must pass the hybrid Design Validator before Phase 3 approval. Run revalidate-design first.",
+                "Design must pass the configured Design Validator before Phase 3 approval. Run revalidate-design first.",
                 run_id=run_id,
             )
         checkpoint = _dict_value(state.get("pending_checkpoint"))

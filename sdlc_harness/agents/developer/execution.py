@@ -13,6 +13,7 @@ from typing import Any, Callable
 from ...core.errors import HarnessError
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .actor import DeveloperActAgent
+from .repair_context import build_repair_closure
 
 
 _ACTION_NAMES = {
@@ -94,6 +95,7 @@ class DeveloperToolLoopExecutor:
         journal_path = self.store.relative(journal_file)
 
         selection_policy_migrated = False
+        persisted_required_paths_for_migration: set[str] = set()
         legacy_file_manifest_migrated = False
         manifest = _build_manifest(
             run_id=run_id,
@@ -120,8 +122,18 @@ class DeveloperToolLoopExecutor:
                 existing = manifest
             if existing.get("input_hash") != manifest.get("input_hash"):
                 compatible_manifest = None
+                persisted_paths: set[str] = set()
+                legacy_context_schema = (
+                    bool(repair_feedback)
+                    and existing.get("version") == "developer_execution_manifest_v3"
+                    and manifest.get("version") == "developer_execution_manifest_v4"
+                    and existing.get("mode") == manifest.get("mode")
+                    and existing.get("repair_iteration") == manifest.get("repair_iteration")
+                    and existing.get("repair_feedback") == manifest.get("repair_feedback")
+                    and _manifest_paths(existing) == _manifest_paths(manifest)
+                )
                 if repair_feedback:
-                    persisted_paths = _manifest_paths(existing)
+                    persisted_paths = _manifest_context_paths(existing)
                     compatible_manifest = _build_manifest(
                         run_id=run_id,
                         work_packet=work_packet,
@@ -131,7 +143,9 @@ class DeveloperToolLoopExecutor:
                         repair_iteration=repair_iteration,
                         selected_paths=persisted_paths,
                     )
-                if not compatible_manifest or existing.get("input_hash") != compatible_manifest.get("input_hash"):
+                if legacy_context_schema:
+                    existing = compatible_manifest or manifest
+                elif not compatible_manifest or existing.get("input_hash") != compatible_manifest.get("input_hash"):
                     raise DeveloperExecutionError(
                         "developer_input_drift",
                         "Approved Developer input changed after the execution session was created.",
@@ -140,7 +154,11 @@ class DeveloperToolLoopExecutor:
                         manifest_path=manifest_path,
                         journal_path=journal_path,
                     )
+                else:
+                    existing = manifest
                 selection_policy_migrated = True
+                persisted_required_paths_for_migration = persisted_paths
+                _write_json_atomic(manifest_file, existing)
             manifest = existing
         else:
             _write_json_atomic(manifest_file, manifest)
@@ -160,6 +178,20 @@ class DeveloperToolLoopExecutor:
                 }
             ]
         if selection_policy_migrated:
+            journal["manifest_input_hash"] = manifest.get("input_hash")
+            for current_item in _dict_items(manifest.get("items")):
+                current_entry = _journal_item(journal, str(current_item.get("id") or ""))
+                context_paths = _item_context_paths(current_item)
+                current_entry["paths"] = _item_paths(current_item)
+                current_entry["context_paths"] = context_paths
+                current_entry["direct_repair_paths"] = _item_direct_repair_paths(current_item)
+                current_entry["contract_anchor_paths"] = _item_contract_anchor_paths(current_item)
+                current_entry.pop("required_paths", None)
+                if current_entry.get("status") != "completed":
+                    current_entry["handled_paths"] = []
+                    current_entry["inspected_paths"] = []
+                    current_entry["unchanged_paths"] = []
+                    current_entry["unresolved_paths"] = []
             migrations = journal.get("migrations")
             if not isinstance(migrations, list):
                 migrations = []
@@ -171,9 +203,9 @@ class DeveloperToolLoopExecutor:
                 migrations.append(
                     {
                         "code": "repair_selection_policy_migrated",
-                        "persisted_item_paths": sorted(_manifest_paths(manifest)),
+                        "persisted_item_paths": sorted(persisted_required_paths_for_migration),
                         "current_item_paths": sorted(
-                            _manifest_paths(
+                            _manifest_required_paths(
                                 _build_manifest(
                                     run_id=run_id,
                                     work_packet=work_packet,
@@ -352,6 +384,8 @@ class DeveloperToolLoopExecutor:
         seen_observations: set[str] = set()
         mutated_paths: set[str] = set()
         repair_mode = str(manifest.get("mode") or "").endswith("_repair")
+        context_repair = str(manifest.get("mode") or "") == "implementation_repair"
+        context_paths = _item_context_paths(item) if context_repair else item_paths
         length_failures = 0
         invalid_action_failures = 0
         max_actions = int(getattr(self.settings, "developer_max_actions_per_item", 24))
@@ -456,6 +490,9 @@ class DeveloperToolLoopExecutor:
                     mutated=bool(mutated_paths),
                     action_index=action_index,
                     max_actions=max_actions,
+                    closure_resolved=True,
+                    handled_paths=set(),
+                    unresolved_paths=set(),
                 )
                 if policy_error:
                     result = {"ok": False, **policy_error}
@@ -484,32 +521,50 @@ class DeveloperToolLoopExecutor:
                     if mutated_path:
                         mutated_paths.add(mutated_path)
                     seen_observations.clear()
+                inspected_paths = {
+                    path for path in context_paths if _has_successful_target_inspection(history, item_path=path)
+                }
+                handled_paths = mutated_paths & set(context_paths)
+                entry["handled_paths"] = sorted(handled_paths)
+                entry["inspected_paths"] = sorted(inspected_paths)
+                entry["unresolved_paths"] = []
+                if result.get("error") == "no_effect_mutation":
+                    entry["no_effect_actions"] = int(entry.get("no_effect_actions") or 0) + 1
                 journal["updated_at"] = utc_now_iso()
                 _write_json_atomic(journal_file, journal)
                 if action["action"] != "complete":
                     continue
-                no_change_required = _dict_value(action.get("arguments")).get("no_change_required") is True
-                inspected_paths = {
-                    path for path in item_paths if _has_successful_target_inspection(history, item_path=path)
-                }
+                complete_arguments = _dict_value(action.get("arguments"))
+                no_change_required = complete_arguments.get("no_change_required") is True
+                declared_unchanged: set[str] = set()
+                invalid_unchanged: list[str] = []
+                for row in _dict_items(complete_arguments.get("unchanged_paths")):
+                    path = str(row.get("path") or "").replace("\\", "/")
+                    reason = str(row.get("reason") or "").strip()
+                    if path not in context_paths or path not in inspected_paths or not reason:
+                        invalid_unchanged.append(path or "<missing>")
+                        continue
+                    declared_unchanged.add(path)
+                handled_paths = (mutated_paths & set(context_paths)) | declared_unchanged
+                entry["handled_paths"] = sorted(handled_paths)
+                entry["unchanged_paths"] = sorted(declared_unchanged)
+                entry["unresolved_paths"] = []
                 existing_paths = {path for path in item_paths if (target_path / path).is_file()}
                 no_change_allowed = (
                     repair_mode
                     and no_change_required
-                    and bool(inspected_paths)
+                    and bool(declared_unchanged)
+                    and not invalid_unchanged
                 )
-                completed_unit = (
-                    bool(mutated_paths)
-                    and mutated_paths <= existing_paths
-                )
+                completed_unit = bool(mutated_paths) and mutated_paths <= existing_paths
                 if not completed_unit and not no_change_allowed:
                     history.append(
                         {
                             "action": "rejected",
                             "error": (
-                                "complete requires at least one successful mutation in the selected coherent slice; "
-                                "repair feedback may instead use no_change_required=true after fresh inspection proves "
-                                "that the current worktree already resolves the reported failure"
+                                "complete requires at least one successful mutation. Repair feedback may instead use "
+                                "no_change_required=true with unchanged_paths=[{path, reason}] after fresh inspection. "
+                                f"invalid_unchanged_paths={invalid_unchanged}."
                             ),
                         }
                     )
@@ -794,11 +849,14 @@ def _build_manifest(
     allowed = [str(value).strip().replace("\\", "/") for value in output_contract.get("allowed_paths", []) if str(value).strip()]
     if not allowed:
         raise HarnessError("developer_work_packet_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.", run_id=run_id)
-    selected = (
+    closure = build_repair_closure(work_packet=work_packet, feedback=repair_feedback, target_path=target_path)
+    context_selected = (
         {path.strip().replace("\\", "/") for path in selected_paths}
         if selected_paths is not None
-        else _selected_repair_paths(work_packet, repair_feedback) if repair_feedback else set(allowed)
+        else set(_string_items(closure.get("context_paths"))) if repair_feedback else set(allowed)
     )
+    direct_selected = set(_string_items(closure.get("direct_repair_paths")))
+    anchor_selected = set(_string_items(closure.get("contract_anchor_paths")))
     proposed = {str(item.get("path") or ""): item for item in _dict_items(work_packet.get("proposed_files"))}
     coverage = _dict_value(work_packet.get("requirement_coverage_by_file"))
     mappings = _dict_value(work_packet.get("design_mappings_by_file"))
@@ -807,8 +865,18 @@ def _build_manifest(
         for item in _dict_items(work_packet.get("canonical_requirements"))
     }
     steps = _dict_items(work_packet.get("implementation_steps"))
-    ordered = [path for path in allowed if path in selected and "/src/test/" not in f"/{path}"]
-    ordered.extend(path for path in allowed if path in selected and "/src/test/" in f"/{path}")
+    execution_paths = set(allowed) if not repair_feedback or mode == "implementation_repair" else context_selected
+    ordered = [path for path in allowed if path in execution_paths and "/src/test/" not in f"/{path}"]
+    ordered.extend(path for path in allowed if path in execution_paths and "/src/test/" in f"/{path}")
+    context_ordered = [path for path in ordered if path in context_selected]
+    direct_ordered = [path for path in ordered if path in direct_selected]
+    anchor_ordered = [path for path in ordered if path in anchor_selected]
+    if repair_feedback and not context_ordered:
+        raise HarnessError(
+            "developer_repair_scope_empty",
+            "Developer repair context has no approved paths.",
+            run_id=run_id,
+        )
     files: list[dict[str, object]] = []
     for path in ordered:
         req_ids = []
@@ -818,11 +886,7 @@ def _build_manifest(
                 req_ids.append(value)
         file_steps = []
         for row in steps:
-            step_paths = (
-                [str(value).replace("\\", "/") for value in row.get("files", [])]
-                if isinstance(row.get("files"), list)
-                else []
-            )
+            step_paths = [str(value).replace("\\", "/") for value in row.get("files", [])] if isinstance(row.get("files"), list) else []
             if path in step_paths:
                 file_steps.append(
                     {
@@ -833,22 +897,21 @@ def _build_manifest(
                         "requirement_ids": row.get("requirement_ids", []),
                     }
                 )
-        design_rows = []
-        for row in _dict_items(mappings.get(path)):
-            design_rows.append(
-                {
-                    "design_element_id": row.get("design_element_id"),
-                    "planned_code_target": row.get("planned_code_target"),
-                    "message_type": row.get("message_type"),
-                    "trace_policy": row.get("trace_policy"),
-                }
-            )
-        item = proposed.get(path, {})
+        design_rows = [
+            {
+                "design_element_id": row.get("design_element_id"),
+                "planned_code_target": row.get("planned_code_target"),
+                "message_type": row.get("message_type"),
+                "trace_policy": row.get("trace_policy"),
+            }
+            for row in _dict_items(mappings.get(path))
+        ]
+        proposed_item = proposed.get(path, {})
         files.append(
             {
                 "path": path,
-                "operation": str(item.get("operation") or "create_or_update"),
-                "purpose": str(item.get("purpose") or item.get("reason") or ""),
+                "operation": str(proposed_item.get("operation") or "create_or_update"),
+                "purpose": str(proposed_item.get("purpose") or proposed_item.get("reason") or ""),
                 "requirement_ids": req_ids,
                 "requirements": [{"id": value, "content": canonical.get(value, "")} for value in req_ids],
                 "design_mappings": design_rows,
@@ -873,10 +936,19 @@ def _build_manifest(
         "id": "TASK-001",
         "title": "Repair approved implementation" if repair_feedback else "Implement approved plan",
         "paths": ordered,
+        "context_paths": context_ordered,
+        "direct_repair_paths": direct_ordered,
+        "contract_anchor_paths": anchor_ordered,
         "files": files,
         "requirement_ids": requirement_ids,
         "requirements": [{"id": value, "content": canonical.get(value, "")} for value in requirement_ids],
         "implementation_steps": steps,
+        "repair_closure": {
+            **closure,
+            "context_paths": context_ordered,
+            "direct_repair_paths": direct_ordered,
+            "contract_anchor_paths": anchor_ordered,
+        } if repair_feedback else {},
     }
     input_payload = {
         "approved_plan": work_packet.get("approved_plan"),
@@ -887,16 +959,13 @@ def _build_manifest(
         "items": [
             {
                 **item,
-                "files": [
-                    {key: value for key, value in file_item.items() if key != "initial_sha256"}
-                    for file_item in files
-                ],
+                "files": [{key: value for key, value in file_item.items() if key != "initial_sha256"} for file_item in files],
             }
         ],
         "repair_feedback": repair_feedback or {},
     }
     return {
-        "version": "developer_execution_manifest_v2",
+        "version": "developer_execution_manifest_v4",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -911,7 +980,7 @@ def _build_manifest(
 
 def _new_journal(*, run_id: str, manifest: dict[str, object], mode: str, repair_iteration: int) -> dict[str, object]:
     return {
-        "version": "developer_execution_journal_v2",
+        "version": "developer_execution_journal_v3",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -923,9 +992,17 @@ def _new_journal(*, run_id: str, manifest: dict[str, object], mode: str, repair_
             {
                 "id": item.get("id"),
                 "paths": _item_paths(item),
+                "context_paths": _item_context_paths(item),
+                "direct_repair_paths": _item_direct_repair_paths(item),
+                "contract_anchor_paths": _item_contract_anchor_paths(item),
                 "status": "pending",
                 "attempts": 0,
                 "actions": [],
+                "handled_paths": [],
+                "inspected_paths": [],
+                "unchanged_paths": [],
+                "unresolved_paths": [],
+                "no_effect_actions": 0,
             }
             for item in _dict_items(manifest.get("items"))
         ],
@@ -945,13 +1022,14 @@ def _action_prompt(
     mutated: bool,
     context_window_tokens: int,
 ) -> str:
-    paths = _item_paths(item)
-    phase = _execution_phase(
-        history=history,
-        mutated=mutated,
-        action_index=action_index,
-        max_actions=max_actions,
-    )
+    repair_mode = str(manifest.get("mode") or "").endswith("_repair")
+    context_repair = str(manifest.get("mode") or "") == "implementation_repair"
+    paths = _item_context_paths(item) if context_repair else _item_paths(item)
+    direct_paths = _item_direct_repair_paths(item) if context_repair else paths
+    anchor_paths = _item_contract_anchor_paths(item) if context_repair else []
+    handled_paths = _handled_paths(history, required_paths=paths)
+    inspected_paths = _inspected_paths(history, required_paths=paths)
+    phase = _execution_phase(history=history, mutated=mutated, action_index=action_index, max_actions=max_actions)
     action_memory = _action_memory(
         history,
         target_item_paths=paths,
@@ -963,9 +1041,22 @@ def _action_prompt(
         "summary": "short reason",
     }
     context = {
-        "execution_task": item,
+        "execution_task": _prompt_execution_task(item, context_paths=paths),
         "execution": {"mode": manifest.get("mode"), "base_sha": manifest.get("base_sha")},
         "repair_feedback": _developer_repair_context(manifest.get("repair_feedback")),
+        "repair_progress": {
+            "direct_repair_paths": direct_paths,
+            "context_paths": paths,
+            "contract_anchor_paths": anchor_paths,
+            "mutated_context_paths": sorted(handled_paths),
+            "inspected_context_paths": sorted(inspected_paths),
+            "completion_rule": (
+                "Apply one coherent real mutation, then call complete so Verification can rerun. Context paths are "
+                "not a mutation checklist. A no-change completion requires inspected evidence and a specific reason."
+                if context_repair
+                else "Complete after one coherent mutation; the owning quality gate will rerun."
+            ),
+        },
         "target_state": {
             path: {"exists": (target_path / path).is_file(), "sha256": _file_hash(target_path / path)}
             for path in paths
@@ -984,7 +1075,6 @@ def _action_prompt(
         if force_incremental
         else ""
     )
-    repair_mode = str(manifest.get("mode") or "").endswith("_repair")
     feedback_source = str(_dict_value(manifest.get("repair_feedback")).get("feedback_source") or "")
     phase_instruction = {
         "inspect_or_edit": (
@@ -996,49 +1086,40 @@ def _action_prompt(
             "approved execution-unit path. Use working_memory.inspected_sources; do not read, list, or search again."
         ),
         "edit_or_complete": (
-            "At least one mutation succeeded. Make only a necessary bounded follow-up edit, or call complete now."
+            "At least one mutation succeeded. Continue only when another change is necessary for the same coherent "
+            "fix; otherwise call complete and let Verification run."
         ),
-        "complete_required": (
-            "This is the final available action and a mutation already succeeded. You MUST call complete now."
-        ),
+        "complete_required": "A mutation succeeded and only one action remains. You MUST call complete now.",
     }[phase]
     if not repair_mode:
         work_instruction = (
             "Choose the next coherent implementation slice yourself from the approved plan. Size it to fit the "
-            "remaining tool-action and JSON output budget; do not attempt all approved files in one invocation. "
-            "Prefer a vertical behavior or dependency cluster that can be completed together. The slice may touch "
-            "several dependent approved paths and must leave the current worktree internally consistent and "
-            "buildable. Finish that slice, then call complete. Verification will run the configured compile/test "
-            "command, and Validator will later compare the accumulated worktree with the full approved design."
+            "remaining tool-action and JSON output budget. Keep the worktree internally consistent and buildable. "
+            "Finish that slice, then call complete; Verification and Validator will assess the accumulated worktree."
         )
     elif feedback_source == "verification":
         work_instruction = (
-            "This is a Verification repair pass, not a fresh implementation pass. Treat files currently present in "
-            "the worktree as the source of truth and inspect the exact code around the latest compile/test diagnostic. "
-            "Modify the smallest coherent set of dependent approved paths needed to make the reported command pass. "
-            "Preserve correct existing code and test assertions; do not regenerate files from the original plan and "
-            "do not implement unrelated missing design scope in this pass. After the diagnostic is repaired, call "
-            "complete so the harness can rerun Verification."
+            "This is a Verification repair pass. The approved repair_objective is the contract authority, the latest "
+            "verification field is the current diagnostic, and worktree files are only the starting state. Repair the "
+            "latest diagnostic with the smallest coherent mutation. Inspect context_paths as needed, but do not modify "
+            "a contract_anchor_path away from its expected_signature merely to match a stale caller or test. Preserve "
+            "correct tests and code; do not regenerate unrelated files. Then call complete for Verification to rerun."
         )
     elif feedback_source == "validator_code_trace":
         work_instruction = (
-            "Verification already passed. This is the next implementation pass driven by Validator's comparison "
-            "against the full approved design. Choose one coherent bounded slice from the reported missing files, "
-            "symbols, behaviors, tests, or trace links. Implement every dependent approved path required to complete "
-            "that slice and keep the accumulated worktree buildable. Do not try to consume all remaining findings in "
-            "one response; Validator will reassess the full worktree after Verification. Call complete when this slice "
-            "is internally complete."
+            "Verification already passed. Implement one coherent bounded slice from Validator's repair_objective. "
+            "Make each affected contract match its expected_signature and update only the dependent callers, "
+            "implementations, or tests needed for that slice. Context paths may remain unchanged. Then call complete."
         )
     else:
         work_instruction = (
-            "Repair the reported quality feedback from the current worktree as one coherent bounded slice. You may "
-            "edit several dependent approved paths. Call complete when that slice is consistent and ready for the "
-            "owning quality gate to rerun."
+            "Repair the reported quality feedback from the current worktree as one coherent bounded slice. Context "
+            "paths may be inspected without modification. Call complete when the mutation is ready for its quality gate."
         )
     if repair_mode and not mutated:
         work_instruction += (
-            " If fresh inspection proves that the reported failure is already resolved, call complete with "
-            "no_change_required=true and cite the inspected evidence."
+            " If fresh inspection proves the reported failure is already resolved, call complete with "
+            "no_change_required=true and list the inspected path plus a specific reason in unchanged_paths."
         )
     return (
         "Developer Tool Action v1\n\n"
@@ -1050,16 +1131,12 @@ def _action_prompt(
         "- search_code: arguments {query, prefix?, limit?}\n"
         "- read_diff: arguments {path}\n"
         "- write_file: arguments {path, expected_sha256, content}; any approved execution-unit path\n"
-        "- apply_patch: arguments {path, expected_sha256, patch}; unified diff for any approved execution-unit "
-        "path. A headerless patch uses arguments.path as its trusted target and MUST begin with a complete hunk "
-        "header such as @@ -10,2 +10,3 @@. Bare @@ is invalid. If you cannot provide valid hunk ranges, use "
-        "write_file instead.\n"
-        "- complete: arguments {summary, no_change_required?}; normally only after a successful write/patch. "
-        "In repair mode, no_change_required=true is allowed only after fresh inspection proves the feedback stale.\n\n"
+        "- apply_patch: arguments {path, expected_sha256, patch}; unified diff for an approved path. A headerless "
+        "patch MUST begin with a complete hunk header such as @@ -10,2 +10,3 @@. Bare @@ is invalid.\n"
+        "- complete: arguments {summary, no_change_required?, unchanged_paths?: [{path, reason}]}; normally after "
+        "at least one successful mutation. no_change_required=true requires fresh inspected evidence.\n\n"
         f"A write_file content or apply_patch value must stay below {max_write_chars} characters. {extra}\n"
-        "Return only one bounded JSON action per response; never emit several file bodies in one action. "
-        "Do not output source code outside the JSON action. Do not invent requirement IDs. "
-        "Inspect dependencies with read_file/search_code when needed. "
+        "Return one bounded JSON action per response. Do not output source code outside the JSON action. "
         f"{work_instruction} {phase_instruction}\n\n"
         f"Execution context:\n{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}"
     )
@@ -1102,6 +1179,8 @@ def _developer_repair_context(value: object) -> dict[str, object]:
         "trace_artifact",
         "developer_constraints",
         "artifact_ref",
+        "repair_objective",
+        "repair_lineage",
     }
     return {
         **{key: item for key, item in feedback.items() if key in allowed_keys},
@@ -1133,6 +1212,9 @@ def _action_policy_error(
     mutated: bool,
     action_index: int,
     max_actions: int,
+    closure_resolved: bool = True,
+    handled_paths: set[str] | None = None,
+    unresolved_paths: set[str] | None = None,
 ) -> dict[str, object] | None:
     name = str(action.get("action") or "")
     phase = _execution_phase(
@@ -1141,6 +1223,18 @@ def _action_policy_error(
         action_index=action_index,
         max_actions=max_actions,
     )
+    handled_paths = handled_paths or set()
+    unresolved_paths = unresolved_paths or set()
+    action_path = str(_dict_value(action.get("arguments")).get("path") or "").replace("\\", "/")
+    if name in _MUTATION_ACTIONS and unresolved_paths and action_path in handled_paths:
+        return {
+            "error": "repair_path_already_handled",
+            "instruction": (
+                "Advance to one of the unresolved repair paths before revisiting this file: "
+                f"{sorted(unresolved_paths)}"
+            ),
+            "unresolved_paths": sorted(unresolved_paths),
+        }
     if name in _OBSERVATION_ACTIONS and _action_signature(action) in seen_observations:
         return {
             "error": "duplicate_observation",
@@ -1151,7 +1245,7 @@ def _action_policy_error(
             "error": "mutation_required",
             "instruction": "The inspection budget is exhausted; write_file or apply_patch an approved unit path now.",
         }
-    if phase == "complete_required" and name != "complete":
+    if phase == "complete_required" and closure_resolved and name != "complete":
         return {
             "error": "completion_required",
             "instruction": "A mutation already succeeded and only one action remains; call complete now.",
@@ -1442,11 +1536,21 @@ def _execute_action(
         if not isinstance(content, str) or len(content) > max_write_chars:
             return {"ok": False, "error": "write_content_too_large", "max_chars": max_write_chars}
         expected = str(args.get("expected_sha256") or "")
-        if expected != _file_hash(target):
-            return {"ok": False, "error": "stale_file_hash", "actual_sha256": _file_hash(target)}
+        before_sha256 = _file_hash(target)
+        if expected != before_sha256:
+            return {"ok": False, "error": "stale_file_hash", "actual_sha256": before_sha256}
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content.rstrip() + "\n", encoding="utf-8")
-        return {"ok": True, "path": path, "sha256": _file_hash(target), "chars": len(content)}
+        after_sha256 = _file_hash(target)
+        if after_sha256 == before_sha256:
+            return {
+                "ok": False,
+                "error": "no_effect_mutation",
+                "path": path,
+                "sha256": after_sha256,
+                "instruction": "This content is already present. Advance to an unresolved repair path or complete.",
+            }
+        return {"ok": True, "path": path, "sha256": after_sha256, "chars": len(content)}
     if name == "apply_patch":
         path = str(args.get("path") or "")
         target = _safe_write_target(repo_root, path, item_paths, run_id=run_id)
@@ -1454,8 +1558,9 @@ def _execute_action(
         if not isinstance(patch_text, str) or len(patch_text) > max_write_chars:
             return {"ok": False, "error": "patch_too_large", "max_chars": max_write_chars}
         expected = str(args.get("expected_sha256") or "")
-        if expected != _file_hash(target):
-            return {"ok": False, "error": "stale_file_hash", "actual_sha256": _file_hash(target)}
+        before_sha256 = _file_hash(target)
+        if expected != before_sha256:
+            return {"ok": False, "error": "stale_file_hash", "actual_sha256": before_sha256}
         try:
             patch_text = _prepare_patch_text(patch_text, item_path=path, run_id=run_id)
         except HarnessError as exc:
@@ -1485,59 +1590,35 @@ def _execute_action(
         finally:
             if patch_file.exists():
                 patch_file.unlink()
-        return {"ok": True, "path": path, "sha256": _file_hash(target)}
+        after_sha256 = _file_hash(target)
+        if after_sha256 == before_sha256:
+            return {
+                "ok": False,
+                "error": "no_effect_mutation",
+                "path": path,
+                "sha256": after_sha256,
+                "instruction": "The patch produced no file change. Advance to an unresolved repair path.",
+            }
+        return {"ok": True, "path": path, "sha256": after_sha256}
     if name == "complete":
         return {"ok": True, "summary": str(args.get("summary") or "")}
     return {"ok": False, "error": "unsupported_action"}
 
 
-def _selected_repair_paths(work_packet: dict[str, object], feedback: dict[str, object] | None) -> set[str]:
-    allowed = {
-        path.replace("\\", "/")
-        for path in _string_items(_dict_value(work_packet.get("output_contract")).get("allowed_paths"))
-    }
-    if not feedback:
-        return allowed
-    feedback_source = str(feedback.get("feedback_source") or "")
-    path_evidence = _dict_value(feedback.get("verification")) if feedback_source == "verification" else feedback
-    text = "\n".join(_walk_strings(path_evidence)).replace("\\", "/").replace("./", "")
-    text_folded = text.casefold()
-    selected = {path for path in allowed if path.casefold() in text_folded}
-    if feedback_source == "verification":
-        selected.update(
-            path
-            for path in allowed
-            if Path(path).stem and _compiler_symbol_referenced(text_folded, Path(path).stem.casefold())
-        )
-    requirement_ids = {
-        str(item.get("requirement_id") or item.get("requirement") or item.get("requirement_ref") or "")
-        for item in _walk_dicts(feedback)
-    } - {""}
-    coverage = _dict_value(work_packet.get("requirement_coverage_by_file"))
-    for path, rows in coverage.items():
-        if any(str(row.get("requirement_id") or "") in requirement_ids for row in _dict_items(rows)):
-            selected.add(str(path).replace("\\", "/"))
+def _selected_repair_paths(
+    work_packet: dict[str, object],
+    feedback: dict[str, object] | None,
+    *,
+    target_path: Path | None = None,
+) -> set[str]:
+    """Compatibility wrapper around the evidence-backed repair closure builder."""
 
-    if feedback_source == "verification" and selected:
-        directly_diagnosed = set(selected)
-        for step in _dict_items(work_packet.get("implementation_steps")):
-            step_paths = {
-                path.replace("\\", "/")
-                for path in _string_items(step.get("files"))
-                if path.replace("\\", "/") in allowed
-            }
-            if not directly_diagnosed.intersection(step_paths):
-                continue
-            selected.update(path for path in step_paths if not _looks_like_test_path(path))
-
-    if feedback_source == "verification" and len(selected) == 1:
-        selected_path = next(iter(selected))
-        for row in _dict_items(coverage.get(selected_path)):
-            for target in _string_items(row.get("planned_code_targets")):
-                dependency_path = target.split("#", 1)[0].replace("\\", "/")
-                if dependency_path in allowed:
-                    selected.add(dependency_path)
-    return selected or allowed
+    closure = build_repair_closure(
+        work_packet=work_packet,
+        feedback=feedback,
+        target_path=target_path,
+    )
+    return set(_string_items(closure.get("context_paths")))
 
 
 def _looks_like_test_path(path: str) -> bool:
@@ -1723,12 +1804,73 @@ def _item_paths(item: dict[str, object]) -> list[str]:
     )
 
 
-def _manifest_paths(manifest: dict[str, object]) -> set[str]:
+def _item_context_paths(item: dict[str, object]) -> list[str]:
+    declared = [path.replace("\\", "/") for path in _string_items(item.get("context_paths"))]
+    if not declared:
+        declared = [path.replace("\\", "/") for path in _string_items(item.get("required_paths"))]
+    return list(dict.fromkeys(declared)) if declared else _item_paths(item)
+
+
+def _item_direct_repair_paths(item: dict[str, object]) -> list[str]:
+    declared = [path.replace("\\", "/") for path in _string_items(item.get("direct_repair_paths"))]
+    return list(dict.fromkeys(declared))
+
+
+def _item_contract_anchor_paths(item: dict[str, object]) -> list[str]:
+    declared = [path.replace("\\", "/") for path in _string_items(item.get("contract_anchor_paths"))]
+    return list(dict.fromkeys(declared))
+
+
+def _item_required_paths(item: dict[str, object]) -> list[str]:
+    """Compatibility alias: legacy required paths are context, not a mutation checklist."""
+
+    return _item_context_paths(item)
+
+
+def _prompt_execution_task(item: dict[str, object], *, context_paths: list[str]) -> dict[str, object]:
+    context = set(context_paths)
+    steps = [
+        row
+        for row in _dict_items(item.get("implementation_steps"))
+        if context.intersection(path.replace("\\", "/") for path in _string_items(row.get("files")))
+    ]
+    visible_item = {key: value for key, value in item.items() if key != "required_paths"}
     return {
-        path
-        for item in _dict_items(manifest.get("items"))
-        for path in _item_paths(item)
+        **visible_item,
+        "paths": context_paths,
+        "allowed_paths": _item_paths(item),
+        "files": [row for row in _item_files(item) if str(row.get("path") or "") in context],
+        "implementation_steps": steps,
     }
+
+
+def _handled_paths(history: list[dict[str, object]], *, required_paths: list[str]) -> set[str]:
+    handled: set[str] = set()
+    required_folded = {path.casefold(): path for path in required_paths}
+    for row in history:
+        if row.get("action") not in _MUTATION_ACTIONS or not _dict_value(row.get("result")).get("ok"):
+            continue
+        path = str(_dict_value(row.get("result")).get("path") or "").replace("\\", "/")
+        canonical = required_folded.get(path.casefold())
+        if canonical:
+            handled.add(canonical)
+    return handled
+
+
+def _inspected_paths(history: list[dict[str, object]], *, required_paths: list[str]) -> set[str]:
+    return {path for path in required_paths if _has_successful_target_inspection(history, item_path=path)}
+
+
+def _manifest_paths(manifest: dict[str, object]) -> set[str]:
+    return {path for item in _dict_items(manifest.get("items")) for path in _item_paths(item)}
+
+
+def _manifest_context_paths(manifest: dict[str, object]) -> set[str]:
+    return {path for item in _dict_items(manifest.get("items")) for path in _item_context_paths(item)}
+
+
+def _manifest_required_paths(manifest: dict[str, object]) -> set[str]:
+    return _manifest_context_paths(manifest)
 
 
 def _completed_files(item: dict[str, object], entry: dict[str, object]) -> list[dict[str, object]]:
@@ -1743,7 +1885,8 @@ def _completed_files(item: dict[str, object], entry: dict[str, object]) -> list[
             {
                 "path": path,
                 "operation": file_item.get("operation"),
-                "reason": entry.get("summary") or file_item.get("purpose"),
+                "reason": file_item.get("purpose") or "Developer tool mutation recorded for this approved path.",
+                "execution_summary": entry.get("summary"),
                 "covered_design_elements": [
                     str(row.get("design_element_id") or "")
                     for row in _dict_items(file_item.get("design_mappings"))

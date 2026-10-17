@@ -31,8 +31,11 @@ class Settings:
     requirement_contract_version: str
     design_repair_limit: int
     design_validation_trials: int
+    design_llm_call_budget: int
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
+    implementation_validation_trials: int
+    implementation_validation_call_budget: int
     qa_repair_limit: int
     sync_mode: str
     atlassian_base_url: str
@@ -118,8 +121,11 @@ def load_settings(
         "SDLC_DEVELOPER_MAX_ACTION_RETRIES",
         "SDLC_DESIGN_REPAIR_LIMIT",
         "SDLC_DESIGN_VALIDATION_TRIALS",
+        "SDLC_DESIGN_LLM_CALL_BUDGET",
         "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
         "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
+        "SDLC_IMPLEMENTATION_VALIDATION_TRIALS",
+        "SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET",
         "SDLC_QA_REPAIR_LIMIT",
         "SDLC_SYNC_MODE",
         "ATLASSIAN_BASE_URL",
@@ -193,7 +199,12 @@ def load_settings(
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
         design_validation_trials=_int_value(
             merged.get("SDLC_DESIGN_VALIDATION_TRIALS"),
-            default=1,
+            default=3,
+            minimum=1,
+        ),
+        design_llm_call_budget=_int_value(
+            merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"),
+            default=16,
             minimum=1,
         ),
         implementation_plan_repair_limit=_int_value(
@@ -205,6 +216,16 @@ def load_settings(
             merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"),
             default=2,
             minimum=0,
+        ),
+        implementation_validation_trials=_int_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"),
+            default=3,
+            minimum=2,
+        ),
+        implementation_validation_call_budget=_int_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"),
+            default=6,
+            minimum=2,
         ),
         qa_repair_limit=_int_value(
             merged.get("SDLC_QA_REPAIR_LIMIT"),

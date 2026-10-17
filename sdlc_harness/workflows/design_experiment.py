@@ -151,26 +151,36 @@ class SemanticCandidate:
         }
 
 
-class ProgressiveDesignExperiment:
-    """Run preflight, traceability, and bounded semantic gates in isolation."""
+class ProgressiveDesignReviewEngine:
+    """Shared progressive review engine used by production and isolated experiments."""
 
     def __init__(
         self,
         settings: Settings,
         *,
-        experiment_root: Path,
+        experiment_root: Path | None = None,
         llm_call_budget: int = 16,
         llm_client: Any | None = None,
     ):
         self.settings = settings
         self.source_store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
-        self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=experiment_root)
+        self.store = (
+            RuntimeStore(repo_root=settings.repo_root, runtime_root=experiment_root)
+            if experiment_root is not None
+            else None
+        )
         self.llm = BudgetedLlmClient(llm_client or LlmClient(settings), limit=llm_call_budget)
+        self.validation_trials = max(1, int(settings.design_validation_trials))
         self.designer = DesignerAgent(self.llm)
         self.trace_validator = ValidatorAgent(self.llm)
         self.design_validator = DesignValidator(self.llm)
 
     def run(self, *, source_run_id: str) -> dict[str, object]:
+        if self.store is None:
+            raise HarnessError(
+                "design_experiment_root_required",
+                "An experiment root is required for an isolated design experiment.",
+            )
         source_state = self.source_store.read_state(source_run_id)
         approved = read_frozen_requirement_input(
             store=self.source_store,
@@ -198,7 +208,7 @@ class ProgressiveDesignExperiment:
             "experiment": {
                 "version": "progressive_design_validation_v1",
                 "source_run_id": source_run_id,
-                "validation_trials": 3,
+                "validation_trials": self.validation_trials,
                 "repair_limit": min(3, max(0, int(self.settings.design_repair_limit))),
                 "llm_call_budget": self.llm.limit,
                 "gate_order": ["deterministic_preflight", "traceability", "semantic_claims", "bounded_adjudication"],
@@ -283,7 +293,7 @@ class ProgressiveDesignExperiment:
 
             if pending_semantic:
                 self.llm.require(1, category="semantic_targeted_verification")
-                unresolved = self._verify_repair(
+                unresolved = self.verify_repair(
                     pending_semantic,
                     design_model=design_model,
                     class_graph=parsed.class_graph,
@@ -299,15 +309,33 @@ class ProgressiveDesignExperiment:
                     continue
                 pending_semantic = []
 
-            self.llm.require(3, category="semantic_claim_reviews")
+            self.llm.require(self.validation_trials, category="semantic_claim_reviews")
             claims = _build_claim_matrix(traceability)
-            confirmed, disputed, trial_report = self._semantic_trials(
+            confirmed, disputed, trial_report = self.semantic_trials(
                 claims=claims,
                 requirement_model=approved.canonical_model.to_dict(),
                 design_model=design_model,
                 class_graph=parsed.class_graph,
                 sequence_graph=parsed.sequence_graph,
             )
+            if not bool(trial_report.get("complete")):
+                self._record_cycle(
+                    state,
+                    version,
+                    "semantic_trials_inconclusive",
+                    [],
+                    [],
+                    design_ref,
+                    trial_report,
+                )
+                state.update(
+                    status="design_experiment_inconclusive",
+                    summary_for_user=(
+                        "Experiment stopped because it could not collect the requested "
+                        "number of valid semantic trials within the bounded retry budget."
+                    ),
+                )
+                return
             if confirmed:
                 selected = confirmed[:2]
                 outcome = self._record_cycle(
@@ -325,7 +353,7 @@ class ProgressiveDesignExperiment:
                     key=lambda item: (CATEGORY_PRIORITY.get(item.category, 99), item.key),
                 )[:3]
                 self.llm.require(1, category="semantic_adjudication")
-                supported, uncertain, adjudication = self._adjudicate(
+                supported, uncertain, adjudication = self.adjudicate(
                     candidates,
                     requirement_model=approved.canonical_model.to_dict(),
                     design_model=design_model,
@@ -369,7 +397,7 @@ class ProgressiveDesignExperiment:
             )
             return
 
-    def _semantic_trials(
+    def semantic_trials(
         self,
         *,
         claims: list[dict[str, object]],
@@ -379,35 +407,61 @@ class ProgressiveDesignExperiment:
         sequence_graph: dict[str, object],
     ) -> tuple[list[SemanticCandidate], list[SemanticCandidate], dict[str, object]]:
         trials: list[dict[str, object]] = []
+        invalid_trials: list[dict[str, object]] = []
         assessments: list[tuple[str, dict[str, object]]] = []
-        for ordinal in range(1, 4):
-            trial_id = f"trial-{ordinal}"
-            payload = self._complete_json(
-                system="You are Progressive Design Semantic Judge. Return strict JSON only.",
-                prompt=_semantic_prompt(
-                    claims=claims,
-                    requirement_model=requirement_model,
-                    design_model=design_model,
-                    class_graph=class_graph,
-                    sequence_graph=sequence_graph,
-                ),
-            )
-            normalized = _validate_assessments(payload, claims)
+        max_attempts = self.validation_trials * 2
+        attempt = 0
+        while len(trials) < self.validation_trials and attempt < max_attempts:
+            missing_trials = self.validation_trials - len(trials)
+            if self.llm.remaining < missing_trials:
+                break
+            attempt += 1
+            attempt_id = f"attempt-{attempt}"
+            try:
+                payload = self._complete_json(
+                    system="You are Progressive Design Semantic Judge. Return strict JSON only.",
+                    prompt=_semantic_prompt(
+                        claims=claims,
+                        requirement_model=requirement_model,
+                        design_model=design_model,
+                        class_graph=class_graph,
+                        sequence_graph=sequence_graph,
+                    ),
+                )
+                normalized = _validate_assessments(payload, claims)
+            except HarnessError as exc:
+                if exc.error_code != "design_semantic_review_failed":
+                    raise
+                invalid_trials.append(
+                    {
+                        "attempt_id": attempt_id,
+                        "error_code": exc.error_code,
+                        "message": exc.message,
+                    }
+                )
+                continue
+            trial_id = f"trial-{len(trials) + 1}"
             trials.append({"trial_id": trial_id, "assessments": normalized})
             assessments.extend((trial_id, item) for item in normalized)
         candidates = _aggregate_assessments(assessments)
-        confirmed = [item for item in candidates if item.support_count >= 2]
-        disputed = [item for item in candidates if item.support_count == 1]
+        quorum = self.validation_trials // 2 + 1
+        confirmed = [item for item in candidates if item.support_count >= quorum]
+        disputed = [item for item in candidates if item.support_count < quorum]
         return confirmed, disputed, {
-            "requested_trials": 3,
-            "valid_trials": 3,
-            "quorum": 2,
+            "requested_trials": self.validation_trials,
+            "valid_trials": len(trials),
+            "quorum": quorum,
             "confirmed_count": len(confirmed),
             "disputed_count": len(disputed),
+            "complete": len(trials) == self.validation_trials,
+            "attempt_count": attempt,
+            "max_attempts": max_attempts,
+            "invalid_trial_count": len(invalid_trials),
+            "invalid_trials": invalid_trials,
             "trials": trials,
         }
 
-    def _verify_repair(
+    def verify_repair(
         self,
         candidates: list[SemanticCandidate],
         *,
@@ -446,7 +500,7 @@ class ProgressiveDesignExperiment:
             raise HarnessError("design_semantic_review_failed", "Targeted verifier omitted an approved candidate.")
         return unresolved
 
-    def _adjudicate(
+    def adjudicate(
         self,
         candidates: list[SemanticCandidate],
         *,
@@ -713,8 +767,15 @@ def _validate_assessments(payload: dict[str, object], claims: list[dict[str, obj
         allowed = set(str(value) for value in known[claim_id].get("allowed_design_refs") or [])
         raw_refs = item.get("design_refs")
         refs = [str(value) for value in raw_refs] if isinstance(raw_refs, list) else []
-        if any(value not in allowed for value in refs):
-            raise HarnessError("design_semantic_review_failed", "Semantic judge cited evidence outside the fixed claim.")
+        invalid_refs = [value for value in refs if value not in allowed]
+        if invalid_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                (
+                    f"Semantic judge cited evidence outside fixed claim {claim_id}: "
+                    f"invalid_refs={invalid_refs[:5]!r}; allowed_refs={sorted(allowed)[:10]!r}."
+                ),
+            )
         if verdict == "violated" and not refs:
             raise HarnessError("design_semantic_review_failed", "Violated semantic claim lacks bounded design evidence.")
         normalized.append(
@@ -788,7 +849,7 @@ Judge every fixed claim exactly once. Do not add, remove, merge, or rename claim
 Return one JSON object only:
 {"assessments":[{"claim_id":"CLAIM-ID","verdict":"satisfied|violated|uncertain","category":"behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption|none","message":"specific evidence-based reason","expected_change":"specific correction or empty","design_refs":["one of allowed_design_refs"]}]}
 
-A violation must cite a behavior required by the claim and evidence already present in its allowed_design_refs. If evidence is insufficient, use uncertain. Architectural preferences are satisfied or uncertain, never violations. `none` is required for satisfied/uncertain.
+A violation must cite a behavior required by the claim and evidence already present in its allowed_design_refs. For every assessment, copy design_refs only from that same claim's allowed_design_refs, byte for byte. Never cite a ref borrowed from another claim or merely visible in the full graphs. If no allowed ref supports the verdict, return an empty design_refs list and use uncertain. Architectural preferences are satisfied or uncertain, never violations. `none` is required for satisfied/uncertain.
 
 INPUT:
 """ + json.dumps(context, ensure_ascii=False, separators=(",", ":"))
@@ -905,3 +966,7 @@ def _call_category(system: str) -> str:
 def _experiment_run_id() -> str:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     return f"experiment_{stamp}_{uuid4().hex[:8]}"
+
+
+class ProgressiveDesignExperiment(ProgressiveDesignReviewEngine):
+    """Isolated artifact-writing facade over the shared progressive review engine."""

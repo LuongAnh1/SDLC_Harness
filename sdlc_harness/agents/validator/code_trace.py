@@ -10,7 +10,7 @@ Developer sửa code/test hay block/reopen checkpoint nền.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
@@ -20,6 +20,15 @@ from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
 from ...storage.runtime import utc_now_iso
+from .code_contract import (
+    aggregate_semantic_trials,
+    build_finding_ledger,
+    build_validation_claims,
+    deterministic_contract_findings,
+    prepare_semantic_trial,
+    snapshot_fingerprint,
+    trial_blocker_keys,
+)
 
 MAX_SNIPPET_TOTAL_CHARS = 60000
 MAX_SNIPPET_FILE_CHARS = 20000
@@ -50,10 +59,18 @@ class CodeTraceResult:
     stats: dict[str, int]
     llm_review: dict[str, object]
     requirement_contract: dict[str, object] | None = None
+    deterministic_findings: list[dict[str, object]] = field(default_factory=list)
+    disputed_findings: list[dict[str, object]] = field(default_factory=list)
+    rejected_findings: list[dict[str, object]] = field(default_factory=list)
+    semantic_consensus: dict[str, object] = field(default_factory=dict)
+    verification_evidence: dict[str, object] = field(default_factory=dict)
+    snapshot_fingerprint: str = ""
+    ledger: dict[str, object] = field(default_factory=dict)
+    inconclusive: bool = False
 
     def to_dict(self) -> dict[str, object]:
         contract = self.requirement_contract or {"version": "v1", "revision": 0}
-        mode = "hybrid_rule_llm_code_trace_v2" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
+        mode = "hybrid_rule_llm_code_trace_v3" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         return {
             "version": "requirement_design_code_trace_v1",
             "mode": mode,
@@ -64,13 +81,21 @@ class CodeTraceResult:
             "stats": self.stats,
             "mappings": self.mappings,
             "missing_links": self.missing_links,
+            "deterministic_findings": self.deterministic_findings,
+            "disputed_findings": self.disputed_findings,
+            "rejected_findings": self.rejected_findings,
+            "semantic_consensus": self.semantic_consensus,
+            "verification_evidence": self.verification_evidence,
+            "snapshot_fingerprint": self.snapshot_fingerprint,
+            "finding_ledger": self.ledger,
+            "inconclusive": self.inconclusive,
             "llm_required": True,
             "llm_review": self.llm_review,
         }
 
     def to_quality_report(self) -> dict[str, object]:
         contract = self.requirement_contract or {"version": "v1", "revision": 0}
-        mode = "hybrid_rule_llm_code_trace_v2" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
+        mode = "hybrid_rule_llm_code_trace_v3" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         return {
             "ok": self.ok,
             "mode": mode,
@@ -82,14 +107,28 @@ class CodeTraceResult:
             "llm_required": True,
             "llm_review_ok": self.llm_review.get("ok") is True,
             "llm_confidence": self.llm_review.get("confidence"),
+            "snapshot_fingerprint": self.snapshot_fingerprint,
+            "deterministic_blocking_count": len(self.deterministic_findings),
+            "consensus_blocking_count": len(self.semantic_consensus.get("stable_blockers", [])),
+            "disputed_count": len(self.disputed_findings),
+            "semantic_consensus": self.semantic_consensus,
+            "inconclusive": self.inconclusive,
         }
 
 
 class CodeTraceValidator:
     """Kiểm approved design mappings đã đi tới code/test bằng rule và LLM."""
 
-    def __init__(self, llm_client: LlmClient):
+    def __init__(
+        self,
+        llm_client: LlmClient,
+        *,
+        validation_trials: int = 1,
+        llm_call_budget: int = 2,
+    ):
         self.llm_client = llm_client
+        self.validation_trials = max(1, int(validation_trials))
+        self.llm_call_budget = max(1, int(llm_call_budget))
 
     def validate(
         self,
@@ -97,8 +136,11 @@ class CodeTraceValidator:
         target_path: Path,
         work_packet: dict[str, object],
         approved_context: dict[str, object] | None = None,
+        verification_evidence: dict[str, object] | None = None,
+        previous_ledger: dict[str, object] | None = None,
     ) -> CodeTraceResult:
         approved_context = approved_context or {}
+        verification_evidence = verification_evidence or {}
         requirement_contract = _dict_value(work_packet.get("requirement_contract"))
         v2 = requirement_contract.get("version") == "v2"
         if v2:
@@ -186,36 +228,145 @@ class CodeTraceValidator:
                     }
                 )
 
-        static_ok = bool(trace_mappings) and not missing_links
-        llm_review = self._review_with_llm(
+        deterministic_findings = deterministic_contract_findings(
             target_path=target_path,
             work_packet=work_packet,
+            approved_context=approved_context,
+        )
+        static_missing_links = [*missing_links, *deterministic_findings]
+        validation_claims = build_validation_claims(
+            work_packet=work_packet,
             trace_mappings=trace_mappings,
-            static_missing_links=missing_links,
+        )
+        code_snippets = _code_snippets(
+            target_path=target_path,
+            mappings=trace_mappings,
             test_paths=existing_test_paths,
-            approved_context=approved_context,
         )
-        llm_missing_links, llm_observations = _normalize_llm_findings(
-            llm_review,
+        fingerprint = snapshot_fingerprint(
+            work_packet=work_packet,
+            code_snippets=code_snippets,
             approved_context=approved_context,
+            verification_evidence=verification_evidence,
         )
-        reported_ok = llm_review.get("ok") is True
-        llm_review["reported_ok"] = reported_ok
-        llm_review["ok"] = not llm_missing_links
-        llm_review["missing_links"] = llm_missing_links
-        llm_review["observations"] = llm_observations
-        llm_review["normalization"] = {
-            "blocking_count": len(llm_missing_links),
-            "observation_count": len(llm_observations),
-            "python_recomputed_ok": True,
+        valid_trials: list[dict[str, object]] = []
+        invalid_trials: list[dict[str, object]] = []
+        rejected_findings: list[dict[str, object]] = []
+        observations: list[dict[str, object]] = []
+        calls_used = 0
+        target_valid_trials = 1 if self.validation_trials == 1 else 2
+        while len(valid_trials) < target_valid_trials and calls_used < self.llm_call_budget:
+            trial_id = f"trial-{len(valid_trials) + 1}"
+            max_attempts = min(2, self.llm_call_budget - calls_used)
+            try:
+                review = self._review_with_llm(
+                    target_path=target_path,
+                    work_packet=work_packet,
+                    trace_mappings=trace_mappings,
+                    static_missing_links=static_missing_links,
+                    test_paths=existing_test_paths,
+                    approved_context=approved_context,
+                    validation_claims=validation_claims,
+                    verification_evidence=verification_evidence,
+                    max_attempts=max_attempts,
+                )
+            except HarnessError as exc:
+                calls_used += max_attempts
+                invalid_trials.append({"attempt_id": f"attempt-{calls_used}", "message": exc.message})
+                continue
+            metadata = _dict_value(review.get("llm_metadata"))
+            calls_used += max(1, int(metadata.get("selected_attempt") or 1))
+            normalized, trial_observations = _normalize_llm_findings(
+                review,
+                approved_context=approved_context,
+            )
+            accepted, trial_observations, rejected = prepare_semantic_trial(
+                findings=normalized,
+                observations=trial_observations,
+                claims=validation_claims,
+                verification_evidence=verification_evidence,
+                trial_id=trial_id,
+            )
+            rejected_findings.extend(rejected)
+            observations.extend(trial_observations)
+            valid_trials.append(
+                {
+                    "trial_id": trial_id,
+                    "reported_ok": review.get("ok") is True,
+                    "confidence": review.get("confidence"),
+                    "summary": review.get("summary"),
+                    "blocking_findings": accepted,
+                    "observations": trial_observations,
+                    "review_context": review.get("review_context"),
+                    "llm_metadata": metadata,
+                }
+            )
+            if len(valid_trials) == 2 and self.validation_trials >= 3:
+                if trial_blocker_keys(valid_trials[0]) != trial_blocker_keys(valid_trials[1]):
+                    target_valid_trials = 3
+
+        disagreement_needs_third = (
+            len(valid_trials) >= 2
+            and trial_blocker_keys(valid_trials[0]) != trial_blocker_keys(valid_trials[1])
+        )
+        required_valid_trials = 3 if disagreement_needs_third else target_valid_trials
+        inconclusive = len(valid_trials) < required_valid_trials
+        consensus = aggregate_semantic_trials(trials=valid_trials) if valid_trials else {
+            "stable_blockers": [],
+            "disputed_findings": [],
+            "quorum": 0,
+            "valid_trials": 0,
+            "pairwise_jaccard": [],
+            "consistency_score": 0.0,
         }
-        missing_links.extend(llm_missing_links)
-        ok = static_ok and not llm_missing_links
+        consensus.update(
+            {
+                "policy": "adaptive_2_plus_1" if self.validation_trials >= 3 else "fixed",
+                "max_trials": self.validation_trials,
+                "llm_call_budget": self.llm_call_budget,
+                "llm_calls_used": calls_used,
+                "invalid_trial_count": len(invalid_trials),
+                "invalid_trials": invalid_trials,
+                "trials": valid_trials,
+                "inconclusive": inconclusive,
+            }
+        )
+        semantic_blockers = _dict_items(consensus.get("stable_blockers"))
+        disputed_findings = _dict_items(consensus.get("disputed_findings"))
+        missing_links = [*static_missing_links, *semantic_blockers]
+        static_ok = bool(trace_mappings) and not static_missing_links
+        ok = static_ok and not semantic_blockers and not inconclusive
+        llm_review = {
+            "ok": not semantic_blockers and not inconclusive,
+            "reported_ok": all(item.get("reported_ok") is True for item in valid_trials),
+            "confidence": _consensus_confidence(valid_trials),
+            "summary": _consensus_summary(valid_trials, semantic_blockers, disputed_findings, inconclusive),
+            "missing_links": semantic_blockers,
+            "observations": observations,
+            "risks": [],
+            "review_context": (
+                valid_trials[0].get("review_context") if valid_trials else {"code_snippets_included": False}
+            ),
+            "semantic_consensus": consensus,
+            "normalization": {
+                "blocking_count": len(semantic_blockers),
+                "observation_count": len(observations),
+                "rejected_count": len(rejected_findings),
+                "python_recomputed_ok": True,
+            },
+        }
+        ledger = build_finding_ledger(
+            previous=previous_ledger,
+            snapshot_id=fingerprint,
+            active_findings=missing_links,
+            disputed_findings=disputed_findings,
+            rejected_findings=rejected_findings,
+        )
         stats = {
             "mapping_count": len(trace_mappings),
             "missing_count": len(missing_links),
             "test_file_count": len(existing_test_paths),
-            "observation_count": len(llm_observations),
+            "observation_count": len(observations),
             "requirement_count": len(_dict_items(work_packet.get("canonical_requirements"))) if v2 else 0,
             "requirements_covered": len(trace_mappings) if v2 else 0,
         }
@@ -224,7 +375,12 @@ class CodeTraceValidator:
             summary = (
                 f"Validator code trace {trace_label} passed with static evidence, LLM graph review, "
                 f"{len(trace_mappings)} mapping(s), {len(existing_test_paths)} test file(s), "
-                f"and {len(llm_observations)} non-blocking observation(s)."
+                f"and {len(observations)} non-blocking observation(s) after semantic consensus."
+            )
+        elif inconclusive:
+            summary = (
+                f"Validator code trace {trace_label} was inconclusive after {calls_used} LLM call(s); "
+                "no Developer repair feedback was authorized."
             )
         else:
             llm_summary = str(llm_review.get("summary") or "").strip()
@@ -238,6 +394,14 @@ class CodeTraceValidator:
             stats=stats,
             llm_review=llm_review,
             requirement_contract=requirement_contract,
+            deterministic_findings=deterministic_findings,
+            disputed_findings=disputed_findings,
+            rejected_findings=rejected_findings,
+            semantic_consensus=consensus,
+            verification_evidence=verification_evidence,
+            snapshot_fingerprint=fingerprint,
+            ledger=ledger,
+            inconclusive=inconclusive,
         )
 
     def _review_with_llm(
@@ -249,6 +413,9 @@ class CodeTraceValidator:
         static_missing_links: list[dict[str, object]],
         test_paths: list[str],
         approved_context: dict[str, object],
+        validation_claims: list[dict[str, object]],
+        verification_evidence: dict[str, object],
+        max_attempts: int = 2,
     ) -> dict[str, object]:
         """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
 
@@ -260,6 +427,8 @@ class CodeTraceValidator:
             code_refs=_code_refs(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
             code_snippets=code_snippets,
             approved_context=approved_context,
+            validation_claims=validation_claims,
+            verification_evidence=verification_evidence,
         )
         try:
             review, llm_metadata = self._complete_review_json(
@@ -268,6 +437,7 @@ class CodeTraceValidator:
                     "Return only valid JSON."
                 ),
                 prompt=prompt,
+                max_attempts=max_attempts,
             )
         except HarnessError as exc:
             raise HarnessError(
@@ -283,7 +453,13 @@ class CodeTraceValidator:
         review["review_context"] = _review_context(review.get("review_context"), code_snippets=code_snippets)
         return review
 
-    def _complete_review_json(self, *, system: str, prompt: str) -> tuple[dict[str, object], dict[str, object]]:
+    def _complete_review_json(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        max_attempts: int = 2,
+    ) -> tuple[dict[str, object], dict[str, object]]:
         """Dùng JSON mode và retry một lần nếu Validator trả payload không parse được."""
 
         settings = getattr(self.llm_client, "settings", None)
@@ -293,7 +469,7 @@ class CodeTraceValidator:
         attempt_prompt = prompt
         last_error = "LLM code trace review did not return a valid JSON object."
 
-        for attempt in range(1, 3):
+        for attempt in range(1, max(1, max_attempts) + 1):
             if callable(completion_method):
                 completion = completion_method(
                     system=system,
@@ -850,6 +1026,8 @@ def _code_trace_review_prompt(
     code_refs: list[dict[str, object]],
     code_snippets: list[dict[str, object]],
     approved_context: dict[str, object],
+    validation_claims: list[dict[str, object]],
+    verification_evidence: dict[str, object],
 ) -> str:
     """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
 
@@ -881,6 +1059,7 @@ def _code_trace_review_prompt(
             "missing_links": [
                 {
                     "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace | trace_mapping_issue | evidence_incomplete",
+                    "claim_id": "exact claim_id from fixed_validation_claims",
                     "blocking": "boolean; true only when code/test/mapping must change before pass",
                     "owner": "developer | validator | human | none",
                     "recommended_action": "developer_repair | validator_mapping_fix | human_decision | none",
@@ -905,6 +1084,8 @@ def _code_trace_review_prompt(
         },
         "approved_behavior_contracts": _approved_behavior_contracts(work_packet),
         "approved_sequence_evidence": _approved_sequence_evidence(approved_context),
+        "fixed_validation_claims": validation_claims,
+        "verification_evidence": verification_evidence,
         "static_trace_mappings": trace_mappings,
         "static_missing_links": static_missing_links,
         "code_refs": code_refs,
@@ -912,6 +1093,8 @@ def _code_trace_review_prompt(
         "egress_confirmation": "Project owner explicitly approved sending source/test snippets to the LLM provider for Validator review.",
         "validator_rules": [
             "Return a blocking Developer finding for every approved planned file or symbol that is still absent from the accumulated worktree.",
+            "Every semantic finding must use one exact claim_id from fixed_validation_claims. Do not invent a new requirement or architecture claim.",
+            "Assess the complete fixed_validation_claims catalogue on this exact code snapshot; omit satisfied claims from missing_links.",
             "Evaluate completeness across the full approved plan, not only files changed by the latest Developer slice.",
             "If a code_snippet has content_truncated=false, do not claim that file evidence is truncated.",
             "Do not require literal methods named true, false, displaySuccessMessage, displayErrorMessage, or displayCancellationMessage.",
@@ -929,6 +1112,8 @@ def _code_trace_review_prompt(
             "Open Questions are unresolved context, not approved constraints. Use owner=human and recommended_action=human_decision when a decision is required.",
             "If evidence and tests already satisfy a mapping, omit it from missing_links or set blocking=false, owner=none, recommended_action=none.",
             "Do not turn a prior implementation choice into an approved requirement.",
+            "Treat verification_evidence.executed_test_entrypoints as authoritative proof that those test entrypoints ran.",
+            "Do not require JUnit when the target repository uses a discovered executable main-based test entrypoint.",
         ],
     }
     return (
@@ -936,6 +1121,31 @@ def _code_trace_review_prompt(
         "Return only valid JSON. Do not wrap the JSON in markdown.\n\n"
         f"{json.dumps(review_input, ensure_ascii=False, indent=2)}"
     )
+
+
+def _consensus_confidence(trials: list[dict[str, object]]) -> float | None:
+    values: list[float] = []
+    for trial in trials:
+        try:
+            values.append(float(trial.get("confidence")))
+        except (TypeError, ValueError):
+            continue
+    return round(sum(values) / len(values), 4) if values else None
+
+
+def _consensus_summary(
+    trials: list[dict[str, object]],
+    blockers: list[dict[str, object]],
+    disputed: list[dict[str, object]],
+    inconclusive: bool,
+) -> str:
+    if inconclusive:
+        return "Semantic code review could not obtain the required valid adaptive consensus trials."
+    if blockers:
+        return f"Semantic consensus confirmed {len(blockers)} stable blocking finding(s)."
+    if disputed:
+        return f"Semantic consensus passed with {len(disputed)} minority finding(s) retained as disputed."
+    return f"Semantic consensus passed across {len(trials)} valid trial(s) with zero stable blockers."
 
 
 def _collection_size(value: object) -> int:
