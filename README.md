@@ -1,4 +1,4 @@
-﻿# SDLC Harness
+# SDLC Harness
 
 Repo này là nơi thiết kế và triển khai lớp **SDLC Harness** cho hướng Agent Harness hỗ trợ chuyển giao ngữ cảnh trong quy trình phát triển phần mềm.
 
@@ -21,7 +21,7 @@ Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/
 ## Cấu Trúc Package
 
 - `sdlc_harness/application/`: command model, settings construction và workflow dispatch độc lập transport.
-- `sdlc_harness/interfaces/`: CLI adapter và HTTP Read API công khai. Cả hai dùng chung application service; `sdlc_harness/cli.py` vẫn là wrapper compatibility cho `python -m sdlc_harness.cli`.
+- `sdlc_harness/interfaces/`: CLI adapter và HTTP API công khai. Cả hai dùng chung application service; `sdlc_harness/cli.py` vẫn là wrapper compatibility cho `python -m sdlc_harness.cli`.
 - `sdlc_harness/operations/`: operation JSON bền vững, idempotency index và queue một worker cho HTTP write action dài.
 - `sdlc_harness/workflows/`: workflow graph Phase 1-4, từ requirement/design/planning tới code, verification, QA, publication và Code Review approval.
 - `sdlc_harness/agents/requirements/`: Requirement Refiner, formal use case Validator, requirement packet Validator và prompt templates copy/adapt từ TraceDev.
@@ -96,9 +96,13 @@ python -m sdlc_harness.interfaces.http
 curl http://127.0.0.1:7788/api/v1/health
 ```
 
+Ops Dashboard được phục vụ cùng server tại `http://127.0.0.1:7788/`. Khi
+`SDLC_API_TOKEN` được bật, nhập token trong dashboard; trình duyệt chỉ giữ token
+trong `sessionStorage` của tab hiện tại.
+
 Các endpoint ngoài health yêu cầu bearer token khi `SDLC_API_TOKEN` được cấu
 hình. Write API trả `202 Accepted`; dùng URL operation trong response để poll
-đến `succeeded`, `failed` hoặc `interrupted`. Mỗi POST cần `Idempotency-Key`.
+đến `succeeded`, `failed` hoặc `interrupted`. Mỗi workflow POST cần `Idempotency-Key`; config save/reset chạy đồng bộ và không tạo operation.
 
 
 <!-- SDLC_NIKO_SYNC_START -->
@@ -141,6 +145,6 @@ CLI subprocess sang HTTP API có operation bền vững và Ops Dashboard. Thi�
 API contract, runtime event, dashboard/config, cutover Niko và checklist nằm tại
 [`docs/platform-api-dashboard/`](docs/platform-api-dashboard/README.md).
 
-Mốc này đang được triển khai: Slice 1 Application Service, Slice 2 Read API và
-Slice 3 Operation Queue/Write API đã hoàn thành. CLI JSON vẫn là integration
-contract của Niko cho tới khi event/dashboard/config và dual transport pass.
+Mốc này đang được triển khai: Slice 1-6 đã hoàn thành, gồm application service,
+Read/Write API, operation queue, events, Ops Dashboard và Runtime Config. CLI JSON
+vẫn là integration contract của Niko cho tới khi Slice 7 dual transport pass.

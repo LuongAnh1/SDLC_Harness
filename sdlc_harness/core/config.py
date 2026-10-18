@@ -1,8 +1,9 @@
-﻿"""Cấu hình runtime cho SDLC Harness.
+"""Configuration loading for SDLC Harness.
 
-Giai đoạn hiện tại ưu tiên CLI chạy local nên cấu hình được đọc từ `.env` ở repo
-root và OS environment. `.env` chỉ chứa thông tin máy cá nhân/API key, không
-commit.
+Workflow settings use the following precedence: code defaults, root `.env`,
+runtime config, real OS environment, then invocation/action overrides. API
+bootstrap fields never come from runtime config because changing them requires a
+server restart.
 """
 
 from __future__ import annotations
@@ -11,6 +12,9 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from .config_schema import CONFIG_SECTIONS, config_field_index, serialize_config_value
+from .runtime_config import RuntimeConfigStore
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -18,6 +22,7 @@ class Settings:
 
     repo_root: Path
     runtime_root: Path
+    runtime_config_path: Path
     llm_mode: str
     llm_api_key: str
     llm_base_url: str
@@ -58,19 +63,24 @@ class Settings:
     api_shutdown_timeout_seconds: int
 
 
-def repo_root() -> Path:
-    """Trả về root của repo, tính từ `sdlc_harness/core/config.py`."""
+@dataclass(frozen=True)
+class ConfigResolution:
+    values: dict[str, str]
+    sources: dict[str, str]
+    runtime_values: dict[str, object]
+    runtime_config_path: Path
+    runtime_config_label: str
 
+
+def repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
 def _read_dotenv(path: Path) -> dict[str, str]:
-    """Đọc `.env` dạng KEY=VALUE tối giản, đủ cho demo local."""
-
     values: dict[str, str] = {}
     if not path.exists():
         return values
-    for raw_line in path.read_text(encoding="utf-8").splitlines():
+    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -80,16 +90,12 @@ def _read_dotenv(path: Path) -> dict[str, str]:
 
 
 def _bool_value(raw: str | None, *, default: bool = False) -> bool:
-    """Đọc biến bật/tắt dạng 1/true/yes/on cho adapter local."""
-
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _int_value(raw: str | None, *, default: int, minimum: int = 0) -> int:
-    """Đọc số nguyên từ env/CLI và chặn giá trị âm cho cấu hình vòng lặp."""
-
     if raw is None:
         return default
     try:
@@ -99,64 +105,76 @@ def _int_value(raw: str | None, *, default: int, minimum: int = 0) -> int:
     return max(minimum, value)
 
 
+def resolve_config(
+    *,
+    root: Path | None = None,
+    runtime_root: Path | None = None,
+    overrides: dict[str, str] | None = None,
+) -> ConfigResolution:
+    root_path = (root or repo_root()).resolve()
+    runtime_path = (runtime_root or root_path / ".runtime").resolve()
+    fields = config_field_index()
+    dotenv = _read_dotenv(root_path / ".env")
+
+    locator_raw = os.environ.get(
+        "SDLC_RUNTIME_CONFIG_FILE",
+        dotenv.get("SDLC_RUNTIME_CONFIG_FILE", ""),
+    ).strip()
+    if locator_raw:
+        config_path = Path(locator_raw).expanduser()
+        if not config_path.is_absolute():
+            config_path = root_path / config_path
+        config_label = locator_raw.replace("\\", "/")
+    else:
+        config_path = runtime_path / "config.json"
+        try:
+            config_label = str(config_path.relative_to(root_path)).replace("\\", "/")
+        except ValueError:
+            config_label = ".runtime/config.json"
+    config_path = config_path.resolve()
+    runtime_values = RuntimeConfigStore(config_path).read()
+
+    values = {name: serialize_config_value(field.get("default", "")) for name, field in fields.items()}
+    sources = {name: "default" for name in fields}
+
+    def apply(source_values: dict[str, object], source: str, *, allow_bootstrap: bool) -> None:
+        for name, value in source_values.items():
+            field = fields.get(name)
+            if field is None or (field.get("bootstrap") and not allow_bootstrap):
+                continue
+            values[name] = serialize_config_value(value)
+            sources[name] = source
+
+    apply(dotenv, ".env", allow_bootstrap=True)
+    apply(runtime_values, "runtime", allow_bootstrap=False)
+    apply({name: os.environ[name] for name in fields if name in os.environ}, "os", allow_bootstrap=True)
+    if overrides:
+        apply({name: value for name, value in overrides.items() if value is not None}, "override", allow_bootstrap=True)
+
+    # The implicit location follows runtime_root in tests and alternate local runtimes.
+    if not locator_raw:
+        values["SDLC_RUNTIME_CONFIG_FILE"] = config_label
+        sources["SDLC_RUNTIME_CONFIG_FILE"] = "default"
+    return ConfigResolution(
+        values=values,
+        sources=sources,
+        runtime_values=runtime_values,
+        runtime_config_path=config_path,
+        runtime_config_label=config_label,
+    )
+
+
 def load_settings(
     *,
     root: Path | None = None,
     runtime_root: Path | None = None,
     overrides: dict[str, str] | None = None,
 ) -> Settings:
-    """Gộp `.env`, OS env và override CLI thành cấu hình chạy.
+    """Resolve settings without mutating process environment."""
 
-    Thứ tự ưu tiên: `.env` -> OS env -> CLI overrides. CLI override đứng cuối để
-    test/smoke có thể ép `--llm-mode fake` mà không sửa file cấu hình thật.
-    """
-
+    resolution = resolve_config(root=root, runtime_root=runtime_root, overrides=overrides)
+    merged = resolution.values
     root_path = (root or repo_root()).resolve()
-    merged = _read_dotenv(root_path / ".env")
-    for key in (
-        "SDLC_LLM_MODE",
-        "SDLC_LLM_API_KEY",
-        "SDLC_LLM_BASE_URL",
-        "SDLC_LLM_MODEL",
-        "SDLC_LLM_TIMEOUT_SECONDS",
-        "SDLC_LLM_STRUCTURED_MAX_TOKENS",
-        "SDLC_LLM_CONTEXT_WINDOW_TOKENS",
-        "SDLC_DEVELOPER_EXECUTION_MODE",
-        "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM",
-        "SDLC_DEVELOPER_MAX_ACTION_RETRIES",
-        "SDLC_DESIGN_REPAIR_LIMIT",
-        "SDLC_DESIGN_VALIDATION_TRIALS",
-        "SDLC_DESIGN_LLM_CALL_BUDGET",
-        "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
-        "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
-        "SDLC_IMPLEMENTATION_VALIDATION_TRIALS",
-        "SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET",
-        "SDLC_QA_REPAIR_LIMIT",
-        "SDLC_SYNC_MODE",
-        "ATLASSIAN_BASE_URL",
-        "ATLASSIAN_EMAIL",
-        "ATLASSIAN_API_TOKEN",
-        "JIRA_SYNC_ENABLED",
-        "JIRA_SYNC_ISSUE_KEY",
-        "CONFLUENCE_SYNC_ENABLED",
-        "CONFLUENCE_SYNC_SPACE_ID",
-        "CONFLUENCE_SYNC_PARENT_PAGE_ID",
-        "SDLC_TARGET_REPO_PATH",
-        "SDLC_TARGET_WORKTREE_ROOT",
-        "SDLC_TARGET_REPO_REMOTE",
-        "SDLC_TARGET_BASE_BRANCH",
-        "SDLC_IMPLEMENTATION_BRANCH_PREFIX",
-        "SDLC_API_HOST",
-        "SDLC_API_PORT",
-        "SDLC_API_TOKEN",
-        "SDLC_API_QUEUE_LIMIT",
-        "SDLC_API_SHUTDOWN_TIMEOUT_SECONDS",
-    ):
-        if key in os.environ:
-            merged[key] = os.environ[key]
-    if overrides:
-        merged.update({key: value for key, value in overrides.items() if value is not None})
-
     runtime_path = (runtime_root or root_path / ".runtime").resolve()
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
@@ -169,79 +187,32 @@ def load_settings(
         target_repo_path = root_path / target_repo_path
     target_repo_path = target_repo_path.resolve()
     worktree_root_raw = merged.get("SDLC_TARGET_WORKTREE_ROOT", "").strip()
-    target_worktree_root = (
-        Path(worktree_root_raw)
-        if worktree_root_raw
-        else target_repo_path.parent / f"{target_repo_path.name}-worktrees"
-    )
+    target_worktree_root = Path(worktree_root_raw) if worktree_root_raw else target_repo_path.parent / f"{target_repo_path.name}-worktrees"
     if not target_worktree_root.is_absolute():
         target_worktree_root = root_path / target_worktree_root
     return Settings(
         repo_root=root_path,
         runtime_root=runtime_path,
+        runtime_config_path=resolution.runtime_config_path,
         llm_mode=merged.get("SDLC_LLM_MODE", "fake").strip().lower() or "fake",
         llm_api_key=merged.get("SDLC_LLM_API_KEY", ""),
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
         llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-chat"),
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
-        llm_structured_max_tokens=_int_value(
-            merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"),
-            default=8192,
-            minimum=1024,
-        ),
-        llm_context_window_tokens=_int_value(
-            merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"),
-            default=128000,
-            minimum=8192,
-        ),
+        llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
+        llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
         developer_execution_mode=developer_execution_mode,
-        developer_max_actions_per_item=_int_value(
-            merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"),
-            default=24,
-            minimum=1,
-        ),
-        developer_max_action_retries=_int_value(
-            merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"),
-            default=2,
-            minimum=0,
-        ),
+        developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),
+        developer_max_action_retries=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"), default=2, minimum=0),
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=2, minimum=0),
-        design_validation_trials=_int_value(
-            merged.get("SDLC_DESIGN_VALIDATION_TRIALS"),
-            default=3,
-            minimum=1,
-        ),
-        design_llm_call_budget=_int_value(
-            merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"),
-            default=16,
-            minimum=1,
-        ),
-        implementation_plan_repair_limit=_int_value(
-            merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"),
-            default=2,
-            minimum=0,
-        ),
-        implementation_repair_limit=_int_value(
-            merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"),
-            default=2,
-            minimum=0,
-        ),
-        implementation_validation_trials=_int_value(
-            merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"),
-            default=3,
-            minimum=2,
-        ),
-        implementation_validation_call_budget=_int_value(
-            merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"),
-            default=6,
-            minimum=2,
-        ),
-        qa_repair_limit=_int_value(
-            merged.get("SDLC_QA_REPAIR_LIMIT"),
-            default=1,
-            minimum=0,
-        ),
+        design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
+        design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=16, minimum=1),
+        implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
+        implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),
+        implementation_validation_trials=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"), default=3, minimum=2),
+        implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=6, minimum=2),
+        qa_repair_limit=_int_value(merged.get("SDLC_QA_REPAIR_LIMIT"), default=1, minimum=0),
         sync_mode=sync_mode,
         atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),
         atlassian_email=merged.get("ATLASSIAN_EMAIL", ""),
@@ -253,22 +224,12 @@ def load_settings(
         confluence_sync_parent_page_id=merged.get("CONFLUENCE_SYNC_PARENT_PAGE_ID", ""),
         target_repo_path=target_repo_path,
         target_worktree_root=target_worktree_root.resolve(),
-        target_repo_remote=merged.get(
-            "SDLC_TARGET_REPO_REMOTE",
-            "https://github.com/LuongAnh1/SDLC_Target_eTour.git",
-        ),
+        target_repo_remote=merged.get("SDLC_TARGET_REPO_REMOTE", "https://github.com/LuongAnh1/SDLC_Target_eTour.git"),
         target_base_branch=merged.get("SDLC_TARGET_BASE_BRANCH", "main").strip() or "main",
-        implementation_branch_prefix=(
-            merged.get("SDLC_IMPLEMENTATION_BRANCH_PREFIX", "feature").strip().strip("/") or "feature"
-        ),
+        implementation_branch_prefix=(merged.get("SDLC_IMPLEMENTATION_BRANCH_PREFIX", "feature").strip().strip("/") or "feature"),
         api_host=merged.get("SDLC_API_HOST", "127.0.0.1").strip() or "127.0.0.1",
         api_port=_int_value(merged.get("SDLC_API_PORT"), default=7788, minimum=1),
         api_token=merged.get("SDLC_API_TOKEN", ""),
         api_queue_limit=_int_value(merged.get("SDLC_API_QUEUE_LIMIT"), default=32, minimum=1),
-        api_shutdown_timeout_seconds=_int_value(
-            merged.get("SDLC_API_SHUTDOWN_TIMEOUT_SECONDS"),
-            default=30,
-            minimum=1,
-        ),
+        api_shutdown_timeout_seconds=_int_value(merged.get("SDLC_API_SHUTDOWN_TIMEOUT_SECONDS"), default=30, minimum=1),
     )
-

@@ -5,23 +5,32 @@ Content type: `application/json; charset=utf-8`
 
 ## Trạng Thái Triển Khai
 
-Slice 4 hiện mở các endpoint sau:
+Slice 6 hiện mở các endpoint sau:
 
 - `GET /api/v1/health`
 - `GET /api/v1/runs?limit=<1..200>`
 - `GET /api/v1/runs/{run_id}`
 - `GET /api/v1/runs/{run_id}/events?after=<0..>&limit=<1..200>`
+- `GET /api/v1/runs/{run_id}/operations?limit=<1..200>`
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_key}`
 - `GET /api/v1/dashboard/snapshot?limit=<1..200>`
+- `GET /api/v1/dashboard/schema`
 - `POST /api/v1/runs`
 - `POST /api/v1/runs/{run_id}/actions`
 - `GET /api/v1/operations/{operation_id}`
+- `GET /api/v1/config`
+- `PUT /api/v1/config`
+- `POST /api/v1/config/reset`
 
-Config endpoint trong tài liệu này là contract cho các slice tiếp theo.
-Các method ghi ngoài hai POST trên trả `405 method_not_allowed`; health không cần
+Config mutation chạy đồng bộ, không tạo operation và bị chặn khi operation đang
+queued/running. Các method khác trả `405 method_not_allowed`; health không cần
 auth, còn endpoint khác dùng bearer token khi `SDLC_API_TOKEN` được cấu hình.
 Service mặc định bind
 `127.0.0.1:7788`; bind non-loopback bắt buộc có token.
+
+Dashboard cùng origin được phục vụ tại `GET /` cùng hai asset allowlist
+`/assets/dashboard.css` và `/assets/dashboard.js`. Ba route tĩnh không nhúng token
+và không yêu cầu auth; mọi API ngoài health giữ nguyên bearer-token boundary.
 
 ## Response Chung
 
@@ -81,6 +90,8 @@ Lỗi giữ contract máy đọc được:
 - `GET /api/v1/health`: process health, version và queue availability; không gọi LLM.
 - `GET /api/v1/dashboard/snapshot`: danh sách run gọn, operation gần nhất, config
   đã mask và số liệu phục vụ render ban đầu.
+- `GET /api/v1/dashboard/schema`: source form, action argument/confirmation,
+  workflow topology, phase/status mapping và repair limit mặc định cho UI.
 
 ### Runs
 
@@ -88,6 +99,8 @@ Lỗi giữ contract máy đọc được:
 - `GET /api/v1/runs?limit=<n>`: danh sách run gọn cho dashboard.
 - `GET /api/v1/runs/{run_id}`: thay `get-status`.
 - `GET /api/v1/runs/{run_id}/events?after=<cursor>&limit=<n>`: timeline tăng dần; mặc định `after=0`, `limit=100`, giới hạn tối đa 200.
+- `GET /api/v1/runs/{run_id}/operations?limit=<n>`: operation summary của đúng
+  run; không trả terminal result đầy đủ và không lộ request/idempotency hash.
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_key}`: chỉ đọc artifact key đã
   công bố trong state; không nhận filesystem path và chặn path traversal.
 
@@ -195,12 +208,20 @@ không nhúng toàn bộ result.
 
 - `GET /api/v1/config`: schema, effective value đã mask và source của từng key.
 - `PUT /api/v1/config`: cập nhật các key được schema cho phép.
-- `POST /api/v1/config/reset`: reset key/section trong runtime config.
+- `POST /api/v1/config/reset`: reset `keys`, `section` hoặc cả hai trong runtime config.
+
+`PUT` dùng body `{"values": {...}}`. Secret rỗng hoặc `********` có nghĩa là giữ
+nguyên. Reset chỉ xóa runtime override để giá trị ưu tiên thấp hơn có hiệu lực.
+Bootstrap field là read-only; field đến từ OS trả `409 config_locked`; save/reset
+trong lúc operation queued/running trả `409 config_busy`; config JSON hỏng trả
+`500 config_corrupted`.
 
 ## Idempotency
 
-- Mọi `POST`/`PUT` gây side effect từ Niko hoặc dashboard phải gửi
+- Mọi workflow `POST` gây side effect từ Niko hoặc dashboard phải gửi
   `Idempotency-Key`.
+- Config save/reset là mutation đồng bộ, atomic và không tạo operation nên không
+  dùng `Idempotency-Key`; gửi lại cùng payload cho cùng kết quả hiệu lực.
 - Key phải có nội dung và dài tối đa 256 ký tự; runtime chỉ lưu SHA-256 của key.
 - Cùng key và cùng canonical payload trả lại operation cũ.
 - Cùng key nhưng payload khác trả `409 idempotency_conflict`.

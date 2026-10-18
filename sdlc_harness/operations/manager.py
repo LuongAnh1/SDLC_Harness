@@ -144,11 +144,16 @@ class OperationManager:
     def get_public_operation(self, operation_id: str) -> dict[str, object]:
         return self._public_operation(self.store.read_operation(operation_id), include_terminal=True)
 
-    def list_public_summaries(self, *, limit: int = 20) -> list[dict[str, object]]:
-        return [
-            self._public_operation(record, include_terminal=False)
-            for record in self.store.list_operations(limit=limit)
-        ]
+    def list_public_summaries(
+        self,
+        *,
+        limit: int = 20,
+        run_id: str | None = None,
+    ) -> list[dict[str, object]]:
+        records = self.store.list_operations(limit=None if run_id else limit)
+        if run_id is not None:
+            records = [record for record in records if record.get("run_id") == run_id][:limit]
+        return [self._public_operation(record, include_terminal=False) for record in records]
 
     def queue_status(self) -> dict[str, object]:
         with self._lock:
@@ -160,6 +165,17 @@ class OperationManager:
                 "capacity": self.queue_limit,
                 "workers": 1,
             }
+
+    def run_when_idle(self, callback: Callable[[], Any]) -> Any:
+        """Serialize a synchronous config mutation against operation submission."""
+
+        with self._lock:
+            if self._running_operation_id or not self._queue.empty():
+                raise HarnessError(
+                    "config_busy",
+                    "Runtime config cannot change while an operation is queued or running.",
+                )
+            return callback()
 
     def shutdown(self, *, timeout_seconds: int) -> None:
         with self._lock:

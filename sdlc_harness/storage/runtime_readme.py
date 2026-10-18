@@ -10,11 +10,11 @@ from uuid import uuid4
 from ..core.errors import HarnessError
 
 
-RUNTIME_LAYOUT_VERSION = "runtime_layout_v2"
+RUNTIME_LAYOUT_VERSION = "runtime_layout_v3"
 _README_LOCK = RLock()
 RUNTIME_README = """# SDLC Harness Runtime
 
-Runtime layout version: `runtime_layout_v2`
+Runtime layout version: `runtime_layout_v3`
 
 This directory contains local operational state for SDLC Harness. It can include
 requirements, generated artifacts, LLM metadata, sync reports, and diagnostics.
@@ -25,6 +25,7 @@ Do not commit or share the directory as a whole.
 ```text
 .runtime/
   README.md
+  config.json
   index/active_runs.json
   locks/
   operations/op_<timestamp>_<suffix>.json
@@ -43,6 +44,7 @@ Directories are created only when their feature is used.
 
 | Location | Purpose |
 | --- | --- |
+| `config.json` | Dashboard-managed runtime overrides; secrets may be present and the file must stay local. |
 | `index/active_runs.json` | Maps each active source to its current run. |
 | `runs/<run_id>/state.json` | Current workflow phase, status, checkpoint, actions, and artifact references. |
 | `runs/<run_id>/events.jsonl` | Append-only timeline ordered by per-run `sequence`; the sequence is the read cursor. |
@@ -56,6 +58,18 @@ Directories are created only when their feature is used.
 `state.json` is the source of current truth. Operation records describe one API
 request. Events are an observation timeline and must not be used to reconstruct or
 authorize workflow state.
+
+## Runtime config
+
+`config.json` is written atomically by the authenticated Config API. Effective
+precedence is defaults, root `.env`, this runtime file, OS environment, then a
+single invocation/action override. OS values and bootstrap fields are read-only
+in the dashboard. Blank or masked secret inputs keep the existing secret.
+
+Config save/reset is blocked while an operation is queued or running. API host,
+port, token, and config-file location remain bootstrap settings. Queue and
+shutdown changes require an API restart; other changes apply to the next
+operation because application settings are rebuilt for each command.
 
 ## Events
 

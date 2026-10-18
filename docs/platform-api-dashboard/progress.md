@@ -212,3 +212,88 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
   run cũ dù không tạo lại run/state. Sau khi test kết thúc đã xác minh thư mục `runs/`
   rỗng, `active_runs.json` là `{}` và xóa lock sót; runtime bàn giao chỉ giữ
   `worktree-registry.lock`.
+
+## 2026-10-18 - Hoàn thành Slice 5 Ops Dashboard
+
+### Thay đổi
+
+- Thêm dashboard cùng origin bằng HTML/CSS/JavaScript thuần, asset allowlist và CSP;
+  API token chỉ được giữ theo phiên trong `sessionStorage`.
+- Thêm dashboard schema dùng chung action metadata với HTTP validation, gồm source
+  form, action argument/confirmation, workflow topology và repair limit mặc định.
+- Thêm operation summary theo run; run detail ghép state, operation và event cursor
+  để hiển thị graph, checkpoint, repair count, artifact, quality và timeline.
+- Mở tạo run từ Jira/dataset và toàn bộ action API hợp lệ; UI lấy giao giữa
+  `allowed_next_actions` và action catalog, dùng idempotency key, poll operation tới
+  terminal và khóa action khi run đang bận.
+- `sync_mode` giữ mặc định `mock`; real/both, cleanup và các thao tác nhạy cảm có
+  bước xác nhận cụ thể. Artifact/API content luôn được escape hoặc đưa qua `textContent`.
+
+### Test
+
+- Focused API/operation/frontend: `35 passed` trong `18.95s`.
+- Frontend view-model dùng Node built-in runner, không thêm npm dependency; bao phủ
+  phase-to-node, action visibility, repair limits và timeline ordering.
+- Full regression trên bản bàn giao: `387 passed, 0 failed` trong `444.25s`.
+- Impeccable detector chạy một lượt. Detector không resolve được stylesheet HTTP
+  `/assets/dashboard.css` nên báo false positive type hierarchy; source thực tế dùng
+  body 14px và heading 24-38px.
+
+### Lỗi và giới hạn kiểm tra
+
+- Computer-use inventory của phiên không có browser/app khả dụng, nên không tạo được
+  screenshot 1440px/390px. HTTP assets, CSP, frontend state helpers và responsive CSS
+  vẫn có automated coverage; visual browser smoke cần chạy lại khi browser surface có sẵn.
+- Full suite tiếp tục tái tạo lock fixture lịch sử
+  `run-run_20261013_160421_f661babf.lock`; file đã được xóa sau test và runtime bàn giao
+  chỉ còn README, active-run index cùng `worktree-registry.lock`.
+
+- Browser smoke đầu tiên gặp `state_corrupted` vì `active_runs.json` đã được ghi thủ công
+  bằng Windows PowerShell với UTF-8 BOM trong lượt dọn runtime trước đó. File runtime đã
+  được chuẩn hóa lại về UTF-8 không BOM; API và dashboard không tạo ra BOM này.
+- Browser smoke tiếp theo phát hiện event `repair_iteration_started` không chứa `limit`
+  nhưng frontend coi trường thiếu là `0`, khiến Implementation hiển thị `4 / 0`. Frontend
+  giờ chỉ dùng event limit khi field thực sự tồn tại và giữ repair default từ dashboard schema.
+- Cùng lượt smoke cho thấy graph tuyến tính ghi Verification “Chưa chạy” dù quality report
+  đã có kết quả `failed` và Developer đang ở repair loop. Graph giờ giữ evidence riêng của
+  Verification, Validator và QA, nên bước đã chạy vẫn thể hiện pass/fail trong lúc producer repair.
+
+
+## 2026-10-18 - Hoàn thành Slice 6 Runtime Config
+
+### Thay đổi
+
+- Thêm schema backend cho năm nhóm API, LLM, Developer/Validation, target repository
+  và sync; dashboard không hard-code danh sách key.
+- Thêm `.runtime/config.json` atomic với precedence
+  `defaults < .env < runtime < OS < invocation/action override`.
+- Thêm `GET /api/v1/config`, `PUT /api/v1/config` và
+  `POST /api/v1/config/reset`; config mutation chạy đồng bộ, không tạo operation.
+- Secret luôn được mask; secret rỗng/`********` giữ nguyên. Bootstrap field chỉ đọc,
+  OS env khóa field tương ứng, type/range/enum được validate trước khi ghi.
+- Operation Manager giữ gate idle xuyên suốt config mutation; mọi save/reset bị từ
+  chối bằng `config_busy` nếu có operation queued hoặc running.
+- Queue/shutdown config có cờ cần restart; cấu hình workflow khác được đọc lại ở
+  operation kế tiếp. API action thiếu `sync_mode` vẫn dùng `mock`.
+- Thêm trang Cấu hình theo section, changed-only save, reset field/section, source
+  indicator, busy lock và restart banner; giữ nguyên visual system của dashboard.
+- Nâng tài liệu `.runtime/README.md` lên `runtime_layout_v3` và ghi rõ vai trò,
+  precedence, secret, restart cùng cleanup policy của `config.json`.
+
+### Test
+
+- Runtime config + Config API mới: `13 passed`.
+- Frontend view-model: `8 passed` bằng Node built-in runner.
+- Impeccable detector chạy một lượt; cảnh báo type hierarchy là false positive do detector không resolve được asset URL `/assets/dashboard.css`, giống Slice 5.
+- API/operation/dashboard regression tập trung: `40 passed`.
+- Full regression trên bản bàn giao: `400 passed, 0 failed` trong `484.78s`.
+
+### Lỗi phát hiện và xử lý
+
+- Lần import đầu phát hiện hai literal escape (`\\` trong path normalization và
+  `\n` khi ghi JSON) bị script tạo file làm mất escape, gây `SyntaxError`. Hai
+  literal đã được sửa, sau đó import và toàn bộ focused test đều pass.
+- Config mutation ban đầu chỉ định kiểm tra queue status trước khi ghi, có khe race
+  với HTTP submit. Gate được chuyển vào `OperationManager.run_when_idle`, giữ cùng
+  lock từ lúc xác nhận idle đến khi atomic replace hoàn tất.
+- Full suite tái tạo lock fixture lịch sử `run-run_20261013_160421_f661babf.lock`; file đã được xóa, còn run smoke `run_20261018_102318_bb4678c1` được giữ nguyên.

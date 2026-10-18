@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SDLC Ops</title>
+  <meta name="description" content="Bảng điều khiển cục bộ cho SDLC Harness">
+  <link rel="stylesheet" href="/assets/dashboard.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Bỏ qua điều hướng</a>
+  <aside class="rail" aria-label="Điều hướng SDLC Ops">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">S</div>
+      <div><strong>SDLC OPS</strong><span>workflow control</span></div>
+    </div>
+    <nav>
+      <a href="#/runs" data-route="runs" class="active">Runs <span id="run-count">0</span></a>
+      <a href="#/timeline" data-route="timeline">Hoạt động <span id="active-count">0</span></a>
+      <a href="#/config" data-route="config">Cấu hình</a>
+    </nav>
+    <div class="rail-status">
+      <span class="health-dot" id="health-dot" aria-hidden="true"></span>
+      <span id="health-copy">Đang kết nối</span>
+    </div>
+  </aside>
+
+  <main id="workspace" tabindex="-1">
+    <header class="page-head">
+      <div>
+        <h1 id="page-title">Runs</h1>
+        <p id="page-subtitle">Theo dõi checkpoint, chất lượng và vòng lặp sửa lỗi.</p>
+      </div>
+      <div class="head-actions">
+        <button type="button" class="quiet" id="auth-button">API token</button>
+        <button type="button" class="quiet" id="refresh-button">Làm mới</button>
+        <button type="button" class="primary" id="new-run-button">Tạo run</button>
+      </div>
+    </header>
+
+    <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+    <section id="summary-strip" class="summary-strip" aria-label="Tóm tắt runtime"></section>
+    <div id="app" aria-live="polite"></div>
+  </main>
+
+  <dialog id="auth-dialog" aria-labelledby="auth-title">
+    <form method="dialog" id="auth-form">
+      <h2 id="auth-title">Kết nối API</h2>
+      <p>Token chỉ được giữ trong tab trình duyệt này và không được ghi vào URL hay log.</p>
+      <label>Bearer token<input id="token-input" type="password" autocomplete="off"></label>
+      <div class="dialog-actions">
+        <button value="cancel" class="quiet" formnovalidate>Đóng</button>
+        <button type="button" class="danger" id="forget-token">Quên token</button>
+        <button value="save" class="primary">Lưu theo phiên</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="create-dialog" aria-labelledby="create-title">
+    <form method="dialog" id="create-form">
+      <h2 id="create-title">Tạo workflow run</h2>
+      <div class="segmented" role="group" aria-label="Nguồn use case">
+        <button type="button" data-source-type="jira" class="active">Jira</button>
+        <button type="button" data-source-type="dataset">Dataset</button>
+      </div>
+      <div id="jira-fields"><label>Issue key<input name="issue_key" placeholder="SDLC-7" required></label></div>
+      <div id="dataset-fields" class="two-columns" hidden>
+        <label>Dataset<input name="dataset" placeholder="eTour"></label>
+        <label>Use case<input name="use_case" placeholder="UC3"></label>
+      </div>
+      <label>Người thực hiện<input name="requested_by" value="dashboard:operator" required></label>
+      <label>Chế độ đồng bộ<select name="sync_mode"><option value="mock">Mock</option><option value="real">Real</option><option value="both">Both</option></select></label>
+      <label id="create-confirmation-field" hidden>Xác nhận source<input name="confirmation" autocomplete="off"></label>
+      <div class="dialog-actions"><button value="cancel" class="quiet" formnovalidate>Hủy</button><button value="submit" class="primary">Tạo run</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="action-dialog" aria-labelledby="action-title">
+    <form method="dialog" id="action-form">
+      <h2 id="action-title">Thực hiện action</h2>
+      <p id="action-description"></p>
+      <div id="action-fields"></div>
+      <details id="override-panel"><summary>Giới hạn nâng cao</summary><div id="override-fields" class="two-columns"></div></details>
+      <label>Chế độ đồng bộ<select name="sync_mode"><option value="mock">Mock</option><option value="real">Real</option><option value="both">Both</option></select></label>
+      <label id="confirmation-field" hidden>Xác nhận<input name="confirmation" autocomplete="off"></label>
+      <div class="dialog-actions"><button value="cancel" class="quiet" formnovalidate>Hủy</button><button value="submit" class="primary">Xác nhận</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="artifact-dialog" class="artifact-dialog" aria-labelledby="artifact-title">
+    <form method="dialog">
+      <div class="dialog-head"><h2 id="artifact-title">Artifact</h2><button value="close" class="quiet" formnovalidate>Đóng</button></div>
+      <pre id="artifact-content" tabindex="0"></pre>
+    </form>
+  </dialog>
+
+  <script type="module" src="/assets/dashboard.js"></script>
+</body>
+</html>

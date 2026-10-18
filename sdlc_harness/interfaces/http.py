@@ -17,93 +17,31 @@ from typing import Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .. import __version__
-from ..application import ApplicationCommand, ApplicationReadService, ApplicationService
+from ..application import (
+    ApplicationCommand,
+    ApplicationReadService,
+    ApplicationService,
+    ConfigurationService,
+)
+from ..application.action_specs import ACTION_SPECS, OVERRIDE_SETTINGS
 from ..application.read_service import DEFAULT_RUN_LIMIT, api_capabilities
 from ..events import DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT
 from ..core.config import Settings, load_settings, repo_root
 from ..core.errors import HarnessError
 from ..operations import OperationManager, OperationStore
+from ..ops.frontend import read_dashboard_asset
 
 
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
 _RUN_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)$")
 _EVENT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/events$")
+_RUN_OPERATIONS_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/operations$")
 _ARTIFACT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/artifacts/([^/]+)$")
 _ACTION_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/actions$")
 _OPERATION_ROUTE = re.compile(r"^/api/v1/operations/([^/]+)$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
 _LOGGER = logging.getLogger("sdlc_harness.http")
 
-_ACTION_SPECS: dict[str, dict[str, object]] = {
-    "answer_clarification": {
-        "command": "answer-clarification",
-        "required": {"question_id", "answer", "answered_by"},
-        "optional": set(),
-        "overrides": set(),
-    },
-    "approve_checkpoint": {
-        "command": "approve-checkpoint",
-        "required": set(),
-        "optional": {"checkpoint_id"},
-        "overrides": {
-            "design_repair_limit",
-            "design_validation_trials",
-            "design_llm_call_budget",
-            "implementation_plan_repair_limit",
-            "implementation_repair_limit",
-        },
-    },
-    "continue_run": {
-        "command": "continue-run",
-        "required": set(),
-        "optional": set(),
-        "overrides": {"implementation_repair_limit", "qa_repair_limit"},
-    },
-    "sync_run": {
-        "command": "sync-run",
-        "required": set(),
-        "optional": set(),
-        "overrides": set(),
-    },
-    "revalidate_design": {
-        "command": "revalidate-design",
-        "required": set(),
-        "optional": set(),
-        "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
-    },
-    "revalidate_implementation_plan": {
-        "command": "revalidate-implementation-plan",
-        "required": set(),
-        "optional": set(),
-        "overrides": {"implementation_plan_repair_limit"},
-    },
-    "revalidate_implementation": {
-        "command": "revalidate-implementation",
-        "required": set(),
-        "optional": set(),
-        "overrides": {"implementation_repair_limit"},
-    },
-    "adopt_run_workspace": {
-        "command": "adopt-run-workspace",
-        "required": set(),
-        "optional": set(),
-        "overrides": set(),
-    },
-    "cleanup_run_workspace": {
-        "command": "cleanup-run-workspace",
-        "required": set(),
-        "optional": set(),
-        "overrides": set(),
-    },
-}
-_OVERRIDE_SETTINGS = {
-    "design_repair_limit": ("SDLC_DESIGN_REPAIR_LIMIT", 0),
-    "design_validation_trials": ("SDLC_DESIGN_VALIDATION_TRIALS", 1),
-    "design_llm_call_budget": ("SDLC_DESIGN_LLM_CALL_BUDGET", 1),
-    "implementation_plan_repair_limit": ("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", 0),
-    "implementation_repair_limit": ("SDLC_IMPLEMENTATION_REPAIR_LIMIT", 0),
-    "qa_repair_limit": ("SDLC_QA_REPAIR_LIMIT", 0),
-}
 
 
 @dataclass(frozen=True)
@@ -157,11 +95,13 @@ class SdlcHttpServer(ThreadingHTTPServer):
         config: ApiServerConfig,
         read_service: ApplicationReadService,
         operation_manager: OperationManager,
+        config_service: ConfigurationService,
         runtime_root: Path,
     ):
         self.config = config
         self.read_service = read_service
         self.operation_manager = operation_manager
+        self.config_service = config_service
         self.runtime_root = runtime_root
         super().__init__(server_address, SdlcRequestHandler)
 
@@ -184,11 +124,21 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
                 raise HarnessError("payload_too_large", "Request body exceeds the API limit.")
             parsed = urlsplit(self.path)
             path = parsed.path.rstrip("/") or "/"
+            asset = read_dashboard_asset(path)
+            if asset is not None:
+                self._require_no_query(parsed.query)
+                body, media_type = asset
+                self._write_bytes(200, body, media_type=media_type)
+                return
             if path == "/api/v1/health":
                 self._require_no_query(parsed.query)
                 self._write_json(200, self._health_payload())
                 return
             self._require_authorized()
+            if path == "/api/v1/config":
+                self._require_no_query(parsed.query)
+                self._write_json(200, self.server.config_service.snapshot())
+                return
             if path == "/api/v1/runs":
                 limit = self._read_limit(parsed.query)
                 self._write_json(200, self.server.read_service.list_runs(limit=limit))
@@ -202,6 +152,10 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
                         operations=self.server.operation_manager.list_public_summaries(limit=limit),
                     ),
                 )
+                return
+            if path == "/api/v1/dashboard/schema":
+                self._require_no_query(parsed.query)
+                self._write_json(200, self.server.read_service.dashboard_schema())
                 return
             operation_match = _OPERATION_ROUTE.fullmatch(path)
             if operation_match:
@@ -223,6 +177,23 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
                         after=after,
                         limit=limit,
                     ),
+                )
+                return
+            run_operations_match = _RUN_OPERATIONS_ROUTE.fullmatch(path)
+            if run_operations_match:
+                run_id = _validated_identifier(unquote(run_operations_match.group(1)), kind="run id")
+                limit = self._read_limit(parsed.query)
+                self.server.read_service.get_run(run_id=run_id)
+                self._write_json(
+                    200,
+                    {
+                        "ok": True,
+                        "run_id": run_id,
+                        "operations": self.server.operation_manager.list_public_summaries(
+                            limit=limit,
+                            run_id=run_id,
+                        ),
+                    },
                 )
                 return
             run_match = _RUN_ROUTE.fullmatch(path)
@@ -264,6 +235,9 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
             path = parsed.path.rstrip("/") or "/"
             self._require_no_query(parsed.query)
             body = self._read_json_body()
+            if path == "/api/v1/config/reset":
+                self._write_json(200, self._reset_config(body))
+                return
             idempotency_key = self.headers.get("Idempotency-Key", "")
             if path == "/api/v1/runs":
                 receipt = self._submit_create_run(body, idempotency_key=idempotency_key)
@@ -290,7 +264,30 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
             )
 
     def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
-        self._unsupported_write_method()
+        try:
+            self._require_authorized()
+            parsed = urlsplit(self.path)
+            path = parsed.path.rstrip("/") or "/"
+            self._require_no_query(parsed.query)
+            if path != "/api/v1/config":
+                raise HarnessError("method_not_allowed", "HTTP method is not available for this API route.")
+            body = self._read_json_body()
+            _require_fields(body, allowed={"values"}, required={"values"})
+            values = body.get("values")
+            if not isinstance(values, dict):
+                raise HarnessError("config_invalid", "values must be a JSON object.")
+            payload = self.server.operation_manager.run_when_idle(
+                lambda: self.server.config_service.update(values)
+            )
+            self._write_json(200, payload)
+        except HarnessError as exc:
+            self._write_harness_error(exc)
+        except Exception:
+            _LOGGER.exception("Unhandled HTTP config update error")
+            self._write_json(
+                500,
+                {"ok": False, "error_code": "internal_error", "message": "Internal server error."},
+            )
 
     def do_PATCH(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler contract
         self._unsupported_write_method()
@@ -403,7 +400,7 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
         arguments = body.get("arguments", {})
         if not isinstance(arguments, dict):
             raise HarnessError("invalid_request", "arguments must be a JSON object.")
-        spec = _ACTION_SPECS.get(action)
+        spec = ACTION_SPECS.get(action)
         if spec is None:
             raise HarnessError("invalid_request", f"Unsupported run action: {action}", run_id=run_id)
         required = set(spec["required"])
@@ -422,7 +419,7 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
         for key in sorted(overrides):
             if key not in arguments:
                 continue
-            setting_key, minimum = _OVERRIDE_SETTINGS[key]
+            setting_key, minimum = OVERRIDE_SETTINGS[key]
             value = _integer_argument(arguments, key, minimum=minimum)
             settings_overrides[setting_key] = str(value)
             normalized_arguments[key] = value
@@ -448,6 +445,26 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
             sync_mode=sync_mode,
             idempotency_key=idempotency_key,
             canonical_request=normalized,
+        )
+
+    def _reset_config(self, body: dict[str, object]) -> dict[str, object]:
+        _require_fields(body, allowed={"keys", "section"}, required=set())
+        raw_keys = body.get("keys")
+        if raw_keys is None:
+            keys: list[str] = []
+        elif isinstance(raw_keys, list):
+            keys = list(raw_keys)
+        else:
+            raise HarnessError("config_invalid", "keys must be a JSON array.")
+        raw_section = body.get("section")
+        if raw_section is None:
+            section = None
+        elif isinstance(raw_section, str) and raw_section.strip():
+            section = raw_section.strip()
+        else:
+            raise HarnessError("config_invalid", "section must be a non-empty string.")
+        return self.server.operation_manager.run_when_idle(
+            lambda: self.server.config_service.reset(keys=keys, section=section)
         )
 
     def _read_json_body(self) -> dict[str, object]:
@@ -558,6 +575,29 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
+    def _write_bytes(self, status: int, body: bytes, *, media_type: str) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", media_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header(
+            "Content-Security-Policy",
+            "default-src 'self'; script-src 'self'; style-src 'self'; "
+            "connect-src 'self'; img-src 'self' data:; object-src 'none'; "
+            "base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        )
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        if self.command != "HEAD":
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
 
 def create_server(
     *,
@@ -566,6 +606,7 @@ def create_server(
     runtime_root: Path | None = None,
     read_service: ApplicationReadService | None = None,
     operation_manager: OperationManager | None = None,
+    config_service: ConfigurationService | None = None,
 ) -> SdlcHttpServer:
     root_path = (root or repo_root()).resolve()
     settings = load_settings(root=root_path, runtime_root=runtime_root)
@@ -578,11 +619,16 @@ def create_server(
         queue_limit=server_config.queue_limit,
         public_value=service.public_value,
     )
+    runtime_config_service = config_service or ConfigurationService(
+        root=root_path,
+        runtime_root=settings.runtime_root,
+    )
     return SdlcHttpServer(
         (server_config.host, server_config.port),
         config=server_config,
         read_service=service,
         operation_manager=manager,
+        config_service=runtime_config_service,
         runtime_root=settings.runtime_root,
     )
 
@@ -638,6 +684,8 @@ def _http_status_for_error(error_code: str) -> int:
         "run_operation_in_progress",
         "run_action_locked",
         "source_action_locked",
+        "config_busy",
+        "config_locked",
     }:
         return 409
     if error_code in {"operation_queue_full", "operation_manager_stopping"}:
@@ -650,6 +698,8 @@ def _http_status_for_error(error_code: str) -> int:
         "invalid_path_parameter",
         "invalid_query",
         "invalid_request",
+        "config_invalid",
+        "config_read_only",
     }:
         return 400
     return 500

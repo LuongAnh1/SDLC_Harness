@@ -1,6 +1,6 @@
 # Implementation Checklist: API Và Ops Dashboard
 
-Trạng thái hiện tại: **Slice 1-4 đã hoàn thành; Slice 5 chưa triển khai**.
+Trạng thái hiện tại: **Slice 1-6 đã hoàn thành; Slice 7 chưa triển khai**.
 
 ## Slice 1 - Application Service Chung
 
@@ -36,20 +36,20 @@ Trạng thái hiện tại: **Slice 1-4 đã hoàn thành; Slice 5 chưa triển
 
 ## Slice 5 - Dashboard
 
-- [ ] Runs và run detail.
-- [ ] Workflow graph có current node/checkpoint/repair count.
-- [ ] Artifact/quality preview.
-- [ ] Operations/log timeline.
-- [ ] Action button dựa trên `allowed_next_actions` và operation state.
-- [ ] Test HTML routes, API calls và render state chính.
+- [x] Runs và run detail.
+- [x] Workflow graph có current node/checkpoint/repair count.
+- [x] Artifact/quality preview.
+- [x] Operations/log timeline.
+- [x] Action button dựa trên `allowed_next_actions` và operation state.
+- [x] Test HTML routes, API calls và render state chính.
 
 ## Slice 6 - Runtime Config
 
-- [ ] Thêm schema và `.runtime/config.json` atomic.
-- [ ] Áp dụng precedence OS > runtime config > `.env` > defaults.
-- [ ] Mask secret, khóa OS env và validate type/range.
-- [ ] Giữ `sync_mode=mock` khi request không chọn real.
-- [ ] Test reset section, masked secret và restart-required fields.
+- [x] Thêm schema và `.runtime/config.json` atomic.
+- [x] Áp dụng precedence invocation > OS > runtime config > `.env` > defaults.
+- [x] Mask secret, khóa OS env và validate type/range.
+- [x] Giữ `sync_mode=mock` khi request không chọn real.
+- [x] Test reset field/section, masked secret, busy gate và restart-required fields.
 
 ## Slice 7 - Niko Dual Transport
 

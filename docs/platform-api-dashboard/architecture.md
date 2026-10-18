@@ -1,6 +1,6 @@
 # Kiến Trúc API Và Ops Dashboard
 
-## Baseline Và Trạng Thái Slice 1-3
+## Baseline Và Trạng Thái Slice 1-6
 
 Trước Slice 1, `sdlc_harness.interfaces.cli` vừa parse argument, dựng Settings vừa
 dispatch trực tiếp tới workflow. Slice 1 đã chuyển settings + dispatch sang
@@ -14,7 +14,7 @@ dựng projection công khai từ state đã persist, thay đường dẫn artif
 metadata URL và chỉ đọc các artifact nằm trong allowlist. Các endpoint đọc không
 tạo operation, không gọi LLM và không ghi state.
 
-Slice 3 đã mở write endpoint qua operation queue bền vững. Slice 4 đã bổ sung event timeline theo run, cursor API và metadata quan sát đã lọc. Request được validate,
+Slice 3 đã mở write endpoint qua operation queue bền vững. Slice 4 đã bổ sung event timeline theo run, cursor API và metadata quan sát đã lọc. Slice 5 phục vụ dashboard cùng origin, schema trình bày và operation theo run; frontend chỉ gọi `/api/v1`. Request được validate,
 hash và persist operation/idempotency trước khi trả `202`; một worker gọi trực
 tiếp application service. Mutation có run dùng runtime run lock chung cho CLI/API,
 còn tạo run dùng source lock. Operation cũ không được replay sau restart.
@@ -30,8 +30,11 @@ interfaces/http.py
   POST action -> OperationManager.submit(command)
               -> ApplicationService.execute(command)
 
-ops/dashboard.py + ops/frontend.py
-  serve UI -> call /api/v1 only
+ops/frontend.py + ops/templates/
+  allowlisted UI assets -> browser calls /api/v1 only
+
+application/config_service.py + core/runtime_config.py
+  schema projection -> masked values -> atomic config mutation
 
 application/service.py
   validate command/action -> construct settings -> select workflow -> normalize result
@@ -95,6 +98,8 @@ sequenceDiagram
 - Hai action cùng run không được chạy đồng thời dù tăng số worker về sau.
 - Read endpoint được phép phục vụ đồng thời và chỉ đọc snapshot đã ghi hoàn chỉnh.
 - Ghi operation/state/config phải atomic theo cùng nguyên tắc temp-file + replace.
+- Config save/reset giữ lock của Operation Manager trong lúc kiểm tra idle và ghi file,
+  vì vậy không thể chen vào giữa một operation queued/running.
 
 ## Network Và Trust Boundary
 

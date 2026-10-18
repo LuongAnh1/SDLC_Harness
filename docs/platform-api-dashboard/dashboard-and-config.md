@@ -5,6 +5,10 @@
 Dashboard giúp quan sát và vận hành SDLC Harness cục bộ. Nó không thay Niko làm
 conversation gateway và không thay Jira/Confluence/GitHub làm collaboration tool.
 
+Slice 5 đã triển khai các trang Runs, run detail, workflow, artifact/quality và
+timeline. Slice 6 đã triển khai Config bằng schema backend, API ghi đồng bộ và
+`.runtime/config.json` atomic.
+
 ## Các Trang
 
 ### Runs
@@ -56,7 +60,7 @@ flowchart LR
 ## Config Precedence
 
 ```text
-defaults < root .env < .runtime/config.json < OS environment
+defaults < root .env < .runtime/config.json < OS environment < invocation/action override
 ```
 
 CLI test/debug override chỉ có hiệu lực cho invocation đó và không được ghi vào
@@ -70,7 +74,9 @@ runtime config. API action argument chỉ override field được contract cho p
 - giá trị mask gửi lại được hiểu là “không đổi secret”;
 - validate type/range trước khi atomic write;
 - trả snapshot hiệu lực đã mask;
-- cấu hình cần restart phải có cờ `restart_required=true`.
+- cấu hình cần restart phải có cờ `restart_required=true`;
+- save/reset bị chặn bằng `409 config_busy` khi operation đang queued/running;
+- reset nhận `keys`, `section` hoặc cả hai và chỉ xóa runtime override.
 
 ## Server Và Auth Config
 

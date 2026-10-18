@@ -14,6 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from sdlc_harness.application import ApplicationReadService
+from sdlc_harness.application.action_specs import ACTION_SPECS
 from sdlc_harness.application.read_service import MAX_ARTIFACT_BYTES
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.events import EventStore
@@ -229,6 +230,7 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertTrue(payload["capabilities"]["read_api"])
         self.assertTrue(payload["capabilities"]["write_api"])
         self.assertTrue(payload["capabilities"]["operation_queue"])
+        self.assertTrue(payload["capabilities"]["dashboard"])
         self.assertEqual(payload["queue"]["workers"], 1)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
@@ -260,6 +262,55 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(status, 200)
         self.assertEqual(snapshot["run_count"], 1)
         self.assertEqual(snapshot["operations"], [])
+
+        status, _, schema = self.request(
+            "/api/v1/dashboard/schema",
+            token=self.api_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(schema["version"], "dashboard_schema_v1")
+        self.assertEqual(set(schema["actions"]), set(ACTION_SPECS))
+        self.assertEqual(len(schema["workflow"]["nodes"]), 8)
+
+    def test_dashboard_assets_are_same_origin_public_and_hardened(self) -> None:
+        response = urlopen(f"{self.base_url}/", timeout=3)
+        html = response.read().decode("utf-8")
+        headers = dict(response.headers)
+        self.assertEqual(response.status, 200)
+        self.assertIn("SDLC OPS", html)
+        self.assertIn("/assets/dashboard.js", html)
+        self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+        for path, media_type in (
+            ("/assets/dashboard.css", "text/css"),
+            ("/assets/dashboard.js", "text/javascript"),
+        ):
+            asset = urlopen(f"{self.base_url}{path}", timeout=3)
+            self.assertEqual(asset.status, 200)
+            self.assertTrue(asset.headers["Content-Type"].startswith(media_type))
+            self.assertTrue(asset.read())
+
+    def test_run_operations_route_filters_other_runs(self) -> None:
+        store = self.server.operation_manager.store
+        for index, run_id in enumerate((self.run_id, "run_other"), start=1):
+            store.create_operation(
+                command="continue_run",
+                run_id=run_id,
+                requested_by="dashboard:operator",
+                sync_mode="mock",
+                request_hash="sha256:" + str(index) * 64,
+                idempotency_key_hash="sha256:" + str(index + 2) * 64,
+            )
+
+        status, _, payload = self.request(
+            f"/api/v1/runs/{self.run_id}/operations?limit=10",
+            token=self.api_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["run_id"], self.run_id)
+        self.assertEqual(len(payload["operations"]), 1)
+        self.assertEqual(payload["operations"][0]["run_id"], self.run_id)
 
     def test_event_route_supports_cursor_limit_auth_and_read_only_behavior(self) -> None:
         EventStore(runtime_root=self.runtime_root).append(

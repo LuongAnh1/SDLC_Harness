@@ -11,6 +11,7 @@ from urllib.parse import quote
 
 from .commands import ApplicationCommand
 from .service import ApplicationService
+from .action_specs import public_dashboard_schema
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
 from ..events import DEFAULT_EVENT_LIMIT, EventStore
@@ -110,6 +111,15 @@ class ApplicationReadService:
                 runtime_root=self.settings.runtime_root,
             )
         )
+        state = self.store.read_state(run_id)
+        for key in (
+            "created_at",
+            "updated_at",
+            "implementation_repair_iterations",
+            "qa_repair_iterations",
+        ):
+            if key not in payload and key in state:
+                payload[key] = state[key]
         return self._public_run(payload)
 
     def list_events(
@@ -142,6 +152,12 @@ class ApplicationReadService:
             },
             "capabilities": api_capabilities(),
         }
+
+    def dashboard_schema(self) -> dict[str, object]:
+        """Return UI metadata without exposing secrets or filesystem settings."""
+
+        settings = load_settings(root=self.root, runtime_root=self.settings.runtime_root)
+        return public_dashboard_schema(settings)
 
     def read_artifact(self, *, run_id: str, artifact_key: str) -> dict[str, object]:
         run_id = _validated_identifier(run_id, kind="run id")
@@ -276,12 +292,13 @@ class ApplicationReadService:
         return resolved
 
     def _sanitize(self, value: Any) -> Any:
+        settings = load_settings(root=self.root, runtime_root=self.settings.runtime_root)
         secrets = tuple(
             secret
             for secret in (
-                self.settings.api_token,
-                self.settings.llm_api_key,
-                self.settings.atlassian_api_token,
+                settings.api_token,
+                settings.llm_api_key,
+                settings.atlassian_api_token,
             )
             if secret
         )
@@ -289,9 +306,9 @@ class ApplicationReadService:
             str(path)
             for path in (
                 self.root,
-                self.settings.runtime_root,
-                self.settings.target_repo_path,
-                self.settings.target_worktree_root,
+                settings.runtime_root,
+                settings.target_repo_path,
+                settings.target_worktree_root,
             )
         )
         return _sanitize_value(value, secrets=secrets, roots=roots)
@@ -303,7 +320,8 @@ def api_capabilities() -> dict[str, bool]:
         "write_api": True,
         "operation_queue": True,
         "events": True,
-        "config_api": False,
+        "dashboard": True,
+        "config_api": True,
     }
 
 
