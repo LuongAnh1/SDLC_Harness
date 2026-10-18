@@ -149,3 +149,13 @@ Ban đầu các tool này có thể được mô phỏng bằng fixture hoặc l
 ## Source Ownership
 
 Khi người dùng yêu cầu thực hiện một use case, Niko không trực tiếp kéo dữ liệu từ fixture/Jira/dataset. Niko gọi SDLC Harness bằng `start_or_get_run(source_ref)`. SDLC Harness quyết định source đã có active run chưa, có cần load/refine lại không, sync đã thành công chưa, rồi trả status cho Niko.
+
+## Platform API Và Dashboard Được Lên Kế Hoạch
+
+Sau khi Phase 4 đã chứng minh CLI JSON và workflow E2E, integration boundary sẽ
+được chuyển dần sang HTTP API. CLI/API phải gọi chung application service; API
+dùng operation queue cho tác vụ dài; dashboard chỉ gọi API. Runtime state,
+artifact, per-run lock, worktree và tool sync vẫn thuộc SDLC Harness.
+
+Tài liệu nguồn cho mốc này nằm tại `docs/platform-api-dashboard/README.md`. Cho
+tới khi checklist cutover hoàn thành, CLI JSON vẫn là contract hiện hành của Niko.

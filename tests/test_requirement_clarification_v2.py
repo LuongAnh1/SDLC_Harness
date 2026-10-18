@@ -517,7 +517,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 ScriptedClient([self.accepted_q4()])
             )
 
-            with patch("sdlc_harness.interfaces.cli.PhaseOneWorkflow", return_value=workflow):
+            with patch("sdlc_harness.application.service.PhaseOneWorkflow", return_value=workflow):
                 start_stdout = io.StringIO()
                 with contextlib.redirect_stdout(start_stdout):
                     start_code = cli_main(

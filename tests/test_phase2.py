@@ -81,6 +81,7 @@ class SequencedTraceabilityValidator:
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         canonical_requirement=None,
+        attempt_recorder=None,
     ) -> TraceabilityResult:
         graph = build_requirement_graph(requirement_packet)
         requirements = graph["requirements"]
@@ -429,7 +430,7 @@ class OnlyClass {
         parsed = parse_design_model(fake_design_model())
 
         with self.assertRaises(HarnessError) as ctx:
-            ValidatorAgent(StaticLlmClient(["not json"])).construct_traceability(
+            ValidatorAgent(StaticLlmClient(["not json", "still not json"])).construct_traceability(
                 requirement_packet=fake_refined_requirement(""),
                 class_graph=parsed.class_graph,
                 sequence_graph=parsed.sequence_graph,
@@ -781,13 +782,13 @@ class OnlyClass {
         created = self._create_phase1_run()
         run_id = str(created["run_id"])
         workflow = PhaseTwoWorkflow(self.settings)
-        workflow.validator = ValidatorAgent(StaticLlmClient(["not json"]))
+        workflow.validator = ValidatorAgent(StaticLlmClient(["not json", "still not json"]))
 
-        with self.assertRaises(HarnessError):
-            workflow.approve_checkpoint(run_id=run_id)
+        response = workflow.approve_checkpoint(run_id=run_id)
 
         state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
-        self.assertEqual(state["status"], "failed")
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(state["status"], "blocked")
         self.assertIsNone(state["pending_checkpoint"])
         self.assertEqual(state["last_error"]["error_code"], "validator_traceability_failed")
 

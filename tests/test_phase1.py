@@ -416,7 +416,7 @@ class PhaseOneTest(unittest.TestCase):
         }
         stdout = io.StringIO()
 
-        with patch("sdlc_harness.interfaces.cli.CheckpointApprovalWorkflow") as workflow_type:
+        with patch("sdlc_harness.application.service.CheckpointApprovalWorkflow") as workflow_type:
             workflow_type.return_value.approve_checkpoint.return_value = response
             with contextlib.redirect_stdout(stdout):
                 code = cli_main(
@@ -445,7 +445,7 @@ class PhaseOneTest(unittest.TestCase):
             run_id=run_id,
         )
 
-        with patch("sdlc_harness.interfaces.cli.CheckpointApprovalWorkflow") as workflow_type:
+        with patch("sdlc_harness.application.service.CheckpointApprovalWorkflow") as workflow_type:
             workflow_type.return_value.approve_checkpoint.side_effect = failure
             with contextlib.redirect_stdout(stdout):
                 code = cli_main(

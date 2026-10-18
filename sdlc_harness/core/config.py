@@ -51,6 +51,10 @@ class Settings:
     target_repo_remote: str
     target_base_branch: str
     implementation_branch_prefix: str
+    api_host: str
+    api_port: int
+    api_token: str
+    api_shutdown_timeout_seconds: int
 
 
 def repo_root() -> Path:
@@ -141,6 +145,10 @@ def load_settings(
         "SDLC_TARGET_REPO_REMOTE",
         "SDLC_TARGET_BASE_BRANCH",
         "SDLC_IMPLEMENTATION_BRANCH_PREFIX",
+        "SDLC_API_HOST",
+        "SDLC_API_PORT",
+        "SDLC_API_TOKEN",
+        "SDLC_API_SHUTDOWN_TIMEOUT_SECONDS",
     ):
         if key in os.environ:
             merged[key] = os.environ[key]
@@ -250,6 +258,14 @@ def load_settings(
         target_base_branch=merged.get("SDLC_TARGET_BASE_BRANCH", "main").strip() or "main",
         implementation_branch_prefix=(
             merged.get("SDLC_IMPLEMENTATION_BRANCH_PREFIX", "feature").strip().strip("/") or "feature"
+        ),
+        api_host=merged.get("SDLC_API_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        api_port=_int_value(merged.get("SDLC_API_PORT"), default=7788, minimum=1),
+        api_token=merged.get("SDLC_API_TOKEN", ""),
+        api_shutdown_timeout_seconds=_int_value(
+            merged.get("SDLC_API_SHUTDOWN_TIMEOUT_SECONDS"),
+            default=30,
+            minimum=1,
         ),
     )
 

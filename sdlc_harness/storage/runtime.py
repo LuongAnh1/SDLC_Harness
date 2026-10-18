@@ -111,6 +111,24 @@ class RuntimeStore:
         except json.JSONDecodeError as exc:
             raise HarnessError("state_corrupted", f"State file is not valid JSON: {run_id}", run_id=run_id) from exc
 
+    def list_states(self, *, limit: int) -> list[dict[str, object]]:
+        """Read recent run states without creating or mutating runtime storage."""
+
+        if limit < 1:
+            raise HarnessError("invalid_query", "Run list limit must be at least 1.")
+        if not self.runs_dir.exists():
+            return []
+        states: list[dict[str, object]] = []
+        for entry in self.runs_dir.iterdir():
+            if not entry.is_dir() or not (entry / "state.json").is_file():
+                continue
+            states.append(self.read_state(entry.name))
+        states.sort(
+            key=lambda state: (str(state.get("updated_at") or ""), str(state.get("run_id") or "")),
+            reverse=True,
+        )
+        return states[:limit]
+
     def write_state(self, state: dict[str, object]) -> None:
         run_id = str(state["run_id"])
         run_dir = self.run_dir(run_id)

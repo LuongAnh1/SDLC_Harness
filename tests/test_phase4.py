@@ -589,7 +589,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(packet["current_files"])
         self.assertEqual(packet["run_workspace"]["workspace_mode"], "git_worktree_v1")
         self.assertEqual(packet["run_workspace"]["branch"], response["workspace"]["branch"])
-        self.assertEqual(packet["output_contract"]["format"], "changed_files_json_v1")
+        self.assertEqual(packet["output_contract"]["format"], "changed_file_blocks_v1")
         self.assertTrue(packet["output_contract"]["changed_files_only"])
         self.assertTrue(packet["output_contract"]["allowed_paths"])
         grouped = packet["design_mappings_by_file"]

@@ -182,6 +182,20 @@ nằm tại `docs/phase-4/workspace-isolation/`.
 - [x] Approve Code Review chỉ chuyển Draft PR thành Ready for review.
 - [x] Có guard/test chứng minh Harness không merge hoặc bật auto-merge.
 
+## Platform Upgrade - API Và Ops Dashboard
+
+Checklist chi tiết nằm tại `docs/platform-api-dashboard/implementation-checklist.md`.
+Đây là mốc nền tảng ưu tiên sau Phase 4 và trước Phase 5 `request_change`.
+
+- [x] Chốt architecture, API, operation/event, dashboard/config và Niko cutover docs.
+- [x] Tách application service dùng chung cho CLI/API.
+- [x] Thêm Read API cho health, run, artifact whitelist và dashboard snapshot.
+- [ ] Thêm write API với operation queue và idempotency.
+- [ ] Thêm event timeline và Ops Dashboard.
+- [ ] Thêm runtime config có schema, mask secret và precedence rõ.
+- [ ] Nối Niko dual transport, chạy contract parity và controlled live E2E.
+- [ ] Chuyển API thành transport mặc định; giữ CLI cho debug/operator.
+
 ## Phase 5 - Sửa Tại Checkpoint
 
 Mục đích: người dùng có thể yêu cầu sửa và hệ thống rerun đúng đoạn.

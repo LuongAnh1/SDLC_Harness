@@ -8,6 +8,7 @@ OpenAI.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 import re
 import urllib.error
@@ -201,8 +202,12 @@ def fake_completion(prompt: str) -> str:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan()
-    if "Developer Repair v1" in prompt:
+    if "Developer Batch Repair v2" in prompt:
+        return fake_developer_repair(prompt)
+    if "Developer Batch Act v2" in prompt:
         return fake_developer_act()
+    if "Developer Repair v1" in prompt:
+        return fake_developer_repair(prompt)
     if "Developer Act v1" in prompt:
         return fake_developer_act()
     if "Code Trace LLM Review v1" in prompt:
@@ -811,6 +816,17 @@ public final class CulturalHeritageRepositoryTest {
         ensure_ascii=False,
         indent=2,
     )
+
+
+def fake_developer_repair(prompt: str) -> str:
+    """Return a valid repair batch that differs from the current fake act output."""
+
+    payload = json.loads(fake_developer_act())
+    marker = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+    for item in payload["files"]:
+        item["content"] = f"{str(item['content']).rstrip()}\n\n// Fake repair marker: {marker}\n"
+    payload["summary"] = "Fake Developer.repair generated an effective code change from current feedback."
+    return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
 def fake_code_trace_review() -> str:

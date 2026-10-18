@@ -105,7 +105,8 @@ Các file quan trọng:
 
 ## Package Layout
 
-- `interfaces/`: public CLI/entrypoint. Giữ `sdlc_harness/cli.py` làm wrapper để không phá lệnh Niko gọi.
+- `application/`: command model, settings construction và workflow dispatch dùng chung cho mọi transport.
+- `interfaces/`: adapter CLI và HTTP sau này. Giữ `sdlc_harness/cli.py` làm wrapper để không phá lệnh Niko gọi.
 - `workflows/`: graph/workflow theo phase. Workflow không tự chứa prompt dài hoặc adapter chi tiết.
 - `agents/requirements/`: Requirement Refiner/Validator và prompt templates. Phase 1 đã sinh cả `formal_use_case_v1.txt` theo grammar TraceDev và `requirement_packet_v1.md` cho checkpoint người duyệt.
 - `sources/`: fixture/dataset/Jira loaders. Niko không đọc source trực tiếp.

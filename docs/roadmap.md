@@ -176,6 +176,24 @@ Kết quả mong muốn:
   `code_review_approved`; PR #1 vẫn OPEN/chưa merge, Jira comment `10104` và
   Confluence page `2129921` đã nhận trạng thái sau approval.
 
+## Platform Upgrade - API Và Ops Dashboard (Trước Phase 5)
+
+Mục đích: thay transport Niko -> SDLC Harness từ subprocess CLI bằng HTTP API có
+operation bền vững, đồng thời thêm dashboard quan sát run/flow/artifact/config.
+
+Tài liệu chi tiết nằm tại `docs/platform-api-dashboard/README.md`. Mốc này không
+đổi workflow Phase 1-4 và không chiếm Phase 5. CLI tiếp tục hoạt động trong thời
+gian chuyển đổi; API chỉ trở thành integration boundary sau contract test và một
+controlled live E2E qua Niko.
+
+Luồng đích:
+
+```text
+Niko / Dashboard -> HTTP API -> Operation Manager -> Application Service
+CLI -----------------------------------------------> Application Service
+Application Service -> existing workflows/state/artifacts/sync
+```
+
 ## Phase 5 - Sửa Tại Checkpoint
 
 Mục đích: người dùng có thể yêu cầu sửa ngay tại checkpoint và hệ thống rerun đúng phase.

@@ -15,16 +15,9 @@ import json
 from pathlib import Path
 import sys
 
-from ..core.config import load_settings, repo_root
+from ..application import ApplicationCommand, ApplicationService
+from ..core.config import repo_root
 from ..core.errors import HarnessError
-from ..workflows.approval import CheckpointApprovalWorkflow
-from ..workflows.phase1 import PhaseOneWorkflow
-from ..workflows.phase2 import PhaseTwoWorkflow
-from ..workflows.phase3 import PhaseThreeWorkflow
-from ..workflows.phase4 import PhaseFourWorkflow
-from ..workflows.target_repo import TargetRepoPreparationWorkflow
-from ..workflows.workspace_adoption import WorkspaceAdoptionWorkflow
-from ..workflows.workspace_cleanup import WorkspaceCleanupWorkflow
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -139,95 +132,68 @@ def _add_sync_mode_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--sync-mode", choices=["mock", "real", "both"], default="mock")
 
 
-def _settings_from_args(args: argparse.Namespace):
+_COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "start-or-get-run": ("dataset", "use_case", "requested_by"),
+    "start-from-jira": ("issue_key", "requested_by"),
+    "get-status": ("run_id",),
+    "sync-run": ("run_id",),
+    "continue-run": ("run_id",),
+    "revalidate-implementation": ("run_id",),
+    "revalidate-implementation-plan": ("run_id",),
+    "revalidate-design": ("run_id",),
+    "experiment-design-consensus": ("source_run_id", "experiment_root", "llm_call_budget"),
+    "approve-checkpoint": ("run_id", "checkpoint_id"),
+    "answer-clarification": ("run_id", "question_id", "answer", "answered_by"),
+    "prepare-target-repo": ("init_codegraph",),
+    "adopt-run-workspace": ("run_id",),
+    "cleanup-run-workspace": ("run_id",),
+}
+
+_SETTINGS_OVERRIDE_ARGUMENTS: dict[str, str] = {
+    "llm_mode": "SDLC_LLM_MODE",
+    "design_repair_limit": "SDLC_DESIGN_REPAIR_LIMIT",
+    "design_validation_trials": "SDLC_DESIGN_VALIDATION_TRIALS",
+    "design_llm_call_budget": "SDLC_DESIGN_LLM_CALL_BUDGET",
+    "implementation_plan_repair_limit": "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
+    "implementation_repair_limit": "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
+    "qa_repair_limit": "SDLC_QA_REPAIR_LIMIT",
+    "sync_mode": "SDLC_SYNC_MODE",
+    "target_repo": "SDLC_TARGET_REPO_PATH",
+    "target_remote": "SDLC_TARGET_REPO_REMOTE",
+}
+
+
+def command_from_args(args: argparse.Namespace) -> ApplicationCommand:
+    """Chuyển argparse Namespace thành command không phụ thuộc transport."""
+
     runtime_value = getattr(args, "source_runtime_root", None) or getattr(args, "runtime_root", None)
     runtime_root = Path(runtime_value) if runtime_value else None
-    overrides = {}
-    if getattr(args, "llm_mode", None):
-        overrides["SDLC_LLM_MODE"] = args.llm_mode
-    if getattr(args, "design_repair_limit", None) is not None:
-        overrides["SDLC_DESIGN_REPAIR_LIMIT"] = str(args.design_repair_limit)
-    if getattr(args, "design_validation_trials", None) is not None:
-        overrides["SDLC_DESIGN_VALIDATION_TRIALS"] = str(args.design_validation_trials)
-    if getattr(args, "design_llm_call_budget", None) is not None:
-        overrides["SDLC_DESIGN_LLM_CALL_BUDGET"] = str(args.design_llm_call_budget)
-    if getattr(args, "implementation_plan_repair_limit", None) is not None:
-        overrides["SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"] = str(args.implementation_plan_repair_limit)
-    if getattr(args, "implementation_repair_limit", None) is not None:
-        overrides["SDLC_IMPLEMENTATION_REPAIR_LIMIT"] = str(args.implementation_repair_limit)
-    if getattr(args, "qa_repair_limit", None) is not None:
-        overrides["SDLC_QA_REPAIR_LIMIT"] = str(args.qa_repair_limit)
-    if getattr(args, "sync_mode", None):
-        overrides["SDLC_SYNC_MODE"] = str(args.sync_mode)
-    if getattr(args, "target_repo", None):
-        overrides["SDLC_TARGET_REPO_PATH"] = str(args.target_repo)
-    if getattr(args, "target_remote", None):
-        overrides["SDLC_TARGET_REPO_REMOTE"] = str(args.target_remote)
-    return load_settings(root=repo_root(), runtime_root=runtime_root, overrides=overrides)
+    argument_names = _COMMAND_ARGUMENTS.get(str(args.command), ())
+    arguments = {name: getattr(args, name) for name in argument_names}
+    overrides: dict[str, str] = {}
+    for argument_name, setting_name in _SETTINGS_OVERRIDE_ARGUMENTS.items():
+        value = getattr(args, argument_name, None)
+        if value is not None:
+            overrides[setting_name] = str(value)
+    return ApplicationCommand(
+        name=str(args.command),
+        arguments=arguments,
+        settings_overrides=overrides,
+        runtime_root=runtime_root,
+    )
+
+
+def _settings_from_args(args: argparse.Namespace):
+    """Compatibility helper; settings ownership now belongs to ApplicationService."""
+
+    service = ApplicationService(root=repo_root())
+    return service.settings_for(command_from_args(args))
 
 
 def run(args: argparse.Namespace) -> dict[str, object]:
-    settings = _settings_from_args(args)
-    if args.command == "start-or-get-run":
-        workflow = PhaseOneWorkflow(settings)
-        return workflow.start_or_get_run(
-            dataset=args.dataset,
-            use_case=args.use_case,
-            requested_by=args.requested_by,
-        )
-    if args.command == "start-from-jira":
-        workflow = PhaseOneWorkflow(settings)
-        return workflow.start_from_jira(
-            issue_key=args.issue_key,
-            requested_by=args.requested_by,
-        )
-    if args.command == "get-status":
-        workflow = PhaseOneWorkflow(settings)
-        return workflow.get_status(run_id=args.run_id)
-    if args.command == "sync-run":
-        phase_one = PhaseOneWorkflow(settings)
-        state = phase_one.store.read_state(args.run_id)
-        if str(state.get("status") or "").startswith("code_review"):
-            return PhaseFourWorkflow(settings).sync_code_review(run_id=args.run_id)
-        return phase_one.sync_run(run_id=args.run_id)
-    if args.command == "continue-run":
-        workflow = PhaseFourWorkflow(settings)
-        return workflow.continue_until_implementation_checkpoint(run_id=args.run_id)
-    if args.command == "revalidate-implementation":
-        workflow = PhaseFourWorkflow(settings)
-        return workflow.revalidate_implementation(run_id=args.run_id)
-    if args.command == "revalidate-implementation-plan":
-        workflow = PhaseThreeWorkflow(settings)
-        return workflow.revalidate_implementation_plan(run_id=args.run_id)
-    if args.command == "revalidate-design":
-        return PhaseTwoWorkflow(settings).revalidate_design(run_id=args.run_id)
-    if args.command == "experiment-design-consensus":
-        return PhaseTwoWorkflow(settings).experiment_design_consensus(
-            source_run_id=args.source_run_id,
-            experiment_root=Path(args.experiment_root),
-            llm_call_budget=int(args.llm_call_budget),
-        )
-    if args.command == "approve-checkpoint":
-        workflow = CheckpointApprovalWorkflow(settings)
-        return workflow.approve_checkpoint(
-            run_id=args.run_id,
-            checkpoint_id=args.checkpoint_id,
-        )
-    if args.command == "answer-clarification":
-        return PhaseOneWorkflow(settings).answer_clarification(
-            run_id=args.run_id,
-            question_id=args.question_id,
-            answer=args.answer,
-            answered_by=args.answered_by,
-        )
-    if args.command == "prepare-target-repo":
-        workflow = TargetRepoPreparationWorkflow(settings)
-        return workflow.prepare(init_codegraph=bool(args.init_codegraph))
-    if args.command == "adopt-run-workspace":
-        return WorkspaceAdoptionWorkflow(settings).adopt(run_id=args.run_id)
-    if args.command == "cleanup-run-workspace":
-        return WorkspaceCleanupWorkflow(settings).cleanup(run_id=args.run_id)
-    raise HarnessError("unknown_command", f"Unknown command: {args.command}")
+    """CLI adapter delegates the structured command to the application service."""
+
+    return ApplicationService(root=repo_root()).execute(command_from_args(args))
 
 
 def main(argv: list[str] | None = None) -> int:

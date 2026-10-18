@@ -15,12 +15,13 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 là implementation planning checkpoint: sau khi design được duyệt, Harness tạo Git worktree/branch riêng cho run, tự chuẩn bị CodeGraph trong worktree, sinh implementation plan có version, chạy Validator hybrid rule + LLM, sync plan lên Jira/Confluence và dừng ở `waiting_implementation_plan_review`. Phase 4 tạo code/test thật trong chính workspace đó, chạy Verification Runner, Validator code trace hybrid rule + LLM và QA-generated acceptance test; cả vòng repair nhỏ lẫn vòng repair lớn đã được live-test bằng DeepSeek tới state `qa_tested`. Slice 4.8A đã triển khai publication manifest, commit/push và Draft PR idempotent tới trạng thái `code_review_published`; Slice 4.8B đã sync PR/test/trace/QA evidence về Jira và Confluence, hỗ trợ re-sync theo remote identity ổn định và mở checkpoint `code_review_ready`. CLI mặc định mock; real sync phải được chọn rõ. Slice 4.9A3 đã nối worktree-per-run xuyên suốt Phase 3/4 và không còn dùng current branch của canonical repo làm nguồn sự thật. Slice 4.9B đã nhận nuôi thành công run/PR legacy mà không đổi HEAD; Slice 4.9C đã thêm lifecycle cleanup explicit, audit và retry an toàn. Slice 4.9D đã được chạy live qua Niko: Draft PR #1 chuyển sang Ready for review, run đạt `code_review_approved`, Jira/Confluence nhận trạng thái mới và PR vẫn OPEN/chưa merge. Phase 5 `request_change` là hướng triển khai tiếp theo.
+Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 là implementation planning checkpoint: sau khi design được duyệt, Harness tạo Git worktree/branch riêng cho run, tự chuẩn bị CodeGraph trong worktree, sinh implementation plan có version, chạy Validator hybrid rule + LLM, sync plan lên Jira/Confluence và dừng ở `waiting_implementation_plan_review`. Phase 4 tạo code/test thật trong chính workspace đó, chạy Verification Runner, Validator code trace hybrid rule + LLM và QA-generated acceptance test; cả vòng repair nhỏ lẫn vòng repair lớn đã được live-test bằng DeepSeek tới state `qa_tested`. Slice 4.8A đã triển khai publication manifest, commit/push và Draft PR idempotent tới trạng thái `code_review_published`; Slice 4.8B đã sync PR/test/trace/QA evidence về Jira và Confluence, hỗ trợ re-sync theo remote identity ổn định và mở checkpoint `code_review_ready`. CLI mặc định mock; real sync phải được chọn rõ. Slice 4.9A3 đã nối worktree-per-run xuyên suốt Phase 3/4 và không còn dùng current branch của canonical repo làm nguồn sự thật. Slice 4.9B đã nhận nuôi thành công run/PR legacy mà không đổi HEAD; Slice 4.9C đã thêm lifecycle cleanup explicit, audit và retry an toàn. Slice 4.9D đã được chạy live qua Niko: Draft PR #1 chuyển sang Ready for review, run đạt `code_review_approved`, Jira/Confluence nhận trạng thái mới và PR vẫn OPEN/chưa merge. Mốc nền tảng API + Ops Dashboard được ưu tiên tiếp theo; Phase 5 `request_change` được giữ nguyên và triển khai sau mốc này.
 
 
 ## Cấu Trúc Package
 
-- `sdlc_harness/interfaces/`: CLI/entrypoint công khai để Niko gọi. `sdlc_harness/cli.py` chỉ là wrapper giữ compatibility cho `python -m sdlc_harness.cli`.
+- `sdlc_harness/application/`: command model, settings construction và workflow dispatch độc lập transport.
+- `sdlc_harness/interfaces/`: CLI adapter và HTTP Read API công khai. Cả hai dùng chung application service; `sdlc_harness/cli.py` vẫn là wrapper compatibility cho `python -m sdlc_harness.cli`.
 - `sdlc_harness/workflows/`: workflow graph Phase 1-4, từ requirement/design/planning tới code, verification, QA, publication và Code Review approval.
 - `sdlc_harness/agents/requirements/`: Requirement Refiner, formal use case Validator, requirement packet Validator và prompt templates copy/adapt từ TraceDev.
 - `sdlc_harness/sources/`: loader cho fixture/dataset/Jira source sau này.
@@ -87,6 +88,16 @@ Chạy test:
 python -m unittest discover -s tests -p "test*.py" -v
 ```
 
+Chạy Read API local:
+
+```bash
+python -m sdlc_harness.interfaces.http
+curl http://127.0.0.1:7788/api/v1/health
+```
+
+Các endpoint đọc run, artifact và dashboard snapshot yêu cầu bearer token khi
+`SDLC_API_TOKEN` được cấu hình. Slice hiện tại chưa mở write action qua HTTP.
+
 
 <!-- SDLC_NIKO_SYNC_START -->
 ## Runtime Snapshot
@@ -120,3 +131,14 @@ Ranh giới hiện tại:
 
 <!-- SDLC_NIKO_SYNC_END -->
 
+
+## Platform Upgrade Được Lên Kế Hoạch
+
+Sau Phase 4 và trước Phase 5 `request_change`, repo sẽ chuyển integration Niko từ
+CLI subprocess sang HTTP API có operation bền vững và Ops Dashboard. Thiết kế,
+API contract, runtime event, dashboard/config, cutover Niko và checklist nằm tại
+[`docs/platform-api-dashboard/`](docs/platform-api-dashboard/README.md).
+
+Mốc này đang được triển khai: Slice 1 Application Service và Slice 2 Read API đã
+hoàn thành. CLI JSON vẫn là integration contract ghi đang hoạt động; operation
+queue và write API sẽ được mở ở Slice 3 trước khi Niko chuyển transport.

@@ -20,7 +20,7 @@ class WorkspaceAdoptionCliTests(unittest.TestCase):
             "status": "code_review_ready",
         }
         stdout = io.StringIO()
-        with patch("sdlc_harness.interfaces.cli.WorkspaceAdoptionWorkflow") as workflow_type:
+        with patch("sdlc_harness.application.service.WorkspaceAdoptionWorkflow") as workflow_type:
             workflow_type.return_value.adopt.return_value = response
             with contextlib.redirect_stdout(stdout):
                 exit_code = cli_main(

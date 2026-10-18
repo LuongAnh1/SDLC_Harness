@@ -89,6 +89,7 @@ class CanonicalRepairValidator:
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         canonical_requirement=None,
+        attempt_recorder=None,
     ) -> TraceabilityResult:
         graph = build_requirement_graph_v2(canonical_requirement)
         requirements = graph["requirements"]

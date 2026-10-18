@@ -112,6 +112,23 @@ approval chuyển Draft PR thành Ready for review. Controlled live smoke đã h
 tới `code_review_approved`; PR vẫn OPEN và chưa merge. Merge tiếp tục do human,
 còn request-change thuộc Slice 5.
 
+## Platform Slice - CLI Sang API Và Ops Dashboard
+
+Mốc này được triển khai sau Slice 4 và trước Slice 5. Mỗi lát phải giữ CLI
+regression, có state/operation quan sát được và không thay đổi workflow payload:
+
+```text
+Application Service chung
+  -> Read API
+  -> Operation Queue + Write API
+  -> Events
+  -> Dashboard + Runtime Config
+  -> Niko dual transport
+  -> Controlled live E2E + cutover
+```
+
+Chi tiết và checklist nằm tại `docs/platform-api-dashboard/`.
+
 ## Slice 5 - Sửa Tại Checkpoint
 
 ```text

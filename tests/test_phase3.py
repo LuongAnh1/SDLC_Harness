@@ -456,7 +456,8 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(packet["requirement_contract"]["revision"], 1)
         self.assertEqual(canonical_ids, coverage_ids)
         self.assertEqual(canonical_ids, projected_ids)
-        self.assertIn("covered_requirement_ids", packet["output_contract"]["required_fields"])
+        self.assertEqual(packet["output_contract"]["format"], "changed_file_blocks_v1")
+        self.assertEqual(packet["output_contract"]["required_fields"], ["path", "content"])
 
     def test_v2_phase4_rejects_tampered_coverage_before_state_mutation(self) -> None:
         approved = self._create_v2_phase2_run()
