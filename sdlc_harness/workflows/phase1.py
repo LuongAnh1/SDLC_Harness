@@ -167,79 +167,78 @@ class PhaseOneWorkflow:
     ) -> dict[str, object]:
         """Apply one answer to the current blocking Requirement V2 question."""
 
-        with self.store.run_lock(run_id):
-            state = self.store.read_state(run_id)
-            if str(state.get("requirement_contract_version") or "v2") != "v2":
-                raise HarnessError(
-                    "requirement_clarification_not_supported",
-                    "Clarification answers require Requirement Contract V2.",
-                    run_id=run_id,
-                )
-            artifacts = self._normalized_artifacts(state)
-            model_ref = artifacts.get("requirement_model")
-            if not model_ref:
-                raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
-            model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
-            duplicate = find_clarification_submission(model, question_id, answer)
-            if duplicate is not None:
-                return self._status_response(state, created_new_run=False)
-            if state.get("status") != "waiting_requirement_clarification":
-                raise HarnessError(
-                    "requirement_clarification_not_ready",
-                    f"Run is not waiting for requirement clarification: {run_id}",
-                    run_id=run_id,
-                )
-            checkpoint = state.get("pending_checkpoint")
-            current_question = checkpoint.get("current_question") if isinstance(checkpoint, dict) else None
-            if (
-                not isinstance(current_question, dict)
-                or current_question.get("id") != question_id
-            ):
-                raise HarnessError(
-                    "requirement_question_not_current",
-                    f"Question is not current: {question_id}",
-                    run_id=run_id,
-                )
-            source_meta = model.source
-            source_text = read_source_snapshot_v2(
-                store=self.store,
+        state = self.store.read_state(run_id)
+        if str(state.get("requirement_contract_version") or "v2") != "v2":
+            raise HarnessError(
+                "requirement_clarification_not_supported",
+                "Clarification answers require Requirement Contract V2.",
                 run_id=run_id,
-                artifact_ref=str(source_meta.get("artifact_ref") or ""),
-                expected_source_ref=str(source_meta.get("source_ref") or ""),
-                expected_fingerprint=str(source_meta.get("fingerprint") or ""),
             )
-            result = self.clarification_updater.apply(
-                source_text=source_text,
-                model=model,
-                question_id=question_id,
-                answer=answer,
-                answered_by=answered_by,
-            )
-            revised_artifacts = write_requirement_v2_revision_artifacts(
-                store=self.store,
-                run_id=run_id,
-                model=result.model,
-                validation_report=result.final_report,
-                audit=result.to_report_dict(),
-            )
-            artifacts.update(revised_artifacts)
-            selection = select_current_requirement_question(result.model)
-            self._apply_v2_checkpoint_state(
-                state=state,
-                model=result.model,
-                artifact_paths=artifacts,
-                current_question=selection.current_question.to_dict() if selection.current_question else None,
-                remaining_blocking_count=selection.remaining_blocking_count,
-                quality_report=result.to_report_dict(),
-                latest_decision=result.decision,
-            )
-            self.store.write_state(state)
-            last_sync = self._sync_requirement_state(state)
-            state["last_sync"] = last_sync
-            state["updated_at"] = utc_now_iso()
-            state["summary_for_user"] = self._v2_summary(state, last_sync)
-            self.store.write_state(state)
+        artifacts = self._normalized_artifacts(state)
+        model_ref = artifacts.get("requirement_model")
+        if not model_ref:
+            raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
+        model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
+        duplicate = find_clarification_submission(model, question_id, answer)
+        if duplicate is not None:
             return self._status_response(state, created_new_run=False)
+        if state.get("status") != "waiting_requirement_clarification":
+            raise HarnessError(
+                "requirement_clarification_not_ready",
+                f"Run is not waiting for requirement clarification: {run_id}",
+                run_id=run_id,
+            )
+        checkpoint = state.get("pending_checkpoint")
+        current_question = checkpoint.get("current_question") if isinstance(checkpoint, dict) else None
+        if (
+            not isinstance(current_question, dict)
+            or current_question.get("id") != question_id
+        ):
+            raise HarnessError(
+                "requirement_question_not_current",
+                f"Question is not current: {question_id}",
+                run_id=run_id,
+            )
+        source_meta = model.source
+        source_text = read_source_snapshot_v2(
+            store=self.store,
+            run_id=run_id,
+            artifact_ref=str(source_meta.get("artifact_ref") or ""),
+            expected_source_ref=str(source_meta.get("source_ref") or ""),
+            expected_fingerprint=str(source_meta.get("fingerprint") or ""),
+        )
+        result = self.clarification_updater.apply(
+            source_text=source_text,
+            model=model,
+            question_id=question_id,
+            answer=answer,
+            answered_by=answered_by,
+        )
+        revised_artifacts = write_requirement_v2_revision_artifacts(
+            store=self.store,
+            run_id=run_id,
+            model=result.model,
+            validation_report=result.final_report,
+            audit=result.to_report_dict(),
+        )
+        artifacts.update(revised_artifacts)
+        selection = select_current_requirement_question(result.model)
+        self._apply_v2_checkpoint_state(
+            state=state,
+            model=result.model,
+            artifact_paths=artifacts,
+            current_question=selection.current_question.to_dict() if selection.current_question else None,
+            remaining_blocking_count=selection.remaining_blocking_count,
+            quality_report=result.to_report_dict(),
+            latest_decision=result.decision,
+        )
+        self.store.write_state(state)
+        last_sync = self._sync_requirement_state(state)
+        state["last_sync"] = last_sync
+        state["updated_at"] = utc_now_iso()
+        state["summary_for_user"] = self._v2_summary(state, last_sync)
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
 
     def _apply_v2_checkpoint_state(
         self,

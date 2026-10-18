@@ -1,6 +1,6 @@
 # Kiến Trúc API Và Ops Dashboard
 
-## Baseline Và Trạng Thái Slice 1-2
+## Baseline Và Trạng Thái Slice 1-3
 
 Trước Slice 1, `sdlc_harness.interfaces.cli` vừa parse argument, dựng Settings vừa
 dispatch trực tiếp tới workflow. Slice 1 đã chuyển settings + dispatch sang
@@ -12,7 +12,12 @@ Slice 2 đã thêm `interfaces/http.py` bằng `ThreadingHTTPServer` và
 `ApplicationReadService`. HTTP adapter chỉ parse/auth/map status; read service
 dựng projection công khai từ state đã persist, thay đường dẫn artifact bằng
 metadata URL và chỉ đọc các artifact nằm trong allowlist. Các endpoint đọc không
-tạo operation, không gọi LLM và không ghi state. Write API vẫn đóng tới Slice 3.
+tạo operation, không gọi LLM và không ghi state.
+
+Slice 3 đã mở write endpoint qua operation queue bền vững. Request được validate,
+hash và persist operation/idempotency trước khi trả `202`; một worker gọi trực
+tiếp application service. Mutation có run dùng runtime run lock chung cho CLI/API,
+còn tạo run dùng source lock. Operation cũ không được replay sau restart.
 
 ## Thành Phần Đích
 
@@ -22,8 +27,8 @@ interfaces/cli.py
 
 interfaces/http.py
   GET -> ApplicationReadService -> ApplicationService.execute(get-status)
-  POST action (Slice 3) -> OperationManager.submit(command)
-                         -> ApplicationService.execute(command)
+  POST action -> OperationManager.submit(command)
+              -> ApplicationService.execute(command)
 
 ops/dashboard.py + ops/frontend.py
   serve UI -> call /api/v1 only
@@ -36,6 +41,9 @@ application/read_service.py
 
 storage/runtime.py
   workflow state/artifacts + operation/event persistence + existing run locks
+
+operations/
+  atomic operation/idempotency store + bounded single-worker queue
 ```
 
 `ApplicationService` là seam chung. Nó nhận command có cấu trúc và trả đúng
@@ -82,7 +90,7 @@ sequenceDiagram
 
 ## Concurrency Và Lock
 
-- V1 dùng một worker mặc định (`SDLC_API_MAX_WORKERS=1`).
+- V1 cố định một worker; `SDLC_API_QUEUE_LIMIT=32` giới hạn số operation đang chờ.
 - Mọi action ghi của run tiếp tục đi qua `RuntimeStore.run_lock(run_id)`.
 - Hai action cùng run không được chạy đồng thời dù tăng số worker về sau.
 - Read endpoint được phép phục vụ đồng thời và chỉ đọc snapshot đã ghi hoàn chỉnh.

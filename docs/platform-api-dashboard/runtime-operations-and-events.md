@@ -55,18 +55,22 @@ queued -> running -> succeeded
 - `failed`: lưu error payload ổn định.
 - `interrupted`: service restart khi operation đang chạy; không tự replay action ghi.
 
-Khi restart, operation `running` được đánh dấu `interrupted` và ghi event. Caller
+Khi restart, cả operation `queued` và `running` được đánh dấu `interrupted`; không
+tự replay. Caller
 đọc workflow status trước, sau đó chỉ gửi action mới khi `allowed_next_actions`
 cho phép. Cơ chế này tránh chạy lại sync/approval/code generation âm thầm.
 
 ## Queue Và Worker
 
 - Queue bounded; đầy queue trả `503 operation_queue_full`.
-- `SDLC_API_MAX_WORKERS=1` là mặc định V1.
+- V1 cố định đúng một worker để giữ thứ tự và kiểm soát chi phí LLM.
+- `SDLC_API_QUEUE_LIMIT=32` là giới hạn mặc định cho operation đang chờ.
 - Worker gọi `ApplicationService`, không gọi CLI subprocess.
 - Operation terminal luôn được persist kể cả workflow trả `HarnessError`.
 - Shutdown dừng nhận request mới, chờ operation hiện tại trong timeout cấu hình,
   rồi đánh dấu interrupted nếu chưa hoàn thành.
+- Mỗi run chỉ có một operation chưa terminal; submit key mới khi run đang bận trả
+  `409 run_operation_in_progress`.
 
 ## Event Contract
 

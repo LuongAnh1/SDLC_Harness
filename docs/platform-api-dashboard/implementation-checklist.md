@@ -1,6 +1,6 @@
 # Implementation Checklist: API Và Ops Dashboard
 
-Trạng thái ban đầu: **chưa triển khai code**.
+Trạng thái hiện tại: **Slice 1-3 đã hoàn thành; Slice 4 chưa triển khai**.
 
 ## Slice 1 - Application Service Chung
 
@@ -18,13 +18,13 @@ Trạng thái ban đầu: **chưa triển khai code**.
 
 ## Slice 3 - Operation Queue Và Write API
 
-- [ ] Persist operation trước khi trả `202`.
-- [ ] Thêm bounded queue, một worker mặc định và terminal result/error.
-- [ ] Ánh xạ toàn bộ action run lifecycle mà Niko dùng sang `/runs/{id}/actions`.
-- [ ] Giữ `prepare-target-repo` và `experiment-design-consensus` ở CLI-only V1.
-- [ ] Dùng run lock hiện tại cho mọi mutation.
-- [ ] Thêm idempotency key bền vững và conflict detection.
-- [ ] Không auto replay operation bị gián đoạn khi restart.
+- [x] Persist operation trước khi trả `202`.
+- [x] Thêm bounded queue, một worker cố định và terminal result/error.
+- [x] Ánh xạ toàn bộ action run lifecycle mà Niko dùng sang `/runs/{id}/actions`.
+- [x] Giữ `prepare-target-repo` và `experiment-design-consensus` ở CLI-only V1.
+- [x] Dùng source/run lock chung cho mutation qua CLI và API.
+- [x] Thêm idempotency key bền vững và conflict detection.
+- [x] Không auto replay operation bị gián đoạn khi restart.
 
 ## Slice 4 - Events Và Quan Sát
 

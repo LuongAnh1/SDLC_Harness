@@ -106,3 +106,38 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
 - Bao phủ response `200/400/401/404/405/413/500`, auth, traversal, artifact
   boundary, redaction, read không mutation và graceful shutdown.
 - Full regression suite: `355 passed, 0 failed` trong `489.53s`.
+
+## 2026-10-18 - Hoàn thành Slice 3 Operation Queue và Write API
+
+### Thay đổi
+
+- Thêm operation/idempotency JSON store atomic và queue bounded dùng cố định một
+  worker; operation được persist trước khi API trả `202`.
+- Mở create-run, run-action và operation-status API; ánh xạ các action Phase 1-4,
+  adoption và cleanup qua `ApplicationService`, không gọi CLI subprocess.
+- Bắt buộc `Idempotency-Key`, replay cùng request, chặn payload conflict và chặn
+  hai operation chưa terminal trên cùng run.
+- Chuyển source/run mutation lock lên application service chung để CLI/API cùng
+  serialize; workspace lock tiếp tục nằm trong workflow hiện hành.
+- Restart/shutdown không replay: mọi operation `queued` hoặc `running` còn dở
+  được kết thúc ở `interrupted`.
+- Health và dashboard snapshot đã phản ánh queue/operation; terminal result dùng
+  public projection để che secret/local path và công bố artifact metadata.
+
+### Test
+
+- Focused operation, HTTP API và Slice 1-2 regression: `47 passed`.
+- Bao phủ persist-before-ack, idempotency replay/conflict, queue full, same-run
+  conflict, worker error, restart/shutdown interrupted, schema/action mapping,
+  auth và public result projection.
+- Full regression suite: `370 passed, 0 failed` trong `417.99s`.
+
+### Lỗi phát hiện và cách xử lý
+
+- Lượt full regression đầu tiên phát hiện `PermissionError: [WinError 5]` khi
+  worker thay file operation bằng atomic replace đúng lúc HTTP polling đọc cùng
+  file trên Windows.
+- `OperationStore` đã serialize đọc/ghi trong cùng process bằng `RLock` và retry
+  ngắn, có giới hạn cho atomic replace khi Windows tạm giữ file.
+- Bổ sung stress test với 200 lượt ghi và 400 lượt đọc đồng thời; test này cùng
+  toàn bộ regression suite đã pass sau bản sửa.

@@ -77,13 +77,13 @@ runtime config. API action argument chỉ override field được contract cho p
 - `SDLC_API_HOST=127.0.0.1`
 - `SDLC_API_PORT=7788`
 - `SDLC_API_TOKEN=`
-- `SDLC_API_MAX_WORKERS=1`
 - `SDLC_API_QUEUE_LIMIT=32`
 - `SDLC_API_SHUTDOWN_TIMEOUT_SECONDS=30`
 - `SDLC_RUNTIME_CONFIG_FILE=.runtime/config.json`
 
 Host/port/token/runtime-config path là bootstrap config; dashboard không đổi chúng
 trong lúc process đang chạy. Bind non-loopback bắt buộc token.
+Slice 3 cố định một worker, chưa mở worker count thành runtime config.
 
 ## Action Safety
 

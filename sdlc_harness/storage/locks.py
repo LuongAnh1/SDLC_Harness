@@ -13,9 +13,18 @@ from ..core.errors import HarnessError
 class RuntimeActionLock:
     """Non-blocking OS lock used to serialize mutations for one run."""
 
-    def __init__(self, path: Path, *, run_id: str):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        run_id: str | None,
+        error_code: str = "run_action_locked",
+        locked_message: str | None = None,
+    ):
         self.path = path
         self.run_id = run_id
+        self.error_code = error_code
+        self.locked_message = locked_message
         self._handle: BinaryIO | None = None
 
     def __enter__(self) -> "RuntimeActionLock":
@@ -35,8 +44,8 @@ class RuntimeActionLock:
             if handle is not None:
                 handle.close()
             raise HarnessError(
-                "run_action_locked",
-                f"Another action is already mutating run {self.run_id}.",
+                self.error_code,
+                self.locked_message or f"Another action is already mutating run {self.run_id}.",
                 run_id=self.run_id,
             ) from exc
 

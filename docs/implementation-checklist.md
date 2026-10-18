@@ -190,7 +190,7 @@ Checklist chi tiết nằm tại `docs/platform-api-dashboard/implementation-che
 - [x] Chốt architecture, API, operation/event, dashboard/config và Niko cutover docs.
 - [x] Tách application service dùng chung cho CLI/API.
 - [x] Thêm Read API cho health, run, artifact whitelist và dashboard snapshot.
-- [ ] Thêm write API với operation queue và idempotency.
+- [x] Thêm write API với operation queue và idempotency.
 - [ ] Thêm event timeline và Ops Dashboard.
 - [ ] Thêm runtime config có schema, mask secret và precedence rõ.
 - [ ] Nối Niko dual transport, chạy contract parity và controlled live E2E.

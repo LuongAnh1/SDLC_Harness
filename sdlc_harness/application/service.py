@@ -7,6 +7,9 @@ from pathlib import Path
 from .commands import ApplicationCommand
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
+from ..sources.fixtures import source_ref_for
+from ..sources.jira import jira_source_ref_for
+from ..storage.runtime import RuntimeStore
 from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.phase1 import PhaseOneWorkflow
 from ..workflows.phase2 import PhaseTwoWorkflow
@@ -40,6 +43,36 @@ class ApplicationService:
         """
 
         settings = self.settings_for(command)
+        name = command.name
+        store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+        if name in {"start-or-get-run", "start-from-jira"}:
+            source_ref = self._source_ref(command)
+            with store.source_lock(source_ref):
+                return self._execute_unlocked(command, settings=settings)
+        if name in {
+            "sync-run",
+            "continue-run",
+            "revalidate-implementation",
+            "revalidate-implementation-plan",
+            "revalidate-design",
+            "approve-checkpoint",
+            "answer-clarification",
+            "adopt-run-workspace",
+            "cleanup-run-workspace",
+        }:
+            run_id = self._required_text(command, "run_id")
+            with store.run_lock(run_id):
+                return self._execute_unlocked(command, settings=settings)
+        return self._execute_unlocked(command, settings=settings)
+
+    def _execute_unlocked(
+        self,
+        command: ApplicationCommand,
+        *,
+        settings: Settings,
+    ) -> dict[str, object]:
+        """Dispatch after the shared mutation lock, when one is required."""
+
         name = command.name
 
         if name == "start-or-get-run":
@@ -111,6 +144,14 @@ class ApplicationService:
                 run_id=self._required_text(command, "run_id")
             )
         raise HarnessError("unknown_command", f"Unknown command: {name}")
+
+    def _source_ref(self, command: ApplicationCommand) -> str:
+        if command.name == "start-from-jira":
+            return jira_source_ref_for(self._required_text(command, "issue_key"))
+        return source_ref_for(
+            self._required_text(command, "dataset"),
+            self._required_text(command, "use_case"),
+        )
 
     @staticmethod
     def _required_text(command: ApplicationCommand, key: str) -> str:

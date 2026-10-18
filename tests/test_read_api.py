@@ -226,7 +226,9 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["capabilities"]["read_api"])
-        self.assertFalse(payload["capabilities"]["write_api"])
+        self.assertTrue(payload["capabilities"]["write_api"])
+        self.assertTrue(payload["capabilities"]["operation_queue"])
+        self.assertEqual(payload["queue"]["workers"], 1)
         self.assertEqual(headers["Cache-Control"], "no-store")
         self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
         self.assertNotIn("Access-Control-Allow-Origin", headers)
@@ -289,7 +291,7 @@ class HttpReadApiTests(ReadApiFixture):
             self.assertFalse(payload["ok"])
 
     def test_unsupported_methods_return_json_405(self) -> None:
-        for method in ("POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"):
+        for method in ("PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"):
             status, _, payload = self.request(
                 "/api/v1/runs",
                 method=method,

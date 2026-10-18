@@ -5,18 +5,21 @@ Content type: `application/json; charset=utf-8`
 
 ## Trạng Thái Triển Khai
 
-Slice 2 hiện chỉ mở các endpoint đọc sau:
+Slice 3 hiện mở các endpoint sau:
 
 - `GET /api/v1/health`
 - `GET /api/v1/runs?limit=<1..200>`
 - `GET /api/v1/runs/{run_id}`
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_key}`
 - `GET /api/v1/dashboard/snapshot?limit=<1..200>`
+- `POST /api/v1/runs`
+- `POST /api/v1/runs/{run_id}/actions`
+- `GET /api/v1/operations/{operation_id}`
 
-Các endpoint tạo run, action, operation, event và config trong tài liệu này là
-contract cho các slice tiếp theo. Mọi method ghi hiện trả `405
-method_not_allowed`; health không cần auth, còn endpoint đọc khác dùng bearer
-token khi `SDLC_API_TOKEN` được cấu hình. Service mặc định bind
+Event và config endpoint trong tài liệu này là contract cho các slice tiếp theo.
+Các method ghi ngoài hai POST trên trả `405 method_not_allowed`; health không cần
+auth, còn endpoint khác dùng bearer token khi `SDLC_API_TOKEN` được cấu hình.
+Service mặc định bind
 `127.0.0.1:7788`; bind non-loopback bắt buộc có token.
 
 ## Response Chung
@@ -137,6 +140,8 @@ Action V1 ánh xạ các đường chạy hiện có:
 `answer_clarification` bắt buộc có `question_id`, `answer`, `answered_by` trong
 `arguments`. Approval có thể nhận `checkpoint_id` khi state công bố ID. Limit
 override chỉ được nhận cho đúng field CLI hiện có và phải qua cùng validation.
+Mọi body reject field lạ; `requested_by` bắt buộc, `arguments` mặc định `{}` và
+`sync_mode` mặc định `mock` dù `.env` đang đặt `real`.
 
 Action chưa có workflow/CLI thật như `request_change`, `resume_run` hoặc
 `cancel_run` không được quảng bá trong API contract hoặc dashboard.
@@ -156,12 +161,16 @@ khiển; chỉ mở API admin riêng trong một kế hoạch sau nếu có nhu 
   "operation_id": "op_20261018_...",
   "operation_status": "queued",
   "run_id": "run_...",
-  "status_url": "/api/v1/operations/op_20261018_..."
+  "status_url": "/api/v1/operations/op_20261018_...",
+  "idempotency_replayed": false
 }
 ```
 
 `run_id` có thể rỗng ở operation tạo run cho tới khi workflow xác định active run
 hoặc tạo run mới. Result cuối chứa nguyên workflow payload.
+Operation GET trả payload đã che secret/local path và chuyển `latest_artifacts`
+thành metadata URL giống run status. Dashboard snapshot chỉ lấy operation summary,
+không nhúng toàn bộ result.
 
 ### Config
 
@@ -173,10 +182,15 @@ hoặc tạo run mới. Result cuối chứa nguyên workflow payload.
 
 - Mọi `POST`/`PUT` gây side effect từ Niko hoặc dashboard phải gửi
   `Idempotency-Key`.
+- Key phải có nội dung và dài tối đa 256 ký tự; runtime chỉ lưu SHA-256 của key.
 - Cùng key và cùng canonical payload trả lại operation cũ.
 - Cùng key nhưng payload khác trả `409 idempotency_conflict`.
 - Key được lưu bền vững cùng operation, không chỉ giữ trong process memory.
 - API mất kết nối sau `202` không cho phép Niko tự động gọi CLI fallback.
+- Cùng run chỉ có một operation chưa terminal; key mới trong lúc run bận trả
+  `409 run_operation_in_progress`.
+- Restart chuyển cả `queued` và `running` thành `interrupted`; retry sau khi đọc
+  workflow state phải dùng idempotency key mới.
 
 ## HTTP Status
 

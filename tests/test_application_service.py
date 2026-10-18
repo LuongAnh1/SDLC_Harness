@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import _settings_from_args, build_parser, command_from_args
+from sdlc_harness.storage.runtime import RuntimeStore
 
 
 class ApplicationCommandTests(unittest.TestCase):
@@ -294,6 +295,31 @@ class ApplicationServiceTests(unittest.TestCase):
             with self.assertRaises(HarnessError) as context:
                 self.service.execute(self.command("get-status", {"run_id": "run_1"}))
         self.assertIs(context.exception, failure)
+
+    def test_run_mutations_share_runtime_lock(self) -> None:
+        command = self.command("sync-run", {"run_id": "run_1"})
+        settings = self.service.settings_for(command)
+        store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+
+        with store.run_lock("run_1"):
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(command)
+
+        self.assertEqual(context.exception.error_code, "run_action_locked")
+
+    def test_start_commands_share_source_lock(self) -> None:
+        command = self.command(
+            "start-or-get-run",
+            {"dataset": "eTour", "use_case": "UC1", "requested_by": "owner"},
+        )
+        settings = self.service.settings_for(command)
+        store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+
+        with store.source_lock("dataset_use_case:eTour:UC1"):
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(command)
+
+        self.assertEqual(context.exception.error_code, "source_action_locked")
 
 
 if __name__ == "__main__":

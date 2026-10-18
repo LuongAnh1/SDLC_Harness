@@ -110,14 +110,19 @@ class ApplicationReadService:
         )
         return self._public_run(payload)
 
-    def dashboard_snapshot(self, *, limit: int = DEFAULT_RUN_LIMIT) -> dict[str, object]:
+    def dashboard_snapshot(
+        self,
+        *,
+        limit: int = DEFAULT_RUN_LIMIT,
+        operations: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
         runs = self.list_runs(limit=limit)
         return {
             "ok": True,
             "generated_at": utc_now_iso(),
             "runs": runs["runs"],
             "run_count": runs["count"],
-            "operations": [],
+            "operations": operations or [],
             "config": {
                 "api_host": self.settings.api_host,
                 "api_port": self.settings.api_port,
@@ -170,6 +175,13 @@ class ApplicationReadService:
             "size_bytes": size_bytes,
             "content": self._sanitize(content),
         }
+
+    def public_value(self, value: Any) -> Any:
+        """Sanitize API-visible operation/status data with the same read boundary."""
+
+        if isinstance(value, dict) and "run_id" in value and "latest_artifacts" in value:
+            return self._public_run(value)
+        return self._sanitize(deepcopy(value))
 
     def _public_run(self, payload: dict[str, object]) -> dict[str, object]:
         projected = deepcopy(payload)
@@ -276,8 +288,8 @@ class ApplicationReadService:
 def api_capabilities() -> dict[str, bool]:
     return {
         "read_api": True,
-        "write_api": False,
-        "operation_queue": False,
+        "write_api": True,
+        "operation_queue": True,
         "events": False,
         "config_api": False,
     }

@@ -9,6 +9,7 @@ atomic replace; khi cần scale mới chuyển sang SQLite/API service.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 from uuid import uuid4
@@ -54,6 +55,17 @@ class RuntimeStore:
         """Serialize state/artifact mutations belonging to one workflow run."""
 
         return RuntimeActionLock(self.runtime_root / "locks" / f"run-{run_id}.lock", run_id=run_id)
+
+    def source_lock(self, source_ref: str) -> RuntimeActionLock:
+        """Serialize creation/intake for one canonical source across CLI and API."""
+
+        digest = hashlib.sha256(source_ref.encode("utf-8")).hexdigest()
+        return RuntimeActionLock(
+            self.runtime_root / "locks" / f"source-{digest}.lock",
+            run_id=None,
+            error_code="source_action_locked",
+            locked_message=f"Another action is already creating a run for source {source_ref}.",
+        )
 
     def artifact_path(self, run_id: str, filename: str) -> Path:
         """Trả đường dẫn artifact cố định và chặn filename thoát thư mục run."""
