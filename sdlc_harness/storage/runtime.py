@@ -1,4 +1,4 @@
-﻿"""Lưu trạng thái và JSON artifact của workflow bằng file local.
+"""Lưu trạng thái và JSON artifact của workflow bằng file local.
 
 Runtime store cố tình đơn giản: mỗi run có folder riêng, state nằm trong
 `state.json`, artifact nằm trong `artifacts/`, còn index active run dùng để
@@ -16,8 +16,9 @@ from uuid import uuid4
 
 from ..core.errors import HarnessError
 from .locks import RuntimeActionLock
+from .runtime_readme import ensure_runtime_readme
 
-TERMINAL_STATUSES = {"done", "cancelled", "failed"}
+TERMINAL_STATUSES = {"done", "cancelled", "failed", "code_review_approved"}
 
 
 class RuntimeStore:
@@ -36,6 +37,7 @@ class RuntimeStore:
         try:
             self.runs_dir.mkdir(parents=True, exist_ok=True)
             self.index_dir.mkdir(parents=True, exist_ok=True)
+            ensure_runtime_readme(self.runtime_root)
         except OSError as exc:
             raise HarnessError("runtime_write_failed", str(exc)) from exc
 
@@ -144,11 +146,179 @@ class RuntimeStore:
     def write_state(self, state: dict[str, object]) -> None:
         run_id = str(state["run_id"])
         run_dir = self.run_dir(run_id)
+        previous: dict[str, object] | None = None
+        if self.state_path(run_id).is_file():
+            previous = self.read_state(run_id)
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HarnessError("runtime_write_failed", str(exc), run_id=run_id) from exc
         self._write_json(self.state_path(run_id), state)
+        self._record_state_events(state=state, previous=previous)
+
+    def _record_state_events(
+        self,
+        *,
+        state: dict[str, object],
+        previous: dict[str, object] | None,
+    ) -> None:
+        """Best-effort observability after state is durable."""
+
+        from ..events import bind_current_run, current_event_context, emit_current, emit_for_run, update_current_state
+
+        run_id = str(state["run_id"])
+        phase = str(state.get("current_phase") or "") or None
+        status = str(state.get("status") or "") or None
+        bind_current_run(run_id)
+        update_current_state(phase=phase, status=status)
+
+        def emit(
+            event_type: str,
+            message: str,
+            data: dict[str, object],
+            *,
+            category: str = "workflow",
+        ) -> None:
+            if current_event_context() is not None:
+                emit_current(
+                    category=category,
+                    event_type=event_type,
+                    message=message,
+                    data=data,
+                    phase=phase,
+                    status=status,
+                )
+            else:
+                emit_for_run(
+                    runtime_root=self.runtime_root,
+                    run_id=run_id,
+                    category=category,
+                    event_type=event_type,
+                    message=message,
+                    data=data,
+                    phase=phase,
+                    status=status,
+                )
+
+        if previous is None:
+            emit(
+                "workflow_created",
+                "Workflow run created.",
+                {"current_phase": phase or "", "current_status": status or ""},
+            )
+        else:
+            previous_phase = str(previous.get("current_phase") or "") or None
+            previous_status = str(previous.get("status") or "") or None
+            if (previous_phase, previous_status) != (phase, status):
+                emit(
+                    "workflow_state_changed",
+                    "Workflow state changed.",
+                    {
+                        "previous_phase": previous_phase or "",
+                        "current_phase": phase or "",
+                        "previous_status": previous_status or "",
+                        "current_status": status or "",
+                    },
+                )
+        previous_checkpoint = previous.get("pending_checkpoint") if previous else None
+        current_checkpoint = state.get("pending_checkpoint")
+        if not previous_checkpoint and isinstance(current_checkpoint, dict):
+            emit(
+                "checkpoint_opened",
+                "Checkpoint opened.",
+                {
+                    "checkpoint_id": str(current_checkpoint.get("checkpoint_id") or current_checkpoint.get("id") or ""),
+                    "checkpoint_type": str(current_checkpoint.get("type") or current_checkpoint.get("name") or phase or ""),
+                },
+            )
+        elif isinstance(previous_checkpoint, dict) and not current_checkpoint:
+            emit(
+                "checkpoint_approved",
+                "Checkpoint approved.",
+                {
+                    "checkpoint_id": str(previous_checkpoint.get("checkpoint_id") or previous_checkpoint.get("id") or ""),
+                    "checkpoint_type": str(previous_checkpoint.get("type") or previous_checkpoint.get("name") or previous.get("current_phase") or ""),
+                },
+            )
+
+        previous_status = str(previous.get("status") or "") if previous else ""
+        repair_states = {
+            "design_repair_needed": ("design", "design_repair_iterations"),
+            "implementation_plan_repair_needed": ("implementation_plan", "implementation_plan_repair_iterations"),
+            "implementation_repair_needed": ("implementation", "implementation_repair_iterations"),
+            "qa_repair_needed": ("qa", "qa_repair_iterations"),
+        }
+        if previous_status in repair_states and previous_status != status:
+            repair_phase, counter_key = repair_states[previous_status]
+            iteration = int(previous.get(counter_key) or 0) + 1 if previous else 1
+            emit(
+                "repair_iteration_started",
+                "Repair iteration started.",
+                {"repair_phase": repair_phase, "iteration": iteration},
+                category="repair",
+            )
+        for repair_phase, counter_key in {
+            "design": "design_repair_iterations",
+            "implementation_plan": "implementation_plan_repair_iterations",
+            "implementation": "implementation_repair_iterations",
+            "qa": "qa_repair_iterations",
+        }.items():
+            before = int(previous.get(counter_key) or 0) if previous else 0
+            after = int(state.get(counter_key) or 0)
+            if after > before:
+                emit(
+                    "repair_iteration_completed",
+                    "Repair iteration completed.",
+                    {"repair_phase": repair_phase, "iteration": after, "result": status or "unknown"},
+                    category="repair",
+                )
+
+        previous_quality = previous.get("quality_reports") if previous else {}
+        current_quality = state.get("quality_reports")
+        previous_quality = previous_quality if isinstance(previous_quality, dict) else {}
+        current_quality = current_quality if isinstance(current_quality, dict) else {}
+        validation_keys = {
+            "design_validation": "design",
+            "implementation_plan_review": "implementation_plan",
+            "implementation_validation": "code_trace",
+            "code_trace": "code_trace",
+        }
+        for quality_key, validator_name in validation_keys.items():
+            report = current_quality.get(quality_key)
+            if not isinstance(report, dict) or report == previous_quality.get(quality_key):
+                continue
+            blockers_value = report.get("blocking_count", report.get("issue_count", report.get("missing_count", 0)))
+            warnings_value = report.get("warning_count", 0)
+            emit(
+                "validator_completed",
+                "Validator completed.",
+                {
+                    "validator": validator_name,
+                    "status": str(report.get("status") or ("passed" if report.get("ok") else "failed")),
+                    "blockers": int(blockers_value or 0),
+                    "warnings": int(warnings_value or 0),
+                    "repair_iterations": int(report.get("repair_iterations") or 0),
+                },
+                category="validation",
+            )
+        qa_report = current_quality.get("qa_acceptance")
+        if isinstance(qa_report, dict) and qa_report != previous_quality.get("qa_acceptance"):
+            scenarios = qa_report.get("scenarios")
+            scenario_items = scenarios if isinstance(scenarios, list) else []
+            passed = sum(1 for item in scenario_items if isinstance(item, dict) and str(item.get("result") or "").lower() == "pass")
+            failed = sum(1 for item in scenario_items if isinstance(item, dict) and str(item.get("result") or "").lower() == "fail")
+            emit(
+                "qa_completed",
+                "QA completed.",
+                {
+                    "status": str(qa_report.get("status") or qa_report.get("result") or "unknown"),
+                    "scenario_count": int(qa_report.get("scenario_count") or len(scenario_items)),
+                    "passed_count": passed,
+                    "failed_count": failed,
+                    "repair_iterations": int(state.get("qa_repair_iterations") or 0),
+                },
+                category="qa",
+            )
 
     def write_json_artifact(self, run_id: str, filename: str, data: dict[str, object]) -> Path:
         """Ghi JSON artifact bằng cùng cơ chế atomic với workflow state."""

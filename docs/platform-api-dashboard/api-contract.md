@@ -5,18 +5,19 @@ Content type: `application/json; charset=utf-8`
 
 ## Trạng Thái Triển Khai
 
-Slice 3 hiện mở các endpoint sau:
+Slice 4 hiện mở các endpoint sau:
 
 - `GET /api/v1/health`
 - `GET /api/v1/runs?limit=<1..200>`
 - `GET /api/v1/runs/{run_id}`
+- `GET /api/v1/runs/{run_id}/events?after=<0..>&limit=<1..200>`
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_key}`
 - `GET /api/v1/dashboard/snapshot?limit=<1..200>`
 - `POST /api/v1/runs`
 - `POST /api/v1/runs/{run_id}/actions`
 - `GET /api/v1/operations/{operation_id}`
 
-Event và config endpoint trong tài liệu này là contract cho các slice tiếp theo.
+Config endpoint trong tài liệu này là contract cho các slice tiếp theo.
 Các method ghi ngoài hai POST trên trả `405 method_not_allowed`; health không cần
 auth, còn endpoint khác dùng bearer token khi `SDLC_API_TOKEN` được cấu hình.
 Service mặc định bind
@@ -86,9 +87,27 @@ Lỗi giữ contract máy đọc được:
 - `POST /api/v1/runs`: thay `start-or-get-run` và `start-from-jira`.
 - `GET /api/v1/runs?limit=<n>`: danh sách run gọn cho dashboard.
 - `GET /api/v1/runs/{run_id}`: thay `get-status`.
-- `GET /api/v1/runs/{run_id}/events?after=<cursor>&limit=<n>`: timeline tăng dần.
+- `GET /api/v1/runs/{run_id}/events?after=<cursor>&limit=<n>`: timeline tăng dần; mặc định `after=0`, `limit=100`, giới hạn tối đa 200.
 - `GET /api/v1/runs/{run_id}/artifacts/{artifact_key}`: chỉ đọc artifact key đã
   công bố trong state; không nhận filesystem path và chặn path traversal.
+
+Response event page:
+
+```json
+{
+  "ok": true,
+  "run_id": "run_...",
+  "events": [],
+  "count": 0,
+  "after": 0,
+  "next_cursor": 0,
+  "has_more": false
+}
+```
+
+Event được trả theo `sequence` tăng dần. `next_cursor` là sequence cuối đã trả, hoặc
+giữ nguyên `after` khi page rỗng. Endpoint read không tạo hoặc sửa state/event; run
+không tồn tại trả `404 run_not_found`, cursor/limit sai trả `400 invalid_query`.
 
 Body tạo run từ fixture:
 

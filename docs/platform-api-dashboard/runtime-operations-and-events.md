@@ -5,7 +5,7 @@
 HTTP request không được mở suốt một lượt LLM/workflow dài. Operation là record vận
 hành của một lần gọi application service; nó không thay thế workflow state.
 
-## Layout Dự Kiến
+## Layout Hiện Hành
 
 ```text
 .runtime/
@@ -20,6 +20,10 @@ hành của một lần gọi application service; nó không thay thế workflo
     artifacts/
     sync/
 ```
+
+`.runtime/README.md` là bản đồ vận hành đặt ngay cạnh dữ liệu. README được sinh
+từ source được track trong repo để runtime mới hoặc runtime vừa reset vẫn mô tả
+đúng layout, lifecycle, retention và ranh giới bảo mật hiện hành.
 
 Operation JSON tối thiểu:
 
@@ -78,6 +82,7 @@ Mỗi dòng `events.jsonl` là một JSON object:
 
 ```json
 {
+  "version": "event_v1",
   "event_id": "evt_...",
   "sequence": 42,
   "timestamp": "...",
@@ -108,3 +113,25 @@ metadata gọn và đã lọc secret.
 - Không tự tạo key mới sau timeout nếu chưa kiểm tra operation/status.
 - CLI và API cùng dùng run lock nhưng idempotency API không bảo vệ một CLI action
   được gọi thủ công; operator phải tránh chạy CLI ghi đồng thời với API.
+
+## Lưu Trữ, Cursor Và Khôi Phục
+
+- `sequence` bắt đầu từ 1 và tăng đơn điệu riêng trong từng run; cursor API chính là
+  sequence cuối caller đã nhận.
+- Append dùng event lock riêng theo run để CLI và API không cấp trùng sequence.
+- Mỗi dòng được flush xuống disk sau khi ghi. Nếu process chết giữa một dòng, lần
+  append sau cắt phần tail chưa hoàn tất rồi tiếp tục sequence kế tiếp.
+- JSON hỏng ở một dòng hoàn chỉnh hoặc sequence không liên tục trả
+  `event_log_corrupted`; hệ thống không âm thầm bỏ qua lỗi giữa file.
+- Event được giữ tới khi xóa cả run. Slice 4 chưa rotation hoặc tự xóa event.
+
+## Ranh Giới Dữ Liệu
+
+Event data dùng allowlist theo event type và giới hạn 4 KiB. LLM event chỉ giữ mode,
+model, JSON mode, finish reason, duration và token counts. Verification chỉ giữ status,
+exit code, timeout, duration và số test phát hiện/thực thi. Sync chỉ giữ phase, mode,
+status và trạng thái target. Prompt, output, clarification answer, stdout/stderr, shell
+command, raw exception, credential URL và local path không được persist vào event.
+
+Lỗi ghi event được ghi vào operational logger nhưng không rollback workflow state hoặc
+đổi kết quả operation. `state.json` tiếp tục là nguồn quyết định hiện tại.

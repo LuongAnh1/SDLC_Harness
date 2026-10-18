@@ -7,6 +7,7 @@ report, không tự quyết định ghi lên tool cộng tác.
 from __future__ import annotations
 
 from ..core.config import Settings
+from ..events import emit_current
 from ..storage.runtime import RuntimeStore
 from .atlassian import (
     real_sync_code_review_checkpoint,
@@ -22,7 +23,7 @@ from .mock import (
 )
 
 
-def sync_requirement_checkpoint(
+def _sync_requirement_checkpoint(
     *,
     store: RuntimeStore,
     settings: Settings,
@@ -59,7 +60,7 @@ def sync_requirement_checkpoint(
     )
 
 
-def sync_design_checkpoint(
+def _sync_design_checkpoint(
     *,
     store: RuntimeStore,
     settings: Settings,
@@ -92,7 +93,7 @@ def sync_design_checkpoint(
     )
 
 
-def sync_implementation_plan_checkpoint(
+def _sync_implementation_plan_checkpoint(
     *,
     store: RuntimeStore,
     settings: Settings,
@@ -125,7 +126,7 @@ def sync_implementation_plan_checkpoint(
     )
 
 
-def sync_code_review_checkpoint(
+def _sync_code_review_checkpoint(
     *,
     store: RuntimeStore,
     settings: Settings,
@@ -163,3 +164,47 @@ def sync_code_review_checkpoint(
         artifact_paths=artifact_paths,
         review_status=review_status,
     )
+
+def _sync_targets(report: dict[str, object]) -> dict[str, object]:
+    targets: dict[str, object] = {}
+    for key in ("jira", "confluence", "github", "mock"):
+        value = report.get(key)
+        if isinstance(value, dict):
+            targets[key] = str(value.get("status") or value.get("result") or "unknown")
+    return targets
+
+
+def _record_sync(*, phase: str, settings: Settings, report: dict[str, object]) -> dict[str, object]:
+    status = str(report.get("status") or report.get("overall_status") or "unknown")
+    emit_current(
+        category="sync",
+        event_type="sync_completed",
+        message="Synchronization completed.",
+        data={
+            "sync_phase": phase,
+            "mode": settings.sync_mode,
+            "status": status,
+            "targets": _sync_targets(report),
+        },
+    )
+    return report
+
+
+def sync_requirement_checkpoint(**kwargs: object) -> dict[str, object]:
+    settings = kwargs["settings"]
+    return _record_sync(phase="requirement", settings=settings, report=_sync_requirement_checkpoint(**kwargs))  # type: ignore[arg-type]
+
+
+def sync_design_checkpoint(**kwargs: object) -> dict[str, object]:
+    settings = kwargs["settings"]
+    return _record_sync(phase="design", settings=settings, report=_sync_design_checkpoint(**kwargs))  # type: ignore[arg-type]
+
+
+def sync_implementation_plan_checkpoint(**kwargs: object) -> dict[str, object]:
+    settings = kwargs["settings"]
+    return _record_sync(phase="implementation_plan", settings=settings, report=_sync_implementation_plan_checkpoint(**kwargs))  # type: ignore[arg-type]
+
+
+def sync_code_review_checkpoint(**kwargs: object) -> dict[str, object]:
+    settings = kwargs["settings"]
+    return _record_sync(phase="code_review", settings=settings, report=_sync_code_review_checkpoint(**kwargs))  # type: ignore[arg-type]

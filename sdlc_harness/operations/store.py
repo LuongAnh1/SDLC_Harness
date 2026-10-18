@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 from ..core.errors import HarnessError
+from ..storage.runtime_readme import ensure_runtime_readme
 
 
 NONTERMINAL_OPERATION_STATUSES = frozenset({"queued", "running"})
@@ -32,6 +33,7 @@ class OperationStore:
         try:
             self.operations_dir.mkdir(parents=True, exist_ok=True)
             self.idempotency_dir.mkdir(parents=True, exist_ok=True)
+            ensure_runtime_readme(self.runtime_root)
         except OSError as exc:
             raise HarnessError("operation_store_failed", "Operation storage is unavailable.") from exc
 

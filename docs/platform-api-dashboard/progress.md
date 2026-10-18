@@ -141,3 +141,74 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
   ngắn, có giới hạn cho atomic replace khi Windows tạm giữ file.
 - Bổ sung stress test với 200 lượt ghi và 400 lượt đọc đồng thời; test này cùng
   toàn bộ regression suite đã pass sau bản sửa.
+
+## 2026-10-18 - Dọn runtime trước Slice 4
+
+- Xóa sáu run E2E đã kết thúc ở `code_review_approved`, hai run SDLC-2 lỗi/dở,
+  một run design consensus thử nghiệm và các thư mục `live-tests`,
+  `e2e-v2-prompt-retry` không còn được code tham chiếu.
+- Giữ `run_20261017_131015_4fa470b4` của SDLC-4 đang
+  `waiting_design_approval`; viết lại `active_runs.json` chỉ còn source này.
+- Xóa run/workspace lock của các run đã xóa; giữ lock của SDLC-4 và
+  `worktree-registry.lock`.
+- Bổ sung `code_review_approved` vào `TERMINAL_STATUSES` để lần chạy sau cùng
+  source không nhận lại run đã hoàn tất vòng đời SDLC Harness.
+- Tạo `.runtime/README.md` làm bản đồ state/operation/event/artifact/lock; Slice 4
+  sẽ chuyển nội dung này thành README được sinh từ source có version trong repo.
+
+## 2026-10-18 - Hoàn thành Slice 4 Runtime Events và Observability
+
+### Thay đổi
+
+- Xóa run SDLC-4 còn lại, xóa run lock tương ứng và đưa `active_runs.json` về `{}`;
+  runtime bắt đầu Slice 4 không có run lịch sử để backfill.
+- Thêm `EventStore` JSONL theo run với sequence/cursor, event lock, append flush, phục
+  hồi partial tail và báo lỗi corruption ở dòng hoàn chỉnh.
+- Thêm execution context bằng `ContextVar`; create-run buffer event queued/started cho
+  tới khi workflow xác định `run_id`, sau đó flush đúng thứ tự và gắn `operation_id`.
+- Instrument operation, workflow state, checkpoint, LLM, repair, verification,
+  validator, QA và sync bằng metadata allowlist; lỗi observability không làm đổi kết
+  quả nghiệp vụ.
+- Mở `GET /api/v1/runs/{run_id}/events` với `after`, `limit`, `next_cursor` và
+  `has_more`; bật `capabilities.events=true`.
+- Chuyển `.runtime/README.md` thành nội dung `runtime_layout_v2` sinh từ source được
+  track; RuntimeStore, OperationStore và EventStore cùng đảm bảo README hiện hành.
+- Giữ `code_review_approved` trong terminal status và thêm regression test để source
+  đã hoàn tất không tái sử dụng run cũ.
+
+### Test
+
+- Focused events/runtime/operations/HTTP/Application Service: `59 passed`.
+- Bao phủ sequence, pagination, restart, concurrent append, tail recovery, corruption,
+  traversal, README idempotent, context create-run, fake LLM, verification, redaction,
+  auth, cursor/limit và read không mutation.
+- Full regression lần đầu: `381 passed, 1 failed` trong `565.38s`; failure nằm ở concurrent README update trên Windows và đang được sửa trước lần chạy cuối.
+
+### Lỗi phát hiện và xử lý
+
+- Lần compile đầu phát hiện escape newline trong source sinh `events.jsonl` tạo
+  `SyntaxError`; đã sửa literal `\n` và compile package sạch trước khi chạy test.
+- Lệnh cleanup PowerShell đầu tiên bị shell ngoài nội suy biến `$runtime`/`$run`; đã
+  chuyển sang script PowerShell có kiểm tra resolved path nằm trong `.runtime` trước
+  khi xóa.
+
+- Full suite đầu tiên phát hiện `PermissionError: [WinError 5]` khi nhiều EventStore
+  đồng thời atomic-replace `.runtime/README.md`. README writer đã được serialize bằng
+  `RLock`, đồng thời retry ngắn có giới hạn và chấp nhận kết quả nếu process khác đã
+  ghi đúng nội dung. Event log/sequence không bị corruption trong lỗi này.
+
+### Kết quả cuối
+
+- Focused suite cuối sau hardening message/sync: `45 passed` trong `18.57s`.
+- Full regression cuối trên đúng bản bàn giao: `384 passed, 0 failed` trong `519.38s`.
+- Slice 4 hoàn thành; mốc tiếp theo là Slice 5 Ops Dashboard.
+
+- Rà bảo mật cuối phát hiện event `message` còn nhận chuỗi caller; đã khóa message theo
+  event type để raw prompt/exception không thể lọt qua field này. Đồng thời bỏ type
+  assert thừa ở sync wrapper để giữ khả năng dùng test double. Hai test operation
+  failed/interrupted và mock sync metadata được bổ sung trước full regression cuối.
+
+- Full regression dùng một fixture còn trỏ default runtime root nên tái tạo file lock của
+  run cũ dù không tạo lại run/state. Sau khi test kết thúc đã xác minh thư mục `runs/`
+  rỗng, `active_runs.json` là `{}` và xóa lock sót; runtime bàn giao chỉ giữ
+  `worktree-registry.lock`.

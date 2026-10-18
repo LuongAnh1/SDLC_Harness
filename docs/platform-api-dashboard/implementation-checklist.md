@@ -1,6 +1,6 @@
 # Implementation Checklist: API Và Ops Dashboard
 
-Trạng thái hiện tại: **Slice 1-3 đã hoàn thành; Slice 4 chưa triển khai**.
+Trạng thái hiện tại: **Slice 1-4 đã hoàn thành; Slice 5 chưa triển khai**.
 
 ## Slice 1 - Application Service Chung
 
@@ -28,10 +28,11 @@ Trạng thái hiện tại: **Slice 1-3 đã hoàn thành; Slice 4 chưa triển
 
 ## Slice 4 - Events Và Quan Sát
 
-- [ ] Ghi event JSONL có sequence/cursor.
-- [ ] Instrument operation, state, checkpoint, repair, test, validator, QA và sync.
-- [ ] Lọc prompt/output/secret khỏi event mặc định.
-- [ ] Test event ordering và incremental read.
+- [x] Sinh `.runtime/README.md` từ source được track và cập nhật cùng runtime schema.
+- [x] Ghi event JSONL có sequence/cursor.
+- [x] Instrument operation, state, checkpoint, repair, test, validator, QA và sync.
+- [x] Lọc prompt/output/secret khỏi event mặc định.
+- [x] Test event ordering và incremental read.
 
 ## Slice 5 - Dashboard
 

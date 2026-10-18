@@ -22,6 +22,8 @@ import subprocess
 import time
 from typing import Any
 
+from ..events import emit_current
+
 DEFAULT_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
@@ -79,6 +81,35 @@ class VerificationRunner:
         self.timeout_seconds = max(1, timeout_seconds)
 
     def run(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        required_test_files: list[str] | None = None,
+    ) -> VerificationResult:
+        """Run verification and publish bounded result metadata."""
+
+        result = self._run_internal(
+            target_path=target_path,
+            work_packet=work_packet,
+            required_test_files=required_test_files,
+        )
+        emit_current(
+            category="verification",
+            event_type="verification_completed",
+            message="Verification completed.",
+            data={
+                "status": result.status,
+                "exit_code": result.exit_code,
+                "timed_out": result.timed_out,
+                "duration_seconds": round(result.duration_seconds, 3),
+                "discovered_tests": len(result.discovered_test_entrypoints),
+                "executed_tests": len(result.executed_test_entrypoints),
+            },
+        )
+        return result
+
+    def _run_internal(
         self,
         *,
         target_path: Path,

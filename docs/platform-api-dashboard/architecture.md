@@ -14,7 +14,7 @@ dựng projection công khai từ state đã persist, thay đường dẫn artif
 metadata URL và chỉ đọc các artifact nằm trong allowlist. Các endpoint đọc không
 tạo operation, không gọi LLM và không ghi state.
 
-Slice 3 đã mở write endpoint qua operation queue bền vững. Request được validate,
+Slice 3 đã mở write endpoint qua operation queue bền vững. Slice 4 đã bổ sung event timeline theo run, cursor API và metadata quan sát đã lọc. Request được validate,
 hash và persist operation/idempotency trước khi trả `202`; một worker gọi trực
 tiếp application service. Mutation có run dùng runtime run lock chung cho CLI/API,
 còn tạo run dùng source lock. Operation cũ không được replay sau restart.

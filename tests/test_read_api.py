@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from sdlc_harness.application import ApplicationReadService
 from sdlc_harness.application.read_service import MAX_ARTIFACT_BYTES
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.events import EventStore
 from sdlc_harness.interfaces.http import ApiServerConfig, create_server
 from sdlc_harness.storage.runtime import RuntimeStore
 
@@ -260,6 +261,44 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(snapshot["run_count"], 1)
         self.assertEqual(snapshot["operations"], [])
 
+    def test_event_route_supports_cursor_limit_auth_and_read_only_behavior(self) -> None:
+        EventStore(runtime_root=self.runtime_root).append(
+            run_id=self.run_id,
+            category="workflow",
+            event_type="workflow_state_changed",
+            phase="design_review",
+            status="waiting_design_approval",
+            message="Workflow state changed.",
+            data={
+                "previous_phase": "design",
+                "current_phase": "design_review",
+                "previous_status": "running",
+                "current_status": "waiting_design_approval",
+            },
+        )
+        event_path = self.runtime_root / "runs" / self.run_id / "events.jsonl"
+        before = event_path.read_bytes()
+        status, _, payload = self.request(
+            f"/api/v1/runs/{self.run_id}/events?after=1&limit=1",
+            token=self.api_token,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["after"], 1)
+        self.assertEqual(payload["count"], 1)
+        self.assertEqual(payload["next_cursor"], payload["events"][-1]["sequence"])
+        self.assertEqual(event_path.read_bytes(), before)
+
+        status, _, unauthorized = self.request(f"/api/v1/runs/{self.run_id}/events")
+        self.assertEqual(status, 401)
+        self.assertEqual(unauthorized["error_code"], "unauthorized")
+        for query in ("after=-1", "after=x", "limit=0", "limit=201", "other=1", "after=1&after=2"):
+            status, _, error = self.request(
+                f"/api/v1/runs/{self.run_id}/events?{query}",
+                token=self.api_token,
+            )
+            self.assertEqual(status, 400, query)
+            self.assertEqual(error["error_code"], "invalid_query")
+
     def test_auth_is_required_for_non_health_routes(self) -> None:
         status, headers, payload = self.request("/api/v1/runs")
         self.assertEqual(status, 401)
@@ -346,6 +385,7 @@ class HttpReadApiTests(ReadApiFixture):
             "/api/v1/runs",
             f"/api/v1/runs/{self.run_id}",
             f"/api/v1/runs/{self.run_id}/artifacts/requirement_model",
+            f"/api/v1/runs/{self.run_id}/events",
             "/api/v1/dashboard/snapshot",
         ):
             status, _, _ = self.request(path, token=self.api_token)

@@ -1,4 +1,4 @@
-﻿"""LLM adapter tối giản cho SDLC Harness.
+"""LLM adapter tối giản cho SDLC Harness.
 
 Phase đầu có hai chế độ: `fake` để test không tốn API và `deepseek`/
 `openai_compatible` để gọi API thật qua endpoint Chat Completions tương thích
@@ -13,9 +13,11 @@ import json
 import re
 import urllib.error
 import urllib.request
+import time
 
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..events import emit_current
 
 
 @dataclass(frozen=True)
@@ -63,22 +65,63 @@ class LlmClient:
     ) -> LlmCompletion:
         """Complete a bounded transcript for controlled agent loops."""
 
-        if self.settings.llm_mode == "fake":
-            prompt = next(
-                (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
-                "",
-            )
-            return LlmCompletion(content=fake_completion(prompt), finish_reason="fake")
-        if self.settings.llm_mode in {"deepseek", "openai_compatible"}:
-            return self._call_chat_completions_messages(
-                messages=messages,
-                json_mode=json_mode,
-                max_tokens=max_tokens,
-            )
-        raise HarnessError(
-            "requirement_refiner_failed",
-            f"Unsupported LLM mode: {self.settings.llm_mode}",
+        metadata = {
+            "mode": self.settings.llm_mode,
+            "model": self.settings.llm_model,
+            "json_mode": json_mode,
+        }
+        emit_current(
+            category="llm",
+            event_type="llm_call_started",
+            message="LLM call started.",
+            data=metadata,
         )
+        started = time.monotonic()
+        try:
+            if self.settings.llm_mode == "fake":
+                prompt = next(
+                    (str(item.get("content") or "") for item in reversed(messages) if item.get("role") == "user"),
+                    "",
+                )
+                completion = LlmCompletion(content=fake_completion(prompt), finish_reason="fake")
+            elif self.settings.llm_mode in {"deepseek", "openai_compatible"}:
+                completion = self._call_chat_completions_messages(
+                    messages=messages,
+                    json_mode=json_mode,
+                    max_tokens=max_tokens,
+                )
+            else:
+                raise HarnessError(
+                    "requirement_refiner_failed",
+                    f"Unsupported LLM mode: {self.settings.llm_mode}",
+                )
+        except Exception as exc:
+            emit_current(
+                category="llm",
+                event_type="llm_call_failed",
+                message="LLM call failed.",
+                data={
+                    **metadata,
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                    "error_code": exc.error_code if isinstance(exc, HarnessError) else "internal_error",
+                },
+            )
+            raise
+        usage = completion.usage
+        emit_current(
+            category="llm",
+            event_type="llm_call_completed",
+            message="LLM call completed.",
+            data={
+                **metadata,
+                "finish_reason": completion.finish_reason,
+                "duration_seconds": round(time.monotonic() - started, 3),
+                "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(usage.get("completion_tokens") or 0),
+                "total_tokens": int(usage.get("total_tokens") or 0),
+            },
+        )
+        return completion
 
     def _call_chat_completions(
         self,

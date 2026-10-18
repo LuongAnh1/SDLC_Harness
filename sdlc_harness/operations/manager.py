@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from ..application import ApplicationCommand, ApplicationService
 from ..core.errors import HarnessError
+from ..events import EventDraft, bind_current_run, emit_current, emit_for_run, event_scope
 from .store import OperationStore, utc_now_iso
 
 
@@ -48,11 +49,17 @@ class OperationManager:
         self._stopped = False
         self._running_operation_id: str | None = None
         self._active_by_run: dict[str, str] = {}
+        self._pending_events: dict[str, list[EventDraft]] = {}
         self.store.ensure_layout()
         self.store.rebuild_idempotency_indexes()
-        self.store.interrupt_incomplete(
+        interrupted = self.store.interrupt_incomplete(
             message="Operation was interrupted by an API process restart and was not replayed."
         )
+        for operation_id in interrupted:
+            record = self.store.read_operation(operation_id)
+            run_id = str(record.get("run_id") or "")
+            if run_id:
+                self._emit_operation_event(record, event_type="operation_interrupted")
         self._worker = Thread(target=self._worker_loop, name="sdlc-operation-worker", daemon=True)
         self._worker.start()
 
@@ -127,6 +134,11 @@ class OperationManager:
                 raise HarnessError("operation_queue_full", "Operation queue is full.") from exc
             if run_id:
                 self._active_by_run[run_id] = operation_id
+                self._emit_operation_event(record, event_type="operation_queued")
+            else:
+                self._pending_events[operation_id] = [
+                    self._operation_draft(record, event_type="operation_queued")
+                ]
             return self._receipt(record, replayed=False)
 
     def get_public_operation(self, operation_id: str) -> dict[str, object]:
@@ -201,32 +213,45 @@ class OperationManager:
             record.update({"status": "running", "started_at": now, "updated_at": now})
             self.store.write_operation(record)
             self._running_operation_id = item.operation_id
-        try:
-            result = self.application_service.execute(item.command)
-        except HarnessError as exc:
-            self._finish(item.operation_id, status="failed", result=None, error=exc.to_response())
-        except Exception:
-            _LOGGER.exception("Unhandled operation execution error: %s", item.operation_id)
-            self._finish(
-                item.operation_id,
-                status="failed",
-                result=None,
-                error={"ok": False, "error_code": "internal_error", "message": "Internal server error."},
-            )
+            buffered = self._pending_events.pop(item.operation_id, [])
+        started = self._operation_draft(record, event_type="operation_started")
+        if record.get("run_id"):
+            self._emit_operation_event(record, event_type="operation_started")
         else:
-            if isinstance(result, dict):
-                self._finish(item.operation_id, status="succeeded", result=result, error=None)
-            else:
+            buffered.append(started)
+        with event_scope(
+            runtime_root=self.store.runtime_root,
+            command=item.command.name,
+            operation_id=item.operation_id,
+            run_id=str(record.get("run_id") or "") or None,
+            buffered=buffered,
+        ):
+            try:
+                result = self.application_service.execute(item.command)
+            except HarnessError as exc:
+                self._finish(item.operation_id, status="failed", result=None, error=exc.to_response())
+            except Exception:
+                _LOGGER.exception("Unhandled operation execution error: %s", item.operation_id)
                 self._finish(
                     item.operation_id,
                     status="failed",
                     result=None,
-                    error={
-                        "ok": False,
-                        "error_code": "invalid_application_result",
-                        "message": "Application service returned a non-object result.",
-                    },
+                    error={"ok": False, "error_code": "internal_error", "message": "Internal server error."},
                 )
+            else:
+                if isinstance(result, dict):
+                    self._finish(item.operation_id, status="succeeded", result=result, error=None)
+                else:
+                    self._finish(
+                        item.operation_id,
+                        status="failed",
+                        result=None,
+                        error={
+                            "ok": False,
+                            "error_code": "invalid_application_result",
+                            "message": "Application service returned a non-object result.",
+                        },
+                    )
 
     def _finish(
         self,
@@ -258,6 +283,17 @@ class OperationManager:
             self.store.write_operation(record)
             self._running_operation_id = None
             self._release_run(record)
+        run_id = str(record.get("run_id") or "")
+        if run_id:
+            bind_current_run(run_id)
+            event_type = "operation_completed" if status == "succeeded" else "operation_failed"
+            emit_current(
+                category="operation",
+                event_type=event_type,
+                message="Operation completed." if status == "succeeded" else "Operation failed.",
+                data=self._operation_data(record),
+                timestamp=str(record.get("finished_at") or "") or None,
+            )
 
     def _interrupt_record(self, record: dict[str, object], *, message: str) -> None:
         now = utc_now_iso()
@@ -275,6 +311,58 @@ class OperationManager:
             }
         )
         self.store.write_operation(record)
+        operation_id = str(record.get("operation_id") or "")
+        self._pending_events.pop(operation_id, None)
+        if record.get("run_id"):
+            self._emit_operation_event(record, event_type="operation_interrupted")
+
+    def _operation_draft(self, record: dict[str, object], *, event_type: str) -> EventDraft:
+        messages = {
+            "operation_queued": "Operation queued.",
+            "operation_started": "Operation started.",
+            "operation_completed": "Operation completed.",
+            "operation_failed": "Operation failed.",
+            "operation_interrupted": "Operation interrupted.",
+        }
+        timestamp_key = {
+            "operation_queued": "created_at",
+            "operation_started": "started_at",
+            "operation_completed": "finished_at",
+            "operation_failed": "finished_at",
+            "operation_interrupted": "finished_at",
+        }[event_type]
+        return EventDraft(
+            category="operation",
+            event_type=event_type,
+            message=messages[event_type],
+            data=self._operation_data(record),
+            timestamp=str(record.get(timestamp_key) or "") or None,
+        )
+
+    @staticmethod
+    def _operation_data(record: dict[str, object]) -> dict[str, object]:
+        error = record.get("error")
+        return {
+            "operation_command": str(record.get("command") or ""),
+            "sync_mode": str(record.get("sync_mode") or ""),
+            "error_code": str(error.get("error_code") or "") if isinstance(error, dict) else "",
+        }
+
+    def _emit_operation_event(self, record: dict[str, object], *, event_type: str) -> None:
+        run_id = str(record.get("run_id") or "")
+        if not run_id:
+            return
+        draft = self._operation_draft(record, event_type=event_type)
+        emit_for_run(
+            runtime_root=self.store.runtime_root,
+            run_id=run_id,
+            operation_id=str(record.get("operation_id") or "") or None,
+            category=draft.category,
+            event_type=draft.event_type,
+            message=draft.message,
+            data=draft.data,
+            timestamp=draft.timestamp,
+        )
 
     def _release_run(self, record: dict[str, object]) -> None:
         run_id = str(record.get("run_id") or "")

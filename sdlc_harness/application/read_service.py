@@ -13,6 +13,7 @@ from .commands import ApplicationCommand
 from .service import ApplicationService
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
+from ..events import DEFAULT_EVENT_LIMIT, EventStore
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 
@@ -87,6 +88,7 @@ class ApplicationReadService:
         self.root = (root or default_repo_root()).resolve()
         self.settings = load_settings(root=self.root, runtime_root=runtime_root)
         self.store = RuntimeStore(repo_root=self.root, runtime_root=self.settings.runtime_root)
+        self.event_store = EventStore(runtime_root=self.settings.runtime_root)
         self.application_service = application_service or ApplicationService(root=self.root)
 
     def list_runs(self, *, limit: int = DEFAULT_RUN_LIMIT) -> dict[str, object]:
@@ -109,6 +111,16 @@ class ApplicationReadService:
             )
         )
         return self._public_run(payload)
+
+    def list_events(
+        self,
+        *,
+        run_id: str,
+        after: int = 0,
+        limit: int = DEFAULT_EVENT_LIMIT,
+    ) -> dict[str, object]:
+        run_id = _validated_identifier(run_id, kind="run id")
+        return self._sanitize(self.event_store.read(run_id=run_id, after=after, limit=limit))
 
     def dashboard_snapshot(
         self,
@@ -290,7 +302,7 @@ def api_capabilities() -> dict[str, bool]:
         "read_api": True,
         "write_api": True,
         "operation_queue": True,
-        "events": False,
+        "events": True,
         "config_api": False,
     }
 

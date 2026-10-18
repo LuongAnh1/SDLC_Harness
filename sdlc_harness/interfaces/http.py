@@ -19,6 +19,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .. import __version__
 from ..application import ApplicationCommand, ApplicationReadService, ApplicationService
 from ..application.read_service import DEFAULT_RUN_LIMIT, api_capabilities
+from ..events import DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT
 from ..core.config import Settings, load_settings, repo_root
 from ..core.errors import HarnessError
 from ..operations import OperationManager, OperationStore
@@ -26,6 +27,7 @@ from ..operations import OperationManager, OperationStore
 
 MAX_REQUEST_BODY_BYTES = 1024 * 1024
 _RUN_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)$")
+_EVENT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/events$")
 _ARTIFACT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/artifacts/([^/]+)$")
 _ACTION_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/actions$")
 _OPERATION_ROUTE = re.compile(r"^/api/v1/operations/([^/]+)$")
@@ -208,6 +210,19 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
                 self._write_json(
                     200,
                     self.server.operation_manager.get_public_operation(operation_id),
+                )
+                return
+            event_match = _EVENT_ROUTE.fullmatch(path)
+            if event_match:
+                run_id = unquote(event_match.group(1))
+                after, limit = self._read_event_query(parsed.query)
+                self._write_json(
+                    200,
+                    self.server.read_service.list_events(
+                        run_id=run_id,
+                        after=after,
+                        limit=limit,
+                    ),
                 )
                 return
             run_match = _RUN_ROUTE.fullmatch(path)
@@ -495,6 +510,24 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
             return int(values["limit"][0])
         except ValueError as exc:
             raise HarnessError("invalid_query", "limit must be an integer.") from exc
+
+    @staticmethod
+    def _read_event_query(query: str) -> tuple[int, int]:
+        if not query:
+            return 0, DEFAULT_EVENT_LIMIT
+        values = parse_qs(query, keep_blank_values=True)
+        if not set(values).issubset({"after", "limit"}) or any(len(items) != 1 for items in values.values()):
+            raise HarnessError("invalid_query", "Only one `after` and one `limit` query parameter are supported.")
+        try:
+            after = int(values.get("after", ["0"])[0])
+            limit = int(values.get("limit", [str(DEFAULT_EVENT_LIMIT)])[0])
+        except ValueError as exc:
+            raise HarnessError("invalid_query", "after and limit must be integers.") from exc
+        if after < 0:
+            raise HarnessError("invalid_query", "after must be an integer >= 0.")
+        if not 1 <= limit <= MAX_EVENT_LIMIT:
+            raise HarnessError("invalid_query", f"limit must be an integer from 1 to {MAX_EVENT_LIMIT}.")
+        return after, limit
 
     def _write_harness_error(self, exc: HarnessError) -> None:
         status = _http_status_for_error(exc.error_code)

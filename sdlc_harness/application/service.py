@@ -7,6 +7,7 @@ from pathlib import Path
 from .commands import ApplicationCommand
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
+from ..events import current_event_context, event_scope
 from ..sources.fixtures import source_ref_for
 from ..sources.jira import jira_source_ref_for
 from ..storage.runtime import RuntimeStore
@@ -43,6 +44,22 @@ class ApplicationService:
         """
 
         settings = self.settings_for(command)
+        if current_event_context() is None:
+            run_id = str(command.arguments.get("run_id") or "").strip() or None
+            with event_scope(
+                runtime_root=settings.runtime_root,
+                command=command.name,
+                run_id=run_id,
+            ):
+                return self._execute_with_locks(command, settings=settings)
+        return self._execute_with_locks(command, settings=settings)
+
+    def _execute_with_locks(
+        self,
+        command: ApplicationCommand,
+        *,
+        settings: Settings,
+    ) -> dict[str, object]:
         name = command.name
         store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         if name in {"start-or-get-run", "start-from-jira"}:
