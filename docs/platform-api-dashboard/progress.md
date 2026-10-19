@@ -297,3 +297,43 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
   với HTTP submit. Gate được chuyển vào `OperationManager.run_when_idle`, giữ cùng
   lock từ lúc xác nhận idle đến khi atomic replace hoàn tất.
 - Full suite tái tạo lock fixture lịch sử `run-run_20261013_160421_f661babf.lock`; file đã được xóa, còn run smoke `run_20261018_102318_bb4678c1` được giữ nguyên.
+
+## 2026-10-18 - Hoàn thành Slice 7 Niko Dual Transport
+
+### Thay đổi
+
+- Tách CLI subprocess thành `CliSdlcTransport`, thêm `HttpSdlcTransport` và giữ
+  `SdlcClient` làm facade chung để intent, preflight, formatter và background job
+  của Niko không phụ thuộc transport.
+- Thêm cấu hình `NIKO_SDLC_TRANSPORT=cli|api`, base URL, bearer token đã mask,
+  request timeout, operation timeout và poll interval trong Niko Ops Dashboard;
+  CLI tiếp tục là mặc định.
+- Ánh xạ create run, get status và toàn bộ action Niko đang hỗ trợ sang API V1.
+  HTTP write gửi idempotency key, nhận `202`, poll operation bền vững và giữ
+  `operation_id` trong `SdlcResult`.
+- Submit timeout được retry đúng một lần với cùng idempotency key. API write không
+  tự fallback sang CLI; poll timeout trả `sdlc_operation_pending` để không kết
+  luận nhầm workflow thất bại hoặc thực thi trùng.
+- Niko truyền `requested_by` thực tế cho mọi mutation, giữ nguyên error payload
+  của Harness và ghi transport/operation metadata mà không log token hay payload
+  nhạy cảm.
+
+### Test
+
+- Focused SDLC client, HTTP fixture, formatter, Niko app, control, jobs và Ops
+  Dashboard: `116 passed`.
+- HTTP fixture bao phủ bearer auth, payload mọi action, `202 -> poll -> terminal`,
+  failed/pending operation, HTTP 400/401/404/409/503, invalid JSON, unavailable
+  API, retry cùng idempotency key, dynamic transport selection và CLI/API result
+  contract parity.
+- Full Niko regression: `332 passed, 0 failed` trong `87.35s`.
+
+### Ghi chú
+
+- Lượt test formatter đầu phát hiện hai chuỗi hiển thị cũ không còn khớp contract
+  test (`implementation_executing` và resume work item); nội dung đã được đồng bộ
+  lại và focused suite pass.
+- Chưa chạy live Jira/Confluence/GitHub bằng API trong Slice 7. Slice 8 sẽ smoke
+  fake/mock trước, sau đó controlled live E2E và chỉ chuyển API thành mặc định khi
+  đủ evidence.
+

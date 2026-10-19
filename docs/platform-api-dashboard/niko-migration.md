@@ -1,5 +1,7 @@
 # Chuyển Niko Từ CLI Sang HTTP API
 
+Trạng thái: **Slice 7 hoàn thành — dual transport đã có, CLI vẫn là mặc định; live cutover thuộc Slice 8.**
+
 ## Nguyên Tắc
 
 Niko giữ `SdlcResult`, intent detection, background reply và formatter hiện tại.

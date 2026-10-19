@@ -1,6 +1,6 @@
 # Implementation Checklist: API Và Ops Dashboard
 
-Trạng thái hiện tại: **Slice 1-6 đã hoàn thành; Slice 7 chưa triển khai**.
+Trạng thái hiện tại: **Slice 1-7 đã hoàn thành; Slice 8 chưa triển khai**.
 
 ## Slice 1 - Application Service Chung
 
@@ -53,11 +53,11 @@ Trạng thái hiện tại: **Slice 1-6 đã hoàn thành; Slice 7 chưa triển
 
 ## Slice 7 - Niko Dual Transport
 
-- [ ] Thêm HTTP transport dưới facade hiện tại.
-- [ ] Thêm config base URL/token/request timeout/operation polling.
-- [ ] Giữ CLI mặc định trong giai đoạn đầu.
-- [ ] Không tự fallback write action từ API sang CLI.
-- [ ] Contract parity và integration fixture pass.
+- [x] Thêm HTTP transport dưới facade hiện tại.
+- [x] Thêm config base URL/token/request timeout/operation polling.
+- [x] Giữ CLI mặc định trong giai đoạn đầu.
+- [x] Không tự fallback write action từ API sang CLI.
+- [x] Contract parity và integration fixture pass.
 
 ## Slice 8 - Cutover
 

@@ -1,6 +1,6 @@
 # Platform Upgrade: API Và Ops Dashboard
 
-Trạng thái: **In progress — Slice 1-6 completed**
+Trạng thái: **In progress — Slice 1-7 completed**
 Ngày chốt tài liệu: **2026-10-18**
 
 ## Mục Tiêu
