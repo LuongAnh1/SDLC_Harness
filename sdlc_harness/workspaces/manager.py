@@ -21,6 +21,7 @@ from typing import BinaryIO, Callable, Iterator
 
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..profiles import PROFILE_SNAPSHOT_STATE_KEY, load_and_validate_target_manifest, read_profile_snapshot
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from .model import RunWorkspaceRecord, branch_name_for_run, run_suffix
 
@@ -148,7 +149,12 @@ class RunWorkspaceManager:
                 if self.artifact_path(run_id).exists():
                     record = self._read_unlocked(run_id)
                     self._validate_record(record, state=state, verify_git=True)
-                    self._reconcile_state(record, state=state)
+                    profile_changed = self._bind_or_validate_profile(
+                        record,
+                        state=state,
+                        allow_bind=True,
+                    )
+                    self._reconcile_state(record, state=state, force_write=profile_changed)
                     return record
                 return self._create_locked(run_id=run_id, state=state)
 
@@ -270,16 +276,24 @@ class RunWorkspaceManager:
         state = self.store.read_state(run_id)
         record = self._read_unlocked(run_id)
         self._validate_record(record, state=state, verify_git=True)
+        self._bind_or_validate_profile(record, state=state, allow_bind=False)
         return record
 
     @contextmanager
     def locked_workspace(self, run_id: str) -> Iterator[RunWorkspaceRecord]:
-        """Giữ per-run lock trong suốt action đọc/sửa code của caller."""
+        """Giữ per-run lock và hoàn tất binding an toàn cho workspace cũ nếu cần."""
 
         with self.run_lock(run_id):
             state = self.store.read_state(run_id)
             record = self._read_unlocked(run_id)
             self._validate_record(record, state=state, verify_git=True)
+            profile_changed = self._bind_or_validate_profile(
+                record,
+                state=state,
+                allow_bind=True,
+            )
+            if profile_changed:
+                self._reconcile_state(record, state=state, force_write=True)
             yield record
 
     def refresh_locked(
@@ -298,6 +312,7 @@ class RunWorkspaceManager:
 
         state = self.store.read_state(record.run_id)
         self._validate_record(record, state=state, verify_git=False)
+        self._bind_or_validate_profile(record, state=state, allow_bind=False)
         self._validate_git_identity(record, verify_recorded_head=False)
         head_sha = self._git(
             Path(record.worktree_path),
@@ -429,8 +444,13 @@ class RunWorkspaceManager:
                 updated_at=now,
             )
             self._validate_record(record, state=state, verify_git=True)
+            profile_changed = self._bind_or_validate_profile(
+                record,
+                state=state,
+                allow_bind=True,
+            )
             self._write_record_locked(record)
-            self._reconcile_state(record, state=state)
+            self._reconcile_state(record, state=state, force_write=profile_changed)
         except HarnessError as exc:
             if self.artifact_path(run_id).exists():
                 raise
@@ -1164,11 +1184,71 @@ class RunWorkspaceManager:
             )
         return target_path, remote
 
-    def _reconcile_state(self, record: RunWorkspaceRecord, *, state: dict[str, object]) -> None:
+    def _bind_or_validate_profile(
+        self,
+        record: RunWorkspaceRecord,
+        *,
+        state: dict[str, object],
+        allow_bind: bool,
+    ) -> bool:
+        """Gắn manifest/workspace vào snapshot hoặc xác minh binding đã có."""
+
+        snapshot = read_profile_snapshot(state, run_id=record.run_id)
+        if snapshot is None:
+            return False
+        project, language = snapshot.resolve_profiles(run_id=record.run_id)
+        if _normalized_remote(record.remote) != _normalized_remote(snapshot.target_remote):
+            raise HarnessError(
+                "profile_snapshot_mismatch",
+                "Profile snapshot target remote does not match the run workspace.",
+                run_id=record.run_id,
+            )
+        if record.base_ref != f"origin/{snapshot.target_base_branch}":
+            raise HarnessError(
+                "profile_snapshot_mismatch",
+                "Profile snapshot target base branch does not match the run workspace.",
+                run_id=record.run_id,
+            )
+
+        resolved = load_and_validate_target_manifest(
+            worktree_path=Path(record.worktree_path),
+            project=project,
+            language=language,
+            run_id=record.run_id,
+        )
+        bound = snapshot.bind_workspace(
+            target_manifest_schema=resolved.manifest.version,
+            target_manifest_digest=resolved.digest,
+            base_sha=record.base_sha,
+            resolved_component_roots=resolved.component_roots,
+            run_id=record.run_id,
+        )
+        if bound == snapshot:
+            return False
+        if not allow_bind:
+            raise HarnessError(
+                "profile_snapshot_mismatch",
+                "Profile snapshot is not bound to its run workspace.",
+                run_id=record.run_id,
+            )
+        state[PROFILE_SNAPSHOT_STATE_KEY] = bound.to_dict()
+        return True
+
+    def _reconcile_state(
+        self,
+        record: RunWorkspaceRecord,
+        *,
+        state: dict[str, object],
+        force_write: bool = False,
+    ) -> None:
         artifact_ref = self.store.relative(self.artifact_path(record.run_id))
         latest_artifacts = dict(state.get("latest_artifacts") or {})
         workspace_summary = record.status_summary()
-        if latest_artifacts.get("run_workspace") == artifact_ref and state.get("workspace") == workspace_summary:
+        if (
+            not force_write
+            and latest_artifacts.get("run_workspace") == artifact_ref
+            and state.get("workspace") == workspace_summary
+        ):
             return
         latest_artifacts["run_workspace"] = artifact_ref
         state.update(
@@ -1233,7 +1313,7 @@ class RunWorkspaceManager:
                 self._git(
                     canonical_repo,
                     "branch",
-                    "-d",
+                    "-D",
                     branch,
                     error_code="workspace_creation_partial",
                     run_id=run_id,

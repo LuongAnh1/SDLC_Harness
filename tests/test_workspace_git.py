@@ -8,6 +8,7 @@ còn nguyên trạng thái mới tạo/nhận nuôi. Cleanup dùng PR giả và 
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -17,6 +18,7 @@ from unittest.mock import patch
 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.profiles import build_profile_snapshot, get_language_profile, get_project_profile
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workspaces import RunWorkspaceManager, branch_name_for_run
 
@@ -31,6 +33,38 @@ def _git(cwd: Path, *args: str) -> str:
         encoding="utf-8",
     )
     return completed.stdout.strip()
+
+
+def _write_profile_target(root: Path) -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    language = get_language_profile(project.language_profile_id)
+    for required_path in project.required_paths:
+        path = root / required_path
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("placeholder\n", encoding="utf-8")
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+    for component in project.components:
+        for editable_root in component.editable_roots:
+            (root / editable_root).mkdir(parents=True, exist_ok=True)
+            (root / editable_root / ".gitkeep").write_text("", encoding="utf-8")
+    payload = {
+        "version": project.target_manifest_schema,
+        "project_profile_id": project.profile_id,
+        "project_profile_schema": project.schema_version,
+        "language_profile_id": language.profile_id,
+        "language_profile_schema": language.schema_version,
+        "components": [
+            {"component_id": component.component_id, "editable_roots": list(component.editable_roots)}
+            for component in project.components
+        ],
+        "protected_paths": list(project.protected_paths),
+        "required_paths": list(project.required_paths),
+        "verification_stage_ids": list(project.verification_stage_ids),
+    }
+    manifest = root / ".sdlc" / "target-profile.json"
+    manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
 class WorkspaceGitTests(unittest.TestCase):
@@ -54,7 +88,8 @@ class WorkspaceGitTests(unittest.TestCase):
         _git(self.seed, "config", "user.email", "sdlc-test@example.com")
         _git(self.seed, "checkout", "-b", "main")
         (self.seed / "README.md").write_text("initial\n", encoding="utf-8")
-        _git(self.seed, "add", "README.md")
+        _write_profile_target(self.seed)
+        _git(self.seed, "add", ".")
         _git(self.seed, "commit", "-m", "initial")
         _git(self.seed, "remote", "add", "origin", str(self.remote))
         _git(self.seed, "push", "-u", "origin", "main")
@@ -81,17 +116,28 @@ class WorkspaceGitTests(unittest.TestCase):
             },
         )
 
-    def _write_state(self, run_id: str, *, source_ref: str = "dataset_use_case:etour:UC1") -> None:
-        self.store.write_state(
-            {
+    def _write_state(
+        self,
+        run_id: str,
+        *,
+        source_ref: str = "dataset_use_case:etour:UC1",
+        profiled: bool = False,
+    ) -> None:
+        state: dict[str, object] = {
                 "run_id": run_id,
                 "source_ref": source_ref,
                 "dataset": "etour",
                 "use_case": "UC1",
                 "status": "active",
                 "latest_artifacts": {},
-            }
-        )
+        }
+        if profiled:
+            state["profile_snapshot"] = build_profile_snapshot(
+                project_profile_id="typescript_fullstack_v1",
+                target_remote=str(self.remote.resolve()),
+                target_base_branch="main",
+            ).to_dict()
+        self.store.write_state(state)
 
     def _push_remote_change(self) -> str:
         feature = self.seed / "feature.txt"
@@ -226,6 +272,79 @@ class WorkspaceGitTests(unittest.TestCase):
         with self.manager.locked_workspace(self.run_id) as locked:
             self.assertEqual(locked, first)
             self.assertEqual(_git(Path(locked.worktree_path), "rev-parse", "HEAD"), locked.head_sha)
+
+    def test_profiled_workspace_binds_manifest_base_sha_and_component_roots(self) -> None:
+        self._write_state(self.run_id, profiled=True)
+
+        record = self.manager.create_for_run(self.run_id)
+        state = self.store.read_state(self.run_id)
+        snapshot = state["profile_snapshot"]
+
+        self.assertEqual(snapshot["target_manifest_schema"], "target_profile_manifest_v1")
+        self.assertRegex(snapshot["target_manifest_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(snapshot["base_sha"], record.base_sha)
+        self.assertEqual(snapshot["resolved_component_roots"]["web"], ["apps/web/src"])
+        self.assertEqual(self.manager.resolve(self.run_id), record)
+
+    def test_profiled_workspace_manifest_mismatch_rolls_back_creation(self) -> None:
+        self._write_state(self.run_id, profiled=True)
+        manifest = self.seed / ".sdlc" / "target-profile.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["project_profile_id"] = "other_profile_v1"
+        manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        _git(self.seed, "add", ".sdlc/target-profile.json")
+        _git(self.seed, "commit", "-m", "break manifest")
+        _git(self.seed, "push", "origin", "main")
+
+        with self.assertRaises(HarnessError) as context:
+            self.manager.create_for_run(self.run_id)
+
+        self.assertEqual(
+            context.exception.error_code,
+            "target_profile_manifest_mismatch",
+            context.exception.message,
+        )
+        self.assertFalse(self.manager.expected_worktree_path(self.run_id).exists())
+        self.assertFalse(self.manager.artifact_path(self.run_id).exists())
+        self.assertFalse(self.store.read_state(self.run_id)["profile_snapshot"].get("base_sha"))
+
+    def test_profiled_workspace_detects_snapshot_and_manifest_drift(self) -> None:
+        self._write_state(self.run_id, profiled=True)
+        record = self.manager.create_for_run(self.run_id)
+        state = self.store.read_state(self.run_id)
+        state["profile_snapshot"]["target_manifest_digest"] = "sha256:" + "f" * 64
+        self.store.write_state(state)
+
+        with self.assertRaises(HarnessError) as snapshot_context:
+            self.manager.resolve(self.run_id)
+        self.assertEqual(snapshot_context.exception.error_code, "profile_snapshot_mismatch")
+
+        state["profile_snapshot"]["target_manifest_digest"] = "sha256:" + hashlib.sha256(
+            (Path(record.worktree_path) / ".sdlc" / "target-profile.json").read_bytes()
+        ).hexdigest()
+        self.store.write_state(state)
+        (Path(record.worktree_path) / ".sdlc" / "target-profile.json").write_text("{}\n", encoding="utf-8")
+        with self.assertRaises(HarnessError) as manifest_context:
+            self.manager.resolve(self.run_id)
+        self.assertEqual(manifest_context.exception.error_code, "target_profile_manifest_invalid")
+
+    def test_locked_workspace_backfills_valid_pre_binding_profile_snapshot(self) -> None:
+        record = self.manager.create_for_run(self.run_id)
+        state = self.store.read_state(self.run_id)
+        state["profile_snapshot"] = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote=str(self.remote.resolve()),
+            target_base_branch="main",
+        ).to_dict()
+        self.store.write_state(state)
+
+        with self.manager.locked_workspace(self.run_id) as locked:
+            self.assertEqual(locked, record)
+
+        rebound = self.store.read_state(self.run_id)["profile_snapshot"]
+        self.assertEqual(rebound["base_sha"], record.base_sha)
+        self.assertRegex(rebound["target_manifest_digest"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(rebound["resolved_component_roots"]["web"], ["apps/web/src"])
 
     def test_adopt_legacy_run_preserves_head_state_and_is_idempotent(self) -> None:
         branch, head_sha, pull_request = self._prepare_legacy_run()
@@ -663,6 +782,25 @@ class WorkspaceGitTests(unittest.TestCase):
         state = self.store.read_state(self.run_id)
         self.assertEqual(recovered, record)
         self.assertEqual(state["workspace"]["head_sha"], record.head_sha)
+
+    def test_profile_binding_recovers_after_state_persistence_failure(self) -> None:
+        self._write_state(self.run_id, profiled=True)
+        failure = HarnessError("runtime_write_failed", "simulated state failure", run_id=self.run_id)
+
+        with patch.object(self.manager.store, "write_state", side_effect=failure):
+            with self.assertRaises(HarnessError) as context:
+                self.manager.create_for_run(self.run_id)
+
+        self.assertEqual(context.exception.error_code, "runtime_write_failed")
+        record = self.manager.read(self.run_id)
+        persisted_before_retry = self.store.read_state(self.run_id)["profile_snapshot"]
+        self.assertNotIn("base_sha", persisted_before_retry)
+
+        recovered = self.manager.create_for_run(self.run_id)
+        persisted_after_retry = self.store.read_state(self.run_id)["profile_snapshot"]
+        self.assertEqual(recovered, record)
+        self.assertEqual(persisted_after_retry["base_sha"], record.base_sha)
+        self.assertIn("target_manifest_digest", persisted_after_retry)
 
     def test_tampered_artifact_does_not_resolve(self) -> None:
         self.manager.create_for_run(self.run_id)

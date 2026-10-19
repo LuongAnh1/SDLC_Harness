@@ -1,8 +1,9 @@
 # Target Direction
 
 > Trạng thái: A1.1 đã triển khai contract/registry thuần; A1.2a đã thêm config
-> selection fail-closed; A1.2b đã thêm snapshot theo run, downstream settings
-> binding và status metadata tối thiểu. Mặc định rỗng vẫn giữ Java baseline. Các
+> selection fail-closed; A1.2b đã thêm snapshot theo run và downstream settings
+> binding; A1.2c đã thêm target manifest preflight cùng workspace binding
+> fail-closed. Mặc định rỗng vẫn giữ Java baseline. Các
 > artifact và behavior Phase 2-4 dưới đây vẫn là proposal.
 
 ## Nguyên Tắc
@@ -68,8 +69,9 @@ audit dùng cùng một contract.
 `profile_snapshot_v1` hiện được tạo ngay khi mở run, trước lần ghi state đầu tiên
 và trước LLM, chứa profile/schema IDs cùng target remote/base branch. Action sau
 được bind lại từ snapshot dưới run lock; status chỉ công khai classification và
-profile IDs. A1.2c sẽ bổ sung manifest digest, base SHA và resolved component
-roots lúc provision workspace.
+profile IDs. Khi provision workspace cho profiled run, A1.2c đối chiếu manifest
+với registry/filesystem rồi bổ sung manifest schema/digest, base SHA và resolved
+component roots; resolve/lock sau đó fail closed nếu binding bị drift.
 
 ## Target Project Đề Xuất
 

@@ -24,13 +24,13 @@ tất và không tự cho phép cutover.
   mặc định rỗng để chưa đổi Java baseline trong giai đoạn migration.
 - [x] A1.2b: tạo `profile_snapshot_v1` ngay lúc mở run và buộc các action sau đó
   dùng snapshot thay vì resolve lại config hiện hành.
-- [ ] A1.2c: bổ sung manifest digest, base SHA và resolved component roots vào
+- [x] A1.2c: bổ sung manifest digest, base SHA và resolved component roots vào
   snapshot khi provision workspace.
 - [ ] Thêm legacy classifier/guard: run thiếu snapshot là `legacy_java_v1`, chỉ
   còn read/audit/sync-existing/cancel/cleanup sau cutover.
 - [x] Giữ HTTP API tương thích; thêm `execution_profile` tối thiểu theo hướng
   additive, không công khai target remote hoặc local path.
-- [ ] Fail closed khi state/workspace/registry/target manifest không khớp.
+- [x] Fail closed khi state/workspace/registry/target manifest không khớp.
 
 ### A2. Phase 3 Planning
 

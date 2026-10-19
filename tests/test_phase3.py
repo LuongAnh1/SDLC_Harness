@@ -20,6 +20,7 @@ from sdlc_harness.agents.validator import (
 )
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.profiles import get_language_profile, get_project_profile
 from sdlc_harness.verification import VerificationResult
 from sdlc_harness.sync.atlassian import (
     _confluence_implementation_plan_storage_body,
@@ -257,6 +258,50 @@ class PhaseThreeTest(unittest.TestCase):
         )
         return completed.stdout.strip()
 
+    def _install_profile_manifest(self, *, project_profile_id: str = "typescript_fullstack_v1") -> None:
+        project = get_project_profile("typescript_fullstack_v1")
+        language = get_language_profile(project.language_profile_id)
+        for required_path in project.required_paths:
+            path = self.target_repo / required_path
+            if path.suffix:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("placeholder\n", encoding="utf-8")
+            else:
+                path.mkdir(parents=True, exist_ok=True)
+        for component in project.components:
+            for editable_root in component.editable_roots:
+                root = self.target_repo / editable_root
+                root.mkdir(parents=True, exist_ok=True)
+                (root / ".gitkeep").write_text("", encoding="utf-8")
+        payload = {
+            "version": project.target_manifest_schema,
+            "project_profile_id": project_profile_id,
+            "project_profile_schema": project.schema_version,
+            "language_profile_id": language.profile_id,
+            "language_profile_schema": language.schema_version,
+            "components": [
+                {"component_id": component.component_id, "editable_roots": list(component.editable_roots)}
+                for component in project.components
+            ],
+            "protected_paths": list(project.protected_paths),
+            "required_paths": list(project.required_paths),
+            "verification_stage_ids": list(project.verification_stage_ids),
+        }
+        manifest = self.target_repo / ".sdlc" / "target-profile.json"
+        manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        self._git(self.target_repo, "add", ".")
+        self._git(
+            self.target_repo,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "add target profile manifest",
+        )
+        self._git(self.target_repo, "push", "origin", "main")
+
     def _create_phase2_run(self) -> dict[str, object]:
         created = PhaseOneWorkflow(self.settings).start_or_get_run(
             dataset="eTour",
@@ -352,6 +397,28 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(sync_report["checkpoint"]["type"], "implementation_plan_review")
         self.assertEqual({target["tool"] for target in sync_report["targets"]}, {"jira", "confluence"})
         self.assertNotIn("github", {target["tool"] for target in sync_report["targets"]})
+
+    def test_profile_manifest_mismatch_blocks_before_codegraph_and_developer(self) -> None:
+        self._install_profile_manifest(project_profile_id="other_profile_v1")
+        settings = self._settings(SDLC_PROJECT_PROFILE="typescript_fullstack_v1")
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        approved = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+        self.assertEqual(approved["status"], "waiting_design_approval")
+
+        with (
+            patch("sdlc_harness.workflows.phase3.CodeGraphContextProvider.prepare_index") as prepare_index,
+            patch.object(DeveloperPlanAgent, "plan") as developer_plan,
+        ):
+            response = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "target_profile_manifest_mismatch")
+        prepare_index.assert_not_called()
+        developer_plan.assert_not_called()
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()

@@ -163,6 +163,50 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Chưa triển khai A1.2c manifest/base SHA/component roots, legacy retirement
   guard, TypeScript prompt, runner hoặc target repo bootstrap.
 
+## 2026-10-19 - A1.2c Target Manifest Và Workspace Binding
+
+- Baseline: commit `8a5e1bb` (`feat: bind project profiles to workflow runs`).
+- Thêm reader bất biến cho `.sdlc/target-profile.json`, đối chiếu chính xác
+  profile/language identity, component roots, protected/required paths và
+  verification stage IDs với registry.
+- Khi provision profiled workspace, tính digest từ raw manifest bytes và bổ sung
+  `target_manifest_schema`, `target_manifest_digest`, `base_sha` cùng
+  `resolved_component_roots` vào `profile_snapshot_v1` trước CodeGraph/LLM.
+- Mọi lần resolve/lock workspace sau đó phải fail closed nếu state, workspace,
+  registry hoặc manifest không còn khớp. Run không có snapshot tiếp tục đi theo
+  Java migration baseline và không bị buộc có manifest.
+- Kiểm thử theo tầng: profile manifest contract, Git workspace rollback/retry,
+  Phase 3 preflight ordering, targeted regression rồi full `pytest`.
+- Reader chỉ nhận exact `target_profile_manifest_v1`, tính SHA-256 từ raw bytes,
+  từ chối unknown field/version, path thiếu và symlink/path thoát khỏi worktree.
+- Workspace create/retry ghi binding cùng state reconcile; resolve, lock và
+  refresh xác minh lại digest/base SHA/component roots. Manifest mismatch được
+  rollback trước CodeGraph/Developer. Rollback branch dùng force-delete chỉ sau
+  khi đã chứng minh branch vẫn trỏ đúng fetched base SHA và worktree còn sạch.
+- Targeted profile/workspace/Phase 3: `82 passed in 264.66s`; Application
+  Service/Read API/Write API: `48 passed in 18.12s`.
+- Full regression: `rtk python -m pytest` ->
+  `435 passed in 864.38s (0:14:24)`.
+- Review follow-up đã chuẩn hóa thứ tự `resolved_component_roots` để thứ tự key
+  trong JSON không làm thay đổi ngữ nghĩa/equality của snapshot; đồng thời thêm
+  regression test cho manifest có component roots đảo thứ tự.
+- `locked_workspace` nay có thể backfill an toàn binding A1.2c cho workspace
+  profiled cũ chỉ sau khi manifest, registry, state và workspace đã được xác minh
+  đầy đủ dưới lock. `resolve` vẫn read-only và fail closed; regression test bao
+  phủ đường nâng cấp từ snapshot pre-binding.
+- Sửa vòng import sạch đã tồn tại giữa `profiles` và `core.config` bằng lazy
+  public exports trong `sdlc_harness.core`; subprocess test mới xác nhận import
+  `sdlc_harness.profiles` trước rồi dùng `Settings`, `load_settings`, `repo_root`
+  vẫn hoạt động trong Python process mới.
+- Review regression: profile/workspace/import contracts
+  `38 passed in 124.18s`; Application Service/profile/Phase 3/Phase 4/Read/Write
+  API `153 passed in 618.18s`.
+- Full regression sau review: `rtk python -m pytest` ->
+  `438 passed in 736.48s (0:12:16)`.
+- Checklist A1.2c và state/workspace/registry/manifest fail-closed đã hoàn tất.
+- Chưa thuộc lát này: TypeScript prompt/source discovery, verification runner,
+  QA/code trace, target repo bootstrap và legacy retirement.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

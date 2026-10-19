@@ -2,10 +2,10 @@
 
 Thư mục này là nguồn định hướng cho bước nâng cấp tiếp theo của SDLC Harness sau
 mốc HTTP API-only và live E2E ngày 2026-10-19. Audit/Gate 0 đã hoàn tất và A1.1
-đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a/A1.2b đã thêm
-selector config, snapshot profile theo run, downstream settings binding và
-status metadata tối thiểu. Mặc định rỗng vẫn giữ Java baseline; target TypeScript
-chưa được tạo.
+đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a-A1.2c đã thêm
+selector config, snapshot profile theo run, downstream settings binding, target
+manifest preflight và workspace binding fail-closed. Mặc định rỗng vẫn giữ Java
+baseline; target TypeScript chưa được tạo.
 
 ## Mục Tiêu
 
