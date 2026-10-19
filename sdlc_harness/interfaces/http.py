@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from dataclasses import dataclass
 import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -658,9 +659,42 @@ def serve_forever(*, server_factory: Callable[[], SdlcHttpServer] | None = None)
             signal.signal(signum, handler)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Build the API process parser without changing config-file defaults."""
+
+    parser = argparse.ArgumentParser(prog="sdlc-harness-api")
+    parser.add_argument("--host", default=None, help="Override SDLC_API_HOST for this process.")
+    parser.add_argument("--port", type=int, default=None, help="Override SDLC_API_PORT for this process.")
+    parser.add_argument(
+        "--runtime-root",
+        default=None,
+        help="Use an isolated runtime root instead of the repository .runtime directory.",
+    )
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
     try:
-        return serve_forever()
+        args = build_parser().parse_args(argv)
+        runtime_root = Path(args.runtime_root).expanduser() if args.runtime_root else None
+        settings = load_settings(root=repo_root(), runtime_root=runtime_root)
+        defaults = ApiServerConfig.from_settings(settings)
+        config = ApiServerConfig(
+            host=args.host if args.host is not None else defaults.host,
+            port=args.port if args.port is not None else defaults.port,
+            token=defaults.token,
+            queue_limit=defaults.queue_limit,
+            shutdown_timeout_seconds=defaults.shutdown_timeout_seconds,
+            max_request_body_bytes=defaults.max_request_body_bytes,
+        )
+        config.validate()
+        return serve_forever(
+            server_factory=lambda: create_server(
+                config=config,
+                root=repo_root(),
+                runtime_root=runtime_root,
+            )
+        )
     except HarnessError as exc:
         print(json.dumps(exc.to_response(), ensure_ascii=False), file=sys.stderr)
         return 1

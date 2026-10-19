@@ -337,3 +337,34 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
   fake/mock trước, sau đó controlled live E2E và chỉ chuyển API thành mặc định khi
   đủ evidence.
 
+## 2026-10-19 - Slice 8A Niko/API Process Smoke
+
+### Thay đổi
+
+- API process nhận `--host`, `--port` và `--runtime-root` để smoke trên cổng và
+  runtime tạm mà không sửa cấu hình hoặc state thật.
+- Thêm integration smoke từ `NikoApp` qua `HttpSdlcTransport` tới process
+  `sdlc_harness.interfaces.http` thật. Smoke chạy eTour UC1 qua create, status và
+  Requirement approval, sau đó xác nhận state chuyển sang
+  `waiting_design_approval` và mock sync thành công.
+- Smoke khóa `niko.sdlc.client.subprocess.run`, nên test sẽ fail nếu đường API vô
+  tình gọi CLI. Hai mutation được xác nhận là đúng hai operation
+  `start_or_get_run` và `approve_checkpoint` trong runtime tạm.
+- Bổ sung coverage phía Niko cho operation `interrupted`: giữ nguyên
+  `operation_interrupted`, operation ID và run ID, đồng thời không replay qua CLI.
+
+### Test
+
+- SDLC API entrypoint, Write API và Operation Manager: `15 passed`.
+- Niko HTTP transport và process integration: `14 passed`.
+- Full regression SDLC Harness: `402 passed, 0 failed` trong `443.32s`.
+- Full regression Niko: `334 passed, 0 failed` trong `84.78s`.
+- Retry cùng idempotency key, HTTP idempotency replay/conflict, restart recovery,
+  sync partial formatting và no-fallback đều có automated coverage.
+
+### Cutover gate
+
+- Chưa chạy controlled live E2E bằng real Jira/Confluence/GitHub trong Slice 8.
+- `NIKO_SDLC_TRANSPORT` tiếp tục mặc định là `cli`; chỉ đổi sang `api` sau khi
+  một run live mới đi trọn Requirement -> Design -> Plan -> Code -> QA -> Code Review.
+

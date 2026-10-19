@@ -1,6 +1,6 @@
 # Implementation Checklist: API Và Ops Dashboard
 
-Trạng thái hiện tại: **Slice 1-7 đã hoàn thành; Slice 8 chưa triển khai**.
+Trạng thái hiện tại: **Slice 1-7 đã hoàn thành; Slice 8 đang triển khai và đã qua cổng smoke fake/mock**.
 
 ## Slice 1 - Application Service Chung
 
@@ -61,9 +61,9 @@ Trạng thái hiện tại: **Slice 1-7 đã hoàn thành; Slice 8 chưa triển
 
 ## Slice 8 - Cutover
 
-- [ ] Smoke Niko/API với fake LLM và mock sync.
+- [x] Smoke Niko/API qua API process thật với fake LLM, mock sync và runtime tạm.
 - [ ] Controlled live E2E với real Jira/Confluence/GitHub.
-- [ ] Test retry/idempotency/restart/sync partial.
+- [x] Test retry/idempotency/restart/sync partial ở transport/API/operation boundary.
 - [ ] Chuyển API thành transport mặc định sau khi evidence pass.
-- [ ] Cập nhật integration boundary trong docs hai repo.
+- [ ] Cập nhật integration boundary trong docs hai repo sau live cutover.
 - [ ] Giữ CLI cho debug/operator, bỏ subprocess khỏi runtime path của Niko.

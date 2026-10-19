@@ -96,6 +96,12 @@ python -m sdlc_harness.interfaces.http
 curl http://127.0.0.1:7788/api/v1/health
 ```
 
+Khi cần smoke cô lập, có thể override process mà không sửa `.env` hoặc runtime thật:
+
+```bash
+python -m sdlc_harness.interfaces.http --host 127.0.0.1 --port 7789 --runtime-root .runtime-smoke
+```
+
 Ops Dashboard được phục vụ cùng server tại `http://127.0.0.1:7788/`. Khi
 `SDLC_API_TOKEN` được bật, nhập token trong dashboard; trình duyệt chỉ giữ token
 trong `sessionStorage` của tab hiện tại.

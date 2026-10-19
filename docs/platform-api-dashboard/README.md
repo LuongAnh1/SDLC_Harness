@@ -1,7 +1,7 @@
 # Platform Upgrade: API Và Ops Dashboard
 
-Trạng thái: **In progress — Slice 1-7 completed**
-Ngày chốt tài liệu: **2026-10-18**
+Trạng thái: **In progress — Slice 1-7 completed; Slice 8 fake/mock process smoke passed**
+Ngày cập nhật gần nhất: **2026-10-19**
 
 ## Mục Tiêu
 

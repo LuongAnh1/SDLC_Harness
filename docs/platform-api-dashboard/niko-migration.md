@@ -1,6 +1,6 @@
 # Chuyển Niko Từ CLI Sang HTTP API
 
-Trạng thái: **Slice 7 hoàn thành — dual transport đã có, CLI vẫn là mặc định; live cutover thuộc Slice 8.**
+Trạng thái: **Slice 8 đang triển khai — smoke Niko/API fake/mock đã pass, CLI vẫn là mặc định cho tới khi live cutover có đủ evidence.**
 
 ## Nguyên Tắc
 
@@ -47,6 +47,18 @@ không kết luận workflow thất bại.
   Code Review checkpoint.
 - Theo dõi operation timeout, duplicate action, restart và sync partial.
 - CLI vẫn dùng cho operator recovery có chủ đích.
+
+API process nhận ba override phục vụ smoke cô lập mà không sửa runtime thật:
+
+```bash
+python -m sdlc_harness.interfaces.http --host 127.0.0.1 --port 7788 --runtime-root .runtime-smoke
+```
+
+Smoke tự động nằm ở Niko và phải gọi đúng process trên, không thay bằng HTTP stub:
+
+```bash
+python -m pytest tests/test_sdlc_api_process_integration.py -q
+```
 
 ### 4. Hoàn tất cutover
 
