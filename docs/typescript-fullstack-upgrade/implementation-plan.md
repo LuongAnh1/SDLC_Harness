@@ -20,8 +20,12 @@ tất và không tự cho phép cutover.
 ### A1. Profile Contract Và Config
 
 - [x] Thêm language/project profile registry và `typescript_fullstack_v1`.
-- [ ] Tạo `profile_snapshot_v1` ngay lúc mở run; bind profile/target identity bất
-  biến và bổ sung manifest digest/base SHA khi provision workspace.
+- [x] A1.2a: thêm `SDLC_PROJECT_PROFILE`, resolve fail-closed qua registry và giữ
+  mặc định rỗng để chưa đổi Java baseline trong giai đoạn migration.
+- [ ] A1.2b: tạo `profile_snapshot_v1` ngay lúc mở run và buộc các action sau đó
+  dùng snapshot thay vì resolve lại config hiện hành.
+- [ ] A1.2c: bổ sung manifest digest, base SHA và resolved component roots vào
+  snapshot khi provision workspace.
 - [ ] Thêm legacy classifier/guard: run thiếu snapshot là `legacy_java_v1`, chỉ
   còn read/audit/sync-existing/cancel/cleanup sau cutover.
 - [ ] Giữ HTTP API tương thích; chỉ thêm status metadata khi thật sự cần.

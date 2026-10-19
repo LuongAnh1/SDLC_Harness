@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import os
 from pathlib import Path
 
+from ..profiles import get_project_profile
 from .config_schema import CONFIG_SECTIONS, config_field_index, serialize_config_value
 from .runtime_config import RuntimeConfigStore
 
@@ -51,6 +52,7 @@ class Settings:
     confluence_sync_enabled: bool
     confluence_sync_space_id: str
     confluence_sync_parent_page_id: str
+    project_profile_id: str | None
     target_repo_path: Path
     target_worktree_root: Path
     target_repo_remote: str
@@ -182,6 +184,10 @@ def load_settings(
     developer_execution_mode = merged.get("SDLC_DEVELOPER_EXECUTION_MODE", "legacy").strip().lower() or "legacy"
     if developer_execution_mode not in {"legacy", "tool_loop"}:
         developer_execution_mode = "legacy"
+    project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "").strip()
+    project_profile_id = (
+        get_project_profile(project_profile_raw).profile_id if project_profile_raw else None
+    )
     target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_eTour")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
@@ -222,6 +228,7 @@ def load_settings(
         confluence_sync_enabled=_bool_value(merged.get("CONFLUENCE_SYNC_ENABLED")),
         confluence_sync_space_id=merged.get("CONFLUENCE_SYNC_SPACE_ID", ""),
         confluence_sync_parent_page_id=merged.get("CONFLUENCE_SYNC_PARENT_PAGE_ID", ""),
+        project_profile_id=project_profile_id,
         target_repo_path=target_repo_path,
         target_worktree_root=target_worktree_root.resolve(),
         target_repo_remote=merged.get("SDLC_TARGET_REPO_REMOTE", "https://github.com/LuongAnh1/SDLC_Target_eTour.git"),

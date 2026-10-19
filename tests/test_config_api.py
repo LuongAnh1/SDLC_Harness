@@ -73,6 +73,12 @@ class ConfigApiTests(unittest.TestCase):
         self.assertEqual(payload["version"], "runtime_config_v1")
         self.assertEqual([section["id"] for section in payload["sections"]], ["api", "llm", "validation", "target", "sync"])
         self.assertNotIn("hidden-llm-secret", json.dumps(payload))
+        target_section = next(section for section in payload["sections"] if section["id"] == "target")
+        profile_field = next(
+            field for field in target_section["fields"] if field["name"] == "SDLC_PROJECT_PROFILE"
+        )
+        self.assertEqual(profile_field["value"], "")
+        self.assertEqual(profile_field["options"], ["", "typescript_fullstack_v1"])
 
         health_status, health = self.request("/api/v1/health")
         self.assertEqual(health_status, 200)
@@ -84,12 +90,22 @@ class ConfigApiTests(unittest.TestCase):
             "/api/v1/config",
             method="PUT",
             token=self.token,
-            body={"values": {"SDLC_DESIGN_REPAIR_LIMIT": 6, "SDLC_SYNC_MODE": "both"}},
+            body={
+                "values": {
+                    "SDLC_DESIGN_REPAIR_LIMIT": 6,
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                    "SDLC_SYNC_MODE": "both",
+                }
+            },
         )
         self.assertEqual(status, 200)
-        self.assertEqual(payload["mutation"]["changed_keys"], ["SDLC_DESIGN_REPAIR_LIMIT", "SDLC_SYNC_MODE"])
+        self.assertEqual(
+            payload["mutation"]["changed_keys"],
+            ["SDLC_DESIGN_REPAIR_LIMIT", "SDLC_PROJECT_PROFILE", "SDLC_SYNC_MODE"],
+        )
         settings = load_settings(root=self.root, runtime_root=self.runtime_root)
         self.assertEqual(settings.design_repair_limit, 6)
+        self.assertEqual(settings.project_profile_id, "typescript_fullstack_v1")
         self.assertEqual(settings.sync_mode, "both")
         self.assertEqual(self.server.operation_manager.store.list_operations(), before)
 
@@ -117,16 +133,26 @@ class ConfigApiTests(unittest.TestCase):
             "/api/v1/config",
             method="PUT",
             token=self.token,
-            body={"values": {"SDLC_LLM_MODEL": "model-x", "SDLC_DESIGN_REPAIR_LIMIT": 7}},
+            body={
+                "values": {
+                    "SDLC_LLM_MODEL": "model-x",
+                    "SDLC_DESIGN_REPAIR_LIMIT": 7,
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                }
+            },
         )
         status, one = self.request(
             "/api/v1/config/reset",
             method="POST",
             token=self.token,
-            body={"keys": ["SDLC_DESIGN_REPAIR_LIMIT"]},
+            body={"keys": ["SDLC_DESIGN_REPAIR_LIMIT", "SDLC_PROJECT_PROFILE"]},
         )
         self.assertEqual(status, 200)
-        self.assertEqual(one["mutation"]["changed_keys"], ["SDLC_DESIGN_REPAIR_LIMIT"])
+        self.assertEqual(
+            one["mutation"]["changed_keys"],
+            ["SDLC_DESIGN_REPAIR_LIMIT", "SDLC_PROJECT_PROFILE"],
+        )
+        self.assertIsNone(load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id)
         status, section = self.request(
             "/api/v1/config/reset",
             method="POST",
@@ -141,6 +167,7 @@ class ConfigApiTests(unittest.TestCase):
             ({"UNKNOWN": "x"}, 400, "config_invalid"),
             ({"SDLC_API_HOST": "0.0.0.0"}, 400, "config_read_only"),
             ({"SDLC_DESIGN_REPAIR_LIMIT": -1}, 400, "config_invalid"),
+            ({"SDLC_PROJECT_PROFILE": "unknown_profile"}, 400, "config_invalid"),
         ]
         for values, expected_status, expected_code in cases:
             status, payload = self.request(

@@ -57,6 +57,7 @@ Trước khi triển khai code cần review đủ bốn câu hỏi:
 4. Acceptance criteria có chứng minh web chạy thật thay vì chỉ sinh file không?
 
 Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. Việc đóng Gate 0
-không tự cấp quyền cutover. A1.1 sau đó chỉ thêm profile contract/registry và
-unit test; config/runtime vẫn chưa đổi, target repo mới chưa được tạo và chưa
-chạy migration hay live workflow cho hướng TypeScript.
+không tự cấp quyền cutover. A1.1 đã thêm profile contract/registry; A1.2a thêm
+selector config fail-closed nhưng giữ mặc định rỗng. Run snapshot/runtime
+workflow vẫn chưa đổi, target repo mới chưa được tạo và chưa chạy migration hay
+live workflow cho hướng TypeScript.

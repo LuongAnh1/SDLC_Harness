@@ -116,6 +116,25 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Chạy lại `rtk python -m pytest tests/test_profiles.py -q` ->
   `8 passed in 0.04s`.
 
+## 2026-10-19 - A1.2a Project Profile Config Selection
+
+- Thêm `SDLC_PROJECT_PROFILE` vào target config schema và `.env.example`; option
+  được lấy từ profile registry, mặc định rỗng để giữ Java baseline trong giai
+  đoạn migration.
+- Mở rộng `Settings` bằng `project_profile_id: str | None`. Giá trị khác rỗng
+  được resolve fail-closed qua registry; `.env`/OS/override dùng profile lạ trả
+  `project_profile_not_supported`.
+- Config API chấp nhận/reset `typescript_fullstack_v1`, từ chối option lạ bằng
+  `config_invalid` trước khi ghi. Runtime config file bị can thiệp trực tiếp với
+  option lạ tiếp tục fail `config_corrupted`.
+- Chưa ghi `profile_snapshot_v1`, chưa thêm metadata vào run/status và chưa nối
+  profile vào Phase 1-4 hoặc workspace.
+- Targeted regression:
+  `rtk python -m pytest tests/test_profiles.py tests/test_runtime_config.py tests/test_config_api.py -q`
+  -> `24 passed in 4.09s` trên revision cuối.
+- Full regression: `rtk python -m pytest` ->
+  `413 passed in 775.82s (0:12:55)`.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

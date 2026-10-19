@@ -205,8 +205,9 @@ Tài liệu nguồn nằm tại
 [`docs/typescript-fullstack-upgrade/`](typescript-fullstack-upgrade/README.md).
 Hướng đã chốt dùng repo mới `SDLC_Target_TypeScript`, React/Vite, Fastify,
 PostgreSQL/Prisma, Vitest và Playwright. A1.1 đã thêm profile contract/registry
-thuần, nhưng chưa có config/run/workflow integration; Java vẫn là execution
-target của baseline đang chạy.
+thuần; A1.2a thêm selector config fail-closed nhưng mặc định vẫn rỗng. Chưa có
+run snapshot/workflow integration; Java vẫn là execution target của baseline
+đang chạy.
 
 Roadmap tương lai chia hai chặng:
 

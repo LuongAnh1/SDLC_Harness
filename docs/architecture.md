@@ -168,6 +168,7 @@ cho bước tiếp theo nằm tại
 
 Hướng này tách workflow/checkpoint chung khỏi language/project profile, sau đó
 mở rộng artifact và verification để một run có thể triển khai một vertical web
-feature xuyên frontend, backend và database. A1.1 mới chỉ thêm profile
-contract/registry thuần; chưa có config/run/workflow integration. HTTP API-only
-boundary và ownership giữa Niko/SDLC Harness vẫn giữ nguyên.
+feature xuyên frontend, backend và database. A1.1 đã thêm profile
+contract/registry thuần; A1.2a thêm selector config fail-closed nhưng giữ mặc
+định rỗng. Chưa có run snapshot hoặc workflow integration. HTTP API-only boundary
+và ownership giữa Niko/SDLC Harness vẫn giữ nguyên.

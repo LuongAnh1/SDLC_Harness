@@ -1,8 +1,9 @@
 # Target Direction
 
-> Trạng thái: A1.1 đã triển khai contract/registry thuần; chưa có config selection,
-> run snapshot hoặc workflow nào dùng profile. Các artifact và behavior Phase
-> 2-4 dưới đây vẫn là proposal.
+> Trạng thái: A1.1 đã triển khai contract/registry thuần; A1.2a đã thêm config
+> selection fail-closed nhưng giữ mặc định rỗng. Chưa có run snapshot hoặc
+> workflow nào dùng profile. Các artifact và behavior Phase 2-4 dưới đây vẫn là
+> proposal.
 
 ## Nguyên Tắc
 
@@ -54,9 +55,10 @@ triển khai ở cutover đầu, nhưng workflow nhận profile qua contract tha
 logic TypeScript trực tiếp.
 
 A1.1 đã đăng ký `typescript_v1` và `typescript_fullstack_v1` bằng immutable
-dataclass, component/editable/protected paths và verification stage IDs. Registry
-không chứa raw command và chưa được runtime resolve; phần nối config/run thuộc
-A1.2.
+dataclass, component/editable/protected paths và verification stage IDs. A1.2a
+đã thêm `SDLC_PROJECT_PROFILE`: giá trị khác rỗng được resolve fail-closed qua
+registry, còn mặc định rỗng giữ Java baseline trong giai đoạn migration. Registry
+không chứa raw command; phần run snapshot và downstream binding thuộc A1.2b.
 
 Niko không chọn profile theo câu chat. Harness resolve profile từ config, kiểm
 target repo phù hợp rồi snapshot profile identity vào run/workspace để retry và
