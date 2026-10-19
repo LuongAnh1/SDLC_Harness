@@ -48,6 +48,8 @@ tại trong code.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
   evidence đã khóa trước khi code.
 - [Progress](progress.md): execution log của công việc khảo sát và viết tài liệu.
+- [Test Performance Optimization](test-performance-optimization.md): baseline,
+  ngân sách và guardrail cho việc giảm thời gian regression suite.
 
 ## Docs-first Gate
 

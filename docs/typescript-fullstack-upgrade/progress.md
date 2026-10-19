@@ -207,6 +207,38 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Chưa thuộc lát này: TypeScript prompt/source discovery, verification runner,
   QA/code trace, target repo bootstrap và legacy retirement.
 
+## 2026-10-20 - Test Performance Optimization Baseline
+
+- Full regression A1.2c: `438 passed in 736.48s`; collection `438 tests` chỉ
+  mất `0.34s`, vì vậy thời gian nằm ở execution thay vì discovery/import.
+- Đo riêng với `--durations`: Phase 4 `58 passed in 382.87s`, Phase 3
+  `35 passed in 145.58s`, workspace Git `32 passed in 116.81s`. Ba file chiếm
+  khoảng 87,6% tổng thời gian.
+- Nguyên nhân đã xác nhận: bare remote/target repo được dựng lại trong mỗi
+  `setUp`, test Phase 4 thường chạy lại toàn bộ checkpoint trước đó, và test
+  thuần đang trả cả chi phí Git dù không kiểm tra Git.
+- Quyết định: tối ưu fixture/state factory trước, sau đó thêm `pytest-xdist`;
+  giữ Git integration và Phase 1-4 journey thật. Ngân sách: serial <= 360 giây,
+  parallel 4 worker <= 240 giây, fast suite <= 60 giây.
+- Kế hoạch và guardrail chi tiết ở `test-performance-optimization.md`.
+- Triển khai test infrastructure:
+  - Git repository template bất biến theo worker, runtime checkpoint template
+    có rewrite run/path và overlay file cho worktree;
+  - fast workspace factory vẫn tạo Git worktree thật nhưng bỏ guard/probe đã có
+    workspace contract suite riêng;
+  - snapshot Phase 1/2/3/4 để test bắt đầu đúng checkpoint cần kiểm tra;
+  - marker `integration`/`journey`, strict marker và optional dependency
+    `pytest-xdist`.
+- Giữ production provisioning/validation thật cho workspace contract, profile
+  preflight, target guard và journey dài đến Code Review Approved.
+- Kết quả sau tối ưu:
+  - fast: `151 passed, 287 deselected in 16.29s`;
+  - parallel 4 worker: `438 passed in 135.60s`, chạy lặp
+    `438 passed in 137.55s`;
+  - serial: `438 passed in 407.64s`.
+- Fast và parallel đạt ngân sách. Serial giảm 44,7% nhưng còn vượt mục tiêu
+  360 giây 47,64 giây; không tiếp tục mock Git contract/journey để chạy theo số.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

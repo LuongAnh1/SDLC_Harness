@@ -16,11 +16,17 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import build_profile_snapshot, get_language_profile, get_project_profile
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workspaces import RunWorkspaceManager, branch_name_for_run
+from tests._support import GitRepositoryTemplate
+
+
+pytestmark = pytest.mark.integration
 
 
 def _git(cwd: Path, *args: str) -> str:
@@ -67,35 +73,38 @@ def _write_profile_target(root: Path) -> None:
     manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _populate_workspace_target(root: Path) -> None:
+    (root / "README.md").write_text("initial\n", encoding="utf-8")
+    _write_profile_target(root)
+
+
 class WorkspaceGitTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.git_template = GitRepositoryTemplate(_populate_workspace_target)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.git_template.close()
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.base = Path(self.temp_dir.name)
         self.harness_root = self.base / "SDLC_Harness"
         self.harness_root.mkdir()
-        self.remote = self.base / "target.git"
-        self.seed = self.base / "seed"
-        self.canonical = self.base / "target"
+        topology = self.git_template.materialize(
+            self.base,
+            canonical_name="target",
+            include_seed=True,
+        )
+        self.remote = topology.remote
+        if topology.seed is None:
+            raise AssertionError("Git template did not create the requested seed repository.")
+        self.seed = topology.seed
+        self.canonical = topology.canonical
         self.worktree_root = self.base / "target-worktrees"
         self.runtime_root = self.harness_root / ".runtime"
-
-        self.remote.mkdir()
-        _git(self.remote, "init", "--bare")
-        self.seed.mkdir()
-        _git(self.seed, "init")
-        _git(self.seed, "config", "user.name", "SDLC Test")
-        _git(self.seed, "config", "user.email", "sdlc-test@example.com")
-        _git(self.seed, "checkout", "-b", "main")
-        (self.seed / "README.md").write_text("initial\n", encoding="utf-8")
-        _write_profile_target(self.seed)
-        _git(self.seed, "add", ".")
-        _git(self.seed, "commit", "-m", "initial")
-        _git(self.seed, "remote", "add", "origin", str(self.remote))
-        _git(self.seed, "push", "-u", "origin", "main")
-        _git(self.base, "clone", "-b", "main", str(self.remote), str(self.canonical))
-        _git(self.canonical, "config", "user.name", "SDLC Test")
-        _git(self.canonical, "config", "user.email", "sdlc-test@example.com")
 
         self.settings = self._settings(remote=str(self.remote.resolve()))
         self.store = RuntimeStore(repo_root=self.harness_root, runtime_root=self.runtime_root)

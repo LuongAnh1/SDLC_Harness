@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -26,6 +27,7 @@ from sdlc_harness.sync.atlassian import real_sync_design_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
+from tests._support import RuntimeDirectoryTemplate
 
 
 class StaticLlmClient:
@@ -157,10 +159,40 @@ def design_finding(name: str, *, excerpt: str = "") -> DesignFinding:
 
 
 class PhaseTwoTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.runtime_template_temp = tempfile.TemporaryDirectory()
+        runtime_root = Path(cls.runtime_template_temp.name) / ".runtime"
+        settings = load_settings(
+            root=Path(__file__).resolve().parents[1],
+            runtime_root=runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGN_REPAIR_LIMIT": "2",
+                "SDLC_DESIGN_VALIDATION_TRIALS": "3",
+                "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
+            },
+        )
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        cls.phase1_run_id = str(created["run_id"])
+        cls.phase1_runtime_template = RuntimeDirectoryTemplate(runtime_root)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.phase1_runtime_template.close()
+        cls.runtime_template_temp.cleanup()
+
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
+        suffix = hashlib.sha256(self._testMethodName.encode("utf-8")).hexdigest()[:8]
+        self.run_id = f"run_20261020_000000_{suffix}"
         self.settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
@@ -177,6 +209,13 @@ class PhaseTwoTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def _create_phase1_run(self) -> dict[str, object]:
+        self.phase1_runtime_template.materialize(
+            self.runtime_root,
+            replacements={self.phase1_run_id: self.run_id},
+        )
+        return PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
+
+    def _create_phase1_run_fresh(self) -> dict[str, object]:
         return PhaseOneWorkflow(self.settings).start_or_get_run(
             dataset="eTour",
             use_case="UC1",
@@ -656,7 +695,7 @@ class OnlyClass {
         self.assertEqual(len(result.missing_links["sequence_diagram"]), graph["count"])
 
     def test_approve_checkpoint_creates_design_checkpoint(self) -> None:
-        created = self._create_phase1_run()
+        created = self._create_phase1_run_fresh()
         response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
 
         self.assertTrue(response["ok"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -10,6 +11,8 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+
+import pytest
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
@@ -33,6 +36,32 @@ from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
+from tests._support import GitRepositoryTemplate, RuntimeDirectoryTemplate, create_fast_run_workspace
+
+
+pytestmark = pytest.mark.integration
+
+
+def _populate_phase3_target(target: Path) -> None:
+    source_dir = target / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"
+    test_dir = target / "src" / "test" / "java" / "com" / "sdlc" / "etour" / "heritage"
+    source_dir.mkdir(parents=True)
+    test_dir.mkdir(parents=True)
+    (source_dir / "CulturalHeritage.java").write_text(
+        "package com.sdlc.etour.heritage;\npublic final class CulturalHeritage {}\n",
+        encoding="utf-8",
+    )
+    (test_dir / "CulturalHeritageTest.java").write_text(
+        "package com.sdlc.etour.heritage;\npublic final class CulturalHeritageTest {}\n",
+        encoding="utf-8",
+    )
+    (target / "scripts").mkdir()
+    (target / "scripts" / "test.ps1").write_text("Write-Host 'test placeholder'\n", encoding="utf-8")
+    (target / ".codegraph").mkdir()
+    (target / ".codegraph" / "README.md").write_text(
+        "test codegraph index placeholder\n",
+        encoding="utf-8",
+    )
 
 
 class RepairCountingDeveloper(DeveloperPlanAgent):
@@ -188,16 +217,102 @@ class RecordingApprover:
 
 
 class PhaseThreeTest(unittest.TestCase):
+    ISOLATED_REPOSITORY_TESTS = {
+        "test_phase3_initializes_codegraph_inside_run_workspace",
+        "test_profile_manifest_mismatch_blocks_before_codegraph_and_developer",
+        "test_target_repo_guard_blocks_dirty_worktree",
+    }
+    JOURNEY_TESTS = {
+        "test_v2_phase4_runs_canonical_ids_through_qa",
+        "test_v2_phase4_runs_to_code_review_approved_with_stable_ids",
+        "test_v2_phase4_repair_loops_preserve_contract_and_stable_ids",
+    }
+    REAL_WORKSPACE_PROVISIONING_TESTS = JOURNEY_TESTS | {
+        "test_profile_manifest_mismatch_blocks_before_codegraph_and_developer",
+        "test_target_repo_guard_blocks_dirty_worktree",
+        "test_target_repo_guard_blocks_remote_mismatch",
+        "test_target_repo_guard_blocks_when_path_points_to_harness_repo",
+    }
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.git_template = GitRepositoryTemplate(_populate_phase3_target)
+        cls.runtime_template_temp = tempfile.TemporaryDirectory()
+        template_root = Path(cls.runtime_template_temp.name)
+        topology = cls.git_template.materialize(template_root)
+        cls.shared_topology = topology
+        runtime_root = template_root / ".runtime"
+        settings = load_settings(
+            root=Path(__file__).resolve().parents[1],
+            runtime_root=runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGN_REPAIR_LIMIT": "2",
+                "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
+                "SDLC_TARGET_REPO_PATH": str(topology.canonical),
+                "SDLC_TARGET_REPO_REMOTE": str(topology.remote.resolve()),
+            },
+        )
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        approved = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+        cls.phase2_run_id = str(approved["run_id"])
+        cls.phase2_runtime_template = RuntimeDirectoryTemplate(runtime_root)
+        phase3 = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=cls.phase2_run_id)
+        cls.phase3_run_id = str(phase3["run_id"])
+        workspace_ref = Path(str(phase3["latest_artifacts"]["run_workspace"]))
+        if not workspace_ref.is_absolute():
+            workspace_ref = Path(__file__).resolve().parents[1] / workspace_ref
+        workspace_payload = json.loads(workspace_ref.read_text(encoding="utf-8"))
+        cls.phase3_template_canonical = str(workspace_payload["canonical_repo"])
+        cls.phase3_template_remote = str(workspace_payload["remote"])
+        cls.phase3_template_worktree = str(workspace_payload["worktree_path"])
+        cls.phase3_runtime_template = RuntimeDirectoryTemplate(runtime_root)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.phase3_runtime_template.close()
+        cls.phase2_runtime_template.close()
+        cls.runtime_template_temp.cleanup()
+        cls.git_template.close()
+
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
-        self.remote_path = Path(self.temp_dir.name) / "target.git"
-        self.remote_path.mkdir()
-        self._git(self.remote_path, "init", "--bare")
+        if self._testMethodName in self.ISOLATED_REPOSITORY_TESTS:
+            topology = self.git_template.materialize(Path(self.temp_dir.name))
+        else:
+            topology = self.shared_topology
+        self.remote_path = topology.remote
         self.remote_url = str(self.remote_path.resolve())
-        self.target_repo = self._init_target_repo(remote_url=self.remote_url)
+        self.target_repo = topology.canonical
+        suffix = hashlib.sha256(self._testMethodName.encode("utf-8")).hexdigest()[:8]
+        self.run_id = f"run_20261020_000000_{suffix}"
         self.settings = self._settings()
+        if self._testMethodName not in self.JOURNEY_TESTS:
+            # Workspace suite và ba journey giữ probe Git thật; các test còn lại
+            # tập trung vào contract planning/state nên không lặp identity probe.
+            validation_patch = patch.object(RunWorkspaceManager, "_validate_git", autospec=True, return_value=None)
+            validation_patch.start()
+            self.addCleanup(validation_patch.stop)
+        if self._testMethodName not in self.REAL_WORKSPACE_PROVISIONING_TESTS:
+            creation_patch = patch.object(
+                RunWorkspaceManager,
+                "_create_locked",
+                autospec=True,
+                side_effect=lambda manager, *, run_id, state: create_fast_run_workspace(
+                    manager,
+                    run_id=run_id,
+                    state=state,
+                ),
+            )
+            creation_patch.start()
+            self.addCleanup(creation_patch.stop)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -217,32 +332,6 @@ class PhaseThreeTest(unittest.TestCase):
             runtime_root=self.runtime_root,
             overrides=overrides,
         )
-
-    def _init_target_repo(self, *, remote_url: str) -> Path:
-        target = Path(self.temp_dir.name) / "target_repo"
-        source_dir = target / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"
-        test_dir = target / "src" / "test" / "java" / "com" / "sdlc" / "etour" / "heritage"
-        source_dir.mkdir(parents=True)
-        test_dir.mkdir(parents=True)
-        (source_dir / "CulturalHeritage.java").write_text(
-            "package com.sdlc.etour.heritage;\npublic final class CulturalHeritage {}\n",
-            encoding="utf-8",
-        )
-        (test_dir / "CulturalHeritageTest.java").write_text(
-            "package com.sdlc.etour.heritage;\npublic final class CulturalHeritageTest {}\n",
-            encoding="utf-8",
-        )
-        (target / "scripts").mkdir()
-        (target / "scripts" / "test.ps1").write_text("Write-Host 'test placeholder'\n", encoding="utf-8")
-        (target / ".codegraph").mkdir()
-        (target / ".codegraph" / "README.md").write_text("test codegraph index placeholder\n", encoding="utf-8")
-        self._git(target, "init")
-        self._git(target, "add", ".")
-        self._git(target, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init")
-        self._git(target, "branch", "-M", "main")
-        self._git(target, "remote", "add", "origin", remote_url)
-        self._git(target, "push", "-u", "origin", "main")
-        return target
 
     def _git(self, cwd: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True, encoding="utf-8")
@@ -303,6 +392,15 @@ class PhaseThreeTest(unittest.TestCase):
         self._git(self.target_repo, "push", "origin", "main")
 
     def _create_phase2_run(self) -> dict[str, object]:
+        self.phase2_runtime_template.materialize(
+            self.runtime_root,
+            replacements={self.phase2_run_id: self.run_id},
+        )
+        approved = PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
+        self.assertEqual(approved["status"], "waiting_design_approval")
+        return approved
+
+    def _create_phase2_run_fresh(self) -> dict[str, object]:
         created = PhaseOneWorkflow(self.settings).start_or_get_run(
             dataset="eTour",
             use_case="UC1",
@@ -311,6 +409,23 @@ class PhaseThreeTest(unittest.TestCase):
         approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
         self.assertEqual(approved["status"], "waiting_design_approval")
         return approved
+
+    def _create_phase3_run_from_template(self) -> dict[str, object]:
+        manager = RunWorkspaceManager(self.settings)
+        worktree_path = manager.expected_worktree_path(self.run_id)
+        self.phase3_runtime_template.materialize(
+            self.runtime_root,
+            replacements={
+                self.phase3_run_id: self.run_id,
+                self.phase3_run_id[-8:]: self.run_id[-8:],
+                self.phase3_template_canonical: str(self.target_repo.resolve()),
+                self.phase3_template_remote: self.remote_url,
+                self.phase3_template_worktree: str(worktree_path),
+            },
+        )
+        state = manager.store.read_state(self.run_id)
+        create_fast_run_workspace(manager, run_id=self.run_id, state=state)
+        return PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
 
     def _create_v2_phase2_run(self) -> dict[str, object]:
         """All new Phase 2 runs already use the canonical V2 contract."""
@@ -543,9 +658,9 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "requirement_v2_phase4_input_invalid")
         self.assertEqual(workflow.store.read_state(run_id), state_before)
 
+    @pytest.mark.journey
     def test_v2_phase4_runs_canonical_ids_through_qa(self) -> None:
-        approved = self._create_v2_phase2_run()
-        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
+        phase3 = self._create_phase3_run_from_template()
         run_id = str(phase3["run_id"])
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
 
@@ -584,8 +699,9 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(trace_ids, qa_ids)
         self.assertEqual(trace["stats"]["requirements_covered"], trace["stats"]["requirement_count"])
 
+    @pytest.mark.journey
     def test_v2_phase4_runs_to_code_review_approved_with_stable_ids(self) -> None:
-        approved = self._create_v2_phase2_run()
+        approved = self._create_phase2_run_fresh()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
@@ -634,9 +750,9 @@ class PhaseThreeTest(unittest.TestCase):
             self.assertIn(requirement_id, jira_sync)
             self.assertIn(requirement_id, confluence_sync)
 
+    @pytest.mark.journey
     def test_v2_phase4_repair_loops_preserve_contract_and_stable_ids(self) -> None:
-        approved = self._create_v2_phase2_run()
-        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
+        phase3 = self._create_phase3_run_from_template()
         run_id = str(phase3["run_id"])
         ready = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
         initial_packet = json.loads(

@@ -9,6 +9,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import pytest
+
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.storage.runtime import RuntimeStore
@@ -22,6 +24,29 @@ from sdlc_harness.sync.github import (
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
+from tests._support import GitRepositoryTemplate, create_fast_run_workspace
+
+
+pytestmark = pytest.mark.integration
+
+
+def _populate_publisher_target(target: Path) -> None:
+    source = target / "src" / "main" / "java" / "example"
+    source.mkdir(parents=True)
+    (source / "Feature.java").write_text("final class InitialFeature {}\n", encoding="utf-8")
+
+
+def _populate_workflow_target(target: Path) -> None:
+    source = target / "src" / "main" / "java" / "example"
+    tests = target / "src" / "test" / "java" / "example"
+    scripts = target / "scripts"
+    source.mkdir(parents=True)
+    tests.mkdir(parents=True)
+    scripts.mkdir(parents=True)
+    (source / "Feature.java").write_text("final class Feature {}\n", encoding="utf-8")
+    (tests / "FeatureAcceptanceTest.java").write_text("final class FeatureAcceptanceTest {}\n", encoding="utf-8")
+    (scripts / "test.ps1").write_text("Write-Host pass\n", encoding="utf-8")
+    (target / ".codegraph").mkdir()
 
 
 class FakeGh:
@@ -171,9 +196,22 @@ class FailingPublisher:
 
 
 class GitHubSyncTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.publisher_template = GitRepositoryTemplate(_populate_publisher_target)
+        cls.workflow_template = GitRepositoryTemplate(_populate_workflow_target)
+
+    @classmethod
+    def tearDownClass(cls) -> None:
+        cls.workflow_template.close()
+        cls.publisher_template.close()
+
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
+        validation_patch = patch.object(RunWorkspaceManager, "_validate_git", autospec=True, return_value=None)
+        validation_patch.start()
+        self.addCleanup(validation_patch.stop)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -503,7 +541,12 @@ class GitHubSyncTest(unittest.TestCase):
                 "latest_artifacts": {},
             }
         )
-        workspace = RunWorkspaceManager(settings).create_for_run(run_id)
+        manager = RunWorkspaceManager(settings)
+        workspace = create_fast_run_workspace(
+            manager,
+            run_id=run_id,
+            state=store.read_state(run_id),
+        )
         worktree = Path(workspace.worktree_path)
         (worktree / ".codegraph").mkdir(exist_ok=True)
         (worktree / "src" / "main" / "java" / "example" / "Feature.java").write_text(
@@ -586,47 +629,13 @@ class GitHubSyncTest(unittest.TestCase):
         return settings, store, run_id
 
     def _target_with_bare_remote(self) -> tuple[Path, Path]:
-        remote = self.root / "remote.git"
-        self._git(self.root, "init", "--bare", str(remote))
-        target = self.root / "target"
-        target.mkdir()
-        source = target / "src" / "main" / "java" / "example"
-        source.mkdir(parents=True)
-        (source / "Feature.java").write_text("final class InitialFeature {}\n", encoding="utf-8")
-        self._git(target, "init")
-        self._git(target, "config", "user.name", "Test")
-        self._git(target, "config", "user.email", "test@example.com")
-        self._git(target, "add", ".")
-        self._git(target, "commit", "-m", "Initial")
-        self._git(target, "branch", "-M", "main")
-        self._git(target, "remote", "add", "origin", str(remote))
-        self._git(target, "push", "-u", "origin", "main")
-        self._git(target, "checkout", "-b", "feature/sdlc-1-implementation")
-        return target, remote
+        topology = self.publisher_template.materialize(self.root, canonical_name="target")
+        self._git(topology.canonical, "checkout", "-b", "feature/sdlc-1-implementation")
+        return topology.canonical, topology.remote
 
     def _init_workflow_target(self) -> tuple[Path, Path]:
-        remote = self.root / "workflow-remote.git"
-        self._git(self.root, "init", "--bare", str(remote))
-        target = self.root / "workflow-target"
-        source = target / "src" / "main" / "java" / "example"
-        tests = target / "src" / "test" / "java" / "example"
-        scripts = target / "scripts"
-        source.mkdir(parents=True)
-        tests.mkdir(parents=True)
-        scripts.mkdir(parents=True)
-        (source / "Feature.java").write_text("final class Feature {}\n", encoding="utf-8")
-        (tests / "FeatureAcceptanceTest.java").write_text("final class FeatureAcceptanceTest {}\n", encoding="utf-8")
-        (scripts / "test.ps1").write_text("Write-Host pass\n", encoding="utf-8")
-        (target / ".codegraph").mkdir()
-        self._git(target, "init")
-        self._git(target, "config", "user.name", "Test")
-        self._git(target, "config", "user.email", "test@example.com")
-        self._git(target, "add", ".")
-        self._git(target, "commit", "-m", "Initial")
-        self._git(target, "branch", "-M", "main")
-        self._git(target, "remote", "add", "origin", str(remote))
-        self._git(target, "push", "-u", "origin", "main")
-        return target, remote
+        topology = self.workflow_template.materialize(self.root, canonical_name="workflow-target")
+        return topology.canonical, topology.remote
 
     def _git(self, cwd: Path, *args: str) -> None:
         subprocess.run(["git", *args], cwd=str(cwd), check=True, capture_output=True, text=True, encoding="utf-8")
