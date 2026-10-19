@@ -2,8 +2,10 @@
 
 Thư mục này là nguồn định hướng cho bước nâng cấp tiếp theo của SDLC Harness sau
 mốc HTTP API-only và live E2E ngày 2026-10-19. Audit/Gate 0 đã hoàn tất và A1.1
-đã thêm contract/registry `typescript_fullstack_v1` thuần. Profile chưa được nối
-vào config, run state hay workflow; target TypeScript cũng chưa được tạo.
+đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a/A1.2b đã thêm
+selector config, snapshot profile theo run, downstream settings binding và
+status metadata tối thiểu. Mặc định rỗng vẫn giữ Java baseline; target TypeScript
+chưa được tạo.
 
 ## Mục Tiêu
 
@@ -41,8 +43,8 @@ tại trong code.
   Java coupling và khoảng trống full-stack có dẫn chứng.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
-- [Implementation Plan](implementation-plan.md): roadmap cho phiên triển khai
-  sau; Gate 0 và A1.1 registry đã hoàn tất, các checklist còn lại vẫn để mở.
+- [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0 và
+  A1.1-A1.2b đã hoàn tất, các checklist còn lại giữ theo trạng thái thực tế.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
   evidence đã khóa trước khi code.
 - [Progress](progress.md): execution log của công việc khảo sát và viết tài liệu.
@@ -58,6 +60,7 @@ Trước khi triển khai code cần review đủ bốn câu hỏi:
 
 Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. Việc đóng Gate 0
 không tự cấp quyền cutover. A1.1 đã thêm profile contract/registry; A1.2a thêm
-selector config fail-closed nhưng giữ mặc định rỗng. Run snapshot/runtime
-workflow vẫn chưa đổi, target repo mới chưa được tạo và chưa chạy migration hay
-live workflow cho hướng TypeScript.
+selector config fail-closed; A1.2b đóng băng profile/target identity cho run mới
+có selector và buộc action sau dùng snapshot. Mặc định rỗng vẫn giữ Java
+baseline, target repo mới chưa được tạo và chưa chạy migration hay live workflow
+cho hướng TypeScript.

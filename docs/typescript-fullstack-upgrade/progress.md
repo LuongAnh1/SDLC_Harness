@@ -135,6 +135,34 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Full regression: `rtk python -m pytest` ->
   `413 passed in 775.82s (0:12:55)`.
 
+## 2026-10-19 - A1.2b Run-scoped Profile Snapshot
+
+- Baseline: commit `d2bd1c3` (`feat: add project profile selector`).
+- Thêm immutable `ProfileSnapshotV1` với version `profile_snapshot_v1`, profile
+  ID/schema, language ID/schema và target remote/base branch. Reader chấp nhận
+  additive field cho A1.2c nhưng fail closed với shape/version hoặc registry
+  mismatch bằng `profile_snapshot_invalid`/`profile_snapshot_mismatch`.
+- Run mới có `SDLC_PROJECT_PROFILE` ghi snapshot trước lần persist state đầu và
+  trước LLM; selector rỗng không thêm snapshot. Active run không được backfill
+  khi config đổi.
+- `ApplicationService` đọc snapshot dưới run lock và bind lại
+  `project_profile_id`, target remote và base branch trước mọi action mutation,
+  sync hoặc workspace. Run thiếu snapshot vẫn dùng Java baseline trong giai đoạn
+  migration; policy `legacy_execution_profile_retired` chưa được bật.
+- Status/detail/list thêm `execution_profile` additive với classification
+  `profiled`, `legacy_java_v1` hoặc `invalid`; không công khai target remote,
+  branch hoặc local path. Status vẫn đọc được nếu snapshot hỏng, còn mutation bị
+  chặn trước workflow dispatch.
+- Targeted regression cho profile/Application Service/Phase 1/Read API:
+  `87 passed in 16.75s`; HTTP Write API: `6 passed in 5.72s`.
+- Full run đầu phát hiện hai CLI workspace mock chưa tạo persisted state:
+  `424 passed, 2 failed in 796.05s`. Fixture được sửa để dùng runtime tạm đúng
+  precondition; rerun hai test -> `2 passed in 0.21s`.
+- Full regression trên revision cuối: `rtk python -m pytest` ->
+  `426 passed in 792.39s (0:13:12)`.
+- Chưa triển khai A1.2c manifest/base SHA/component roots, legacy retirement
+  guard, TypeScript prompt, runner hoặc target repo bootstrap.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

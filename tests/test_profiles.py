@@ -10,11 +10,16 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
     ComponentProfile,
     LanguageProfile,
+    PROFILE_SNAPSHOT_VERSION,
     ProfileRegistry,
+    ProfileSnapshotV1,
     ProjectProfile,
+    build_profile_snapshot,
     get_language_profile,
     get_project_profile,
     list_project_profile_ids,
+    profile_status_metadata,
+    read_profile_snapshot,
 )
 
 
@@ -180,6 +185,88 @@ class ProfileRegistryTests(unittest.TestCase):
             self.assertNotIn(forbidden_key, payload)
         for java_assumption in ("src/main/java", "src/test/java", "javac", "scripts/test.ps1"):
             self.assertNotIn(java_assumption, payload)
+
+    def test_profile_snapshot_round_trips_and_allows_future_additive_fields(self) -> None:
+        snapshot = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/target.git",
+            target_base_branch="main",
+        )
+        payload: dict[str, object] = {**snapshot.to_dict(), "future_workspace_binding": {"base_sha": "abc"}}
+
+        restored = ProfileSnapshotV1.from_dict(payload)
+        project, language = restored.resolve_profiles()
+
+        self.assertEqual(restored, snapshot)
+        self.assertEqual(restored.version, PROFILE_SNAPSHOT_VERSION)
+        self.assertEqual(project.profile_id, "typescript_fullstack_v1")
+        self.assertEqual(language.profile_id, "typescript_v1")
+        self.assertEqual(read_profile_snapshot({"profile_snapshot": payload}), snapshot)
+
+    def test_profile_snapshot_rejects_invalid_shape_and_unknown_version(self) -> None:
+        snapshot = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/target.git",
+            target_base_branch="main",
+        ).to_dict()
+        cases: tuple[object, ...] = (
+            [],
+            {},
+            {**snapshot, "version": "profile_snapshot_v2"},
+            {**snapshot, "target_remote": ""},
+            {**snapshot, "target_base_branch": " main "},
+        )
+
+        for payload in cases:
+            with self.subTest(payload=payload), self.assertRaises(HarnessError) as context:
+                ProfileSnapshotV1.from_dict(payload)
+            self.assertEqual(context.exception.error_code, "profile_snapshot_invalid")
+
+    def test_profile_snapshot_rejects_registry_mismatch(self) -> None:
+        snapshot = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/target.git",
+            target_base_branch="main",
+        )
+        cases = (
+            replace(snapshot, project_profile_id="removed_profile_v1"),
+            replace(snapshot, project_profile_schema="project_profile_v2"),
+            replace(snapshot, language_profile_id="removed_language_v1"),
+            replace(snapshot, language_profile_schema="language_profile_v2"),
+        )
+
+        for candidate in cases:
+            with self.subTest(candidate=candidate), self.assertRaises(HarnessError) as context:
+                candidate.resolve_profiles(run_id="run_profile")
+            self.assertEqual(context.exception.error_code, "profile_snapshot_mismatch")
+            self.assertEqual(context.exception.run_id, "run_profile")
+
+    def test_profile_status_metadata_classifies_profiled_legacy_and_invalid_runs(self) -> None:
+        snapshot = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/target.git",
+            target_base_branch="main",
+        )
+
+        self.assertEqual(
+            profile_status_metadata({"run_id": "run_profile", "profile_snapshot": snapshot.to_dict()}),
+            {
+                "classification": "profiled",
+                "snapshot_version": "profile_snapshot_v1",
+                "project_profile_id": "typescript_fullstack_v1",
+                "language_profile_id": "typescript_v1",
+            },
+        )
+        self.assertEqual(
+            profile_status_metadata({"run_id": "run_legacy"})["classification"],
+            "legacy_java_v1",
+        )
+        self.assertEqual(
+            profile_status_metadata(
+                {"run_id": "run_invalid", "profile_snapshot": {"version": "profile_snapshot_v2"}}
+            )["classification"],
+            "invalid",
+        )
 
 
 if __name__ == "__main__":

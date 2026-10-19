@@ -15,6 +15,7 @@ from .action_specs import public_dashboard_schema
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
 from ..events import DEFAULT_EVENT_LIMIT, EventStore
+from ..profiles import profile_status_metadata
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 
@@ -227,6 +228,7 @@ class ApplicationReadService:
         summary = {
             "run_id": run_id,
             "source_ref": state.get("source_ref"),
+            "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
             "created_at": state.get("created_at"),

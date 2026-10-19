@@ -19,6 +19,7 @@ from sdlc_harness.application.read_service import MAX_ARTIFACT_BYTES
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.events import EventStore
 from sdlc_harness.interfaces.http import ApiServerConfig, create_server
+from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.storage.runtime import RuntimeStore
 
 
@@ -124,6 +125,30 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertNotIn(self.api_token, encoded)
         self.assertNotIn("slice-2-llm-secret", encoded)
         self.assertEqual(result["workspace"]["worktree_path"], "<local-path>")
+
+    def test_run_reads_expose_minimal_profile_metadata_without_target_identity(self) -> None:
+        state = dict(self.state)
+        state["profile_snapshot"] = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/private-target.git",
+            target_base_branch="private-main",
+        ).to_dict()
+        self.store.write_state(state)
+
+        detail = self.read_service.get_run(run_id=self.run_id)
+        summary = self.read_service.list_runs(limit=1)["runs"][0]
+        encoded = json.dumps({"detail": detail, "summary": summary}, ensure_ascii=False)
+
+        expected = {
+            "classification": "profiled",
+            "snapshot_version": "profile_snapshot_v1",
+            "project_profile_id": "typescript_fullstack_v1",
+            "language_profile_id": "typescript_v1",
+        }
+        self.assertEqual(detail["execution_profile"], expected)
+        self.assertEqual(summary["execution_profile"], expected)
+        self.assertNotIn("private-target", encoded)
+        self.assertNotIn("private-main", encoded)
 
     def test_read_public_json_artifact(self) -> None:
         result = self.read_service.read_artifact(
@@ -271,6 +296,27 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(schema["version"], "dashboard_schema_v1")
         self.assertEqual(set(schema["actions"]), set(ACTION_SPECS))
         self.assertEqual(len(schema["workflow"]["nodes"]), 8)
+
+    def test_http_status_exposes_profile_ids_without_target_remote_or_branch(self) -> None:
+        state = dict(self.state)
+        state["profile_snapshot"] = build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote="https://github.com/example/private-target.git",
+            target_base_branch="private-main",
+        ).to_dict()
+        self.store.write_state(state)
+
+        status, _, run = self.request(
+            f"/api/v1/runs/{self.run_id}",
+            token=self.api_token,
+        )
+        encoded = json.dumps(run, ensure_ascii=False)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(run["execution_profile"]["classification"], "profiled")
+        self.assertEqual(run["execution_profile"]["project_profile_id"], "typescript_fullstack_v1")
+        self.assertNotIn("private-target", encoded)
+        self.assertNotIn("private-main", encoded)
 
     def test_dashboard_assets_are_same_origin_public_and_hardened(self) -> None:
         response = urlopen(f"{self.base_url}/", timeout=3)

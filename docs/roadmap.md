@@ -194,9 +194,9 @@ CLI -----------------------------------------------> Application Service
 Application Service -> existing workflows/state/artifacts/sync
 ```
 
-## Hướng Tiếp Theo - TypeScript Full-stack (Đang Ở Mức Tài Liệu)
+## Hướng Tiếp Theo - TypeScript Full-stack (Đang Triển Khai Chặng A)
 
-Trước khi mở Phase 5, repo đang khảo sát một hướng nâng cấp riêng cho execution
+Trước khi mở Phase 5, repo đang triển khai một hướng nâng cấp riêng cho execution
 target: bỏ hard-code Java bằng language/project profile, sau đó mở rộng workflow
 để một Jira issue/use case triển khai được vertical feature có frontend,
 backend và database.
@@ -205,9 +205,9 @@ Tài liệu nguồn nằm tại
 [`docs/typescript-fullstack-upgrade/`](typescript-fullstack-upgrade/README.md).
 Hướng đã chốt dùng repo mới `SDLC_Target_TypeScript`, React/Vite, Fastify,
 PostgreSQL/Prisma, Vitest và Playwright. A1.1 đã thêm profile contract/registry
-thuần; A1.2a thêm selector config fail-closed nhưng mặc định vẫn rỗng. Chưa có
-run snapshot/workflow integration; Java vẫn là execution target của baseline
-đang chạy.
+thuần; A1.2a thêm selector config fail-closed; A1.2b thêm run snapshot,
+downstream settings binding và status metadata tối thiểu. Mặc định vẫn rỗng nên
+Java tiếp tục là execution target của baseline đang chạy.
 
 Roadmap tương lai chia hai chặng:
 

@@ -16,6 +16,7 @@ from ..artifacts import (
 )
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..profiles import build_profile_snapshot, profile_status_metadata
 from ..sources.fixtures import UseCaseSource, load_use_case
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
@@ -103,6 +104,12 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
+        if self.settings.project_profile_id:
+            state["profile_snapshot"] = build_profile_snapshot(
+                project_profile_id=self.settings.project_profile_id,
+                target_remote=self.settings.target_repo_remote,
+                target_base_branch=self.settings.target_base_branch,
+            ).to_dict()
         self.store.write_state(state)
 
         return self._start_v2(source=source, state=state)
@@ -453,6 +460,7 @@ class PhaseOneWorkflow:
             "source_ref": state.get("source_ref"),
             "run_id": state.get("run_id"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
+            "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
             "latest_artifacts": latest_artifacts if isinstance(latest_artifacts, dict) else {},

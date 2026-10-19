@@ -254,6 +254,106 @@ class PhaseOneTest(unittest.TestCase):
         self.assertFalse(second["created_new_run"])
         self.assertEqual(first["run_id"], second["run_id"])
 
+    def test_profile_snapshot_is_persisted_before_requirement_refiner_runs(self) -> None:
+        settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                "SDLC_TARGET_REPO_REMOTE": "https://github.com/example/typescript-target.git",
+                "SDLC_TARGET_BASE_BRANCH": "main",
+            },
+        )
+        workflow = PhaseOneWorkflow(settings)
+        observed: dict[str, object] = {}
+
+        def stop_after_state(*args: object, run_id: str, **kwargs: object) -> object:
+            observed.update(workflow.store.read_state(run_id))
+            raise HarnessError("test_stop", "Stop after observing initial state.")
+
+        with patch.object(workflow.refiner_v2, "refine", side_effect=stop_after_state):
+            with self.assertRaises(HarnessError) as context:
+                workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertEqual(context.exception.error_code, "test_stop")
+        snapshot = observed["profile_snapshot"]
+        self.assertIsInstance(snapshot, dict)
+        self.assertEqual(snapshot["version"], "profile_snapshot_v1")
+        self.assertEqual(snapshot["project_profile_id"], "typescript_fullstack_v1")
+        self.assertEqual(snapshot["language_profile_id"], "typescript_v1")
+        self.assertEqual(snapshot["target_remote"], "https://github.com/example/typescript-target.git")
+
+    def test_profiled_run_status_exposes_only_minimal_profile_metadata(self) -> None:
+        settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                "SDLC_TARGET_REPO_REMOTE": "https://github.com/example/typescript-target.git",
+            },
+        )
+        workflow = PhaseOneWorkflow(settings)
+
+        response = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertEqual(
+            response["execution_profile"],
+            {
+                "classification": "profiled",
+                "snapshot_version": "profile_snapshot_v1",
+                "project_profile_id": "typescript_fullstack_v1",
+                "language_profile_id": "typescript_v1",
+            },
+        )
+        self.assertNotIn("target_remote", response["execution_profile"])
+
+    def test_active_legacy_run_is_not_backfilled_after_profile_config_changes(self) -> None:
+        legacy_workflow = PhaseOneWorkflow(self.settings)
+        first = legacy_workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        profiled_settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                "SDLC_TARGET_REPO_REMOTE": "https://github.com/example/typescript-target.git",
+            },
+        )
+
+        second = PhaseOneWorkflow(profiled_settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        state = legacy_workflow.store.read_state(str(first["run_id"]))
+
+        self.assertFalse(second["created_new_run"])
+        self.assertNotIn("profile_snapshot", state)
+        self.assertEqual(second["execution_profile"]["classification"], "legacy_java_v1")
+
+    def test_status_reports_invalid_snapshot_without_breaking_audit_read(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_invalid_profile_snapshot"
+        workflow.store.write_state(
+            {
+                "run_id": run_id,
+                "status": "blocked",
+                "latest_artifacts": {},
+                "allowed_next_actions": ["get_status"],
+                "profile_snapshot": {"version": "profile_snapshot_v2"},
+            }
+        )
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(response["execution_profile"]["classification"], "invalid")
+        self.assertIsNone(response["execution_profile"]["project_profile_id"])
+
     def test_start_or_get_run_ignores_failed_active_run(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
         first = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
@@ -407,6 +507,7 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_cli_code_review_approval_success_is_json_with_zero_exit(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
+        PhaseOneWorkflow(self.settings).store.write_state({"run_id": run_id})
         response = {
             "ok": True,
             "run_id": run_id,
@@ -438,6 +539,7 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_cli_code_review_approval_business_error_keeps_json_contract(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
+        PhaseOneWorkflow(self.settings).store.write_state({"run_id": run_id})
         stdout = io.StringIO()
         failure = HarnessError(
             "github_pr_identity_mismatch",

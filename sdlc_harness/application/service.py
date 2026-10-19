@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from .commands import ApplicationCommand
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
 from ..events import current_event_context, event_scope
+from ..profiles import read_profile_snapshot
 from ..sources.fixtures import source_ref_for
 from ..sources.jira import jira_source_ref_for
 from ..storage.runtime import RuntimeStore
@@ -79,8 +81,29 @@ class ApplicationService:
         }:
             run_id = self._required_text(command, "run_id")
             with store.run_lock(run_id):
-                return self._execute_unlocked(command, settings=settings)
+                state = store.read_state(run_id)
+                run_settings = self._settings_for_run(settings=settings, state=state, run_id=run_id)
+                return self._execute_unlocked(command, settings=run_settings)
         return self._execute_unlocked(command, settings=settings)
+
+    @staticmethod
+    def _settings_for_run(
+        *,
+        settings: Settings,
+        state: dict[str, object],
+        run_id: str,
+    ) -> Settings:
+        """Gắn execution identity theo snapshot đã lưu, không theo config hiện tại."""
+
+        snapshot = read_profile_snapshot(state, run_id=run_id)
+        if snapshot is None:
+            return settings
+        return replace(
+            settings,
+            project_profile_id=snapshot.project_profile_id,
+            target_repo_remote=snapshot.target_remote,
+            target_base_branch=snapshot.target_base_branch,
+        )
 
     def _execute_unlocked(
         self,

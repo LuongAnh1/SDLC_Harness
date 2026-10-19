@@ -1,9 +1,9 @@
 # Target Direction
 
 > Trạng thái: A1.1 đã triển khai contract/registry thuần; A1.2a đã thêm config
-> selection fail-closed nhưng giữ mặc định rỗng. Chưa có run snapshot hoặc
-> workflow nào dùng profile. Các artifact và behavior Phase 2-4 dưới đây vẫn là
-> proposal.
+> selection fail-closed; A1.2b đã thêm snapshot theo run, downstream settings
+> binding và status metadata tối thiểu. Mặc định rỗng vẫn giữ Java baseline. Các
+> artifact và behavior Phase 2-4 dưới đây vẫn là proposal.
 
 ## Nguyên Tắc
 
@@ -57,17 +57,19 @@ logic TypeScript trực tiếp.
 A1.1 đã đăng ký `typescript_v1` và `typescript_fullstack_v1` bằng immutable
 dataclass, component/editable/protected paths và verification stage IDs. A1.2a
 đã thêm `SDLC_PROJECT_PROFILE`: giá trị khác rỗng được resolve fail-closed qua
-registry, còn mặc định rỗng giữ Java baseline trong giai đoạn migration. Registry
-không chứa raw command; phần run snapshot và downstream binding thuộc A1.2b.
+registry, còn mặc định rỗng giữ Java baseline trong giai đoạn migration. A1.2b
+đã đóng băng profile ID/schema cùng target remote/base branch cho run mới có
+selector; registry vẫn không chứa raw command.
 
 Niko không chọn profile theo câu chat. Harness resolve profile từ config, kiểm
 target repo phù hợp rồi snapshot profile identity vào run/workspace để retry và
 audit dùng cùng một contract.
 
-`profile_snapshot_v1` được tạo ngay khi mở run, trước khi config có thể đổi, và
-chứa profile/schema IDs cùng target remote/base branch. Lúc provision workspace,
-snapshot bổ sung manifest digest, base SHA và resolved component roots. Mọi
-action sau phải dùng snapshot này, không resolve lại profile từ default hiện tại.
+`profile_snapshot_v1` hiện được tạo ngay khi mở run, trước lần ghi state đầu tiên
+và trước LLM, chứa profile/schema IDs cùng target remote/base branch. Action sau
+được bind lại từ snapshot dưới run lock; status chỉ công khai classification và
+profile IDs. A1.2c sẽ bổ sung manifest digest, base SHA và resolved component
+roots lúc provision workspace.
 
 ## Target Project Đề Xuất
 
@@ -211,8 +213,9 @@ approved claims và Verification evidence như consensus flow hiện hành.
 
 - HTTP action, operation, idempotency và checkpoint không cần đổi chỉ để hỗ trợ
   project profile.
-- Status có thể thêm profile/schema metadata theo hướng additive; artifact public
-  mới phải được thêm có chủ ý vào Read API allowlist và được sanitize.
+- Status đã thêm `execution_profile` theo hướng additive và không công khai
+  target identity; artifact public mới vẫn phải được thêm có chủ ý vào Read API
+  allowlist và được sanitize.
 - Không tạo microservice orchestration hoặc nhiều repo cho FE/BE ở V1.
 - Không cho một run xây toàn bộ ứng dụng hoặc nhiều feature độc lập.
 - Không dùng database thật/shared/prod cho agent verification.

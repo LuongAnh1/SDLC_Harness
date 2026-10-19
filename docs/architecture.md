@@ -169,6 +169,7 @@ cho bước tiếp theo nằm tại
 Hướng này tách workflow/checkpoint chung khỏi language/project profile, sau đó
 mở rộng artifact và verification để một run có thể triển khai một vertical web
 feature xuyên frontend, backend và database. A1.1 đã thêm profile
-contract/registry thuần; A1.2a thêm selector config fail-closed nhưng giữ mặc
-định rỗng. Chưa có run snapshot hoặc workflow integration. HTTP API-only boundary
-và ownership giữa Niko/SDLC Harness vẫn giữ nguyên.
+contract/registry thuần; A1.2a thêm selector config fail-closed; A1.2b snapshot
+profile/target identity cho run mới có selector và bind settings của action theo
+snapshot. Mặc định rỗng vẫn giữ Java baseline; chưa chuyển prompt/runner sang
+TypeScript. HTTP API-only boundary và ownership giữa Niko/SDLC Harness giữ nguyên.
