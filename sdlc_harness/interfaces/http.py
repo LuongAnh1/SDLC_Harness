@@ -1,4 +1,4 @@
-"""Stdlib HTTP read/write API for SDLC Harness."""
+"""HTTP read/write boundary cho Niko, Ops Dashboard và SDLC operations."""
 
 from __future__ import annotations
 

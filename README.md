@@ -15,7 +15,7 @@ SDLC_Harness
   = lưu workflow state, artifact version, checkpoint, tool sync, traceability
 ```
 
-Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/CLI: load eTour UC1 hoặc Jira issue thật, gọi Requirement Refiner theo formal grammar kiểu TraceDev, validate/repair formal use case và requirement packet, ghi runtime artifact, sync Jira/Confluence thật khi cấu hình Atlassian đầy đủ, và trả JSON status cho Niko đọc. Phase 2 đã khóa ở mức static approve-only: `approve-checkpoint`, Designer Agent fake/LLM-ready, parser PlantUML class/sequence graph, Validator traceability V1, Designer repair loop có cấu hình vòng lặp, mock/real Jira-Confluence sync cho checkpoint thiết kế, và regression test cho nhánh `blocked` khi requirement không traceable. Phase 3 là implementation planning checkpoint: sau khi design được duyệt, Harness tạo Git worktree/branch riêng cho run, tự chuẩn bị CodeGraph trong worktree, sinh implementation plan có version, chạy Validator hybrid rule + LLM, sync plan lên Jira/Confluence và dừng ở `waiting_implementation_plan_review`. Phase 4 tạo code/test thật trong chính workspace đó, chạy Verification Runner, Validator code trace hybrid rule + LLM và QA-generated acceptance test; cả vòng repair nhỏ lẫn vòng repair lớn đã được live-test bằng DeepSeek tới state `qa_tested`. Slice 4.8A đã triển khai publication manifest, commit/push và Draft PR idempotent tới trạng thái `code_review_published`; Slice 4.8B đã sync PR/test/trace/QA evidence về Jira và Confluence, hỗ trợ re-sync theo remote identity ổn định và mở checkpoint `code_review_ready`. CLI mặc định mock; real sync phải được chọn rõ. Slice 4.9A3 đã nối worktree-per-run xuyên suốt Phase 3/4 và không còn dùng current branch của canonical repo làm nguồn sự thật. Slice 4.9B đã nhận nuôi thành công run/PR legacy mà không đổi HEAD; Slice 4.9C đã thêm lifecycle cleanup explicit, audit và retry an toàn. Slice 4.9D đã được chạy live qua Niko: Draft PR #1 chuyển sang Ready for review, run đạt `code_review_approved`, Jira/Confluence nhận trạng thái mới và PR vẫn OPEN/chưa merge. Mốc nền tảng API + Ops Dashboard được ưu tiên tiếp theo; Phase 5 `request_change` được giữ nguyên và triển khai sau mốc này.
+Giai đoạn hiện tại đã hoàn thiện workflow Requirement → Design → Implementation Plan → Code/Verification/Validator → QA → Code Review, cùng worktree-per-run, Jira/Confluence/GitHub sync và checkpoint do người dùng điều khiển. Mốc API + Ops Dashboard Slice 1-8 đã hoàn thành: Niko gọi Harness bằng HTTP API-only với operation bền vững, idempotency và polling; CLI của Harness vẫn là interface operator/debug độc lập. Live E2E `run_20261019_034156_05cfbb93` đã đi trọn luồng tới `code_review_approved`, PR #7 Ready for review. Phase 5 `request_change` được giữ nguyên và triển khai sau mốc này.
 
 
 ## Cấu Trúc Package
@@ -57,7 +57,8 @@ Giai đoạn hiện tại đã có vertical slice Phase 1 bằng Python package/
 
 ## Quyết Định Phase 0
 
-- Phase 1 dùng CLI trả JSON để Niko gọi SDLC Harness.
+- Phase 1 ban đầu dùng CLI JSON để chứng minh contract; quyết định này đã được
+  thay thế bởi HTTP API-only sau mốc platform Slice 8.
 - eTour UC1 được copy vào `fixtures/etour/UC1.txt` để repo chạy độc lập hơn.
 - Runtime artifact và mock sync output nằm trong `.runtime/runs/<run_id>/`, không nằm trong `docs/`.
 - Thử nghiệm đầu của Phase 1 được phép mock sync, nhưng trước Phase 2 cần có API/tool sync thật tối thiểu.
@@ -114,18 +115,19 @@ hình. Write API trả `202 Accepted`; dùng URL operation trong response để 
 <!-- SDLC_NIKO_SYNC_START -->
 ## Runtime Snapshot
 
-SDLC_Harness hiện là repo sở hữu pipeline Phase 1 cho hướng Agent Harness SDLC:
+SDLC_Harness hiện là repo sở hữu pipeline Phase 1-4 cho hướng Agent Harness SDLC:
 đọc use case từ fixture hoặc Jira, chuẩn hóa thành formal use case và
 Requirement Packet, validate/repair, ghi artifact runtime và sync checkpoint lên
-Jira/Confluence. Niko_Agent chỉ gọi repo này qua CLI JSON rồi diễn giải kết quả
-cho người dùng trên Telegram.
+Jira/Confluence/GitHub. Niko_Agent gọi HTTP API rồi diễn giải kết quả cho người
+dùng trên Telegram.
 
 Ranh giới hiện tại:
 
 - Phase 1 đã có real Jira source và real Jira/Confluence sync khi cấu hình
   Atlassian đầy đủ.
 - Mock sync vẫn tồn tại cho unit/smoke test hoặc khi chưa cấu hình tool thật.
-- CLI phải giữ stdout chỉ có JSON vì Niko parse trực tiếp response đó.
+- CLI giữ stdout chỉ có JSON để phục vụ operator/automation độc lập; Niko không
+  còn gọi CLI bằng subprocess.
 - Phase 2 hiện có contract `approve-checkpoint` đã khóa cho static approve-only: Designer tạo PlantUML,
   parser sinh class/sequence graph thật, Validator traceability tạo
   requirement graph/class trace/sequence trace/missing links ở mode
@@ -144,13 +146,13 @@ Ranh giới hiện tại:
 <!-- SDLC_NIKO_SYNC_END -->
 
 
-## Platform Upgrade Được Lên Kế Hoạch
+## Platform Upgrade Đã Hoàn Thành
 
-Sau Phase 4 và trước Phase 5 `request_change`, repo sẽ chuyển integration Niko từ
+Sau Phase 4 và trước Phase 5 `request_change`, repo đã chuyển integration Niko từ
 CLI subprocess sang HTTP API có operation bền vững và Ops Dashboard. Thiết kế,
 API contract, runtime event, dashboard/config, cutover Niko và checklist nằm tại
 [`docs/platform-api-dashboard/`](docs/platform-api-dashboard/README.md).
 
-Mốc này đang được triển khai: Slice 1-6 đã hoàn thành, gồm application service,
-Read/Write API, operation queue, events, Ops Dashboard và Runtime Config. CLI JSON
-vẫn là integration contract của Niko cho tới khi Slice 7 dual transport pass.
+Slice 1-8 đã hoàn thành. Niko đã xóa dual transport và cấu hình CLI riêng sau
+live E2E ngày 2026-10-19; CLI JSON của Harness tiếp tục tồn tại cho operator và
+automation, không còn là integration contract của Niko.

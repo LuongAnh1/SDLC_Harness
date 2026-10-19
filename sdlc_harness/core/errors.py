@@ -1,7 +1,7 @@
-﻿"""Lỗi có mã ổn định để CLI trả JSON cho Niko.
+"""Lỗi có mã ổn định cho HTTP API và CLI adapters.
 
-Không để exception Python thô tràn ra stdout vì Niko sẽ đọc stdout như một
-contract máy-máy. Mỗi lỗi nghiệp vụ cần có `error_code` ngắn, ổn định.
+Không để exception Python thô vượt qua transport boundary. Mỗi lỗi nghiệp vụ
+cần có `error_code` ngắn, ổn định để API và CLI cùng ánh xạ sang JSON.
 """
 
 from __future__ import annotations

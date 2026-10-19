@@ -368,3 +368,28 @@ task riêng, không mở rộng Slice 1 sang sửa Validator/Phase 4.
 - `NIKO_SDLC_TRANSPORT` tiếp tục mặc định là `cli`; chỉ đổi sang `api` sau khi
   một run live mới đi trọn Requirement -> Design -> Plan -> Code -> QA -> Code Review.
 
+## 2026-10-19 - Hoàn Thành Slice 8 API-only Cutover
+
+### Bằng chứng live
+
+- Niko chạy `run_20261019_034156_05cfbb93` hoàn toàn qua HTTP API với DeepSeek
+  và real Jira/Confluence/GitHub.
+- Run đi từ Jira intake qua Requirement, Design, Implementation Plan,
+  Developer/Verification/Validator, QA, Draft PR tới `code_review_approved`.
+- GitHub PR #7 chuyển sang Ready for review; không phát hiện operation hoặc
+  mutation trùng.
+
+### Cleanup
+
+- Xóa subprocess transport, `NIKO_SDLC_TRANSPORT` và cấu hình CLI/LLM của Harness
+  khỏi Niko.
+- Giữ CLI của SDLC Harness làm interface operator/debug/automation độc lập.
+- Chuyển Telegram integration fixture từ subprocess sang HTTP `202` và polling.
+- Đồng bộ README, architecture, migration, checklist và module header hai repo.
+
+### Kết luận
+
+Slice 8 hoàn thành. Integration boundary hiện hành là
+`Niko -> HTTP API -> Operation Manager -> Application Service`; Phase 5 có thể
+tiếp tục mà không phụ thuộc subprocess CLI từ Niko.
+

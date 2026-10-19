@@ -188,7 +188,7 @@ Kỳ vọng:
 | `last_sync.status=failed` | Thiếu Atlassian config hoặc token/quyền sai | Kiểm tra `.env`, Jira permission, Confluence permission |
 | `partial_failed` | Một trong hai target Jira/Confluence lỗi | Mở `tool_sync_report_v1.json` để xem target lỗi |
 | Tạo nhiều comment/page | Report cũ chưa có `external_id`, hoặc run khác nhau | Xem `tool_sync_report_v1.json` và `run_id` |
-> Ghi chú đồng bộ với Niko: Niko chỉ gọi các lệnh CLI JSON của SDLC_Harness và
-> format kết quả cho Telegram. Mọi source intake, artifact, state, Jira comment
-> và Confluence page đều được tạo/sync bởi SDLC_Harness.
+> Ghi chú đồng bộ với Niko: Niko gọi HTTP API và format kết quả cho Telegram.
+> CLI trong tài liệu này dành cho operator chạy tay. Mọi source intake, artifact,
+> state, Jira comment và Confluence page đều được tạo/sync bởi SDLC_Harness.
 

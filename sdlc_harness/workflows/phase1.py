@@ -1,4 +1,4 @@
-﻿"""Workflow Phase 1: use case -> formal use case -> requirement checkpoint.
+"""Workflow Phase 1: use case -> formal use case -> requirement checkpoint.
 
 Phase này tạo structured requirement model, kiểm tra grounding/clarification,
 render các projection và lưu checkpoint để Niko có thể kiểm soát từng bước.
@@ -49,7 +49,7 @@ class PhaseOneWorkflow:
     """Điều phối Phase 1 từ fixture/Jira tới checkpoint requirement.
 
     Workflow này sở hữu source loading, refiner, validator, artifact runtime và
-    sync Jira/Confluence. Niko chỉ gọi CLI JSON và đọc response đã tóm tắt.
+    sync Jira/Confluence. Niko gọi HTTP API và đọc response đã tóm tắt.
     """
 
     def __init__(self, settings: Settings):

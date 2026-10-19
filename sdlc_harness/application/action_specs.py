@@ -1,4 +1,4 @@
-"""Shared API action metadata for HTTP validation and the Ops Dashboard."""
+"""HTTP action metadata shared by request validation and the Ops Dashboard."""
 
 from __future__ import annotations
 

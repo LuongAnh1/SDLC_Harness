@@ -23,7 +23,7 @@ start-or-get-run(eTour UC1) hoặc start-from-jira(SDLC-1)
 
 Phase 1 cần chứng minh:
 
-- SDLC Harness có CLI JSON đủ ổn định để Niko gọi sau này.
+- SDLC Harness có application contract ổn định cho HTTP API và CLI operator.
 - SDLC Harness sở hữu việc load source; Niko không tự kéo use case từ fixture/Jira/dataset.
 - Fixture eTour UC1 được đưa qua Requirement Refiner để tạo requirement artifact đầu tiên.
 - Requirement Validator tối thiểu kiểm tra packet trước khi tạo checkpoint.
@@ -37,14 +37,15 @@ Phase 1 cần chứng minh:
 - Chưa gọi Designer/Developer/Tester.
 - Chưa tạo design/code/test artifact.
 - Chưa gọi GitHub API thật.
-- Chưa để Niko tự điều khiển approval/change request; Niko hiện chỉ gọi CLI/status ở mức tối thiểu, không tự kéo use case hay tự sync tool.
+- Trong phạm vi Phase 1 ban đầu, Niko chưa điều khiển approval/change request;
+  integration hiện hành đã dùng HTTP API nhưng vẫn không tự kéo source hay sync tool.
 - Chưa xử lý nhiều use case hoặc impact analysis.
 - Chưa mở đa ngôn ngữ.
 
 ## Tài Liệu Trong Folder Này
 
 - `flow.md`: luồng xử lý `start-or-get-run` và `get-status`.
-- `cli-contract.md`: contract CLI JSON cho Niko gọi.
+- `cli-contract.md`: contract CLI JSON lịch sử và interface operator hiện hành.
 - `operator-guide.md`: cách chạy tay Phase 1, bao gồm `start-or-get-run`,
   `get-status`, `sync-run` và các bước kiểm tra Jira/Confluence/Niko.
 - `runtime-layout.md`: cấu trúc `.runtime/runs/<run_id>/` và active run index.

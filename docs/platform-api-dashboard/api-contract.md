@@ -226,7 +226,7 @@ trong lúc operation queued/running trả `409 config_busy`; config JSON hỏng 
 - Cùng key và cùng canonical payload trả lại operation cũ.
 - Cùng key nhưng payload khác trả `409 idempotency_conflict`.
 - Key được lưu bền vững cùng operation, không chỉ giữ trong process memory.
-- API mất kết nối sau `202` không cho phép Niko tự động gọi CLI fallback.
+- API mất kết nối sau `202` không cho phép Niko tự tạo operation mới bằng đường khác.
 - Cùng run chỉ có một operation chưa terminal; key mới trong lúc run bận trả
   `409 run_operation_in_progress`.
 - Restart chuyển cả `queued` và `running` thành `interrupted`; retry sau khi đọc

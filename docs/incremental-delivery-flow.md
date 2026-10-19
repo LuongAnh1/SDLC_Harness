@@ -114,8 +114,8 @@ còn request-change thuộc Slice 5.
 
 ## Platform Slice - CLI Sang API Và Ops Dashboard
 
-Mốc này được triển khai sau Slice 4 và trước Slice 5. Mỗi lát phải giữ CLI
-regression, có state/operation quan sát được và không thay đổi workflow payload:
+Mốc này đã hoàn thành sau Slice 4 và trước Slice 5. CLI regression được giữ cho
+operator; Niko đã bỏ dual transport sau live E2E:
 
 ```text
 Application Service chung
@@ -123,8 +123,9 @@ Application Service chung
   -> Operation Queue + Write API
   -> Events
   -> Dashboard + Runtime Config
-  -> Niko dual transport
-  -> Controlled live E2E + cutover
+  -> Niko dual transport (migration)
+  -> Controlled live E2E
+  -> Niko API-only cutover
 ```
 
 Chi tiết và checklist nằm tại `docs/platform-api-dashboard/`.
@@ -170,14 +171,13 @@ rõ ràng thay GitHub bằng GitLab.
 
 ## Trước Khi Sang Code Phase 2
 
-Mock sync chỉ dùng để mở đường cho thử nghiệm đầu. Trước khi triển khai code
-Phase 2, cần có một adapter sync thật tối thiểu, Niko phải gọi được SDLC Harness
-qua CLI, và tài liệu Phase 2 phải chốt rõ vòng Designer/Validator.
+Đây là gate lịch sử trước Phase 2. Khi đó mock sync chỉ dùng để mở đường cho thử
+nghiệm đầu và CLI là integration boundary ban đầu; hiện Niko đã chuyển sang API.
 
 Điều kiện tối thiểu:
 
 - SDLC Harness có CLI trả JSON ổn định.
-- Niko có adapter gọi CLI và đọc status.
+- Niko có adapter đọc status; adapter hiện hành dùng HTTP API.
 - Sync thuộc SDLC Harness; Niko chỉ đọc kết quả sync để báo người dùng.
 - Có tool thật hoặc API thật được chứng minh. Theo lựa chọn hiện tại để khóa Phase 1, triển khai cả Jira comment và Confluence page.
 - Runtime/provider cho workflow mới được cấu hình rõ, ưu tiên DeepSeek thay vì phụ thuộc FCC.

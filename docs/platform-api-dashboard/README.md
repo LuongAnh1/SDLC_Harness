@@ -1,6 +1,6 @@
 # Platform Upgrade: API Và Ops Dashboard
 
-Trạng thái: **In progress — Slice 1-7 completed; Slice 8 fake/mock process smoke passed**
+Trạng thái: **Completed — Slice 1-8 đã hoàn thành; Niko đã API-only**
 Ngày cập nhật gần nhất: **2026-10-19**
 
 ## Mục Tiêu
@@ -22,8 +22,8 @@ chuyển workflow state sang Niko.
 - Runtime state, artifact, per-run lock và worktree vẫn do SDLC Harness sở hữu.
 - Tác vụ dài chạy qua operation queue và trả `202 Accepted`.
 - Worker mặc định là một để giữ thứ tự, tránh tranh chấp và kiểm soát chi phí LLM.
-- Niko chuyển theo từng bước: CLI -> contract test hai transport -> API -> bỏ CLI
-  khỏi runtime path của Niko. CLI vẫn tồn tại cho debug/vận hành thủ công.
+- Niko đã bỏ CLI khỏi runtime path sau contract test và live E2E. CLI của Harness
+  vẫn tồn tại cho debug/vận hành thủ công.
 - Không tự động fallback API -> CLI cho action ghi vì có thể gây thực thi trùng.
 - Dashboard không đọc/ghi trực tiếp file state hoặc config.
 
@@ -61,3 +61,7 @@ flowchart LR
 - Config che secret, khóa OS environment và giữ `sync_mode=mock` làm mặc định.
 - Niko chạy ít nhất một E2E thật hoàn chỉnh bằng API trước khi cutover.
 - Contract CLI hiện tại vẫn pass trong suốt quá trình chuyển đổi.
+
+Live E2E `run_20261019_034156_05cfbb93` đã hoàn tất từ Jira intake tới
+`code_review_approved`; GitHub PR #7 đã Ready for review. Sau bằng chứng này,
+Niko đã xóa subprocess transport, transport selector và cấu hình CLI riêng.

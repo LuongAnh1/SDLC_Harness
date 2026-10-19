@@ -1,4 +1,4 @@
-"""Application service dùng chung cho CLI và HTTP API tương lai."""
+"""Application service dùng chung cho HTTP API và CLI operator."""
 
 from __future__ import annotations
 

@@ -19,7 +19,9 @@ Checklist chi tiết nằm ở `docs/phase-0/phase-0-checklist.md`. Phase 0 đã
 
 Mục đích: chứng minh một use case có thể thành artifact có trạng thái và checkpoint.
 
-Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code slice đã pass unit/smoke với fake LLM và đã có một lượt chạy thật DeepSeek, nhưng Phase 1 chưa khóa để mở Phase 2. Trước Phase 2 cần nối Niko gọi CLI/status và có sync API/tool thật tối thiểu.
+Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 đã hoàn
+thành và được mở rộng qua Requirement V2; Niko hiện đọc status qua HTTP API,
+trong khi CLI được giữ cho operator/debug.
 
 - [x] Tạo `start-or-get-run` và loader do SDLC Harness sở hữu.
 - [x] Tạo workflow run, `source_ref` và `run_id`.
@@ -32,7 +34,7 @@ Checklist chi tiết nằm ở `docs/phase-1/phase-1-checklist.md`. Phase 1 code
 - [x] Lưu state `waiting_requirement_approval`.
 - [x] Tạo sync report mock.
 - [x] Có lệnh/API `get-status(run_id)`.
-- [x] Niko có thể đọc status qua CLI JSON; đã tích hợp trực tiếp trong `Niko_Agent`.
+- [x] Niko có thể đọc status qua HTTP API; CLI JSON vẫn có regression độc lập.
 - [ ] Chặn approval khi Requirement Packet còn open question ảnh hưởng business
   rule/acceptance; mở checkpoint clarification và lưu decision provenance trước
   khi sang Design. Chi tiết:
@@ -191,10 +193,10 @@ Checklist chi tiết nằm tại `docs/platform-api-dashboard/implementation-che
 - [x] Tách application service dùng chung cho CLI/API.
 - [x] Thêm Read API cho health, run, artifact whitelist và dashboard snapshot.
 - [x] Thêm write API với operation queue và idempotency.
-- [ ] Thêm event timeline và Ops Dashboard.
-- [ ] Thêm runtime config có schema, mask secret và precedence rõ.
-- [ ] Nối Niko dual transport, chạy contract parity và controlled live E2E.
-- [ ] Chuyển API thành transport mặc định; giữ CLI cho debug/operator.
+- [x] Thêm event timeline và Ops Dashboard.
+- [x] Thêm runtime config có schema, mask secret và precedence rõ.
+- [x] Nối Niko dual transport, chạy contract parity và controlled live E2E.
+- [x] Chuyển Niko sang API-only; giữ CLI Harness cho debug/operator.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

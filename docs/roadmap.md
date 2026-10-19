@@ -182,9 +182,9 @@ Mục đích: thay transport Niko -> SDLC Harness từ subprocess CLI bằng HTT
 operation bền vững, đồng thời thêm dashboard quan sát run/flow/artifact/config.
 
 Tài liệu chi tiết nằm tại `docs/platform-api-dashboard/README.md`. Mốc này không
-đổi workflow Phase 1-4 và không chiếm Phase 5. CLI tiếp tục hoạt động trong thời
-gian chuyển đổi; API chỉ trở thành integration boundary sau contract test và một
-controlled live E2E qua Niko.
+đổi workflow Phase 1-4 và không chiếm Phase 5. Mốc đã hoàn thành ngày 2026-10-19:
+Niko dùng HTTP API-only sau contract test và controlled live E2E; CLI tiếp tục
+hoạt động độc lập cho operator/debug.
 
 Luồng đích:
 

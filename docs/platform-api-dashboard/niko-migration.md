@@ -1,6 +1,6 @@
 # Chuyển Niko Từ CLI Sang HTTP API
 
-Trạng thái: **Slice 8 đang triển khai — smoke Niko/API fake/mock đã pass, CLI vẫn là mặc định cho tới khi live cutover có đủ evidence.**
+Trạng thái: **Hoàn thành — Niko dùng HTTP API-only; CLI Harness là interface operator độc lập.**
 
 ## Nguyên Tắc
 
@@ -11,9 +11,8 @@ Không chạy cùng một write action qua cả API và CLI để “so sánh”
 runtime/fixture tách biệt. Live dual period nghĩa là có thể chọn transport bằng
 config, không phải fan-out một request tới hai nơi.
 
-## Cấu Hình Dự Kiến
+## Cấu Hình Hiện Hành
 
-- `NIKO_SDLC_TRANSPORT=cli|api`
 - `NIKO_SDLC_API_BASE_URL=http://127.0.0.1:7788`
 - `NIKO_SDLC_API_TOKEN=`
 - `NIKO_SDLC_API_REQUEST_TIMEOUT_SECONDS=10`
@@ -42,7 +41,8 @@ không kết luận workflow thất bại.
 
 ### 3. API primary
 
-- Chuyển local config sang `NIKO_SDLC_TRANSPORT=api`.
+- Chuyển local config tạm thời sang `NIKO_SDLC_TRANSPORT=api`; selector này đã
+  được xóa sau khi cutover hoàn tất.
 - Chạy ít nhất một E2E thật từ Jira qua requirement, design, plan, code, QA và
   Code Review checkpoint.
 - Theo dõi operation timeout, duplicate action, restart và sync partial.
@@ -62,9 +62,12 @@ python -m pytest tests/test_sdlc_api_process_integration.py -q
 
 ### 4. Hoàn tất cutover
 
-- Bỏ subprocess CLI khỏi runtime path của Niko sau khi regression và E2E pass.
-- Giữ CLI SDLC Harness làm công cụ debug/automation tương thích.
-- Cập nhật docs Niko và SDLC để API là integration boundary hiện hành.
+- [x] Bỏ subprocess CLI khỏi runtime path của Niko sau khi regression và E2E pass.
+- [x] Giữ CLI SDLC Harness làm công cụ debug/automation tương thích.
+- [x] Cập nhật docs Niko và SDLC để API là integration boundary hiện hành.
+
+Evidence: run `run_20261019_034156_05cfbb93` hoàn tất qua API tới
+`code_review_approved`; PR #7 đã Ready for review mà không có mutation trùng.
 
 ## Error Mapping
 

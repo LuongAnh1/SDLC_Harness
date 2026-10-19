@@ -1,1 +1,1 @@
-﻿"""Public interfaces để Niko/CLI gọi SDLC Harness."""
+"""HTTP API for Niko/dashboard and standalone CLI for operators."""

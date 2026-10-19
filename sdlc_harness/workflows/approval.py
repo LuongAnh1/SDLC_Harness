@@ -11,7 +11,7 @@ from .phase4 import PhaseFourWorkflow
 
 
 class CheckpointApprovalWorkflow:
-    """Chọn workflow đúng khi CLI/Niko gọi `approve-checkpoint`."""
+    """Chọn workflow đúng khi application service nhận `approve_checkpoint`."""
 
     def __init__(self, settings: Settings):
         self.settings = settings

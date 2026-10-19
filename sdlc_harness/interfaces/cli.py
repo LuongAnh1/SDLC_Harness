@@ -1,8 +1,9 @@
-﻿"""CLI JSON cho Niko gọi SDLC Harness bằng subprocess.
+"""CLI JSON độc lập cho operator, debug và automation của SDLC Harness.
 
 Quy tắc quan trọng: stdout chỉ có JSON. Nếu cần debug, ghi stderr/log file sau;
-không trộn text tự do vào stdout vì Niko sẽ parse trực tiếp response này. CLI
-hiện bao phủ start/status/sync/approve/continue, workspace adoption/cleanup và
+không trộn text tự do vào stdout để giữ contract automation ổn định. Niko hiện
+gọi HTTP API, không gọi module này. CLI bao phủ start/status/sync/approve/continue,
+workspace adoption/cleanup và
 đường vận hành `revalidate-implementation` cho Phase 4 repair-limit runs. Các
 lệnh có thể ghi tool cộng tác mặc định `--sync-mode mock`; real sync phải được
 caller chọn rõ.

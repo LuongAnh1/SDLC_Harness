@@ -1,7 +1,7 @@
 ﻿"""Compatibility entrypoint cho CLI công khai của SDLC Harness.
 
 Implementation thật nằm ở `sdlc_harness.interfaces.cli`, nhưng wrapper này giữ
-ổn định lệnh `python -m sdlc_harness.cli` để Niko gọi bằng subprocess.
+ổn định lệnh `python -m sdlc_harness.cli` cho operator và automation thủ công.
 """
 
 from __future__ import annotations
