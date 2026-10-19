@@ -1,4 +1,4 @@
-﻿"""Artifact writers cho workflow outputs."""
+﻿"""Các bộ ghi artifact cho đầu ra workflow."""
 
 from .requirement_v2 import (
     read_requirement_model_v2,

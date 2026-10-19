@@ -1,4 +1,4 @@
-"""Single-worker durable operation queue for the HTTP write API."""
+"""Hàng đợi operation bền vững một worker cho HTTP API ghi dữ liệu."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Runtime state storage."""
+"""Lưu trạng thái runtime."""
 
 from .locks import RuntimeActionLock
 from .runtime import RuntimeStore, TERMINAL_STATUSES, utc_now_iso

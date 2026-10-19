@@ -1,4 +1,4 @@
-"""Durable workflow events and execution-local instrumentation context."""
+"""Event workflow bền vững và context instrumentation cục bộ của execution."""
 
 from .context import (
     EventDraft,

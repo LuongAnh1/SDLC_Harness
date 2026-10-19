@@ -1,4 +1,4 @@
-"""Preflight/setup cho target repo mà Phase 3 sẽ đọc bằng CodeGraph.
+"""Kiểm tra trước và thiết lập target repo để Phase 3 đọc bằng CodeGraph.
 
 Lệnh này được tách khỏi `approve-checkpoint` để CodeGraph init là thao tác có
 chủ ý của người dùng, không âm thầm làm dirty target repo trong lúc duyệt

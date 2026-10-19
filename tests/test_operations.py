@@ -1,4 +1,4 @@
-"""Durability, idempotency, and lifecycle tests for Slice 3 operations."""
+"""Kiểm thử độ bền, idempotency và vòng đời operation của Slice 3."""
 
 from __future__ import annotations
 

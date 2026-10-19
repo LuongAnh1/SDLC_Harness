@@ -1,4 +1,4 @@
-"""HTTP action metadata shared by request validation and the Ops Dashboard."""
+"""Metadata action HTTP dùng chung cho xác thực request và Ops Dashboard."""
 
 from __future__ import annotations
 

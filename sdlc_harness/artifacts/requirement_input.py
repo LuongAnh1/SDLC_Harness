@@ -1,4 +1,4 @@
-"""Read the approved requirement contract at the Phase 1 -> Phase 2 boundary."""
+"""Đọc contract requirement đã duyệt tại biên Phase 1 -> Phase 2."""
 
 from __future__ import annotations
 

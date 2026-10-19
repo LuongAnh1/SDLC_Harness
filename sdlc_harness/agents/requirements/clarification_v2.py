@@ -1,4 +1,4 @@
-"""Deterministic question selection and bounded Requirement V2 clarification updates."""
+"""Chọn câu hỏi tất định và cập nhật clarification Requirement V2 có giới hạn."""
 
 from __future__ import annotations
 

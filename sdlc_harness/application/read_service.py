@@ -1,4 +1,4 @@
-"""Safe read models for the HTTP API and current Ops Dashboard."""
+"""Các read model an toàn cho HTTP API và Ops Dashboard hiện tại."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Focused tests for the standalone Requirement Model V2 slice."""
+"""Kiểm thử tập trung cho lát Requirement Model V2 độc lập."""
 
 from __future__ import annotations
 

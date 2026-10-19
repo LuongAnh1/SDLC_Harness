@@ -1,4 +1,4 @@
-﻿"""SDLC Harness - execution workflow cho chuyển giao ngữ cảnh SDLC.
+﻿"""SDLC Harness - workflow thực thi cho chuyển giao ngữ cảnh SDLC.
 
 Package này chạy workflow độc lập với Niko. Niko gọi HTTP API để khởi tạo run,
 đọc trạng thái và gửi action; CLI được giữ riêng cho operator/debug. Việc load

@@ -1,4 +1,4 @@
-"""Execution-local event context shared by CLI, API, and workflow boundaries."""
+"""Context event cục bộ của execution dùng chung tại biên CLI, API và workflow."""
 
 from __future__ import annotations
 

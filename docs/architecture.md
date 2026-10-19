@@ -159,3 +159,15 @@ lock, worktree và tool sync vẫn thuộc SDLC Harness.
 
 Tài liệu nguồn cho mốc này nằm tại `docs/platform-api-dashboard/README.md`. CLI
 JSON được giữ cho operator/debug, không còn nằm trong runtime path của Niko.
+
+## Hướng Nâng Cấp TypeScript Full-stack
+
+Baseline Phase 3-4 hiện vẫn phụ thuộc target Java đơn khối. Khảo sát và proposal
+cho bước tiếp theo nằm tại
+[`docs/typescript-fullstack-upgrade/`](typescript-fullstack-upgrade/README.md).
+
+Hướng này tách workflow/checkpoint chung khỏi language/project profile, sau đó
+mở rộng artifact và verification để một run có thể triển khai một vertical web
+feature xuyên frontend, backend và database. A1.1 mới chỉ thêm profile
+contract/registry thuần; chưa có config/run/workflow integration. HTTP API-only
+boundary và ownership giữa Niko/SDLC Harness vẫn giữ nguyên.

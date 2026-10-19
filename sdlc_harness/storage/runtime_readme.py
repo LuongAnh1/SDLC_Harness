@@ -1,4 +1,4 @@
-"""Versioned documentation for the local runtime layout."""
+"""Tài liệu có phiên bản cho bố cục runtime cục bộ."""
 
 from __future__ import annotations
 

@@ -194,6 +194,27 @@ CLI -----------------------------------------------> Application Service
 Application Service -> existing workflows/state/artifacts/sync
 ```
 
+## Hướng Tiếp Theo - TypeScript Full-stack (Đang Ở Mức Tài Liệu)
+
+Trước khi mở Phase 5, repo đang khảo sát một hướng nâng cấp riêng cho execution
+target: bỏ hard-code Java bằng language/project profile, sau đó mở rộng workflow
+để một Jira issue/use case triển khai được vertical feature có frontend,
+backend và database.
+
+Tài liệu nguồn nằm tại
+[`docs/typescript-fullstack-upgrade/`](typescript-fullstack-upgrade/README.md).
+Hướng đã chốt dùng repo mới `SDLC_Target_TypeScript`, React/Vite, Fastify,
+PostgreSQL/Prisma, Vitest và Playwright. A1.1 đã thêm profile contract/registry
+thuần, nhưng chưa có config/run/workflow integration; Java vẫn là execution
+target của baseline đang chạy.
+
+Roadmap tương lai chia hai chặng:
+
+1. TypeScript profile foundation và target bootstrap;
+2. full-stack design/planning/verification/trace cho một vertical feature.
+
+Hai chặng chỉ bắt đầu sau khi docs-first gate trong bộ tài liệu mới được review.
+
 ## Phase 5 - Sửa Tại Checkpoint
 
 Mục đích: người dùng có thể yêu cầu sửa ngay tại checkpoint và hệ thống rerun đúng phase.

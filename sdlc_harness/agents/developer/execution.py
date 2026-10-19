@@ -1,4 +1,4 @@
-"""Budget-aware Developer tool loop with durable execution-unit checkpoints."""
+"""Vòng tool Developer có giới hạn ngân sách và checkpoint execution unit bền vững."""
 
 from __future__ import annotations
 

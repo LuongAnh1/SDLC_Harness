@@ -1,4 +1,4 @@
-"""Tester/QA role cho acceptance review va test-generation tham chieu."""
+"""Vai trò Tester/QA cho review nghiệm thu và sinh test tham chiếu."""
 
 from .qa import QaGeneratedTestSuite, QaTestResult, QaTesterAgent, QaTesterLlmError
 

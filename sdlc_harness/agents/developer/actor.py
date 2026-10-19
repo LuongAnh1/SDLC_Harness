@@ -1,8 +1,8 @@
-"""Batch Developer actor for Phase 4.
+"""Developer actor xử lý theo batch cho Phase 4.
 
-The Developer receives the approved work packet plus the current worktree
-snapshot and returns complete contents for only the files changed in this
-iteration. Python owns validation, application, Verification, and Validator.
+Developer nhận work packet đã duyệt cùng snapshot worktree hiện tại và chỉ trả
+về nội dung đầy đủ của các file thay đổi trong iteration này. Python sở hữu việc
+xác thực, áp dụng thay đổi, Verification và Validator.
 """
 
 from __future__ import annotations

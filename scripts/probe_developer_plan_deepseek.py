@@ -1,4 +1,4 @@
-"""Probe Developer.plan với DeepSeek thật mà không mutate runtime.
+"""Thăm dò Developer.plan với DeepSeek thật mà không thay đổi runtime.
 
 Script này đọc state/artifact của một run đã tới `waiting_design_approval`, dựng
 đúng prompt Phase 3 Developer.plan, gọi Chat Completions trực tiếp và lưu raw

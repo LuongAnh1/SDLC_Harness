@@ -1,4 +1,4 @@
-"""Requirement agents cho Phase 1."""
+"""Các agent Requirement cho Phase 1."""
 
 from .model_v2 import (
     DecisionStatus,

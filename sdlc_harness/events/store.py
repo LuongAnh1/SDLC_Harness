@@ -1,4 +1,4 @@
-"""Append-only, privacy-bounded event storage for one workflow run."""
+"""Kho event chỉ ghi nối, giới hạn dữ liệu riêng tư cho một workflow run."""
 
 from __future__ import annotations
 

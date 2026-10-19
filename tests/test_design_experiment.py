@@ -1,4 +1,4 @@
-"""Tests for the isolated progressive design-validator experiment."""
+"""Kiểm thử thử nghiệm progressive gate độc lập của Design Validator."""
 
 from __future__ import annotations
 

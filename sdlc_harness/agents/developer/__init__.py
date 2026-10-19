@@ -1,4 +1,4 @@
-﻿"""Developer role cho planning/code generation theo từng phase."""
+﻿"""Vai trò Developer cho việc lập kế hoạch và sinh mã theo từng phase."""
 from .actor import DeveloperActAgent, DeveloperActLlmError, DeveloperActResult
 from .execution import (
     DeveloperExecutionError,

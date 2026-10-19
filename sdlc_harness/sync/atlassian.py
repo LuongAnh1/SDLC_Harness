@@ -1,13 +1,13 @@
-"""Real sync adapters for Jira and Confluence Cloud.
+"""Các adapter đồng bộ thật cho Jira và Confluence Cloud.
 
-Adapters in this module push checkpoint artifacts to Atlassian tools and write a
-tool sync report under the run directory. Phase 1 writes requirement review,
-Phase 2 design review, Phase 3 implementation-plan review, and Phase 4 Code
-Review backed by the published Draft PR. Remote identity is stable by
-`source_ref + phase`, so a missing local report does not automatically create a
-duplicate Jira comment or Confluence page. Renderer chỉ gửi artifact ref và
-branch/commit/PR identity; machine-local worktree path được loại bỏ. Niko never
-calls Atlassian directly.
+Các adapter trong module này đẩy artifact checkpoint lên công cụ Atlassian và
+ghi báo cáo đồng bộ công cụ dưới thư mục run. Phase 1 ghi review requirement,
+Phase 2 ghi review thiết kế, Phase 3 ghi review implementation plan, còn Phase 4
+ghi Code Review dựa trên Draft PR đã publish. Định danh phía remote ổn định theo
+`source_ref + phase`, nên khi thiếu báo cáo cục bộ hệ thống không tự động tạo
+trùng Jira comment hoặc Confluence page. Renderer chỉ gửi artifact ref và
+định danh branch/commit/PR; đường dẫn worktree cục bộ trên máy được loại bỏ.
+Niko không bao giờ gọi Atlassian trực tiếp.
 """
 
 from __future__ import annotations

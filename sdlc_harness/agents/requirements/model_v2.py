@@ -1,8 +1,7 @@
-"""Canonical data model for Requirement Model V2.
+"""Mô hình dữ liệu chuẩn tắc cho Requirement Model V2.
 
-The V2 model is deliberately independent from PhaseOneWorkflow.  This module
-only parses and serializes the wire contract; policy and semantic validation
-live in validator_v2.py.
+Mô hình V2 chủ ý độc lập với PhaseOneWorkflow. Module này chỉ parse và serialize
+wire contract; policy và semantic validation nằm trong `validator_v2.py`.
 """
 
 from __future__ import annotations

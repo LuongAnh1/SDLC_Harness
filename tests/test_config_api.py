@@ -1,4 +1,4 @@
-"""HTTP contract tests for Slice 6 runtime configuration."""
+"""Kiểm thử contract HTTP cho cấu hình runtime của Slice 6."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""HTTP read/write boundary cho Niko, Ops Dashboard và SDLC operations."""
+"""Biên đọc/ghi HTTP cho Niko, Ops Dashboard và các operation SDLC."""
 
 from __future__ import annotations
 

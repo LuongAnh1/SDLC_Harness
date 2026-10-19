@@ -1,4 +1,4 @@
-"""Workflow Phase 3: approved design -> implementation plan checkpoint.
+"""Workflow Phase 3: thiết kế đã duyệt -> checkpoint implementation plan.
 
 Phase 3 chỉ bắt đầu sau khi design checkpoint đã được duyệt. Workflow tạo và
 khóa Git worktree riêng cho run, đọc requirement/design/trace graph đã duyệt, tạo

@@ -1,4 +1,4 @@
-"""Contract and security tests for the Slice 2 read-only HTTP API."""
+"""Kiểm thử contract và bảo mật cho HTTP API chỉ đọc của Slice 2."""
 
 from __future__ import annotations
 

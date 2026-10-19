@@ -1,1 +1,1 @@
-﻿"""Package marker."""
+﻿"""Đánh dấu package agent."""

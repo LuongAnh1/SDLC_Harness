@@ -1,4 +1,4 @@
-"""Python-owned validation and blocking policy for Requirement Model V2."""
+"""Policy xác thực và blocking do Python sở hữu cho Requirement Model V2."""
 
 from __future__ import annotations
 

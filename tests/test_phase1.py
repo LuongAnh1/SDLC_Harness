@@ -1,4 +1,4 @@
-"""Test Phase 1 cho vertical slice use case -> requirement checkpoint."""
+"""Kiểm thử Phase 1 cho vertical slice use case -> requirement checkpoint."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Application service for safe runtime config reads and mutations."""
+"""Application service đọc và cập nhật cấu hình runtime an toàn."""
 
 from __future__ import annotations
 

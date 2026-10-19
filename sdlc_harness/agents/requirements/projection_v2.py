@@ -1,4 +1,4 @@
-"""Cross-projection checks for deterministic Requirement Model V2 views."""
+"""Kiểm tra chéo projection cho các view tất định của Requirement Model V2."""
 
 from __future__ import annotations
 

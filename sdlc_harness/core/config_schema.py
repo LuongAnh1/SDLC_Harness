@@ -1,4 +1,4 @@
-"""Schema and validation rules for dashboard-managed runtime config."""
+"""Schema và quy tắc xác thực cấu hình runtime do dashboard quản lý."""
 
 from __future__ import annotations
 

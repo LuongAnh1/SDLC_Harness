@@ -1,4 +1,4 @@
-"""Loader Jira issue làm source đầu vào cho Phase 1B.
+"""Bộ nạp Jira issue làm nguồn đầu vào cho Phase 1B.
 
 Module này kéo context từ Jira xuống SDLC Harness. Nhánh sync ở
 `sdlc_harness/sync/` làm chiều ngược lại: đẩy checkpoint đã xử lý lên tool.

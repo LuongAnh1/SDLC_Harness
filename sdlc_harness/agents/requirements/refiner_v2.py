@@ -1,4 +1,4 @@
-"""Structured Requirement Model V2 refiner with one bounded recovery call."""
+"""Bộ tinh chỉnh Requirement Model V2 có cấu trúc với một lần recovery giới hạn."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿"""LLM provider adapters."""
+﻿"""Các adapter LLM provider."""
 
 from .client import (
     LlmClient,

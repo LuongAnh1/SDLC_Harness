@@ -1,4 +1,4 @@
-"""Test Phase 4 slice 4.1: implementation plan review -> DeveloperWorkPacket."""
+"""Kiểm thử Phase 4 Slice 4.1: review implementation plan -> DeveloperWorkPacket."""
 
 from __future__ import annotations
 

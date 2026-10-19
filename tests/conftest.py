@@ -1,4 +1,4 @@
-"""Keep unit-test defaults independent from the machine's live SDLC config."""
+"""Giữ mặc định unit test độc lập với cấu hình SDLC thật trên máy."""
 
 from __future__ import annotations
 

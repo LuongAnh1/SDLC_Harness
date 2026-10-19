@@ -1,4 +1,4 @@
-"""Operator-facing dashboard assets and presentation metadata."""
+"""Asset dashboard và metadata trình bày dành cho operator."""
 
 from .frontend import read_dashboard_asset
 

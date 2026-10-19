@@ -1,4 +1,4 @@
-﻿"""Tool sync adapters."""
+﻿"""Các adapter đồng bộ với công cụ cộng tác."""
 
 from .atlassian import (
     real_sync_code_review_checkpoint,

@@ -1,4 +1,4 @@
-"""Small cross-platform advisory lock for runtime actions."""
+"""Khóa phối hợp đa nền tảng, nhỏ gọn cho các action runtime."""
 
 from __future__ import annotations
 

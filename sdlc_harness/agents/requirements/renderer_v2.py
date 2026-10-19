@@ -1,4 +1,4 @@
-"""Deterministic projections for Requirement Model V2."""
+"""Các projection tất định cho Requirement Model V2."""
 
 from __future__ import annotations
 

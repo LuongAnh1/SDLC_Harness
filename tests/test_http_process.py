@@ -1,4 +1,4 @@
-"""Process entrypoint tests for isolated API smoke runs."""
+"""Kiểm thử process entrypoint cho các API smoke run độc lập."""
 
 from __future__ import annotations
 

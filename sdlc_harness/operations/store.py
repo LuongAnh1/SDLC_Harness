@@ -1,4 +1,4 @@
-"""Durable JSON storage for asynchronous API operations and idempotency."""
+"""Kho JSON bền vững cho operation API bất đồng bộ và idempotency."""
 
 from __future__ import annotations
 

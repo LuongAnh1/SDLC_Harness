@@ -1,4 +1,4 @@
-"""Designer role cho Phase 2."""
+"""Vai trò Designer cho Phase 2."""
 from .designer import DesignDraft, DesignerAgent
 from .plantuml import (
     ClassDiagramParser,

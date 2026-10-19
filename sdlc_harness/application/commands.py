@@ -1,4 +1,4 @@
-"""Command model dùng chung cho các transport của SDLC Harness."""
+"""Mô hình command dùng chung cho các transport của SDLC Harness."""
 
 from __future__ import annotations
 

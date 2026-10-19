@@ -1,4 +1,4 @@
-﻿"""Loader fixture use case cho Phase 1.
+﻿"""Bộ nạp use case từ fixture cho Phase 1.
 
 Niko không đọc fixture trực tiếp. Fixture eTour đi qua module này để
 SDLC_Harness giữ quyền sở hữu source_ref và idempotency; Jira issue thật nằm ở

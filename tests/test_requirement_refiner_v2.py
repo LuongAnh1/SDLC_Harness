@@ -1,4 +1,4 @@
-"""Tests for structured Requirement Model V2 refinement and artifact writing."""
+"""Kiểm thử tinh chỉnh Requirement Model V2 có cấu trúc và ghi artifact."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Allowlisted static assets for the dependency-free Ops Dashboard."""
+"""Các asset tĩnh trong allowlist của Ops Dashboard không phụ thuộc thư viện."""
 
 from __future__ import annotations
 

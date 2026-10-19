@@ -1,4 +1,4 @@
-"""Workflow Phase 2: approved requirement -> validated design checkpoint."""
+"""Workflow Phase 2: requirement đã duyệt -> checkpoint thiết kế đã xác thực."""
 
 from __future__ import annotations
 

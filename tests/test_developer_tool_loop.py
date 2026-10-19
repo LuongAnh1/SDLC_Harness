@@ -1,4 +1,4 @@
-"""Focused tests for the durable Phase 4 Developer action loop."""
+"""Kiểm thử tập trung cho vòng action Developer bền vững của Phase 4."""
 
 from __future__ import annotations
 

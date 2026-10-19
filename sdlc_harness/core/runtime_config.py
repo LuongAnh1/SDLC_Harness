@@ -1,4 +1,4 @@
-"""Atomic persistence for dashboard-managed runtime configuration."""
+"""Lưu cấu hình runtime do dashboard quản lý theo cách atomic."""
 
 from __future__ import annotations
 

@@ -1,8 +1,8 @@
-"""Build diagnostic hints for Developer repair execution.
+"""Dựng gợi ý chẩn đoán cho lần thực thi Developer repair.
 
-The approved work-packet allowlist remains the repair boundary.  Compiler and
-validator evidence only ranks useful starting points; it must never hide an
-approved file that may need a coherent cross-file change.
+Allowlist của work packet đã duyệt vẫn là biên repair. Bằng chứng từ compiler và
+validator chỉ xếp hạng các điểm bắt đầu hữu ích; nó không được ẩn file đã duyệt
+có thể cần thay đổi đồng bộ giữa nhiều file.
 """
 
 from __future__ import annotations

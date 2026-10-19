@@ -1,4 +1,4 @@
-"""Application command và dispatcher dùng chung cho mọi transport."""
+"""Lệnh application và bộ điều phối dùng chung cho mọi transport."""
 
 from .commands import ApplicationCommand
 from .config_service import ConfigurationService

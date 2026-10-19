@@ -1,4 +1,4 @@
-"""Dual-read and Phase 2 traceability tests for Requirement Contract V2."""
+"""Kiểm thử đọc kép và traceability Phase 2 cho Requirement Contract V2."""
 
 from __future__ import annotations
 

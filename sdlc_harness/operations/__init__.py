@@ -1,4 +1,4 @@
-"""Durable operation queue used by the HTTP write API."""
+"""Hàng đợi operation bền vững cho HTTP API ghi dữ liệu."""
 
 from .manager import OperationManager, canonical_json_hash, sha256_text
 from .store import OperationStore

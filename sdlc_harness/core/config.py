@@ -1,9 +1,9 @@
-"""Configuration loading for SDLC Harness.
+"""Nạp cấu hình cho SDLC Harness.
 
-Workflow settings use the following precedence: code defaults, root `.env`,
-runtime config, real OS environment, then invocation/action overrides. API
-bootstrap fields never come from runtime config because changing them requires a
-server restart.
+Thiết lập workflow dùng thứ tự ưu tiên: mặc định trong code, `.env` ở thư mục
+gốc, cấu hình runtime, môi trường OS thật, rồi override từ invocation/action.
+Các trường bootstrap API không bao giờ lấy từ cấu hình runtime vì thay đổi
+chúng đòi hỏi khởi động lại server.
 """
 
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Slice 4 event storage, context, instrumentation, and runtime layout tests."""
+"""Kiểm thử lưu event, context, instrumentation và bố cục runtime của Slice 4."""
 
 from __future__ import annotations
 

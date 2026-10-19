@@ -1,9 +1,9 @@
-"""Hybrid design validation for Phase 2.
+"""Xác thực thiết kế hybrid cho Phase 2.
 
-The traceability agent answers whether approved requirements are represented in
-the diagrams.  This module adds the missing quality gate: deterministic graph
-contracts plus an LLM semantic review of ordering, states, and conditional
-transaction guarantees.
+Traceability agent xác định các requirement đã duyệt có được biểu diễn trong
+diagram hay không. Module này bổ sung quality gate còn thiếu: contract graph
+tất định cùng một lượt LLM semantic review về thứ tự, trạng thái và bảo đảm
+transaction có điều kiện.
 """
 
 from __future__ import annotations

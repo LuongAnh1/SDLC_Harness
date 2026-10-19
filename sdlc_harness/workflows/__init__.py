@@ -1,4 +1,4 @@
-﻿"""Workflow graphs của SDLC Harness."""
+﻿"""Các đồ thị workflow của SDLC Harness."""
 
 from .phase1 import PhaseOneWorkflow
 from .phase2 import PhaseTwoWorkflow

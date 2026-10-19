@@ -1,4 +1,4 @@
-"""Test Phase 3 cho approved design -> implementation plan review."""
+"""Kiểm thử Phase 3 cho thiết kế đã duyệt -> review implementation plan."""
 
 from __future__ import annotations
 

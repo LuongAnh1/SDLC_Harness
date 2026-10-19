@@ -1,8 +1,8 @@
-"""Isolated progressive-gate experiment for Phase 2 design validation.
+"""Thử nghiệm progressive gate độc lập cho xác thực thiết kế Phase 2.
 
-This workflow is deliberately outside the production checkpoint path.  It
-reads a frozen Requirement V2 snapshot, writes only under an experiment root,
-never calls a sync adapter, and caps all LLM calls with a hard budget.
+Workflow này chủ ý nằm ngoài luồng checkpoint production. Nó đọc snapshot
+Requirement V2 đã đóng băng, chỉ ghi dưới thư mục gốc của thử nghiệm, không gọi
+adapter đồng bộ và giới hạn cứng ngân sách cho mọi lần gọi LLM.
 """
 
 from __future__ import annotations

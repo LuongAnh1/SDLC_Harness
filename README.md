@@ -46,11 +46,17 @@ Giai đoạn hiện tại đã hoàn thiện workflow Requirement → Design →
 - `docs/phase-4/README.md`: code/test/Draft PR sau khi implementation plan được duyệt.
 - `docs/phase-4/workspace-isolation/`: contract worktree-per-run, migration và
   checklist prerequisite trước Code Review approval/Phase 5.
+- `docs/typescript-fullstack-upgrade/README.md`: khảo sát và proposal docs-first
+  cho target TypeScript cùng vertical web feature frontend/backend/database;
+  hướng này chưa được triển khai trong runtime.
 
 ## Nguyên Tắc Hiện Tại
 
 1. Bắt đầu từ một use case độc lập trước.
-2. Java là ngôn ngữ thử nghiệm chính vì eTour/SMOS/iTrust và TraceDev đều thiên về Java.
+2. Java là target đã dùng để chứng minh baseline eTour/TraceDev. Hướng tiếp theo
+   đã chốt ở mức tài liệu là target TypeScript full-stack; xem
+   `docs/typescript-fullstack-upgrade/`. Cho đến khi roadmap đó được triển khai,
+   runtime Phase 3-4 hiện hành vẫn là Java.
 3. Không xây full hệ thống âm thầm; mỗi slice phải chạy được và quan sát được.
 4. Niko không lưu workflow state chính; Niko đọc state từ SDLC Harness để phản hồi người dùng.
 5. Tool thật có thể đi sau; ban đầu được phép dùng fixture/mock adapter cho Jira, Confluence và GitHub/GitLab.

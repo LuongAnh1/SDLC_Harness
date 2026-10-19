@@ -1,4 +1,4 @@
-"""Run dependency-free frontend view-model tests through Node's built-in runner."""
+"""Chạy kiểm thử view-model frontend không phụ thuộc bằng runner có sẵn của Node."""
 
 from __future__ import annotations
 

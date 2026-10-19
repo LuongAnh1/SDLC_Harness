@@ -1,4 +1,4 @@
-"""Helpers parse JSON an toàn cho các LLM trả lời không hoàn toàn sạch.
+"""Các hàm hỗ trợ parse JSON an toàn khi LLM trả lời không hoàn toàn sạch.
 
 Một số provider có thể bọc JSON trong markdown/prose, hoặc output bị cắt làm
 `json.loads()` fail ngay cả khi phần đầu đã có object hợp lệ. Các workflow dùng

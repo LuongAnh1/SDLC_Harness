@@ -1,4 +1,4 @@
-"""Immutable revisioned artifacts for Requirement Model V2."""
+"""Artifact bất biến, có revision cho Requirement Model V2."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Tests for Requirement V2 clarification selection, mutation, and Phase 1 wiring."""
+"""Kiểm thử chọn, cập nhật clarification Requirement V2 và nối vào Phase 1."""
 
 from __future__ import annotations
 

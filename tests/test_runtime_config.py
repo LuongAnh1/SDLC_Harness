@@ -1,4 +1,4 @@
-"""Runtime config precedence, persistence, masking, and validation tests."""
+"""Kiểm thử thứ tự ưu tiên, lưu trữ, che dữ liệu và xác thực cấu hình runtime."""
 
 from __future__ import annotations
 

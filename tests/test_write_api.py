@@ -1,4 +1,4 @@
-"""HTTP contract tests for Slice 3 run creation, actions, and operations."""
+"""Kiểm thử contract HTTP cho tạo run, action và operation của Slice 3."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Deterministic contract evidence and stable finding mechanics for Phase 4."""
+"""Bằng chứng contract tất định và cơ chế finding ổn định cho Phase 4."""
 
 from __future__ import annotations
 

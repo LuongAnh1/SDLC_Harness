@@ -1,4 +1,4 @@
-"""Test Phase 2 V0 cho contract approve checkpoint -> design checkpoint."""
+"""Kiểm thử Phase 2 V0 cho contract approve checkpoint -> design checkpoint."""
 
 from __future__ import annotations
 

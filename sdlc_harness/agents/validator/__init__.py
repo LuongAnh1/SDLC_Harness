@@ -1,4 +1,4 @@
-"""Validator role cho Phase 2."""
+"""Vai trò Validator cho Phase 2."""
 from .code_trace import CodeTraceResult, CodeTraceValidator
 from .design_validation import DesignFinding, DesignValidationResult, DesignValidator
 from .traceability import (
