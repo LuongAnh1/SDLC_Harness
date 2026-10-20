@@ -770,12 +770,11 @@ def _vitest_verified_test_files(
         if not isinstance(assertion_results, list) or not assertion_results:
             assertion_error = "Vitest JSON report does not prove that each selected file executed a test."
             continue
-        statuses = {
-            str(assertion.get("status") or "").strip().lower()
+        if not all(
+            isinstance(assertion, dict)
+            and str(assertion.get("status") or "").strip().lower() == "passed"
             for assertion in assertion_results
-            if isinstance(assertion, dict)
-        }
-        if len(statuses) != len(assertion_results) or statuses != {"passed"}:
+        ):
             assertion_error = "Vitest JSON report records a non-passing or invalid assertion."
 
     if set(reported) != set(selected_test_files) or len(reported) != len(selected_test_files):

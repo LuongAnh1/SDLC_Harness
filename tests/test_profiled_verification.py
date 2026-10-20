@@ -274,7 +274,10 @@ class ProfiledVerificationTest(unittest.TestCase):
                             "testResults": [
                                 {
                                     "name": str(qa_file.resolve()),
-                                    "assertionResults": [{"status": "passed"}],
+                                    "assertionResults": [
+                                        {"status": "passed"},
+                                        {"status": "passed"},
+                                    ],
                                 }
                             ],
                         }
