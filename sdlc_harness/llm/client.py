@@ -248,13 +248,13 @@ def fake_completion(prompt: str) -> str:
     if "Developer Batch Repair v2" in prompt:
         return fake_developer_repair(prompt)
     if "Developer Batch Act v2" in prompt:
-        return fake_developer_act()
+        return fake_developer_act(prompt)
     if "Developer Repair v1" in prompt:
         return fake_developer_repair(prompt)
     if "Developer Act v1" in prompt:
-        return fake_developer_act()
+        return fake_developer_act(prompt)
     if "Code Trace LLM Review v1" in prompt:
-        return fake_code_trace_review()
+        return fake_code_trace_review(prompt)
     if "QA Tester Generate Acceptance Tests v1" in prompt:
         return fake_qa_generated_tests(prompt)
     if "QA Tester Acceptance Review v1" in prompt:
@@ -804,7 +804,25 @@ def _fake_typescript_type(value: object) -> str:
     return replacements.get(text, text)
 
 
-def fake_developer_act() -> str:
+def fake_developer_act(prompt: str = "") -> str:
+    """Sinh fake output từ chính work packet; legacy không prompt giữ fixture cũ."""
+
+    packet = _fake_json_after_marker(prompt, "DeveloperWorkPacket:")
+    if packet and str(packet.get("schema_version") or "").startswith("developer_work_packet_profiled_"):
+        from ..agents.developer.fake_generation import fake_developer_files
+
+        return json.dumps(
+            {
+                "summary": "Fake Developer.act generated profile-aware changes.",
+                "files": fake_developer_files(packet),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    return _fake_legacy_developer_act()
+
+
+def _fake_legacy_developer_act() -> str:
     """Developer.act giả lập để test Phase 4 không gọi API thật."""
 
     return json.dumps(
@@ -993,31 +1011,50 @@ public final class CulturalHeritageRepositoryTest {
 def fake_developer_repair(prompt: str) -> str:
     """Return a valid repair batch that differs from the current fake act output."""
 
-    payload = json.loads(fake_developer_act())
+    payload = json.loads(fake_developer_act(prompt))
     marker = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
     for item in payload["files"]:
-        item["content"] = f"{str(item['content']).rstrip()}\n\n// Fake repair marker: {marker}\n"
+        path = str(item.get("path") or "").casefold()
+        comment = "--" if path.endswith(".sql") else "//"
+        item["content"] = (
+            f"{str(item['content']).rstrip()}\n\n{comment} Fake repair marker: {marker}\n"
+        )
     payload["summary"] = "Fake Developer.repair generated an effective code change from current feedback."
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
-def fake_code_trace_review() -> str:
+def fake_code_trace_review(prompt: str = "") -> str:
     """LLM review giả lập cho code trace hybrid rule + LLM."""
+
+    review_input = _fake_json_after_marker(
+        prompt,
+        "Return only valid JSON. Do not wrap the JSON in markdown.",
+    )
+    mappings = review_input.get("static_trace_mappings") if isinstance(review_input, dict) else []
+    graph_edges: list[dict[str, object]] = []
+    for mapping in mappings if isinstance(mappings, list) else []:
+        if not isinstance(mapping, dict):
+            continue
+        design_ids = mapping.get("design_element_ids")
+        design_id = str(mapping.get("design_element_id") or "")
+        if not design_id and isinstance(design_ids, list) and design_ids:
+            design_id = str(design_ids[0])
+        graph_edges.append(
+            {
+                "requirement_ref": str(mapping.get("requirement_ref") or ""),
+                "design_element_id": design_id,
+                "code_ref": str(mapping.get("code_ref") or ""),
+                "test_ref": str(mapping.get("test_ref") or ""),
+                "evidence": "Static trace mapping supplied by the harness.",
+            }
+        )
 
     return json.dumps(
         {
             "ok": True,
             "confidence": 0.91,
             "summary": "Fake LLM review accepts the requirement-design-code-test graph for deterministic tests.",
-            "graph_edges": [
-                {
-                    "requirement_ref": "approved_requirement_packet",
-                    "design_element_id": "class:DeleteCulturalHeritageService",
-                    "code_ref": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java#deleteHeritage",
-                    "test_ref": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
-                    "evidence": "Service and flow test references align with the approved delete use case.",
-                }
-            ],
+            "graph_edges": graph_edges,
             "missing_links": [],
             "risks": [],
         },
@@ -1030,6 +1067,12 @@ def fake_qa_generated_tests(prompt: str = "") -> str:
     """Fake QA-generated tests so Phase 4 can execute the QA slice deterministically."""
 
     requirement_ids: list[str] = []
+    qa_policy = _fake_json_prompt_section(
+        prompt,
+        start="QA Test Policy:",
+        end="QA Generation Packet:",
+    )
+    packet: dict[str, object] = {}
     marker = "QA Generation Packet:"
     if marker in prompt:
         try:
@@ -1043,6 +1086,70 @@ def fake_qa_generated_tests(prompt: str = "") -> str:
                 for item in canonical
                 if isinstance(item, dict) and str(item.get("id") or "").strip()
             ]
+
+    if qa_policy.get("language_profile_id") == "typescript_v1":
+        components = qa_policy.get("components")
+        code_under_test = packet.get("code_under_test") if isinstance(packet, dict) else {}
+        code_files = code_under_test.get("files") if isinstance(code_under_test, dict) else []
+        production_paths = (
+            [
+                str(item.get("path") or "").replace("\\", "/")
+                for item in code_files
+                if isinstance(item, dict)
+            ]
+            if isinstance(code_files, list)
+            else []
+        )
+        component_items = (
+            [item for item in components if isinstance(item, dict)]
+            if isinstance(components, list)
+            else []
+        )
+        component = next(
+            (
+                item
+                for item in component_items
+                if any(
+                    path.startswith(f"{str(item.get('test_root') or '').rstrip('/')}/")
+                    for path in production_paths
+                )
+            ),
+            component_items[0] if component_items else {},
+        )
+        test_root = str(component.get("test_root") or "apps/api/src").rstrip("/")
+        test_suffix = str(component.get("test_suffix") or ".test.ts")
+        test_path = f"{test_root}/GeneratedQaAcceptance{test_suffix}"
+        return json.dumps(
+            {
+                "summary": "Fake QA generated a profile-owned Vitest acceptance test.",
+                "test_files": [
+                    {
+                        "path": test_path,
+                        "content": (
+                            'import { describe, expect, it } from "vitest";\n\n'
+                            'describe("generated QA acceptance", () => {\n'
+                            '  it("executes the approved fake scenario", () => {\n'
+                            '    expect(true).toBe(true);\n'
+                            '  });\n'
+                            '});\n'
+                        ),
+                        "scenarios": ["Profiled fake acceptance scenario"],
+                    }
+                ],
+                "scenarios": [
+                    {
+                        "name": "Profiled fake acceptance scenario",
+                        "expected_result": "The generated Vitest scenario passes.",
+                        "test_file": test_path,
+                        "risk": "",
+                        "requirement_ids": requirement_ids,
+                    }
+                ],
+                "risks": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
 
     return json.dumps(
         {
@@ -1081,6 +1188,21 @@ public final class DeleteCulturalHeritageQaAcceptanceTest {
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _fake_json_after_marker(prompt: str, marker: str) -> dict[str, object]:
+    """Đọc JSON object đầu tiên sau marker mà không phụ thuộc phần prompt theo sau."""
+
+    if marker not in prompt:
+        return {}
+    raw = prompt.split(marker, 1)[1].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def fake_qa_tester_review() -> str:
     """QA review giả lập để Phase 4 có acceptance gate ổn định trong test."""
 

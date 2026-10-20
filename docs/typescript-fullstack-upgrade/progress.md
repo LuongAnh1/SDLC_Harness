@@ -621,6 +621,42 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   không tạo remote, không push. Phần code Chặng A tiếp theo là A2.2b cho
   Developer.act/tool-loop; A4.1b vẫn giữ full-stack infra skeleton.
 
+## 2026-10-20 - Kế Hoạch A2.2b Developer Execution Prompt Và Fake
+
+- Baseline Harness `becd185`; worktree sạch, branch `main` đang ahead remote 8
+  commit. Target local giữ nguyên `111b72c` và không thuộc phạm vi sửa đổi.
+- Lát này resolve language directive và approved signature từ profiled
+  `DeveloperWorkPacket`, dùng chung cho Developer batch và tool-loop; prompt
+  profiled không còn ví dụ hay giả định Java.
+- Fake Developer, QA và Code Trace phải đọc contract trong prompt thay vì trả
+  path/nội dung Java cố định. Legacy packet tiếp tục giữ compatibility Java.
+- Tool-loop chỉ được nâng manifest/prompt contract và test ordering; chưa được
+  nối vào `PhaseFourWorkflow`, chưa đổi execution mode mặc định.
+- Acceptance: targeted prompt/fake/tool-loop tests, một fake profiled Phase 4
+  regression, full pytest, compileall, Node helper check và git diff check đều
+  pass. Không chạy live workflow, external sync, remote hoặc push.
+
+## 2026-10-20 - A2.2b Developer Execution Prompt Và Fake
+
+- Baseline Harness `becd185`; target local `111b72c` không bị sửa, không có
+  remote/live workflow/external sync nào được gọi.
+- Thêm resolver fail-closed cho Developer generation context từ profiled packet;
+  act/repair prompt dùng TypeScript directive, exact allowed path và approved
+  signature contract thay cho ví dụ Java cố định.
+- Tool-loop phát hành manifest V6, đưa profile/signature vào durable input hash,
+  action context và source-before-test ordering. Executor chưa được nối vào
+  `PhaseFourWorkflow`, config/default mode giữ nguyên.
+- Fake Developer/QA/Code Trace nay đọc packet/policy/static mapping trong prompt;
+  deterministic profiled output sinh TypeScript/Vitest, còn fake Java cũ chỉ
+  phục vụ packet legacy.
+- Verification: nhóm prompt/tool-loop/QA/Code Trace/Phase 4 `102 passed`; full
+  parallel `539 passed, 1 skipped in 96.78s`; `compileall`, Node `--check` và
+  `git diff --check` pass. Skip duy nhất là symlink escape thiếu quyền trên
+  Windows như baseline.
+- Việc còn lại: nối `DeveloperToolLoopExecutor` vào initial act,
+  implementation repair và QA repair trong một lát control-flow riêng; sau đó
+  mới cân nhắc đổi execution mode mặc định.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

@@ -635,7 +635,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
 
         manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "developer_execution_manifest_v5")
+        self.assertEqual(manifest["version"], "developer_execution_manifest_v6")
         self.assertIn("src/Caller.java", manifest["items"][0]["context_paths"])
         self.assertIn("new Main().run()", caller.read_text(encoding="utf-8"))
         self.assertIn("workspace_allowed_paths", llm.prompts[0])

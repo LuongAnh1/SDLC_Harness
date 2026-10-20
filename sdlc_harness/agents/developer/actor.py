@@ -14,6 +14,8 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
+from .fake_generation import fake_developer_files
+from .profile_context import developer_generation_context, developer_prompt_context
 
 
 _FILE_HEADER = re.compile(r"^=== File: (.+?) ===\s*$", re.MULTILINE)
@@ -101,6 +103,8 @@ class DeveloperActAgent:
 
 
 def _developer_act_prompt(work_packet: dict[str, object]) -> str:
+    generation_context = developer_prompt_context(work_packet)
+    example_path = str(generation_context["example_path"])
     return f"""Developer Batch Act v2
 
 Implement one coherent slice of the approved implementation plan using current_files in the DeveloperWorkPacket.
@@ -113,7 +117,7 @@ OUTPUT FORMAT
 - Do not output JSON, Markdown fences, explanations, summaries, patches, or tool actions.
 - Return the complete final content of each changed file using exactly:
 
-=== File: src/main/java/path/Example.java ===
+=== File: {example_path} ===
 <complete file content>
 
 Rules:
@@ -124,6 +128,9 @@ Rules:
 - Do not run tests, commit, create a PR, or modify requirement/design artifacts.
 - Use repository-relative paths and explicit UTF-8 where the toolchain supports it.
 - Do not invent traceability metadata; Python derives it from the approved work packet.
+
+DeveloperGenerationContext:
+{json.dumps(generation_context, ensure_ascii=False, indent=2)}
 
 DeveloperWorkPacket:
 {json.dumps(work_packet, ensure_ascii=False, indent=2)}
@@ -136,6 +143,8 @@ def _developer_repair_prompt(
     repair_feedback: dict[str, object],
     repair_iteration: int,
 ) -> str:
+    generation_context = developer_prompt_context(work_packet)
+    example_path = str(generation_context["example_path"])
     return f"""Developer Batch Repair v2
 
 Repair the current worktree from the latest Verification, Validator, or QA feedback below. Treat current_files as
@@ -150,7 +159,7 @@ OUTPUT FORMAT
 - Do not output JSON, Markdown fences, explanations, summaries, patches, or tool actions.
 - Return the complete final content of each changed file using exactly:
 
-=== File: src/main/java/path/Example.java ===
+=== File: {example_path} ===
 <complete file content>
 
 Rules:
@@ -161,6 +170,9 @@ Rules:
 - Preserve the approved requirement, design, implementation plan, and stable requirement mappings.
 - Do not run tests, commit, create a PR, or modify requirement/design artifacts.
 - Do not invent traceability metadata; Python derives it from the approved work packet.
+
+DeveloperGenerationContext:
+{json.dumps(generation_context, ensure_ascii=False, indent=2)}
 
 DeveloperWorkPacket:
 {json.dumps(work_packet, ensure_ascii=False, indent=2)}
@@ -334,22 +346,19 @@ def _developer_file(*, path: str, content: str, work_packet: dict[str, object]) 
 
 
 def _deterministic_developer_act(work_packet: dict[str, object]) -> DeveloperActResult:
-    allowed_paths = _allowed_paths(work_packet)
-    if not allowed_paths:
-        raise HarnessError("developer_act_failed", "DeveloperWorkPacket has no allowed paths.")
-    files: list[dict[str, object]] = []
-    for path in allowed_paths:
-        class_name = path.rsplit("/", 1)[-1].removesuffix(".java")
-        content = _fake_test_content(class_name) if "/src/test/" in f"/{path}" else _fake_source_content(class_name)
-        files.append(_developer_file(path=path, content=content, work_packet=work_packet))
-    return DeveloperActResult(summary="Fake Developer generated deterministic Java changes.", files=files)
-
-
-def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
-    contract = work_packet.get("output_contract")
-    if not isinstance(contract, dict) or not isinstance(contract.get("allowed_paths"), list):
-        return []
-    return [str(item).strip().replace("\\", "/") for item in contract["allowed_paths"] if str(item).strip()]
+    files = [
+        _developer_file(
+            path=str(item["path"]),
+            content=str(item["content"]),
+            work_packet=work_packet,
+        )
+        for item in fake_developer_files(work_packet)
+    ]
+    context = developer_generation_context(work_packet)
+    return DeveloperActResult(
+        summary=f"Fake Developer generated deterministic {context['language_name']} changes.",
+        files=files,
+    )
 
 
 def _covered_elements_for_path(work_packet: dict[str, object], path: str) -> list[str]:
@@ -376,55 +385,3 @@ def _covered_requirements_for_path(work_packet: dict[str, object], path: str) ->
             if value and value not in result:
                 result.append(value)
     return result
-
-
-def _fake_source_content(class_name: str) -> str:
-    return f"""package com.sdlc.etour.heritage;
-
-import java.util.HashSet;
-import java.util.Objects;
-import java.util.Set;
-
-public final class {class_name} {{
-    private final Set<String> deletedHeritageIds = new HashSet<>();
-    private boolean operationInProgress;
-
-    public boolean validateDeletion(String heritageId) {{
-        return heritageId != null && !heritageId.isBlank() && !operationInProgress;
-    }}
-
-    public boolean deleteHeritage(String heritageId) {{
-        if (!validateDeletion(heritageId)) {{
-            return false;
-        }}
-        operationInProgress = true;
-        try {{
-            deletedHeritageIds.add(Objects.requireNonNull(heritageId));
-            return true;
-        }} finally {{
-            operationInProgress = false;
-        }}
-    }}
-
-    public void cancelDeletion() {{ operationInProgress = false; }}
-
-    public boolean isDeleted(String heritageId) {{ return deletedHeritageIds.contains(heritageId); }}
-}}
-""".strip()
-
-
-def _fake_test_content(class_name: str) -> str:
-    return f"""package com.sdlc.etour.heritage;
-
-public final class {class_name} {{
-    public static void main(String[] args) {{
-        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
-        if (!service.deleteHeritage("heritage-1")) {{
-            throw new IllegalStateException("Expected delete operation to succeed");
-        }}
-        if (!service.isDeleted("heritage-1")) {{
-            throw new IllegalStateException("Expected heritage id to be marked deleted");
-        }}
-    }}
-}}
-""".strip()

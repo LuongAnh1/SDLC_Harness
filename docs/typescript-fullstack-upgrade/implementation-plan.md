@@ -51,9 +51,23 @@ tất và không tự cho phép cutover.
   - Hoàn tất: 2026-10-20.
   - File prompt Developer/Tester cũ được xác nhận là reference-only, không có
     runtime call site và chưa bị nối lại vào workflow.
-- [ ] A2.2b: chuyển prompt/fake fixture đang hoạt động của Developer.act,
+- [x] A2.2b: chuyển prompt/fake fixture đang hoạt động của Developer.act,
   tool-loop, QA và Code Trace sang TypeScript sau khi A3 có editable-root,
   work-packet và execution guard tương ứng.
+  - Lát hiện tại chuẩn hóa language/signature context dùng chung cho Developer
+    batch và tool-loop, đồng thời chuyển fake Phase 4 sang profile-aware.
+  - Chưa nối `DeveloperToolLoopExecutor` vào `PhaseFourWorkflow`, chưa đổi
+    `SDLC_DEVELOPER_EXECUTION_MODE` và chưa cutover executor mặc định.
+  - Hoàn tất: 2026-10-20. Prompt act/repair lấy path ví dụ từ exact
+    `allowed_paths`, resolve `typescript_prompt_v1` từ packet policy và bind
+    signature digest; profile/signature mismatch bị chặn trước LLM.
+  - Tool-loop phát hành `developer_execution_manifest_v6`, đưa directive cùng
+    per-file approved signatures vào input hash/action context và xếp test
+    `.test.*`/`.spec.*` sau production source. Session V5 không tự migrate qua
+    authority contract mới.
+  - Fake Developer/QA/Code Trace đọc packet/policy/static mappings trong prompt;
+    TypeScript fixture sinh `.ts`/`.test.ts` và Vitest, còn Java chỉ tồn tại ở
+    nhánh packet legacy. Full regression: `539 passed, 1 skipped`.
 - [x] A2.3: loại raw command khỏi implementation plan; plan chỉ tham chiếu
   verification stage ID.
   - Hoàn tất: 2026-10-20.

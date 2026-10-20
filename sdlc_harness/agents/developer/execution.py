@@ -13,6 +13,11 @@ from typing import Any, Callable
 from ...core.errors import HarnessError
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .actor import DeveloperActAgent
+from .profile_context import (
+    developer_generation_context,
+    developer_path_is_test,
+    developer_prompt_context,
+)
 from .repair_context import build_repair_closure
 
 
@@ -129,7 +134,7 @@ class DeveloperToolLoopExecutor:
                         "developer_execution_manifest_v3",
                         "developer_execution_manifest_v4",
                     }
-                    and manifest.get("version") == "developer_execution_manifest_v5"
+                    and manifest.get("version") == "developer_execution_manifest_v6"
                     and existing.get("mode") == manifest.get("mode")
                     and existing.get("repair_iteration") == manifest.get("repair_iteration")
                     and existing.get("repair_feedback") == manifest.get("repair_feedback")
@@ -871,14 +876,17 @@ def _build_manifest(
     proposed = {str(item.get("path") or ""): item for item in _dict_items(work_packet.get("proposed_files"))}
     coverage = _dict_value(work_packet.get("requirement_coverage_by_file"))
     mappings = _dict_value(work_packet.get("design_mappings_by_file"))
+    resolved_generation_context = developer_generation_context(work_packet)
+    generation_context = developer_prompt_context(work_packet)
+    signatures_by_file = _dict_value(resolved_generation_context.get("signatures_by_file"))
     canonical = {
         str(item.get("id") or ""): str(item.get("content") or "")
         for item in _dict_items(work_packet.get("canonical_requirements"))
     }
     steps = _dict_items(work_packet.get("implementation_steps"))
     execution_paths = set(allowed) if not repair_feedback or mode == "implementation_repair" else context_selected
-    ordered = [path for path in allowed if path in execution_paths and "/src/test/" not in f"/{path}"]
-    ordered.extend(path for path in allowed if path in execution_paths and "/src/test/" in f"/{path}")
+    ordered = [path for path in allowed if path in execution_paths and not developer_path_is_test(path)]
+    ordered.extend(path for path in allowed if path in execution_paths and developer_path_is_test(path))
     context_ordered = [path for path in ordered if path in context_selected]
     direct_ordered = [path for path in ordered if path in direct_selected]
     diagnostic_ordered = [path for path in ordered if path in diagnostic_selected]
@@ -927,6 +935,7 @@ def _build_manifest(
                 "requirement_ids": req_ids,
                 "requirements": [{"id": value, "content": canonical.get(value, "")} for value in req_ids],
                 "design_mappings": design_rows,
+                "approved_signatures": _dict_items(signatures_by_file.get(path)),
                 "implementation_steps": file_steps,
                 "initial_sha256": _file_hash(target_path / path),
             }
@@ -968,6 +977,7 @@ def _build_manifest(
         "approved_plan": work_packet.get("approved_plan"),
         "effective_design_contract": work_packet.get("effective_design_contract"),
         "requirement_contract": work_packet.get("requirement_contract"),
+        "developer_generation_context": generation_context,
         "base_sha": _dict_value(work_packet.get("run_workspace")).get("base_sha"),
         "workspace_allowed_paths": allowed,
         "items": [
@@ -979,7 +989,7 @@ def _build_manifest(
         "repair_feedback": repair_feedback or {},
     }
     return {
-        "version": "developer_execution_manifest_v5",
+        "version": "developer_execution_manifest_v6",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -988,6 +998,7 @@ def _build_manifest(
         "input_hash": _json_hash(input_payload),
         "workspace_allowed_paths": allowed,
         "repair_feedback": repair_feedback or {},
+        "developer_generation_context": generation_context,
         "items": [item],
     }
 
@@ -1058,6 +1069,7 @@ def _action_prompt(
     context = {
         "execution_task": _prompt_execution_task(item, context_paths=paths),
         "execution": {"mode": manifest.get("mode"), "base_sha": manifest.get("base_sha")},
+        "developer_generation_context": manifest.get("developer_generation_context"),
         "repair_feedback": _developer_repair_context(manifest.get("repair_feedback")),
         "repair_progress": {
             "workspace_allowed_paths": _item_paths(item),
@@ -1642,18 +1654,7 @@ def _selected_repair_paths(
 
 
 def _looks_like_test_path(path: str) -> bool:
-    normalized = "/" + path.strip().replace("\\", "/").casefold().lstrip("/")
-    name = Path(normalized).name
-    return (
-        "/src/test/" in normalized
-        or normalized.startswith("/test/")
-        or normalized.startswith("/tests/")
-        or "/__tests__/" in normalized
-        or name.startswith("test_")
-        or name.endswith("test.java")
-        or ".test." in name
-        or ".spec." in name
-    )
+    return developer_path_is_test(path)
 
 
 def _compiler_symbol_referenced(text_folded: str, symbol_folded: str) -> bool:

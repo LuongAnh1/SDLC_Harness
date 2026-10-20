@@ -23,11 +23,11 @@ không sửa hàng loạt file chỉ vì chúng có nội dung Java.
 | Phase 2 | `agents/validator/traceability.py` | `traceability_class.txt`, `traceability_sequence.txt` | Active | Giữ invariant traceability; không gắn target language |
 | Phase 3 | `agents/developer/planner.py` | Prompt dựng inline | Active | A2.2a/A2.3: invariant + language/path directive; test intent chỉ tham chiếu profile stage ID |
 | Phase 3 | `agents/validator/plan_review.py` | Prompt dựng inline | Active | A2.2a/A2.3: cùng directive và fail-closed verification stage policy từ snapshot |
-| Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Active, còn Java-heavy | A2.2b sau khi A3 khóa editable roots/work packet |
-| Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Active, còn Java assumptions | A2.2b/A3; phải dùng execution guard trước khi đổi output |
+| Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Profile-aware; Java chỉ ở legacy compatibility | A2.2b resolve directive/path/signature từ work packet trước act/repair |
+| Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Profile-aware manifest/action context; chưa nối vào Phase 4 workflow | A2.2b phát hành manifest V6; executor cutover là lát riêng |
 | Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Profiled run dùng exact TypeScript AST symbol/signature evidence; legacy branch giữ Java compatibility | A3.4b đã bind plan V3/work packet V2 và giữ deterministic mismatch ngoài quyền phủ quyết của LLM |
 | Phase 4 | `agents/tester/qa.py` | Prompt dựng inline | Profiled run dùng TypeScript/Vitest; legacy branch giữ Java compatibility | A3.3 dùng QA policy, exact selected files và Vitest JSON evidence; browser QA để B4 |
-| Fake mode | `llm/client.py::fake_completion` | Dispatch theo marker prompt | Active trong regression | Phase 3 theo directive ở A2.2a; Phase 4/QA để A2.2b/A3 |
+| Fake mode | `llm/client.py::fake_completion` | Dispatch theo marker prompt | Active, profile-aware trong regression | Phase 3/4, QA và Code Trace đọc contract thật trong prompt; Java chỉ cho legacy packet |
 
 ## File reference-only
 
@@ -56,6 +56,21 @@ workflow nếu chưa có contract/profile test tương ứng.
 - Fake Developer.plan nhận biết directive ID và sinh TypeScript paths.
 - Prompt Phase 4, QA và Code Trace vẫn được đánh dấu pending, không bị coi là đã
   chuyển đổi trong lát này.
+
+## Trạng thái A2.2b
+
+- Developer batch act/repair resolve language context từ profiled work packet,
+  chọn path ví dụ từ exact `allowed_paths` và fail closed khi editable path
+  policy không khớp approved signature profile.
+- Tool-loop manifest V6 bind directive, profile identity và per-file approved
+  signatures vào input hash/action context; test path nhận diện cả Java legacy
+  lẫn `.test.*`, `.spec.*`, `__tests__` của profile hiện hành.
+- Fake Developer dùng chung deterministic renderer với direct agent fallback;
+  fake QA chọn component root/suffix từ `QaTestPolicy`, fake Code Trace dùng
+  static mappings trong review input thay vì Java path cố định.
+- `DeveloperToolLoopExecutor` vẫn chưa được nối vào `PhaseFourWorkflow`; việc
+  chọn/cutover executor là lát độc lập để không trộn prompt migration với thay
+  đổi control flow.
 
 ## Trạng thái A2.3
 
