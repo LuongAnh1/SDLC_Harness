@@ -14,7 +14,12 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
-from ...profiles import PlanningPathPolicy
+from ...profiles import (
+    LanguagePromptDirective,
+    PlanningPathPolicy,
+    get_language_profile,
+    resolve_language_prompt_directive,
+)
 
 
 def _expected_design_elements(
@@ -446,6 +451,7 @@ class ImplementationPlanValidator:
         requirement_contract_version: str = "v2",
         canonical_requirement: dict[str, object] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
+        prompt_directive: LanguagePromptDirective | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
 
@@ -478,6 +484,8 @@ class ImplementationPlanValidator:
             rule_review=rule_review,
             llm_client=client,
             canonical_requirement=canonical_requirement,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         return _hybrid_review(
             rule_review=rule_review,
@@ -576,6 +584,8 @@ class ImplementationPlanValidator:
         rule_review: ImplementationPlanReview,
         llm_client: Any | None = None,
         canonical_requirement: dict[str, object] | None = None,
+        planning_policy: PlanningPathPolicy | None = None,
+        prompt_directive: LanguagePromptDirective | None = None,
     ) -> dict[str, object]:
         """Nhờ LLM đánh giá plan theo ngữ nghĩa requirement/design đã duyệt."""
 
@@ -594,6 +604,8 @@ class ImplementationPlanValidator:
             sequence_graph=sequence_graph,
             rule_review=rule_review,
             canonical_requirement=canonical_requirement,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         raw = client.complete(
             system=(
@@ -687,6 +699,8 @@ def _llm_review_prompt(
     sequence_graph: dict[str, object],
     rule_review: ImplementationPlanReview,
     canonical_requirement: dict[str, object] | None = None,
+    planning_policy: PlanningPathPolicy | None = None,
+    prompt_directive: LanguagePromptDirective | None = None,
 ) -> str:
     canonical_section = (
         "Canonical Requirement V2 (source of truth; stable IDs are authoritative):\n"
@@ -703,6 +717,19 @@ def _llm_review_prompt(
         key: requirement_design_trace.get(key, [])
         for key in ("version", "class_trace", "sequence_trace")
     }
+    if planning_policy:
+        if prompt_directive is None:
+            prompt_directive = resolve_language_prompt_directive(
+                get_language_profile(planning_policy.language_profile_id)
+            )
+        if prompt_directive.language_profile_id != planning_policy.language_profile_id:
+            raise HarnessError(
+                "prompt_directive_mismatch",
+                "Phase 3 review requires a prompt directive matching the planning language profile.",
+            )
+        language_context = prompt_directive.validator_review_context()
+    else:
+        language_context = {"prompt_directive_id": "legacy_compatibility"}
     return f"""Implementation Plan LLM Review v1
 
 You must compare the implementation plan against the approved requirement and design.
@@ -736,6 +763,9 @@ Review boundaries:
 - Judge concurrency, transaction, rollback, authentication, and infrastructure only
   when the approved requirement/design explicitly defines those semantics. Do not
   invent a broader system contract as a reason to reject the plan.
+
+Language prompt directive:
+{json.dumps(language_context, ensure_ascii=False, indent=2)}
 
 Approved requirement packet:
 {_excerpt(requirement_packet, limit=6000)}

@@ -22,7 +22,11 @@ from ..artifacts.writers import write_phase3_implementation_plan, write_phase3_p
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
-from ..profiles import planning_path_policy_from_snapshot, read_profile_snapshot
+from ..profiles import (
+    planning_path_policy_from_snapshot,
+    prompt_directive_from_snapshot,
+    read_profile_snapshot,
+)
 from ..repo_context import CodeGraphContextProvider, discover_profile_source_files
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
@@ -113,7 +117,7 @@ class PhaseThreeWorkflow:
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
-        planning_policy = _planning_policy_for_run(state=state, run_id=run_id)
+        planning_policy, prompt_directive = _phase3_profile_context(state=state, run_id=run_id)
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
         repo_context = self.repo_context_provider.collect(
@@ -147,6 +151,7 @@ class PhaseThreeWorkflow:
             requirement_graph=requirement_graph,
             requirement_artifact_refs=frozen_requirement.approved_artifacts,
             planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         start_version = _next_implementation_plan_version(self.store.run_dir(run_id) / "artifacts")
         versions = list(
@@ -187,6 +192,7 @@ class PhaseThreeWorkflow:
                 requirement_contract_version=frozen_requirement.contract_version,
                 canonical_requirement=frozen_requirement.canonical_model.to_dict(),
                 planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -251,6 +257,7 @@ class PhaseThreeWorkflow:
                 requirement_graph=requirement_graph,
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
             )
         if review is None or not review.ok:
             error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
@@ -333,7 +340,7 @@ class PhaseThreeWorkflow:
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
-        planning_policy = _planning_policy_for_run(state=state, run_id=run_id)
+        planning_policy, prompt_directive = _phase3_profile_context(state=state, run_id=run_id)
         self.repo_context_provider.prepare_index(target_path)
 
         state.update(
@@ -395,6 +402,7 @@ class PhaseThreeWorkflow:
                 requirement_graph=requirement_graph,
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
             )
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -448,6 +456,7 @@ class PhaseThreeWorkflow:
                 requirement_contract_version=frozen_requirement.contract_version,
                 canonical_requirement=frozen_requirement.canonical_model.to_dict(),
                 planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -521,6 +530,7 @@ class PhaseThreeWorkflow:
                     requirement_graph=requirement_graph,
                     requirement_artifact_refs=frozen_requirement.approved_artifacts,
                     planning_policy=planning_policy,
+                    prompt_directive=prompt_directive,
                 )
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -750,13 +760,16 @@ def _target_source_files(
     return files
 
 
-def _planning_policy_for_run(*, state: dict[str, object], run_id: str):
+def _phase3_profile_context(*, state: dict[str, object], run_id: str):
     snapshot = read_profile_snapshot(state, run_id=run_id)
     if snapshot is None:
         # Compatibility nội bộ cho direct workflow tests trong A2-A3. Public
         # Application Service đã hard-retire execution của run legacy.
-        return None
-    return planning_path_policy_from_snapshot(snapshot, run_id=run_id)
+        return None, None
+    return (
+        planning_path_policy_from_snapshot(snapshot, run_id=run_id),
+        prompt_directive_from_snapshot(snapshot, run_id=run_id),
+    )
 
 
 def _next_implementation_plan_version(artifact_dir: Path) -> int:

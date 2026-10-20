@@ -45,9 +45,15 @@ tất và không tự cho phép cutover.
   - Quyết định: class không có existing-symbol duy nhất, stereotype/component hint
     hoặc name suffix không mâu thuẫn sẽ bị chặn để sửa design; không fallback sang
     API và không giao LLM tự chọn component.
-- [ ] Chuyển prompt context/fake fixtures sang TypeScript.
-- [ ] Tách shared prompt invariant khỏi profile directive; lập usage map và test
-  để active TypeScript prompt không còn Java assumption.
+- [x] A2.2a: lập prompt usage map; tách invariant Phase 3 khỏi language directive,
+  resolve `typescript_prompt_v1` từ immutable snapshot và khóa Developer.plan /
+  Validator.review_plan / fake Phase 3 bằng test không còn Java assumption.
+  - Hoàn tất: 2026-10-20.
+  - File prompt Developer/Tester cũ được xác nhận là reference-only, không có
+    runtime call site và chưa bị nối lại vào workflow.
+- [ ] A2.2b: chuyển prompt/fake fixture đang hoạt động của Developer.act,
+  tool-loop, QA và Code Trace sang TypeScript sau khi A3 có editable-root,
+  work-packet và execution guard tương ứng.
 - [ ] Loại raw command khỏi implementation plan; plan chỉ tham chiếu
   verification stage ID.
 - [x] Chuyển plan Validator sang profile-aware rules.

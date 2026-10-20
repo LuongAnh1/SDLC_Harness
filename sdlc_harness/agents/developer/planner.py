@@ -17,7 +17,12 @@ from typing import Any
 from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
-from ...profiles import PlanningPathPolicy
+from ...profiles import (
+    LanguagePromptDirective,
+    PlanningPathPolicy,
+    get_language_profile,
+    resolve_language_prompt_directive,
+)
 
 
 @dataclass(frozen=True)
@@ -58,6 +63,7 @@ class DeveloperPlanAgent:
         previous_review: dict[str, object],
         canonical_requirement: RequirementModelV2 | None,
         planning_policy: PlanningPathPolicy | None,
+        prompt_directive: LanguagePromptDirective | None,
     ) -> dict[str, object]:
         """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
 
@@ -85,6 +91,7 @@ class DeveloperPlanAgent:
             previous_review=previous_review,
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         raw = self.llm_client.complete(
             system=(
@@ -125,6 +132,7 @@ class DeveloperPlanAgent:
         requirement_graph: dict[str, object] | None = None,
         requirement_artifact_refs: dict[str, str] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
+        prompt_directive: LanguagePromptDirective | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
@@ -172,6 +180,7 @@ class DeveloperPlanAgent:
             previous_review=previous_review or {},
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         mappings = _merge_mappings(
             mappings,
@@ -307,6 +316,7 @@ class DeveloperPlanAgent:
         requirement_graph: dict[str, object] | None = None,
         requirement_artifact_refs: dict[str, str] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
+        prompt_directive: LanguagePromptDirective | None = None,
     ) -> ImplementationPlanDraft:
         """Apply a repair patch to the previous candidate without rebuilding it from scratch."""
 
@@ -340,6 +350,7 @@ class DeveloperPlanAgent:
             previous_review=compact_review,
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
         )
         mappings = _merge_mappings(
             previous_mappings,
@@ -449,6 +460,7 @@ def _developer_plan_prompt(
     previous_review: dict[str, object],
     canonical_requirement: RequirementModelV2 | None,
     planning_policy: PlanningPathPolicy | None,
+    prompt_directive: LanguagePromptDirective | None,
 ) -> str:
     canonical_section = (
         "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
@@ -471,13 +483,26 @@ def _developer_plan_prompt(
     sequence_payload = _compact_sequence_graph(sequence_graph) if repair_mode else sequence_graph
     mapping_payload = _compact_mappings(base_mappings) if repair_mode else base_mappings
     if planning_policy:
-        source_example = "apps/api/src/ExampleService.ts"
-        test_example = "apps/api/src/ExampleService.test.ts"
+        if prompt_directive is None:
+            prompt_directive = resolve_language_prompt_directive(
+                get_language_profile(planning_policy.language_profile_id)
+            )
+        if prompt_directive.language_profile_id != planning_policy.language_profile_id:
+            raise HarnessError(
+                "prompt_directive_mismatch",
+                "Phase 3 planning requires a prompt directive matching the planning language profile.",
+            )
+        example_rule = planning_policy.component_rules[0]
+        source_example = f"{example_rule.source_root}/Example{example_rule.source_suffix}"
+        test_example = f"{example_rule.source_root}/Example{example_rule.test_suffix}"
         path_rules = (
             "Use only paths accepted by the immutable planning policy below. "
             "Do not choose or change a component for an existing deterministic mapping."
         )
-        planning_context = planning_policy.prompt_context()
+        planning_context = {
+            **planning_policy.prompt_context(),
+            "language_prompt": prompt_directive.developer_plan_context(),
+        }
     else:
         source_example = "src/main/java/com/sdlc/ExampleService.java"
         test_example = "src/test/java/com/sdlc/ExampleServiceTest.java"

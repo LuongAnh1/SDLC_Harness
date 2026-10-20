@@ -44,11 +44,14 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1 và A2.1a/A2.1b đã hoàn tất, các checklist còn lại giữ theo trạng
-  thái thực tế.
+  toàn bộ A1, A2.1a/A2.1b và A2.2a đã hoàn tất, các checklist còn lại giữ theo
+  trạng thái thực tế.
+- [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
+  reference-only và owner của từng lát migration.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
   evidence đã khóa trước khi code.
-- [Progress](progress.md): execution log của công việc khảo sát và viết tài liệu.
+- [Progress](progress.md): execution log của công việc khảo sát, quyết định và
+  triển khai.
 - [Test Performance Optimization](test-performance-optimization.md): baseline,
   ngân sách và guardrail cho việc giảm thời gian regression suite.
 

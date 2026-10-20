@@ -15,6 +15,12 @@ from .planning import (
     build_planning_path_policy,
     planning_path_policy_from_snapshot,
 )
+from .prompting import (
+    LanguagePromptDirective,
+    get_prompt_directive,
+    prompt_directive_from_snapshot,
+    resolve_language_prompt_directive,
+)
 from .snapshot import (
     PROFILE_SNAPSHOT_STATE_KEY,
     PROFILE_SNAPSHOT_VERSION,
@@ -34,6 +40,7 @@ from .retirement import (
 __all__ = [
     "ComponentProfile",
     "LanguageProfile",
+    "LanguagePromptDirective",
     "ProfileRegistry",
     "ProjectProfile",
     "ComponentPlanningRule",
@@ -48,12 +55,15 @@ __all__ = [
     "build_profile_snapshot",
     "build_planning_path_policy",
     "get_language_profile",
+    "get_prompt_directive",
     "get_project_profile",
     "list_project_profile_ids",
     "load_and_validate_target_manifest",
     "profile_status_metadata",
     "read_profile_snapshot",
     "planning_path_policy_from_snapshot",
+    "prompt_directive_from_snapshot",
+    "resolve_language_prompt_directive",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",
     "public_run_summary",

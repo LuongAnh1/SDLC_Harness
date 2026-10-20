@@ -611,7 +611,7 @@ def fake_design_semantic_review() -> str:
 def fake_developer_implementation_plan(prompt: str = "") -> str:
     """Developer.plan giả lập để test Smart Developer không gọi API thật."""
 
-    typescript = '"project_profile_id": "typescript_fullstack_v1"' in prompt
+    typescript = '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     service_path = (
         "apps/api/src/DeleteCulturalHeritageService.ts"
         if typescript

@@ -334,6 +334,29 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Fast và parallel đạt ngân sách. Serial giảm 44,7% nhưng còn vượt mục tiêu
   360 giây 47,64 giây; không tiếp tục mock Git contract/journey để chạy theo số.
 
+## 2026-10-20 - A2.2a Phase 3 Prompt Directive
+
+- Baseline: commit `5053db2`; A2.1b đã khóa planning path theo profile.
+- Lập `prompt-usage-map.md`, xác nhận Developer/Tester prompt `.txt` chỉ là
+  reference-only; prompt Phase 3/4 đang hoạt động được dựng tại call site.
+- Thêm registry `LanguagePromptDirective` và `typescript_prompt_v1`; resolve từ
+  frozen run snapshot, fail closed khi directive không tồn tại hoặc mismatch.
+- Developer.plan và Validator.review_plan giữ invariant riêng của role, nhận
+  cùng language directive và path context từ `PlanningPathPolicy`. Path ví dụ
+  được sinh từ component rule thay vì hard-code một project path.
+- Fake Developer.plan chọn TypeScript output bằng directive ID. Fake Phase 4/QA
+  vẫn giữ nguyên và được tách thành A2.2b sau execution guard của A3.
+- Targeted regression ban đầu phát hiện một direct-call test chỉ truyền planning
+  policy. Agent boundary đã bổ sung resolver từ language profile cho direct
+  caller, còn workflow thật vẫn truyền directive từ snapshot.
+- Verification: prompt/profile/planning-path targeted `26 passed`; Phase 3 và
+  implementation-plan contract `43 passed`; fast suite `178 passed, 1 skipped,
+  291 deselected in 11.99s`; full parallel 4 worker `469 passed, 1 skipped in
+  95.25s`; `compileall` package thành công. Test skip vẫn là symlink escape trên
+  Windows không có quyền tạo symlink.
+- HTTP API, state/checkpoint và artifact contract không thay đổi; raw
+  verification command vẫn thuộc lát A2 tiếp theo.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
