@@ -22,7 +22,8 @@ from ..artifacts.writers import write_phase3_implementation_plan, write_phase3_p
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
-from ..repo_context import CodeGraphContextProvider
+from ..profiles import read_profile_snapshot
+from ..repo_context import CodeGraphContextProvider, discover_profile_source_files
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..workspaces import RunWorkspaceManager
@@ -111,7 +112,7 @@ class PhaseThreeWorkflow:
         )
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
-        target_files = _target_source_files(target_path)
+        target_files = _target_source_files(target_path, state=state, run_id=run_id)
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
         repo_context = self.repo_context_provider.collect(
@@ -327,8 +328,8 @@ class PhaseThreeWorkflow:
 
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
+        target_files = _target_source_files(target_path, state=state, run_id=run_id)
         self.repo_context_provider.prepare_index(target_path)
-        target_files = _target_source_files(target_path)
 
         state.update(
             {
@@ -715,7 +716,22 @@ class PhaseThreeWorkflow:
         }
 
 
-def _target_source_files(target_path: Path) -> list[str]:
+def _target_source_files(
+    target_path: Path,
+    *,
+    state: dict[str, object] | None = None,
+    run_id: str = "",
+) -> list[str]:
+    snapshot = read_profile_snapshot(state or {}, run_id=run_id or None)
+    if snapshot is not None:
+        return discover_profile_source_files(
+            target_path=target_path,
+            snapshot=snapshot,
+            run_id=run_id,
+        )
+
+    # Compatibility nội bộ cho direct workflow tests trong A2-A3. Public
+    # Application Service đã hard-retire mọi execution của run legacy.
     files: list[str] = []
     for base in ("src/main/java", "src/test/java"):
         root = target_path / base

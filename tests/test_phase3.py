@@ -220,6 +220,7 @@ class PhaseThreeTest(unittest.TestCase):
     ISOLATED_REPOSITORY_TESTS = {
         "test_phase3_initializes_codegraph_inside_run_workspace",
         "test_profile_manifest_mismatch_blocks_before_codegraph_and_developer",
+        "test_profiled_phase3_discovers_typescript_for_plan_and_revalidation",
         "test_target_repo_guard_blocks_dirty_worktree",
     }
     JOURNEY_TESTS = {
@@ -229,6 +230,7 @@ class PhaseThreeTest(unittest.TestCase):
     }
     REAL_WORKSPACE_PROVISIONING_TESTS = JOURNEY_TESTS | {
         "test_profile_manifest_mismatch_blocks_before_codegraph_and_developer",
+        "test_profiled_phase3_discovers_typescript_for_plan_and_revalidation",
         "test_target_repo_guard_blocks_dirty_worktree",
         "test_target_repo_guard_blocks_remote_mismatch",
         "test_target_repo_guard_blocks_when_path_points_to_harness_repo",
@@ -534,6 +536,53 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "target_profile_manifest_mismatch")
         prepare_index.assert_not_called()
         developer_plan.assert_not_called()
+
+    def test_profiled_phase3_discovers_typescript_for_plan_and_revalidation(self) -> None:
+        self._install_profile_manifest()
+        source_path = self.target_repo / "apps" / "api" / "src" / "ExistingService.ts"
+        source_path.write_text("export class ExistingService {}\n", encoding="utf-8")
+        self._git(self.target_repo, "add", ".")
+        self._git(
+            self.target_repo,
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-m",
+            "add TypeScript planning source",
+        )
+        self._git(self.target_repo, "push", "origin", "main")
+        settings = self._settings(SDLC_PROJECT_PROFILE="typescript_fullstack_v1")
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        approved = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        planned = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(planned["status"], "waiting_implementation_plan_review")
+        structured_path = self.repo_root / str(
+            planned["latest_artifacts"]["implementation_plan_structured"]
+        )
+        structured = json.loads(structured_path.read_text(encoding="utf-8"))
+        self.assertEqual(structured["repo_context"]["source_files"], ["apps/api/src/ExistingService.ts"])
+
+        revalidated = PhaseThreeWorkflow(settings).revalidate_implementation_plan(
+            run_id=str(approved["run_id"])
+        )
+
+        self.assertEqual(revalidated["status"], "waiting_implementation_plan_review")
+        revalidated_path = self.repo_root / str(
+            revalidated["latest_artifacts"]["implementation_plan_structured"]
+        )
+        revalidated_plan = json.loads(revalidated_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            revalidated_plan["repo_context"]["source_files"],
+            ["apps/api/src/ExistingService.ts"],
+        )
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()

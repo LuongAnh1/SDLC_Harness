@@ -36,8 +36,9 @@ tất và không tự cho phép cutover.
 
 ### A2. Phase 3 Planning
 
-- [ ] Chuyển source discovery, default targets, test targets và path rules sang
-  profile.
+- [x] A2.1a: chuyển source discovery của Phase 3 sang component roots và suffix
+  từ immutable run profile snapshot.
+- [ ] A2.1b: chuyển default targets, test targets và path rules sang profile.
 - [ ] Chuyển prompt context/fake fixtures sang TypeScript.
 - [ ] Tách shared prompt invariant khỏi profile directive; lập usage map và test
   để active TypeScript prompt không còn Java assumption.

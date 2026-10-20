@@ -240,6 +240,32 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   `compileall` riêng package thành công. Checklist A1.2d hoàn tất; toàn bộ A1 đã
   đóng.
 
+## 2026-10-20 - A2.1a Profile-aware Phase 3 Source Discovery
+
+- Baseline: commit `fefff44` (`feat: retire legacy Java execution profile`).
+- Phạm vi lát này chỉ thay source discovery trước CodeGraph/Developer: dùng
+  workspace-bound `profile_snapshot_v1`, component editable roots và language
+  source/test suffixes; chưa đổi default target, prompt, raw verification
+  command hay Plan Validator.
+- Kết quả discovery phải là POSIX-relative, unique, deterministic; file ngoài
+  approved roots hoặc sai suffix không được đưa vào context. Snapshot profiled
+  chưa bind workspace và path resolve thoát workspace phải fail closed.
+- Giữ Java discovery cũ chỉ làm compatibility nội bộ cho direct workflow tests
+  trong giai đoạn A2-A3; Application Service vẫn hard-retire legacy execution.
+- Đã thêm discovery component dưới `repo_context`: snapshot phải workspace-bound;
+  source/test suffix lấy từ `LanguageProfile`; roots lấy từ snapshot đã bind.
+  Kết quả được dedupe, sort và chuẩn hóa POSIX; missing/escaping path fail closed.
+- Phase 3 planning lần đầu và revalidation dùng chung discovery path. Integration
+  profiled chứng minh cả hai lần đều nhận `apps/api/src/ExistingService.ts` và
+  không nhận source Java nằm ngoài approved component roots.
+- Regression: profile/discovery/manifest/Phase 3/plan contract
+  `66 passed, 1 skipped in 45.74s`; fast suite
+  `166 passed, 1 skipped, 291 deselected in 8.86s`; full parallel 4 worker
+  `457 passed, 1 skipped in 54.13s`; `compileall` package thành công. Test skip là
+  case symlink escape vì Windows hiện tại không cấp quyền tạo symlink.
+- Checklist A2.1a hoàn tất. A2.1b vẫn chưa làm: default targets, test targets và
+  Validator path rules hiện còn Java-specific.
+
 ## 2026-10-20 - Test Performance Optimization Baseline
 
 - Full regression A1.2c: `438 passed in 736.48s`; collection `438 tests` chỉ
