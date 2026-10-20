@@ -5,6 +5,13 @@ chuẩn hóa kết quả thành report máy đọc được. Nó không sinh tes
 sửa source và không thay vai QA/Tester Agent ở tầng acceptance/system test.
 """
 
-from .runner import VerificationResult, VerificationRunner
+from .registry import VerificationStageSpec, resolve_verification_stage_specs
+from .runner import VerificationResult, VerificationRunner, VerificationStageResult
 
-__all__ = ["VerificationResult", "VerificationRunner"]
+__all__ = [
+    "VerificationResult",
+    "VerificationRunner",
+    "VerificationStageResult",
+    "VerificationStageSpec",
+    "resolve_verification_stage_specs",
+]

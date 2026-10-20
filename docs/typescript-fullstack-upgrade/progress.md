@@ -426,6 +426,31 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   là registry fixed argv/cwd/env/timeout và Verification Runner cho
   `typecheck -> unit`.
 
+## 2026-10-20 - A3.2 Profile-owned Verification Runner
+
+- Baseline: commit `960b575` đã đóng A3.1 editable path guards trước khi bắt đầu
+  thay đổi runner.
+- Thêm executable registry riêng ở tầng verification. Immutable stage policy chỉ
+  mang ID; registry code-reviewed mới map `typecheck -> npm run typecheck` và
+  `unit -> npm run test:unit`, cwd root, timeout 120 giây và env allowlist.
+- Profiled runner preflight target/package scripts/npm, chạy argv list với
+  `shell=False`, dừng ở fail/timeout đầu tiên và không đọc raw execution field
+  từ plan/work packet. Contract drift bị chặn trước subprocess.
+- Phase 4 truyền policy resolve từ frozen snapshot vào cả initial verification,
+  migration/revalidate, implementation repair và QA execution. QA generated
+  test TypeScript vẫn fail closed đến lát Vitest kế tiếp.
+- `VerificationResult` giữ flat fields legacy và thêm planned/executed stage IDs
+  cùng per-stage argv/cwd/timeout/status/output evidence. Markdown report,
+  quality report và repair feedback đã mang evidence này; repair objective dùng
+  stage lỗi làm identity ổn định.
+- Verification: test mới `9 passed`; profile/plan/Phase 3-4/events regression
+  `150 passed`; full parallel 4 worker `497 passed, 1 skipped in 81.18s`;
+  `compileall` thành công. Skip duy nhất vẫn là symlink escape trên Windows thiếu
+  quyền tạo symlink.
+- Không chạy live workflow, không external sync và chưa bootstrap target
+  TypeScript. Việc kế tiếp trong A3 là chuyển QA generation/application sang
+  Vitest; A2.2b prompt/fake Developer.act và Code Trace vẫn mở.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

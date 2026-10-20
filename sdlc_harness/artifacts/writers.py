@@ -735,6 +735,9 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
 
 
 def _test_report_markdown(report: dict[str, object]) -> str:
+    planned_stage_ids = report.get("planned_stage_ids")
+    executed_stage_ids = report.get("executed_stage_ids")
+    stage_results = report.get("stage_results")
     lines = [
         f"# Test Report {report.get('artifact_version', 'V1')}",
         "",
@@ -780,7 +783,49 @@ def _test_report_markdown(report: dict[str, object]) -> str:
             f"- Reason: {report.get('reason', '')}",
             f"- Discovered test entrypoints: `{len(report.get('discovered_test_entrypoints') or [])}`",
             f"- Executed test entrypoints: `{len(report.get('executed_test_entrypoints') or [])}`",
-            "",
+        ]
+    )
+    if isinstance(stage_results, list) and stage_results:
+        lines.extend(
+            [
+                f"- Planned stages: `{', '.join(str(item) for item in planned_stage_ids or [])}`",
+                f"- Executed stages: `{', '.join(str(item) for item in executed_stage_ids or [])}`",
+                "",
+                "## Verification Stages",
+                "",
+            ]
+        )
+        for item in stage_results:
+            if not isinstance(item, dict):
+                continue
+            lines.extend(
+                [
+                    f"### {item.get('stage_id', '')}",
+                    "",
+                    f"- Status: `{item.get('status', '')}`",
+                    f"- Argv: `{json.dumps(item.get('argv') or [], ensure_ascii=False)}`",
+                    f"- Cwd: `{item.get('cwd', '')}`",
+                    f"- Timeout: `{item.get('timeout_seconds', '')}` seconds",
+                    f"- Exit code: `{item.get('exit_code', '')}`",
+                    f"- Duration: `{item.get('duration_seconds', '')}` seconds",
+                    f"- Reason: {item.get('reason', '')}",
+                    "",
+                    "#### Stdout",
+                    "",
+                    "```text",
+                    str(item.get("stdout") or "").rstrip(),
+                    "```",
+                    "",
+                    "#### Stderr",
+                    "",
+                    "```text",
+                    str(item.get("stderr") or "").rstrip(),
+                    "```",
+                    "",
+                ]
+            )
+    lines.extend(
+        [
             "## Test Entrypoints",
             "",
             *(

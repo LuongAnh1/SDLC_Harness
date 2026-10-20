@@ -149,8 +149,15 @@ class SequenceVerificationRunner:
     def __init__(self, statuses: list[str]):
         self.statuses = list(statuses)
 
-    def run(self, *, target_path: Path, work_packet: dict[str, object], required_test_files=None):
-        del work_packet, required_test_files
+    def run(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        required_test_files=None,
+        verification_policy=None,
+    ):
+        del work_packet, required_test_files, verification_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
         return VerificationResult(
             status=status,

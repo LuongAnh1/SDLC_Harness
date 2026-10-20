@@ -68,6 +68,7 @@ from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..profiles import (
     PlanningPathPolicy,
+    VerificationStagePolicy,
     planning_path_policy_from_snapshot,
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
@@ -1137,7 +1138,11 @@ class PhaseFourWorkflow:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
-            result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            result = self.verification_runner.run(
+                target_path=target_info.path,
+                work_packet=work_packet,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
             report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -1664,7 +1669,11 @@ class PhaseFourWorkflow:
                 report=change_report,
                 version=artifact_version,
             )
-            verification_result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            verification_result = self.verification_runner.run(
+                target_path=target_info.path,
+                work_packet=work_packet,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
             test_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -1937,6 +1946,10 @@ class PhaseFourWorkflow:
             target_path=target_info.path,
             work_packet=work_packet,
             required_test_files=[str(item.get("path") or "") for item in applied_tests],
+            verification_policy=_verification_policy_for_state(
+                state,
+                run_id=str(state.get("run_id") or ""),
+            ),
         )
         execution_payload = {
             "run_id": state.get("run_id"),
@@ -2257,7 +2270,11 @@ class PhaseFourWorkflow:
                 **latest_artifacts,
                 "developer_work_packet": refreshed_packet_path,
             }
-            verification_result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            verification_result = self.verification_runner.run(
+                target_path=target_info.path,
+                work_packet=work_packet,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
             test_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -2580,7 +2597,11 @@ class PhaseFourWorkflow:
                 report=change_report,
                 version=artifact_version,
             )
-            verification_result = self.verification_runner.run(target_path=target_info.path, work_packet=work_packet)
+            verification_result = self.verification_runner.run(
+                target_path=target_info.path,
+                work_packet=work_packet,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
             test_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -4049,6 +4070,21 @@ def _planning_policy_for_state(
     )
 
 
+def _verification_policy_for_state(
+    state: dict[str, object],
+    *,
+    run_id: str,
+) -> VerificationStagePolicy | None:
+    """Resolve executable stage identity chỉ từ run snapshot bất biến."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    return (
+        verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
+        if snapshot
+        else None
+    )
+
+
 def _string_items(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -4220,6 +4256,9 @@ def _verification_quality_report(
         "timed_out": result.timed_out,
         "discovered_test_entrypoints": list(result.discovered_test_entrypoints),
         "executed_test_entrypoints": list(result.executed_test_entrypoints),
+        "planned_stage_ids": list(result.planned_stage_ids),
+        "executed_stage_ids": list(result.executed_stage_ids),
+        "stage_results": [item.to_dict() for item in result.stage_results],
         "attempt": attempt,
         "repair_iteration": repair_iteration,
         "repairable": _is_repairable_verification_failure(result),
@@ -4293,6 +4332,9 @@ def _verification_repair_feedback(
             "timed_out": result.timed_out,
             "stdout": _bounded_diagnostic(result.stdout),
             "stderr": _bounded_diagnostic(result.stderr),
+            "planned_stage_ids": list(result.planned_stage_ids),
+            "executed_stage_ids": list(result.executed_stage_ids),
+            "stage_results": [item.to_dict() for item in result.stage_results],
         },
         "missing_links": [],
         "developer_constraints": {
@@ -4375,10 +4417,18 @@ def _validator_repair_objective(missing_links: list[object]) -> dict[str, object
 def _verification_repair_objective(result: VerificationResult) -> dict[str, object]:
     """Create a generic objective; the changing diagnostic stays in feedback.verification."""
 
+    terminal_stage_id = result.stage_results[-1].stage_id if result.stage_results else ""
     return {
-        "objective_id": _stable_repair_id({"source": "verification", "command": result.command}),
+        "objective_id": _stable_repair_id(
+            {
+                "source": "verification",
+                "stage_id": terminal_stage_id,
+                "command": result.command,
+            }
+        ),
         "source": "verification",
         "status": "open",
+        "stage_id": terminal_stage_id,
         "canonical_keys": [],
         "contract_findings": [],
         "must_preserve": "Repair the current diagnostic without regressing approved requirements or design.",

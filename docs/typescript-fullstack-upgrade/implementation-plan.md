@@ -82,10 +82,19 @@ tất và không tự cho phép cutover.
   - Editable root chỉ xác nhận file thuộc vùng có thể sửa; phạm vi ghi thực tế
     vẫn là exact `allowed_paths` đã được implementation plan duyệt.
   - Java path guard chỉ còn cho artifact legacy; prompt/fake Phase 4 vẫn thuộc
-    A2.2b và Verification Runner stage executor vẫn thuộc lát A3 kế tiếp.
-- [ ] Chuyển Verification Runner sang profile-owned setup/discovery/execution.
-- [ ] Dùng fixed argv/cwd/env allowlist/timeout từ registry, không execute shell
+    A2.2b.
+- [x] A3.2: chuyển Verification Runner sang profile-owned setup/discovery/execution.
+  - Hoàn tất: 2026-10-20.
+  - Phase 4 resolve `VerificationStagePolicy` từ immutable run snapshot tại mọi
+    điểm initial/revalidate/repair/QA verification.
+  - Chặng A chạy tuần tự `typecheck -> unit`, dừng tại fail/timeout đầu tiên và
+    ghi evidence riêng cho từng stage vào test report.
+- [x] Dùng fixed argv/cwd/env allowlist/timeout từ registry, không execute shell
   string do LLM hoặc plan cung cấp.
+  - Registry code-reviewed ánh xạ sang `npm run typecheck` và
+    `npm run test:unit`, cwd root, timeout 120 giây, env allowlist và `shell=False`.
+  - Packet thiếu/sai policy, sai thứ tự stage hoặc chứa raw execution field bị
+    chặn trước subprocess; Java command runner chỉ còn cho artifact legacy.
 - [ ] Chuyển QA generation/application sang Vitest test files và xác minh report
   chứng minh generated test thật sự được execute.
 - [ ] Thêm TypeScript AST contract evidence cho code trace.

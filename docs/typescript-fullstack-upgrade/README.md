@@ -70,7 +70,9 @@ binding và legacy retirement. Run mới bắt buộc chọn profile; target rep
 chưa được tạo và chưa chạy migration hay live workflow cho hướng TypeScript.
 Phase 3 profiled hiện phát hành `implementation_plan_structured_v2`, bind review
 với SHA-256 của artifact và chỉ kích hoạt smoke suite `typecheck -> unit`.
-Verification Runner đã fail-closed với packet stage-only nhưng chưa ánh xạ hoặc
-thực thi các stage này cho tới lát A3 kế tiếp. Work packet, refresh, apply và
-repair của profiled run đã khóa theo editable roots từ immutable snapshot; exact
-`allowed_paths` của approved plan vẫn là phạm vi ghi cuối cùng.
+Verification Runner đã ánh xạ smoke suite qua code-reviewed registry sang fixed
+argv/cwd/env allowlist/timeout, chạy `shell=False` và ghi evidence từng stage.
+Work packet, refresh, apply và repair của profiled run đã khóa theo editable
+roots từ immutable snapshot; exact `allowed_paths` của approved plan vẫn là
+phạm vi ghi cuối cùng. QA generated test vẫn fail closed cho tới lát chuyển sang
+Vitest; chưa chạy live workflow trên target TypeScript.

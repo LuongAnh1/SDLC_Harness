@@ -168,6 +168,10 @@ Project profile giữ full-stack stage catalog để target manifest khai báo
 capability. `VerificationStagePolicy v1` của Chặng A chỉ kích hoạt smoke suite
 `typecheck -> unit`. Khi sang Chặng B phải phát hành policy/profile schema version
 mới để mở rộng active suite; không đổi ý nghĩa của policy đã snapshot cho run cũ.
+Registry A3.2 hiện resolve hai stage này lần lượt thành `npm run typecheck` và
+`npm run test:unit`, cwd root, timeout 120 giây và environment allowlist. Runner
+preflight `package.json`/script/npm, chạy argv list với `shell=False`, dừng ở lỗi
+đầu tiên và không fallback sang raw command hay Java runner cho profiled packet.
 Full-stack suite đích khi đó là:
 
 ```text

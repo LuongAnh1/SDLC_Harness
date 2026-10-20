@@ -325,7 +325,9 @@ class SequenceVerificationRunner:
         target_path: Path,
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
+        verification_policy=None,
     ) -> VerificationResult:
+        del work_packet, required_test_files, verification_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
         self.calls.append(status)
         reason_by_status = {
@@ -2054,20 +2056,22 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(result.status, "passed")
         self.assertIn("javac visible", result.stdout)
 
-    def test_verification_runner_rejects_profiled_packet_before_java_fallback(self) -> None:
+    def test_verification_runner_rejects_profiled_packet_without_snapshot_policy(self) -> None:
         work_packet = {
             "verification_stage_ids": ["typecheck", "unit"],
             "test_intents": [{"stage_id": "unit"}],
         }
 
-        with patch("sdlc_harness.verification.runner.subprocess.run") as subprocess_run:
-            result = VerificationRunner(timeout_seconds=10).run(
+        with (
+            patch("sdlc_harness.verification.runner.subprocess.run") as subprocess_run,
+            self.assertRaises(HarnessError) as caught,
+        ):
+            VerificationRunner(timeout_seconds=10).run(
                 target_path=self.target_repo,
                 work_packet=work_packet,
             )
 
-        self.assertEqual(result.status, "failed")
-        self.assertIn("A3 stage executor", result.reason)
+        self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
         subprocess_run.assert_not_called()
 
     def test_verification_runner_executes_required_qa_test_class(self) -> None:

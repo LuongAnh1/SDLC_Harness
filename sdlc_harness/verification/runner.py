@@ -1,10 +1,9 @@
-"""Chạy compile/unit test command của target repo cho Phase 4.
+"""Chạy các stage kiểm chứng của target repo cho Phase 4.
 
 Verification Runner là lớp công cụ, không phải AI Tester. Nó nhận
-DeveloperWorkPacket đã được Phase 4 chuẩn bị hoặc refresh, chọn command kiểm thử
-gần code nhất, chạy trong target repo và trả kết quả có cấu trúc để workflow ghi
-`test_report_v{n}.md`. Trên Windows, runner cố gắng thêm JDK phổ biến vào PATH
-để các lần chạy sau không kẹt vì shell chưa nhận `javac`.
+DeveloperWorkPacket đã được Phase 4 chuẩn bị hoặc refresh. Profiled run chỉ dùng
+stage policy từ snapshot và executable registry đã review; artifact legacy vẫn
+dùng command Java cũ. Kết quả có cấu trúc được ghi vào `test_report_v{n}.md`.
 
 Sau command baseline, runner khám phá mọi Java test entrypoint có `main()` dưới
 `src/test/java`, hợp nhất chúng với `required_test_files` của QA và chạy trực tiếp
@@ -14,6 +13,7 @@ từng class. Chỉ compile test source không còn đủ để báo pass.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import re
@@ -22,7 +22,14 @@ import subprocess
 import time
 from typing import Any
 
+from ..core.errors import HarnessError
 from ..events import emit_current
+from ..profiles import (
+    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    VerificationStagePolicy,
+    profiled_execution_field_paths,
+)
+from .registry import VerificationStageSpec, resolve_verification_stage_specs
 
 DEFAULT_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -43,6 +50,38 @@ JAVA_MAIN_METHOD_PATTERN = re.compile(
 
 
 @dataclass(frozen=True)
+class VerificationStageResult:
+    """Bằng chứng thực thi của một stage profile-owned."""
+
+    stage_id: str
+    status: str
+    argv: tuple[str, ...]
+    cwd: str
+    timeout_seconds: int
+    exit_code: int | None
+    duration_seconds: float
+    stdout: str
+    stderr: str
+    reason: str
+    timed_out: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "stage_id": self.stage_id,
+            "status": self.status,
+            "argv": list(self.argv),
+            "cwd": self.cwd,
+            "timeout_seconds": self.timeout_seconds,
+            "exit_code": self.exit_code,
+            "duration_seconds": round(self.duration_seconds, 3),
+            "stdout": self.stdout,
+            "stderr": self.stderr,
+            "reason": self.reason,
+            "timed_out": self.timed_out,
+        }
+
+
+@dataclass(frozen=True)
 class VerificationResult:
     """Kết quả chạy compile/unit test command của target repo."""
 
@@ -57,6 +96,9 @@ class VerificationResult:
     timed_out: bool = False
     discovered_test_entrypoints: tuple[str, ...] = ()
     executed_test_entrypoints: tuple[str, ...] = ()
+    planned_stage_ids: tuple[str, ...] = ()
+    executed_stage_ids: tuple[str, ...] = ()
+    stage_results: tuple[VerificationStageResult, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -71,11 +113,14 @@ class VerificationResult:
             "timed_out": self.timed_out,
             "discovered_test_entrypoints": list(self.discovered_test_entrypoints),
             "executed_test_entrypoints": list(self.executed_test_entrypoints),
+            "planned_stage_ids": list(self.planned_stage_ids),
+            "executed_stage_ids": list(self.executed_stage_ids),
+            "stage_results": [item.to_dict() for item in self.stage_results],
         }
 
 
 class VerificationRunner:
-    """Chạy command kiểm thử của target repo và phân loại pass/fail/skipped."""
+    """Chạy profile stages hoặc command legacy và phân loại kết quả."""
 
     def __init__(self, *, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS):
         self.timeout_seconds = max(1, timeout_seconds)
@@ -86,6 +131,7 @@ class VerificationRunner:
         target_path: Path,
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> VerificationResult:
         """Run verification and publish bounded result metadata."""
 
@@ -93,6 +139,7 @@ class VerificationRunner:
             target_path=target_path,
             work_packet=work_packet,
             required_test_files=required_test_files,
+            verification_policy=verification_policy,
         )
         emit_current(
             category="verification",
@@ -105,6 +152,8 @@ class VerificationRunner:
                 "duration_seconds": round(result.duration_seconds, 3),
                 "discovered_tests": len(result.discovered_test_entrypoints),
                 "executed_tests": len(result.executed_test_entrypoints),
+                "planned_stages": list(result.planned_stage_ids),
+                "executed_stages": list(result.executed_stage_ids),
             },
         )
         return result
@@ -115,22 +164,22 @@ class VerificationRunner:
         target_path: Path,
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> VerificationResult:
-        """Chạy baseline command rồi chạy mọi Java test entrypoint đã khám phá."""
+        """Chọn runner profile-owned hoặc nhánh Java compatibility."""
 
-        if _has_profiled_verification_contract(work_packet):
-            return VerificationResult(
-                status="failed",
-                command="",
-                cwd=str(target_path),
-                exit_code=None,
-                duration_seconds=0.0,
-                stdout="",
-                stderr="",
-                reason=(
-                    "Profile-owned verification stages require the A3 stage executor; "
-                    "the legacy Java command runner will not execute them."
-                ),
+        if verification_policy is not None or _has_profiled_verification_contract(work_packet):
+            if verification_policy is None:
+                raise HarnessError(
+                    "verification_stage_policy_invalid",
+                    "Profiled verification requires the immutable run stage policy.",
+                    run_id=str(work_packet.get("run_id") or "") or None,
+                )
+            return self._run_profiled_stages(
+                target_path=target_path,
+                work_packet=work_packet,
+                required_test_files=required_test_files,
+                verification_policy=verification_policy,
             )
 
         command = _test_command_from_work_packet(work_packet)
@@ -229,6 +278,165 @@ class VerificationRunner:
             test_files=test_files,
             baseline=baseline,
         )
+
+    def _run_profiled_stages(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        required_test_files: list[str] | None,
+        verification_policy: VerificationStagePolicy,
+    ) -> VerificationResult:
+        """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
+
+        run_id = str(work_packet.get("run_id") or "") or None
+        specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
+        _validate_profiled_work_packet(
+            work_packet,
+            verification_policy=verification_policy,
+            run_id=run_id,
+        )
+        planned_stage_ids = tuple(spec.stage_id for spec in specs)
+        if required_test_files:
+            return VerificationResult(
+                status="failed",
+                command="",
+                cwd=str(target_path),
+                exit_code=None,
+                duration_seconds=0.0,
+                stdout="",
+                stderr="",
+                reason=(
+                    "Profiled QA test-file verification is not supported until the Vitest QA executor is enabled."
+                ),
+                planned_stage_ids=planned_stage_ids,
+            )
+
+        target_root = target_path.resolve()
+        if not target_root.is_dir():
+            return _profiled_preflight_failure(
+                target_path=target_root,
+                planned_stage_ids=planned_stage_ids,
+                reason="Verification target repository does not exist or is not a directory.",
+            )
+        scripts, manifest_error = _package_scripts(target_root)
+        if manifest_error:
+            return _profiled_preflight_failure(
+                target_path=target_root,
+                planned_stage_ids=planned_stage_ids,
+                reason=manifest_error,
+            )
+
+        prepared: list[tuple[VerificationStageSpec, Path, list[str], dict[str, str]]] = []
+        for spec in specs:
+            if spec.required_package_script not in scripts:
+                return _profiled_preflight_failure(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    reason=f"package.json is missing required script: {spec.required_package_script}",
+                )
+            stage_cwd = (target_root / spec.cwd).resolve()
+            try:
+                stage_cwd.relative_to(target_root)
+            except ValueError as exc:
+                raise HarnessError(
+                    "verification_stage_policy_invalid",
+                    f"Verification stage cwd escapes target repository: {spec.cwd}",
+                    run_id=run_id,
+                ) from exc
+            if not stage_cwd.is_dir():
+                return _profiled_preflight_failure(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    reason=f"Verification stage cwd does not exist: {spec.cwd}",
+                )
+            env = _profiled_verification_env(spec)
+            executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
+            if not executable:
+                return _profiled_preflight_failure(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    reason=f"Verification executable was not found: {spec.argv[0]}",
+                )
+            prepared.append((spec, stage_cwd, [executable, *spec.argv[1:]], env))
+
+        stage_results: list[VerificationStageResult] = []
+        for spec, stage_cwd, executable_argv, env in prepared:
+            start = time.monotonic()
+            try:
+                completed = subprocess.run(
+                    executable_argv,
+                    cwd=str(stage_cwd),
+                    env=env,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=spec.timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stage_result = VerificationStageResult(
+                    stage_id=spec.stage_id,
+                    status="failed",
+                    argv=spec.argv,
+                    cwd=spec.cwd,
+                    timeout_seconds=spec.timeout_seconds,
+                    exit_code=None,
+                    duration_seconds=time.monotonic() - start,
+                    stdout=_truncate_output(_decode_timeout_output(exc.stdout)),
+                    stderr=_truncate_output(_decode_timeout_output(exc.stderr)),
+                    reason=f"Verification stage timed out after {spec.timeout_seconds}s: {spec.stage_id}",
+                    timed_out=True,
+                )
+            except OSError as exc:
+                stage_result = VerificationStageResult(
+                    stage_id=spec.stage_id,
+                    status="failed",
+                    argv=spec.argv,
+                    cwd=spec.cwd,
+                    timeout_seconds=spec.timeout_seconds,
+                    exit_code=None,
+                    duration_seconds=time.monotonic() - start,
+                    stdout="",
+                    stderr=_truncate_output(str(exc)),
+                    reason=f"Verification stage could not start: {spec.stage_id}",
+                )
+            else:
+                stage_result = VerificationStageResult(
+                    stage_id=spec.stage_id,
+                    status="passed" if completed.returncode == 0 else "failed",
+                    argv=spec.argv,
+                    cwd=spec.cwd,
+                    timeout_seconds=spec.timeout_seconds,
+                    exit_code=completed.returncode,
+                    duration_seconds=time.monotonic() - start,
+                    stdout=_truncate_output(completed.stdout),
+                    stderr=_truncate_output(completed.stderr),
+                    reason=(
+                        f"Verification stage completed successfully: {spec.stage_id}"
+                        if completed.returncode == 0
+                        else f"Verification stage exited with code {completed.returncode}: {spec.stage_id}"
+                    ),
+                )
+            stage_results.append(stage_result)
+            if stage_result.status != "passed":
+                return _profiled_result(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    stage_results=stage_results,
+                    terminal=stage_result,
+                )
+
+        terminal = stage_results[-1]
+        return _profiled_result(
+            target_path=target_root,
+            planned_stage_ids=planned_stage_ids,
+            stage_results=stage_results,
+            terminal=terminal,
+            reason="All profile-owned verification stages completed successfully.",
+        )
+
     def _run_java_tests(
         self,
         *,
@@ -329,6 +537,125 @@ class VerificationRunner:
         )
 
 
+def _validate_profiled_work_packet(
+    work_packet: dict[str, object],
+    *,
+    verification_policy: VerificationStagePolicy,
+    run_id: str | None,
+) -> None:
+    if work_packet.get("schema_version") != PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Profiled verification requires the profiled Developer Work Packet schema.",
+            run_id=run_id,
+        )
+    actual_stage_ids = tuple(_string_items(work_packet.get("verification_stage_ids")))
+    if actual_stage_ids != verification_policy.stage_ids:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Developer Work Packet verification stages do not match the immutable run policy.",
+            run_id=run_id,
+        )
+    test_intents = work_packet.get("test_intents")
+    if not isinstance(test_intents, list) or not test_intents:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Profiled Developer Work Packet has no test intent block.",
+            run_id=run_id,
+        )
+    prohibited = profiled_execution_field_paths(test_intents, path="$.test_intents")
+    if prohibited:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Profiled Developer Work Packet contains prohibited execution fields: " + ", ".join(prohibited),
+            run_id=run_id,
+        )
+    allowed_stage_ids = set(verification_policy.stage_ids)
+    for item in test_intents:
+        if not isinstance(item, dict):
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                "Profiled Developer Work Packet contains an invalid test intent.",
+                run_id=run_id,
+            )
+        stage_id = str(item.get("stage_id") or "").strip()
+        if not stage_id or stage_id not in allowed_stage_ids:
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Profiled test intent references an unsupported verification stage: {stage_id}",
+                run_id=run_id,
+            )
+
+
+def _package_scripts(target_root: Path) -> tuple[set[str], str]:
+    manifest_path = target_root / "package.json"
+    if not manifest_path.is_file():
+        return set(), "Verification target is missing package.json."
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return set(), "Verification target package.json is not valid UTF-8 JSON."
+    scripts = payload.get("scripts") if isinstance(payload, dict) else None
+    if not isinstance(scripts, dict):
+        return set(), "Verification target package.json has no scripts object."
+    return {str(key) for key, value in scripts.items() if isinstance(value, str) and value.strip()}, ""
+
+
+def _profiled_verification_env(spec: VerificationStageSpec) -> dict[str, str]:
+    allowed = {key.casefold() for key in spec.inherited_env_keys}
+    env = {key: value for key, value in os.environ.items() if key.casefold() in allowed}
+    env.update(dict(spec.fixed_env))
+    return env
+
+
+def _environment_value(env: dict[str, str], key: str) -> str:
+    expected = key.casefold()
+    return next((value for name, value in env.items() if name.casefold() == expected), "")
+
+
+def _profiled_preflight_failure(
+    *,
+    target_path: Path,
+    planned_stage_ids: tuple[str, ...],
+    reason: str,
+) -> VerificationResult:
+    return VerificationResult(
+        status="failed",
+        command="",
+        cwd=str(target_path),
+        exit_code=None,
+        duration_seconds=0.0,
+        stdout="",
+        stderr="",
+        reason=reason,
+        planned_stage_ids=planned_stage_ids,
+    )
+
+
+def _profiled_result(
+    *,
+    target_path: Path,
+    planned_stage_ids: tuple[str, ...],
+    stage_results: list[VerificationStageResult],
+    terminal: VerificationStageResult,
+    reason: str | None = None,
+) -> VerificationResult:
+    return VerificationResult(
+        status=terminal.status,
+        command="",
+        cwd=str(target_path),
+        exit_code=terminal.exit_code,
+        duration_seconds=sum(item.duration_seconds for item in stage_results),
+        stdout=terminal.stdout,
+        stderr=terminal.stderr,
+        reason=reason or terminal.reason,
+        timed_out=terminal.timed_out,
+        planned_stage_ids=planned_stage_ids,
+        executed_stage_ids=tuple(item.stage_id for item in stage_results),
+        stage_results=tuple(stage_results),
+    )
+
+
 def _has_compiled_java_output(target_path: Path) -> bool:
     build_path = target_path / "build"
     return build_path.is_dir() and any(build_path.rglob("*.class"))
@@ -387,6 +714,12 @@ def _has_profiled_verification_contract(work_packet: dict[str, object]) -> bool:
         isinstance(item, dict) and bool(str(item.get("stage_id") or "").strip())
         for item in intents
     )
+
+
+def _string_items(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _verification_env() -> dict[str, str]:

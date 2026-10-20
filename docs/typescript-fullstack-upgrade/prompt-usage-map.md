@@ -82,3 +82,14 @@ workflow nếu chưa có contract/profile test tương ứng.
   bị chặn trước khi ghi file.
 - Prompt/fake Developer.act, QA và Code Trace vẫn Java-heavy theo đúng A2.2b;
   A3.1 chỉ mở guard an toàn, chưa tuyên bố Phase 4 TypeScript đã chạy được.
+
+## Trạng thái A3.2
+
+- Verification Runner nhận stage policy resolve từ frozen snapshot; work packet
+  chỉ được mang stage ID, không được cung cấp executable data.
+- Registry trong tầng verification sở hữu fixed argv/cwd/env allowlist/timeout
+  cho `typecheck -> unit`; subprocess luôn dùng argv list và `shell=False`.
+- Test report, quality report và repair feedback mang ordered stage evidence;
+  flat fields cũ vẫn được giữ để đọc artifact legacy.
+- QA profiled có `required_test_files` fail closed đến khi QA generation/application
+  chuyển sang Vitest và chứng minh generated test thật sự được execute.
