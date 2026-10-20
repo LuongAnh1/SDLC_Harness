@@ -847,7 +847,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("Canonical requirement coverage: 2/2", body)
         self.assertIn("canonical flow [REQ-1, REQ-2]", body)
 
-    def test_cli_approve_checkpoint_dispatches_implementation_plan_to_phase4(self) -> None:
+    def test_cli_approve_checkpoint_rejects_legacy_implementation_plan(self) -> None:
         phase3 = self._create_phase3_run()
         stdout = io.StringIO()
         env = {
@@ -870,9 +870,9 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_ready")
-        self.assertIn("developer_work_packet", payload["latest_artifacts"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], phase3["run_id"])
 
     def test_phase4_rejects_non_implementation_plan_checkpoint(self) -> None:
         created = PhaseOneWorkflow(self.settings).start_or_get_run(
@@ -984,7 +984,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "blocked")
         self.assertEqual(response["last_error"]["error_code"], "run_workspace_mismatch")
 
-    def test_cli_continue_run_dispatches_phase4_developer_act(self) -> None:
+    def test_cli_continue_run_rejects_legacy_developer_act(self) -> None:
         ready = self._create_phase4_ready_run()
         stdout = io.StringIO()
         env = {
@@ -1009,11 +1009,9 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_traced")
-        self.assertIn("code_change_report", payload["latest_artifacts"])
-        self.assertIn("test_report", payload["latest_artifacts"])
-        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], ready["run_id"])
 
     def test_continue_run_runs_verification_after_implementation_written(self) -> None:
         written = self._create_phase4_written_run()
@@ -1302,7 +1300,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(notification_mapping["symbol"], "notifyError")
         self.assertTrue(notification_mapping["symbol_found"])
 
-    def test_cli_continue_run_dispatches_phase4_code_trace(self) -> None:
+    def test_cli_continue_run_rejects_legacy_code_trace(self) -> None:
         tested = self._create_phase4_tested_run()
         stdout = io.StringIO()
         env = {
@@ -1325,11 +1323,11 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_traced")
-        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], tested["run_id"])
 
-    def test_cli_continue_run_dispatches_phase4_verification(self) -> None:
+    def test_cli_continue_run_rejects_legacy_verification(self) -> None:
         written = self._create_phase4_written_run()
         stdout = io.StringIO()
         env = {
@@ -1352,10 +1350,9 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_traced")
-        self.assertIn("test_report", payload["latest_artifacts"])
-        self.assertIn("requirement_design_code_trace", payload["latest_artifacts"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], written["run_id"])
 
     def test_continue_run_marks_repair_needed_when_code_trace_missing_test_file(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -1723,7 +1720,7 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(ctx.exception.error_code, "implementation_revalidate_not_allowed")
 
-    def test_cli_revalidate_implementation_dispatches_phase4(self) -> None:
+    def test_cli_revalidate_implementation_rejects_legacy_run(self) -> None:
         self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
         tested = self._create_phase4_tested_run()
         workflow = PhaseFourWorkflow(self.settings)
@@ -1755,10 +1752,9 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "implementation_traced")
-        self.assertEqual(payload["implementation_repair_iterations"], 1)
-        self.assertIn("requirement_design_code_trace_v3.json", payload["latest_artifacts"]["requirement_design_code_trace"])
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], blocked["run_id"])
 
     def test_canonical_trace_survives_redundant_file_mapping_removal(self) -> None:
         tested = self._create_phase4_tested_run()

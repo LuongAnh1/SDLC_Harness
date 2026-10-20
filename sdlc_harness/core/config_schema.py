@@ -103,7 +103,7 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Project profile",
                 "enum",
                 "",
-                "Để trống để giữ Java baseline trong giai đoạn migration; profile chỉ áp dụng cho run mới sau khi có snapshot.",
+                "Bắt buộc cho run mới; để trống chỉ giữ các thao tác lịch sử trên run legacy đã retire.",
                 options=_PROJECT_PROFILE_OPTIONS,
             ),
             _field("SDLC_TARGET_REPO_PATH", "Repository path", "path", "../SDLC_Target_eTour", "Đường dẫn repository nhận code."),

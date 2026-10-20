@@ -1,6 +1,6 @@
 # Implementation Plan
 
-> Đây là roadmap triển khai, không phải execution log. Gate 0 và slice A1.1 đã
+> Đây là roadmap triển khai, không phải execution log. Gate 0 và toàn bộ A1 đã
 > hoàn tất; các checklist còn lại phản ánh công việc chưa thực hiện.
 
 ## Gate 0 - Review Tài Liệu (Hoàn Tất 2026-10-19)
@@ -26,8 +26,10 @@ tất và không tự cho phép cutover.
   dùng snapshot thay vì resolve lại config hiện hành.
 - [x] A1.2c: bổ sung manifest digest, base SHA và resolved component roots vào
   snapshot khi provision workspace.
-- [ ] Thêm legacy classifier/guard: run thiếu snapshot là `legacy_java_v1`, chỉ
-  còn read/audit/sync-existing/cancel/cleanup sau cutover.
+- [x] Nhận diện run thiếu snapshot là `legacy_java_v1` trên status/read API.
+- [x] A1.2d: retire Java legacy ngay tại application boundary; chỉ giữ
+  read/audit/sync-existing/cleanup, chặn action sinh artifact mới và không mở
+  rộng `cancel_run` trong lát này.
 - [x] Giữ HTTP API tương thích; thêm `execution_profile` tối thiểu theo hướng
   additive, không công khai target remote hoặc local path.
 - [x] Fail closed khi state/workspace/registry/target manifest không khớp.

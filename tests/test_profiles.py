@@ -19,6 +19,8 @@ from sdlc_harness.profiles import (
     get_project_profile,
     list_project_profile_ids,
     profile_status_metadata,
+    public_allowed_actions,
+    public_run_summary,
     read_profile_snapshot,
 )
 
@@ -267,6 +269,31 @@ class ProfileRegistryTests(unittest.TestCase):
             )["classification"],
             "invalid",
         )
+
+    def test_public_projection_treats_null_snapshot_as_legacy(self) -> None:
+        state = {
+            "run_id": "run_legacy",
+            "profile_snapshot": None,
+            "summary_for_user": "Approve this checkpoint.",
+        }
+
+        self.assertEqual(
+            public_allowed_actions(state, ["approve_checkpoint", "sync_run", "get_status"]),
+            ["sync_run", "get_status"],
+        )
+        self.assertIn("legacy_java_v1 đã retire", public_run_summary(state))
+
+    def test_public_projection_respects_profile_metadata_without_snapshot_payload(self) -> None:
+        state = {
+            "run_id": "run_profile",
+            "execution_profile": {"classification": "profiled"},
+        }
+
+        self.assertEqual(
+            public_allowed_actions(state, ["approve_checkpoint", "continue_run"]),
+            ["approve_checkpoint", "continue_run"],
+        )
+        self.assertEqual(public_run_summary(state, "Continue this run."), "Continue this run.")
 
 
 if __name__ == "__main__":

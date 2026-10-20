@@ -169,6 +169,7 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
                 "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
@@ -199,6 +200,7 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
                 "SDLC_DESIGN_LLM_CALL_BUDGET": "16",

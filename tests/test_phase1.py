@@ -14,6 +14,7 @@ from unittest.mock import patch
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.core.config import load_settings, repo_root
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.sources.fixtures import UseCaseSource, load_use_case
 from sdlc_harness.sources.jira import load_jira_issue_source
 from sdlc_harness.sync.atlassian import real_sync_requirement_checkpoint
@@ -28,11 +29,22 @@ class PhaseOneTest(unittest.TestCase):
         self.settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
-            overrides={"SDLC_LLM_MODE": "fake", "SDLC_SYNC_MODE": "mock"},
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+            },
         )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def profile_snapshot(self) -> dict[str, object]:
+        return build_profile_snapshot(
+            project_profile_id="typescript_fullstack_v1",
+            target_remote=self.settings.target_repo_remote,
+            target_base_branch=self.settings.target_base_branch,
+        ).to_dict()
 
     def test_repo_root_points_to_project_root(self) -> None:
         self.assertEqual(repo_root(), self.repo_root)
@@ -312,7 +324,16 @@ class PhaseOneTest(unittest.TestCase):
         self.assertNotIn("target_remote", response["execution_profile"])
 
     def test_active_legacy_run_is_not_backfilled_after_profile_config_changes(self) -> None:
-        legacy_workflow = PhaseOneWorkflow(self.settings)
+        legacy_settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "",
+            },
+        )
+        legacy_workflow = PhaseOneWorkflow(legacy_settings)
         first = legacy_workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
         profiled_settings = load_settings(
             root=self.repo_root,
@@ -428,6 +449,7 @@ class PhaseOneTest(unittest.TestCase):
             },
             "allowed_next_actions": ["approve_checkpoint", "get_status", "sync_run", "cancel_run"],
             "summary_for_user": current_summary,
+            "profile_snapshot": self.profile_snapshot(),
         }
         workflow.store.write_state(current_state)
         state_path = workflow.store.state_path(run_id)
@@ -464,6 +486,7 @@ class PhaseOneTest(unittest.TestCase):
                 "status": "partial_failed",
                 "mode": "real",
             },
+            "profile_snapshot": self.profile_snapshot(),
         }
         workflow.store.write_state(state)
         state_path = workflow.store.state_path(run_id)
@@ -507,7 +530,9 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_cli_code_review_approval_success_is_json_with_zero_exit(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
-        PhaseOneWorkflow(self.settings).store.write_state({"run_id": run_id})
+        PhaseOneWorkflow(self.settings).store.write_state(
+            {"run_id": run_id, "profile_snapshot": self.profile_snapshot()}
+        )
         response = {
             "ok": True,
             "run_id": run_id,
@@ -539,7 +564,9 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_cli_code_review_approval_business_error_keeps_json_contract(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
-        PhaseOneWorkflow(self.settings).store.write_state({"run_id": run_id})
+        PhaseOneWorkflow(self.settings).store.write_state(
+            {"run_id": run_id, "profile_snapshot": self.profile_snapshot()}
+        )
         stdout = io.StringIO()
         failure = HarnessError(
             "github_pr_identity_mismatch",
@@ -593,7 +620,13 @@ class PhaseOneTest(unittest.TestCase):
         )
         stdout = io.StringIO()
         with (
-            patch.dict(os.environ, {"SDLC_SYNC_MODE": "mock"}),
+            patch.dict(
+                os.environ,
+                {
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                },
+            ),
             patch("sdlc_harness.workflows.phase1.load_jira_issue_source", return_value=source),
             contextlib.redirect_stdout(stdout),
         ):
@@ -859,6 +892,7 @@ class PhaseOneTest(unittest.TestCase):
                 "allowed_next_actions": ["get_status", "cancel_run"],
                 "last_error": {"error_code": "developer_act_failed", "message": "truncated"},
                 "developer_execution": {},
+                "profile_snapshot": self.profile_snapshot(),
             }
         )
 
@@ -887,6 +921,7 @@ class PhaseOneTest(unittest.TestCase):
                     "message": "Persisted repair selection differs from the current selection policy.",
                 },
                 "developer_execution": {"mode": "implementation_repair"},
+                "profile_snapshot": self.profile_snapshot(),
             }
         )
 

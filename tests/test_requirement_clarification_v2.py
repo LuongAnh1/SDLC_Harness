@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -509,6 +510,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -517,7 +519,10 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 ScriptedClient([self.accepted_q4()])
             )
 
-            with patch("sdlc_harness.application.service.PhaseOneWorkflow", return_value=workflow):
+            with (
+                patch.dict(os.environ, {"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"}),
+                patch("sdlc_harness.application.service.PhaseOneWorkflow", return_value=workflow),
+            ):
                 start_stdout = io.StringIO()
                 with contextlib.redirect_stdout(start_stdout):
                     start_code = cli_main(

@@ -16,6 +16,13 @@ from .snapshot import (
     profile_status_metadata,
     read_profile_snapshot,
 )
+from .retirement import (
+    LEGACY_RETIRED_ALLOWED_COMMANDS,
+    public_allowed_actions,
+    public_run_summary,
+    require_project_profile_for_start,
+    require_run_command_allowed,
+)
 
 __all__ = [
     "ComponentProfile",
@@ -35,4 +42,9 @@ __all__ = [
     "load_and_validate_target_manifest",
     "profile_status_metadata",
     "read_profile_snapshot",
+    "LEGACY_RETIRED_ALLOWED_COMMANDS",
+    "public_allowed_actions",
+    "public_run_summary",
+    "require_project_profile_for_start",
+    "require_run_command_allowed",
 ]

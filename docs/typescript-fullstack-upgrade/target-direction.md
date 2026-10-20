@@ -3,7 +3,8 @@
 > Trạng thái: A1.1 đã triển khai contract/registry thuần; A1.2a đã thêm config
 > selection fail-closed; A1.2b đã thêm snapshot theo run và downstream settings
 > binding; A1.2c đã thêm target manifest preflight cùng workspace binding
-> fail-closed. Mặc định rỗng vẫn giữ Java baseline. Các
+> fail-closed; A1.2d đã hard-retire run Java thiếu snapshot. Profile rỗng chỉ
+> còn phục vụ read/audit/sync-existing/cleanup. Các
 > artifact và behavior Phase 2-4 dưới đây vẫn là proposal.
 
 ## Nguyên Tắc
@@ -58,7 +59,7 @@ logic TypeScript trực tiếp.
 A1.1 đã đăng ký `typescript_v1` và `typescript_fullstack_v1` bằng immutable
 dataclass, component/editable/protected paths và verification stage IDs. A1.2a
 đã thêm `SDLC_PROJECT_PROFILE`: giá trị khác rỗng được resolve fail-closed qua
-registry, còn mặc định rỗng giữ Java baseline trong giai đoạn migration. A1.2b
+registry. Từ A1.2d, giá trị rỗng không được mở run mới. A1.2b
 đã đóng băng profile ID/schema cùng target remote/base branch cho run mới có
 selector; registry vẫn không chứa raw command.
 
@@ -222,8 +223,8 @@ approved claims và Verification evidence như consensus flow hiện hành.
 - Không cho một run xây toàn bộ ứng dụng hoặc nhiều feature độc lập.
 - Không dùng database thật/shared/prod cho agent verification.
 - Không triển khai Java runtime profile sau cutover theo quyết định hiện tại.
-- Run thiếu profile snapshot được xem là `legacy_java_v1`. Sau cutover chúng vẫn
-  đọc/audit/sync artifact đã có, cancel và cleanup được, nhưng approve/continue/
+- Run thiếu profile snapshot được xem là `legacy_java_v1`. Chúng vẫn
+  đọc/audit/sync artifact đã có và cleanup được, nhưng approve/continue/
   revalidate sinh artifact mới phải fail `legacy_execution_profile_retired`.
-- Không tự migrate Java run. Muốn tiếp tục cùng Jira issue phải cancel run cũ rồi
-  mở run TypeScript mới.
+- Không tự migrate Java run. `cancel_run` chưa thuộc HTTP contract của lát này;
+  start cùng source đang có active legacy run phải fail thay vì tạo run chồng.

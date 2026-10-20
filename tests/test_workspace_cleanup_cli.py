@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from sdlc_harness.cli import main as cli_main
+from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.storage.runtime import RuntimeStore
 
 
@@ -21,7 +22,16 @@ class WorkspaceCleanupCliTests(unittest.TestCase):
         self.addCleanup(temp_dir.cleanup)
         runtime_root = Path(temp_dir.name) / ".runtime"
         run_id = "run_20261013_160421_f661babf"
-        RuntimeStore(repo_root=repo_root, runtime_root=runtime_root).write_state({"run_id": run_id})
+        RuntimeStore(repo_root=repo_root, runtime_root=runtime_root).write_state(
+            {
+                "run_id": run_id,
+                "profile_snapshot": build_profile_snapshot(
+                    project_profile_id="typescript_fullstack_v1",
+                    target_remote="https://github.com/example/target.git",
+                    target_base_branch="main",
+                ).to_dict(),
+            }
+        )
         response = {
             "ok": True,
             "run_id": run_id,

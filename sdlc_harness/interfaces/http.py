@@ -720,6 +720,8 @@ def _http_status_for_error(error_code: str) -> int:
         "source_action_locked",
         "config_busy",
         "config_locked",
+        "legacy_execution_profile_retired",
+        "project_profile_required",
     }:
         return 409
     if error_code in {"operation_queue_full", "operation_manager_stopping"}:

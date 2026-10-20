@@ -77,6 +77,11 @@ class ReadApiFixture(unittest.TestCase):
             ),
             "llm": {"mode": "fake", "model": "test"},
             "developer_execution": {},
+            "profile_snapshot": build_profile_snapshot(
+                project_profile_id="typescript_fullstack_v1",
+                target_remote="https://github.com/example/target.git",
+                target_base_branch="main",
+            ).to_dict(),
         }
         self.store.write_state(self.state)
         self.read_service = ApplicationReadService(root=self.root, runtime_root=self.runtime_root)
@@ -87,6 +92,31 @@ class ReadApiFixture(unittest.TestCase):
 
 
 class ApplicationReadServiceTests(ReadApiFixture):
+    def test_legacy_run_remains_readable_but_hides_retired_actions(self) -> None:
+        legacy = dict(self.state)
+        legacy.update(
+            {
+                "run_id": "run_legacy_java",
+                "allowed_next_actions": [
+                    "approve_checkpoint",
+                    "continue_run",
+                    "sync_run",
+                    "cancel_run",
+                    "get_status",
+                ],
+                "summary_for_user": "Approve this checkpoint.",
+            }
+        )
+        legacy.pop("profile_snapshot")
+        self.store.write_state(legacy)
+
+        result = self.read_service.get_run(run_id="run_legacy_java")
+
+        self.assertEqual(result["execution_profile"]["classification"], "legacy_java_v1")
+        self.assertEqual(result["allowed_next_actions"], ["sync_run", "get_status"])
+        self.assertIn("legacy_java_v1 đã retire", result["summary_for_user"])
+        self.assertNotIn("Approve this checkpoint", result["summary_for_user"])
+
     def test_list_runs_is_sorted_limited_and_does_not_create_missing_storage(self) -> None:
         older_state = dict(self.state)
         older_state.update(

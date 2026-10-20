@@ -207,6 +207,39 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Chưa thuộc lát này: TypeScript prompt/source discovery, verification runner,
   QA/code trace, target repo bootstrap và legacy retirement.
 
+## 2026-10-20 - A1.2d Legacy Run Retirement Guard
+
+- Baseline: commit `6b52714` (`test: optimize integration suite runtime`).
+- Chốt hard retirement, không thêm feature flag: run thiếu
+  `profile_snapshot_v1` không được sinh thêm requirement/design/code/test
+  artifact; run mới phải có `SDLC_PROJECT_PROFILE` trước khi load source hoặc
+  gọi LLM.
+- Giữ read/audit, sync artifact/checkpoint đã tồn tại và workspace cleanup.
+  Không mở rộng `cancel_run` vì action này chưa thuộc HTTP contract hiện hành.
+- Lỗi contract dự kiến là `project_profile_required` cho start thiếu profile và
+  `legacy_execution_profile_retired` cho mutation trên legacy run; cả hai được
+  ánh xạ HTTP `409 Conflict`.
+- Legacy workspace sync/cleanup phải dùng identity đã persist trong workspace
+  record, không dùng target TypeScript từ config hiện hành và không backfill
+  profile snapshot.
+- Đã đặt guard tập trung tại `ApplicationService`: start thiếu profile fail trước
+  source/LLM; active legacy run cùng source và mọi mutation sinh artifact bị
+  chặn trước workflow dispatch. CLI/HTTP dùng lỗi ổn định, HTTP map `409`.
+- Read API và application response chỉ project `get_status`/`sync_run` cho
+  legacy; persisted state không bị rewrite. Design experiment và workspace
+  adoption cũng bị retire; `cancel_run` không được thêm vào contract.
+- Code Review sync và cleanup legacy resolve target identity từ persisted
+  workspace record. Git integration chứng minh cleanup vẫn dùng đúng Java repo
+  sau khi config hiện hành đã đổi sang target khác; record path/base sai fail
+  closed và không dispatch cleanup.
+- Regression cuối: targeted ban đầu `109 passed in 28.06s`; fast
+  `160 passed, 290 deselected in 6.97s`; full parallel 4 worker chạy hai lần
+  `450 passed in 62.82s` và `450 passed in 64.60s`. Sau khi bổ sung edge case
+  `profile_snapshot: null`, nhóm profile/application/read/write API tiếp tục qua
+  `73 passed in 14.75s`; full parallel cuối cùng đạt `452 passed in 55.59s` và
+  `compileall` riêng package thành công. Checklist A1.2d hoàn tất; toàn bộ A1 đã
+  đóng.
+
 ## 2026-10-20 - Test Performance Optimization Baseline
 
 - Full regression A1.2c: `438 passed in 736.48s`; collection `438 tests` chỉ

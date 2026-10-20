@@ -14,7 +14,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
 from sdlc_harness.application import ApplicationCommand, ApplicationReadService
-from sdlc_harness.interfaces.http import ApiServerConfig, create_server
+from sdlc_harness.interfaces.http import ApiServerConfig, _http_status_for_error, create_server
 from sdlc_harness.operations import OperationManager, OperationStore
 
 
@@ -37,6 +37,10 @@ class RecordingService:
 
 
 class WriteApiTests(unittest.TestCase):
+    def test_retirement_contract_errors_map_to_conflict(self) -> None:
+        self.assertEqual(_http_status_for_error("project_profile_required"), 409)
+        self.assertEqual(_http_status_for_error("legacy_execution_profile_retired"), 409)
+
     def setUp(self) -> None:
         self.root = Path(__file__).resolve().parents[1]
         self.temp_dir = TemporaryDirectory()

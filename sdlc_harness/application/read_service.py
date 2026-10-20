@@ -15,7 +15,7 @@ from .action_specs import public_dashboard_schema
 from ..core.config import Settings, load_settings, repo_root as default_repo_root
 from ..core.errors import HarnessError
 from ..events import DEFAULT_EVENT_LIMIT, EventStore
-from ..profiles import profile_status_metadata
+from ..profiles import profile_status_metadata, public_allowed_actions, public_run_summary
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 
@@ -215,6 +215,20 @@ class ApplicationReadService:
     def _public_run(self, payload: dict[str, object]) -> dict[str, object]:
         projected = deepcopy(payload)
         run_id = str(projected.get("run_id") or "")
+        try:
+            state = self.store.read_state(run_id)
+        except HarnessError:
+            state = projected
+        if "allowed_next_actions" in projected:
+            projected["allowed_next_actions"] = public_allowed_actions(
+                state,
+                projected["allowed_next_actions"],
+            )
+        if "summary_for_user" in projected:
+            projected["summary_for_user"] = public_run_summary(
+                state,
+                projected["summary_for_user"],
+            )
         projected["latest_artifacts"] = self._artifact_metadata(
             run_id=run_id,
             references=projected.get("latest_artifacts"),
@@ -234,9 +248,12 @@ class ApplicationReadService:
             "created_at": state.get("created_at"),
             "updated_at": state.get("updated_at"),
             "pending_checkpoint": checkpoint,
-            "allowed_next_actions": state.get("allowed_next_actions", []),
+            "allowed_next_actions": public_allowed_actions(
+                state,
+                state.get("allowed_next_actions", []),
+            ),
             "last_error": last_error,
-            "summary_for_user": state.get("summary_for_user"),
+            "summary_for_user": public_run_summary(state),
             "latest_artifacts": self._artifact_metadata(
                 run_id=run_id,
                 references=state.get("latest_artifacts"),

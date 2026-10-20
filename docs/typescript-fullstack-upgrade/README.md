@@ -2,10 +2,10 @@
 
 Thư mục này là nguồn định hướng cho bước nâng cấp tiếp theo của SDLC Harness sau
 mốc HTTP API-only và live E2E ngày 2026-10-19. Audit/Gate 0 đã hoàn tất và A1.1
-đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a-A1.2c đã thêm
+đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a-A1.2d đã thêm
 selector config, snapshot profile theo run, downstream settings binding, target
-manifest preflight và workspace binding fail-closed. Mặc định rỗng vẫn giữ Java
-baseline; target TypeScript chưa được tạo.
+manifest preflight, workspace binding fail-closed và retirement guard cho run
+Java cũ. Profile rỗng không còn được mở run mới; target TypeScript chưa được tạo.
 
 ## Mục Tiêu
 
@@ -30,9 +30,9 @@ planning, code, verification, QA, workspace và sync vẫn thuộc SDLC Harness.
 - Target repo cung cấp infra skeleton; agent triển khai nghiệp vụ, không dựng
   lại toàn bộ framework trong mỗi run.
 - Một run triển khai một vertical feature xuyên frontend, backend và database.
-- Sau cutover dự kiến không duy trì Java execution profile. Run Java cũ phải
-  còn đọc/audit được, nhưng chính sách resume/revalidate sẽ được khóa trong
-  implementation contract trước khi code.
+- Không duy trì Java execution profile cho execution mới. Run Java cũ vẫn
+  đọc/audit/sync-existing/cleanup được, còn resume/revalidate sinh artifact đã
+  bị chặn bởi retirement contract tại application boundary.
 
 Các quyết định trên là hướng thiết kế đã thống nhất, chưa mô tả hành vi đang tồn
 tại trong code.
@@ -44,7 +44,7 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0 và
-  A1.1-A1.2b đã hoàn tất, các checklist còn lại giữ theo trạng thái thực tế.
+  toàn bộ A1 đã hoàn tất, các checklist còn lại giữ theo trạng thái thực tế.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
   evidence đã khóa trước khi code.
 - [Progress](progress.md): execution log của công việc khảo sát và viết tài liệu.
@@ -60,9 +60,7 @@ Trước khi triển khai code cần review đủ bốn câu hỏi:
 3. Artifact Phase 2-4 có đủ để trace một vertical feature xuyên các tầng không?
 4. Acceptance criteria có chứng minh web chạy thật thay vì chỉ sinh file không?
 
-Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. Việc đóng Gate 0
-không tự cấp quyền cutover. A1.1 đã thêm profile contract/registry; A1.2a thêm
-selector config fail-closed; A1.2b đóng băng profile/target identity cho run mới
-có selector và buộc action sau dùng snapshot. Mặc định rỗng vẫn giữ Java
-baseline, target repo mới chưa được tạo và chưa chạy migration hay live workflow
-cho hướng TypeScript.
+Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. A1 hiện đã khóa
+profile contract, selector, immutable run snapshot, target manifest/workspace
+binding và legacy retirement. Run mới bắt buộc chọn profile; target repo mới
+chưa được tạo và chưa chạy migration hay live workflow cho hướng TypeScript.

@@ -115,20 +115,38 @@ class ApplicationServiceTests(unittest.TestCase):
         return ApplicationCommand(
             name=name,
             arguments=arguments,
-            settings_overrides=overrides or {"SDLC_LLM_MODE": "fake", "SDLC_SYNC_MODE": "mock"},
+            settings_overrides=overrides
+            or {
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+            },
             runtime_root=self.runtime_root,
         )
 
-    def write_state(self, run_id: str = "run_1", **changes: object) -> None:
+    def write_state(
+        self,
+        run_id: str = "run_1",
+        *,
+        profiled: bool = True,
+        **changes: object,
+    ) -> None:
         state: dict[str, object] = {
             "run_id": run_id,
             "status": "waiting_design_approval",
             "latest_artifacts": {},
         }
+        if profiled:
+            state["profile_snapshot"] = build_profile_snapshot(
+                project_profile_id="typescript_fullstack_v1",
+                target_remote="https://github.com/example/target.git",
+                target_base_branch="main",
+            ).to_dict()
         state.update(changes)
         RuntimeStore(repo_root=self.root, runtime_root=self.runtime_root).write_state(state)
 
     def test_get_status_dispatches_to_phase_one(self) -> None:
+        self.write_state()
         response = {"ok": True, "run_id": "run_1", "status": "waiting_design_approval"}
         with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
             workflow_type.return_value.get_status.return_value = response
@@ -139,6 +157,32 @@ class ApplicationServiceTests(unittest.TestCase):
         workflow_type.return_value.get_status.assert_called_once_with(run_id="run_1")
         settings = workflow_type.call_args.args[0]
         self.assertEqual(settings.runtime_root, self.runtime_root.resolve())
+
+    def test_get_status_projects_legacy_retirement_without_mutating_state(self) -> None:
+        self.write_state(
+            profiled=False,
+            allowed_next_actions=["approve_checkpoint", "sync_run", "cancel_run", "get_status"],
+            summary_for_user="Approve this checkpoint.",
+        )
+        before = RuntimeStore(repo_root=self.root, runtime_root=self.runtime_root).state_path("run_1").read_text(
+            encoding="utf-8"
+        )
+        response = {
+            "ok": True,
+            "run_id": "run_1",
+            "allowed_next_actions": ["approve_checkpoint", "sync_run", "cancel_run", "get_status"],
+            "summary_for_user": "Approve this checkpoint.",
+        }
+        with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
+            workflow_type.return_value.get_status.return_value = response
+            result = self.service.execute(self.command("get-status", {"run_id": "run_1"}))
+
+        self.assertEqual(result["allowed_next_actions"], ["sync_run", "get_status"])
+        self.assertIn("legacy_java_v1 đã retire", result["summary_for_user"])
+        after = RuntimeStore(repo_root=self.root, runtime_root=self.runtime_root).state_path("run_1").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(after, before)
 
     def test_sync_routes_code_review_state_to_phase_four(self) -> None:
         self.write_state(status="code_review_ready")
@@ -168,6 +212,7 @@ class ApplicationServiceTests(unittest.TestCase):
         phase_one.sync_run.assert_called_once_with(run_id="run_1")
 
     def test_experiment_dispatch_preserves_path_and_budget(self) -> None:
+        self.write_state(run_id="run_source")
         with patch("sdlc_harness.application.service.PhaseTwoWorkflow") as workflow_type:
             workflow_type.return_value.experiment_design_consensus.return_value = {"ok": True}
 
@@ -187,6 +232,176 @@ class ApplicationServiceTests(unittest.TestCase):
             experiment_root=Path(".experiments/custom"),
             llm_call_budget=12,
         )
+
+    def test_start_requires_project_profile_before_workflow_dispatch(self) -> None:
+        command = self.command(
+            "start-or-get-run",
+            {"dataset": "eTour", "use_case": "UC1", "requested_by": "owner"},
+            overrides={"SDLC_LLM_MODE": "fake", "SDLC_PROJECT_PROFILE": ""},
+        )
+
+        with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(command)
+
+        self.assertEqual(context.exception.error_code, "project_profile_required")
+        workflow_type.assert_not_called()
+        self.assertFalse((self.runtime_root / "runs").exists())
+
+    def test_start_rejects_active_legacy_run_for_same_source(self) -> None:
+        source_ref = "dataset_use_case:eTour:UC1"
+        self.write_state(profiled=False, source_ref=source_ref)
+        store = RuntimeStore(repo_root=self.root, runtime_root=self.runtime_root)
+        store.register_active_run(source_ref, "run_1")
+
+        with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(
+                    self.command(
+                        "start-or-get-run",
+                        {"dataset": "eTour", "use_case": "UC1", "requested_by": "owner"},
+                    )
+                )
+
+        self.assertEqual(context.exception.error_code, "legacy_execution_profile_retired")
+        workflow_type.assert_not_called()
+
+    def test_legacy_run_blocks_artifact_producing_commands_before_dispatch(self) -> None:
+        self.write_state(profiled=False)
+        cases = [
+            ("answer-clarification", {"run_id": "run_1", "question_id": "Q-1", "answer": "A", "answered_by": "owner"}),
+            ("approve-checkpoint", {"run_id": "run_1"}),
+            ("continue-run", {"run_id": "run_1"}),
+            ("revalidate-design", {"run_id": "run_1"}),
+            ("revalidate-implementation-plan", {"run_id": "run_1"}),
+            ("revalidate-implementation", {"run_id": "run_1"}),
+            ("adopt-run-workspace", {"run_id": "run_1"}),
+        ]
+
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one,
+            patch("sdlc_harness.application.service.PhaseTwoWorkflow") as phase_two,
+            patch("sdlc_harness.application.service.PhaseThreeWorkflow") as phase_three,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four,
+            patch("sdlc_harness.application.service.CheckpointApprovalWorkflow") as approval,
+            patch("sdlc_harness.application.service.WorkspaceAdoptionWorkflow") as adoption,
+        ):
+            for name, arguments in cases:
+                with self.subTest(command=name):
+                    with self.assertRaises(HarnessError) as context:
+                        self.service.execute(self.command(name, arguments))
+                    self.assertEqual(context.exception.error_code, "legacy_execution_profile_retired")
+
+        for workflow_type in (phase_one, phase_two, phase_three, phase_four, approval, adoption):
+            workflow_type.assert_not_called()
+
+    def test_legacy_design_experiment_is_retired(self) -> None:
+        self.write_state(run_id="run_source", profiled=False)
+
+        with patch("sdlc_harness.application.service.PhaseTwoWorkflow") as workflow_type:
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(
+                    self.command(
+                        "experiment-design-consensus",
+                        {
+                            "source_run_id": "run_source",
+                            "experiment_root": ".experiments/custom",
+                            "llm_call_budget": "12",
+                        },
+                    )
+                )
+
+        self.assertEqual(context.exception.error_code, "legacy_execution_profile_retired")
+        workflow_type.assert_not_called()
+
+    def test_legacy_non_code_review_sync_remains_available(self) -> None:
+        self.write_state(profiled=False)
+        phase_one = Mock()
+        phase_one.store.read_state.return_value = {"status": "waiting_design_approval"}
+        phase_one.sync_run.return_value = {"ok": True}
+
+        with patch("sdlc_harness.application.service.PhaseOneWorkflow", return_value=phase_one):
+            result = self.service.execute(self.command("sync-run", {"run_id": "run_1"}))
+
+        self.assertTrue(result["ok"])
+        phase_one.sync_run.assert_called_once_with(run_id="run_1")
+
+    def test_legacy_code_review_sync_uses_persisted_workspace_identity(self) -> None:
+        self.write_state(profiled=False, status="code_review_ready")
+        record = Mock(
+            canonical_repo=str(self.root.parent / "SDLC_Target_eTour"),
+            worktree_path=str(self.root.parent / "SDLC_Target_eTour-worktrees" / "run_1"),
+            remote="https://github.com/example/legacy.git",
+            base_ref="origin/legacy-main",
+        )
+        phase_one = Mock()
+        phase_one.store.read_state.return_value = {"status": "code_review_ready"}
+
+        with (
+            patch("sdlc_harness.application.service.RunWorkspaceManager") as manager_type,
+            patch("sdlc_harness.application.service.PhaseOneWorkflow", return_value=phase_one),
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as workflow_type,
+        ):
+            manager_type.return_value.read.return_value = record
+            workflow_type.return_value.sync_code_review.return_value = {"ok": True}
+            result = self.service.execute(self.command("sync-run", {"run_id": "run_1"}))
+
+        self.assertTrue(result["ok"])
+        settings = workflow_type.call_args.args[0]
+        self.assertIsNone(settings.project_profile_id)
+        self.assertEqual(settings.target_repo_path, Path(record.canonical_repo).resolve())
+        self.assertEqual(settings.target_repo_remote, record.remote)
+        self.assertEqual(settings.target_base_branch, "legacy-main")
+        workflow_type.return_value.sync_code_review.assert_called_once_with(run_id="run_1")
+
+    def test_legacy_cleanup_uses_persisted_workspace_identity(self) -> None:
+        self.write_state(profiled=False, status="cancelled")
+        record = Mock(
+            canonical_repo=str(self.root.parent / "SDLC_Target_eTour"),
+            worktree_path=str(self.root.parent / "SDLC_Target_eTour-worktrees" / "run_1"),
+            remote="https://github.com/example/legacy.git",
+            base_ref="origin/legacy-main",
+        )
+
+        with (
+            patch("sdlc_harness.application.service.RunWorkspaceManager") as manager_type,
+            patch("sdlc_harness.application.service.WorkspaceCleanupWorkflow") as workflow_type,
+        ):
+            manager_type.return_value.read.return_value = record
+            workflow_type.return_value.cleanup.return_value = {"ok": True}
+            result = self.service.execute(
+                self.command("cleanup-run-workspace", {"run_id": "run_1"})
+            )
+
+        self.assertTrue(result["ok"])
+        settings = workflow_type.call_args.args[0]
+        self.assertIsNone(settings.project_profile_id)
+        self.assertEqual(settings.target_repo_path, Path(record.canonical_repo).resolve())
+        self.assertEqual(settings.target_worktree_root, Path(record.worktree_path).resolve().parent)
+        self.assertEqual(settings.target_repo_remote, record.remote)
+        self.assertEqual(settings.target_base_branch, "legacy-main")
+
+    def test_legacy_workspace_identity_fails_closed_before_cleanup_dispatch(self) -> None:
+        self.write_state(profiled=False, status="cancelled")
+        record = Mock(
+            canonical_repo=str(self.root.parent / "SDLC_Target_eTour"),
+            worktree_path=str(self.root.parent / "SDLC_Target_eTour-worktrees" / "another-run"),
+            remote="https://github.com/example/legacy.git",
+            base_ref="origin/main",
+        )
+
+        with (
+            patch("sdlc_harness.application.service.RunWorkspaceManager") as manager_type,
+            patch("sdlc_harness.application.service.WorkspaceCleanupWorkflow") as workflow_type,
+        ):
+            manager_type.return_value.read.return_value = record
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(
+                    self.command("cleanup-run-workspace", {"run_id": "run_1"})
+                )
+
+        self.assertEqual(context.exception.error_code, "workspace_path_invalid")
+        workflow_type.assert_not_called()
 
     def test_prepare_target_repo_dispatches_operator_flag(self) -> None:
         with patch("sdlc_harness.application.service.TargetRepoPreparationWorkflow") as workflow_type:
@@ -359,6 +574,7 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "unknown_command")
 
     def test_business_error_is_not_rewritten_by_service(self) -> None:
+        self.write_state()
         failure = HarnessError("run_not_found", "Run not found", run_id="run_1")
         with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
             workflow_type.return_value.get_status.side_effect = failure

@@ -827,7 +827,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(qa_tested["implementation_repair_iterations"], 1)
         self.assertEqual(qa_tested["qa_repair_iterations"], 1)
 
-    def test_cli_approve_checkpoint_dispatches_design_to_phase3(self) -> None:
+    def test_cli_approve_checkpoint_rejects_legacy_design_run(self) -> None:
         approved = self._create_phase2_run()
         stdout = io.StringIO()
         env = {
@@ -852,10 +852,9 @@ class PhaseThreeTest(unittest.TestCase):
             )
 
         payload = json.loads(stdout.getvalue())
-        self.assertEqual(code, 0)
-        self.assertEqual(payload["status"], "waiting_implementation_plan_review")
-        self.assertEqual(payload["pending_checkpoint"]["type"], "implementation_plan_review")
-        self.assertEqual(payload["last_sync"]["phase"], "implementation_plan_review")
+        self.assertEqual(code, 1)
+        self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
+        self.assertEqual(payload["run_id"], approved["run_id"])
 
     def test_settings_reads_implementation_plan_repair_limit(self) -> None:
         self.assertEqual(self.settings.implementation_plan_repair_limit, 2)

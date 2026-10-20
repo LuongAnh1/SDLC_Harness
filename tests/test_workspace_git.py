@@ -18,6 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import build_profile_snapshot, get_language_profile, get_project_profile
@@ -571,6 +572,33 @@ class WorkspaceGitTests(unittest.TestCase):
         self.assertEqual(_git(self.canonical, "branch", "--list", record.branch), "")
         self.assertEqual(_git(self.canonical, "ls-remote", "--heads", "origin", record.branch).split()[0], record.head_sha)
         self.assertEqual(self.store.read_state(self.run_id)["status"], "cancelled")
+
+    def test_application_cleanup_legacy_run_uses_record_after_target_cutover(self) -> None:
+        record, _ = self._publish_workspace()
+        state = self.store.read_state(self.run_id)
+        state["status"] = "cancelled"
+        self.store.write_state(state)
+        service = ApplicationService(root=self.harness_root)
+        command = ApplicationCommand(
+            name="cleanup-run-workspace",
+            arguments={"run_id": self.run_id},
+            settings_overrides={
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                "SDLC_TARGET_REPO_PATH": str(self.base / "typescript-target"),
+                "SDLC_TARGET_WORKTREE_ROOT": str(self.base / "typescript-worktrees"),
+                "SDLC_TARGET_REPO_REMOTE": "https://github.com/example/typescript-target.git",
+                "SDLC_TARGET_BASE_BRANCH": "main",
+            },
+            runtime_root=self.runtime_root,
+        )
+
+        response = service.execute(command)
+
+        self.assertTrue(response["cleaned"])
+        self.assertEqual(response["cleanup_reason"], "run_cancelled")
+        self.assertFalse(Path(record.worktree_path).exists())
+        self.assertEqual(_git(self.canonical, "branch", "--list", record.branch), "")
+        self.assertTrue(_git(self.canonical, "ls-remote", "--heads", "origin", record.branch))
 
     def test_cleanup_merged_pull_request_is_audited_and_idempotent(self) -> None:
         record, pull_request = self._publish_workspace()

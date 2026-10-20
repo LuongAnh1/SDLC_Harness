@@ -1,0 +1,91 @@
+"""Chính sách retirement cho run Java cũ không có profile snapshot."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from ..core.errors import HarnessError
+from .snapshot import PROFILE_SNAPSHOT_STATE_KEY, read_profile_snapshot
+
+
+LEGACY_RETIRED_ALLOWED_COMMANDS = frozenset(
+    {
+        "get-status",
+        "sync-run",
+        "cleanup-run-workspace",
+    }
+)
+LEGACY_RETIRED_VISIBLE_ACTIONS = frozenset({"get_status", "sync_run"})
+
+
+def require_project_profile_for_start(*, project_profile_id: str | None) -> None:
+    """Không cho tạo run mới nếu chưa chọn execution profile hiện hành."""
+
+    if project_profile_id:
+        return
+    raise HarnessError(
+        "project_profile_required",
+        "SDLC_PROJECT_PROFILE must be selected before starting a new run.",
+    )
+
+
+def require_run_command_allowed(
+    state: dict[str, object],
+    *,
+    command_name: str,
+    run_id: str,
+) -> None:
+    """Chặn command sinh artifact trên run legacy tại application boundary."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    if snapshot is not None or command_name in LEGACY_RETIRED_ALLOWED_COMMANDS:
+        return
+    raise HarnessError(
+        "legacy_execution_profile_retired",
+        (
+            f"Run {run_id} uses the retired legacy_java_v1 execution profile; "
+            "only read, existing-artifact sync, and workspace cleanup remain available."
+        ),
+        run_id=run_id,
+    )
+
+
+def public_allowed_actions(
+    state: Mapping[str, object],
+    actions: object,
+) -> list[str]:
+    """Ẩn action đã retire khỏi projection nhưng không sửa persisted state."""
+
+    items = actions if isinstance(actions, (list, tuple)) else []
+    normalized = [str(action) for action in items if action]
+    if not _is_legacy_projection(state):
+        return normalized
+    return [action for action in normalized if action in LEGACY_RETIRED_VISIBLE_ACTIONS]
+
+
+def public_run_summary(
+    state: Mapping[str, object],
+    summary: object | None = None,
+) -> object:
+    """Không để status legacy tiếp tục mời gọi action đã bị retire."""
+
+    if not _is_legacy_projection(state):
+        return state.get("summary_for_user") if summary is None else summary
+    run_id = str(state.get("run_id") or "run này")
+    return (
+        f"Run {run_id} dùng legacy_java_v1 đã retire; chỉ còn read/audit, "
+        "sync artifact đã tồn tại và workspace cleanup."
+    )
+
+
+def _is_legacy_projection(state: Mapping[str, object]) -> bool:
+    """Nhận diện legacy từ persisted state hoặc public operation payload."""
+
+    metadata = state.get("execution_profile")
+    if isinstance(metadata, Mapping):
+        classification = metadata.get("classification")
+        if classification == "legacy_java_v1":
+            return True
+        if classification in {"profiled", "invalid"}:
+            return False
+    return state.get(PROFILE_SNAPSHOT_STATE_KEY) is None
