@@ -152,6 +152,7 @@ def _executability_issues(
     *,
     structured_plan: dict[str, object],
     mappings: list[dict[str, Any]],
+    class_graph: dict[str, object] | None = None,
     planning_policy: PlanningPathPolicy | None = None,
     verification_policy: VerificationStagePolicy | None = None,
 ) -> list[str]:
@@ -202,6 +203,7 @@ def _executability_issues(
                     structured_plan,
                     planning_policy=planning_policy,
                     verification_policy=verification_policy,
+                    class_graph=class_graph,
                 )
             )
     else:
@@ -575,6 +577,7 @@ class ImplementationPlanValidator:
         executability_issues = _executability_issues(
             structured_plan=structured_plan,
             mappings=mappings,
+            class_graph=class_graph,
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )

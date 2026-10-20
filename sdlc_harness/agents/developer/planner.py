@@ -22,6 +22,7 @@ from ...profiles import (
     PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
+    build_implementation_signature_contract,
     build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
@@ -232,6 +233,16 @@ class DeveloperPlanAgent:
             mappings=mappings,
             planning_policy=planning_policy,
         )
+        signature_contract = (
+            build_implementation_signature_contract(
+                planning_policy=planning_policy,
+                mappings=mappings,
+                class_graph=class_graph,
+                candidate=llm_payload.get("implementation_signature_contract"),
+            )
+            if planning_policy and verification_policy
+            else None
+        )
         structured = {
             "version": (
                 PROFILED_IMPLEMENTATION_PLAN_VERSION
@@ -281,6 +292,11 @@ class DeveloperPlanAgent:
             "implementation_steps": implementation_steps,
             "proposed_files": proposed_files,
             "design_mappings": mappings,
+            **(
+                {"implementation_signature_contract": signature_contract}
+                if signature_contract is not None
+                else {}
+            ),
             "design_adjustments": design_adjustments,
             "requirement_coverage": requirement_coverage,
             "test_intents": test_intents,
@@ -413,6 +429,19 @@ class DeveloperPlanAgent:
             mappings=mappings,
             planning_policy=planning_policy,
         )
+        signature_candidate = llm_payload.get("implementation_signature_contract")
+        if not isinstance(signature_candidate, dict):
+            signature_candidate = previous.get("implementation_signature_contract")
+        signature_contract = (
+            build_implementation_signature_contract(
+                planning_policy=planning_policy,
+                mappings=mappings,
+                class_graph=class_graph,
+                candidate=signature_candidate,
+            )
+            if planning_policy and verification_policy
+            else None
+        )
         requirement_coverage = (
             _requirement_coverage(
                 requirement_graph=requirement_graph or {},
@@ -435,12 +464,22 @@ class DeveloperPlanAgent:
         )
         structured = {
             **previous,
+            "version": (
+                PROFILED_IMPLEMENTATION_PLAN_VERSION
+                if verification_policy
+                else previous.get("version", "implementation_plan_structured_v1")
+            ),
             "planning_mode": "llm_repair_patch_v1" if not llm_parse_error else "deterministic_repair_after_llm_parse_error_v1",
             "repo_context": _repo_context_summary(repo_context or {}),
             "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
             "implementation_steps": implementation_steps,
             "proposed_files": proposed_files,
             "design_mappings": mappings,
+            **(
+                {"implementation_signature_contract": signature_contract}
+                if signature_contract is not None
+                else {}
+            ),
             "design_adjustments": adjustments,
             "requirement_coverage": requirement_coverage,
             "verification_stage_ids": (
@@ -575,6 +614,42 @@ def _developer_plan_prompt(
             indent=2,
         )
         verification_run_context = ""
+        signature_contract_field = (
+            '  "implementation_signature_contract": '
+            + json.dumps(
+                {
+                    "version": "implementation_signature_contract_v1",
+                    "entries": [
+                        {
+                            "design_element_id": "method:Owner.operation",
+                            "symbol_kind": "method",
+                            "owner_kind": "class|interface|abstract",
+                            "qualified_name": "Owner.operation",
+                            "parameters": [
+                                {
+                                    "name": "value",
+                                    "type": "string",
+                                    "optional": False,
+                                    "rest": False,
+                                }
+                            ],
+                            "return_type": "Promise<void>",
+                            "type_parameters": ["T extends string"],
+                            "async": True,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            + ",\n"
+        )
+        signature_rules = (
+            "For every approved method mapping, provide one or more exact implementation "
+            "signature entries. Parameter names are evidence; parameter type/order, "
+            "optional/rest, return type, type parameters, and async are approved contract. "
+            "Use qualified Owner.method names and do not include source_path or contract_id; "
+            "the harness binds those deterministically."
+        )
     else:
         test_intent_schema = json.dumps(
             [
@@ -593,6 +668,8 @@ def _developer_plan_prompt(
             indent=2,
         )
         verification_run_context = f"- legacy_test_command: {test_command}"
+        signature_contract_field = ""
+        signature_rules = "Legacy compatibility does not use an implementation signature contract."
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -630,7 +707,7 @@ Return JSON only with this shape:
       "test_intent": "how to verify this element"
     }}
   ],
-  "test_intents": {test_intent_schema},
+{signature_contract_field}  "test_intents": {test_intent_schema},
   "assumptions": [],
   "open_questions": []
 }}
@@ -645,6 +722,7 @@ Rules:
 - Keep proposed files grouped by file, not by method.
 - `test_intents` must be max 6 focused tests.
 - {verification_rules}
+- {signature_rules}
 - Do not add behavior outside the approved requirement/design.
 - {path_rules}
 - Use CodeGraph evidence when naming existing classes/files.
@@ -736,6 +814,9 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
         "implementation_steps": _dict_items(parsed.get("implementation_steps")),
         "proposed_files": _dict_items(parsed.get("proposed_files")),
         "design_mappings": _dict_items(parsed.get("design_mappings")),
+        "implementation_signature_contract": _object_dict(
+            parsed.get("implementation_signature_contract")
+        ),
         "test_intents": _dict_items(parsed.get("test_intents")),
         "assumptions": _string_items(parsed.get("assumptions")),
         "open_questions": _string_items(parsed.get("open_questions")),
@@ -1231,6 +1312,9 @@ def _repair_candidate(plan: dict[str, object]) -> dict[str, object]:
         "implementation_steps": _dict_items(plan.get("implementation_steps")),
         "proposed_files": _dict_items(plan.get("proposed_files")),
         "design_adjustments": _dict_items(plan.get("design_adjustments")),
+        "implementation_signature_contract": _object_dict(
+            plan.get("implementation_signature_contract")
+        ),
         "test_intents": _dict_items(plan.get("test_intents")),
     }
 
@@ -1669,11 +1753,10 @@ def _markdown_plan(
     assumptions = [str(item) for item in structured.get("assumptions", []) if str(item).strip()]
     open_questions = [str(item) for item in structured.get("open_questions", []) if str(item).strip()]
     out_of_scope = [str(item) for item in structured.get("out_of_scope", []) if str(item).strip()]
-    plan_label = (
-        "V2"
-        if structured.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
-        else "V1"
-    )
+    signature_contract = _object_dict(structured.get("implementation_signature_contract"))
+    signature_entries = _dict_items(signature_contract.get("entries"))
+    version_text = str(structured.get("version") or "")
+    plan_label = "V3" if version_text.endswith("_v3") else "V2" if version_text.endswith("_v2") else "V1"
 
     lines = [
         f"# Implementation Plan {plan_label}",
@@ -1764,6 +1847,50 @@ def _markdown_plan(
             )
             + " |"
         )
+
+    if signature_entries:
+        lines.extend(
+            [
+                "",
+                "## Approved Implementation Signatures",
+                "",
+                f"- Contract: `{signature_contract.get('version', '')}`",
+                f"- Digest: `{signature_contract.get('digest', '')}`",
+                "",
+                "| Design element | Source | Qualified symbol | Signature |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for item in signature_entries:
+            params = ", ".join(
+                (
+                    ("..." if param.get("rest") is True else "")
+                    + str(param.get("name") or "")
+                    + ("?" if param.get("optional") is True else "")
+                    + ": "
+                    + str(param.get("type") or "")
+                )
+                for param in _dict_items(item.get("parameters"))
+            )
+            type_parameters = _string_items(item.get("type_parameters"))
+            generic = f"<{', '.join(type_parameters)}>" if type_parameters else ""
+            async_prefix = "async " if item.get("async") is True else ""
+            signature = (
+                f"{async_prefix}{item.get('qualified_name', '')}{generic}"
+                f"({params}): {item.get('return_type', '')}"
+            )
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _table_cell(str(item.get("design_element_id") or "")),
+                        _table_cell(str(item.get("source_path") or "")),
+                        _table_cell(str(item.get("qualified_name") or "")),
+                        _table_cell(signature),
+                    ]
+                )
+                + " |"
+            )
 
     if requirement_coverage:
         lines.extend(

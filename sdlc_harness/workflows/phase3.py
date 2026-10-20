@@ -814,6 +814,9 @@ def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[st
         "implementation_steps": structured_plan.get("implementation_steps", []),
         "proposed_files": structured_plan.get("proposed_files", []),
         "design_mappings": structured_plan.get("design_mappings", []),
+        "implementation_signature_contract": structured_plan.get(
+            "implementation_signature_contract", {}
+        ),
         "verification_stage_ids": structured_plan.get("verification_stage_ids", []),
         "test_intents": structured_plan.get("test_intents", []),
         "issues": issues,

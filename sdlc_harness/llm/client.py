@@ -639,8 +639,7 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
         else "Target repo already has a test folder under src/test/java/com/sdlc/etour/heritage."
     )
 
-    return json.dumps(
-        {
+    payload = {
             "summary": "Plan uses CodeGraph context to map the approved delete heritage design into service, boundary, repository, and tests.",
             "repo_evidence": [source_evidence, test_evidence],
             "implementation_steps": [
@@ -706,10 +705,103 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
             ),
             "assumptions": ["Repository can expose a delete operation or be extended in Phase 4."],
             "open_questions": [],
-        },
+        }
+    if typescript:
+        payload["implementation_signature_contract"] = (
+            _fake_typescript_implementation_signature_contract(prompt)
+        )
+    return json.dumps(
+        payload,
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str, object]:
+    """Mô phỏng Phase 3 producer; builder không được tự suy luận type từ Phase 2."""
+
+    class_graph = _fake_json_prompt_section(
+        prompt,
+        start="Class graph:",
+        end="Sequence graph:",
+    )
+    entries: list[dict[str, object]] = []
+    nodes = class_graph.get("nodes") if isinstance(class_graph, dict) else []
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        owner = str(node.get("className") or node.get("id") or "").strip()
+        owner_kind = str(node.get("type") or "class").strip().lower()
+        methods = node.get("methods")
+        if not owner or not isinstance(methods, list):
+            continue
+        for method in methods:
+            if not isinstance(method, dict):
+                continue
+            name = str(method.get("name") or "").strip()
+            if not name:
+                continue
+            parameters = []
+            raw_parameters = method.get("parameters")
+            for parameter in raw_parameters if isinstance(raw_parameters, list) else []:
+                if not isinstance(parameter, dict):
+                    continue
+                raw_name = str(parameter.get("name") or "").strip()
+                parameters.append(
+                    {
+                        "name": raw_name.removeprefix("...").removesuffix("?"),
+                        "type": _fake_typescript_type(parameter.get("type")),
+                        "optional": raw_name.endswith("?"),
+                        "rest": raw_name.startswith("..."),
+                    }
+                )
+            entries.append(
+                {
+                    "design_element_id": f"method:{owner}.{name}",
+                    "symbol_kind": "method",
+                    "owner_kind": owner_kind,
+                    "qualified_name": f"{owner}.{name}",
+                    "parameters": parameters,
+                    "return_type": _fake_typescript_type(method.get("returnType") or "void"),
+                    "type_parameters": [],
+                    "async": False,
+                }
+            )
+    return {
+        "version": "implementation_signature_contract_v1",
+        "entries": entries,
+    }
+
+
+def _fake_json_prompt_section(
+    prompt: str,
+    *,
+    start: str,
+    end: str,
+) -> dict[str, object]:
+    start_marker = f"{start}\n"
+    end_marker = f"\n\n{end}"
+    if start_marker not in prompt:
+        return {}
+    raw = prompt.split(start_marker, 1)[1].split(end_marker, 1)[0].strip()
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _fake_typescript_type(value: object) -> str:
+    text = str(value or "unknown").strip()
+    replacements = {
+        "String": "string",
+        "Boolean": "boolean",
+        "Integer": "number",
+        "Long": "number",
+        "Double": "number",
+        "Float": "number",
+    }
+    return replacements.get(text, text)
 
 
 def fake_developer_act() -> str:

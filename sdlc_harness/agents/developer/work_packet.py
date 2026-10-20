@@ -13,9 +13,13 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
+    LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
+    is_profiled_work_packet_schema,
     profiled_plan_contract_issues,
 )
 from ...storage.runtime import utc_now_iso
@@ -59,6 +63,7 @@ def build_developer_work_packet(
             structured_plan,
             planning_policy=planning_policy,
             verification_policy=verification_policy,
+            allow_legacy=True,
         )
         if contract_issues:
             raise HarnessError(
@@ -102,11 +107,21 @@ def build_developer_work_packet(
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
     required_fields = ["path", "content"]
+    current_profiled_contract = (
+        has_profiled_contract
+        and structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
+    )
+    legacy_profiled_contract = (
+        has_profiled_contract
+        and structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    )
     return {
-        "version": "developer_work_packet_v1",
+        "version": "developer_work_packet_v2" if current_profiled_contract else "developer_work_packet_v1",
         "schema_version": (
             PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if has_profiled_contract
+            if current_profiled_contract
+            else LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+            if legacy_profiled_contract
             else "developer_work_packet_legacy_v1"
         ),
         "mode": "approved_implementation_plan_to_developer_act_v1",
@@ -140,6 +155,15 @@ def build_developer_work_packet(
         "design_mappings_by_file": _group_design_mappings_by_file(
             design_mappings,
             planning_policy=planning_policy,
+        ),
+        **(
+            {
+                "implementation_signature_contract": _dict_value(
+                    structured_plan.get("implementation_signature_contract")
+                )
+            }
+            if current_profiled_contract
+            else {}
         ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
@@ -477,7 +501,7 @@ def validate_developer_work_packet_path_policy(
     """Xác minh policy và toàn bộ allowed paths trước refresh/apply/repair."""
 
     schema_version = str(packet.get("schema_version") or "")
-    profiled = schema_version == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+    profiled = is_profiled_work_packet_schema(schema_version)
     if profiled and planning_policy is None:
         raise HarnessError(
             "developer_work_packet_path_policy_missing",

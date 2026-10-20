@@ -585,7 +585,7 @@ class PhaseThreeTest(unittest.TestCase):
             planned["latest_artifacts"]["implementation_plan_structured"]
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v2")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v3")
         self.assertEqual(structured["repo_context"]["source_files"], ["apps/api/src/ExistingService.ts"])
         self.assertEqual(
             structured["planning_profile"],
@@ -614,7 +614,12 @@ class PhaseThreeTest(unittest.TestCase):
         plan_markdown = (
             self.repo_root / str(planned["latest_artifacts"]["implementation_plan"])
         ).read_text(encoding="utf-8")
-        self.assertIn("# Implementation Plan V2", plan_markdown)
+        signature_contract = structured["implementation_signature_contract"]
+        self.assertEqual(signature_contract["version"], "implementation_signature_contract_v1")
+        self.assertTrue(signature_contract["digest"].startswith("sha256:"))
+        self.assertTrue(signature_contract["entries"])
+        self.assertIn("# Implementation Plan V3", plan_markdown)
+        self.assertIn("## Approved Implementation Signatures", plan_markdown)
         self.assertIn("## Verification Plan", plan_markdown)
         self.assertIn("Stage `unit`", plan_markdown)
         self.assertNotIn("scripts/test.ps1", plan_markdown)
@@ -666,6 +671,10 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(
             revalidated_plan["verification_stage_ids"],
             structured["verification_stage_ids"],
+        )
+        self.assertEqual(
+            revalidated_plan["implementation_signature_contract"]["version"],
+            "implementation_signature_contract_v1",
         )
         self.assertTrue(all("command" not in item for item in revalidated_plan["test_intents"]))
 

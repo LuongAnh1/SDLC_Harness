@@ -19,13 +19,14 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
-from ...profiles import CodeTracePolicy
+from ...profiles import CodeTracePolicy, PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
     aggregate_semantic_trials,
     build_finding_ledger,
     build_validation_claims,
     deterministic_contract_findings,
+    deterministic_typescript_contract_findings,
     prepare_semantic_trial,
     snapshot_fingerprint,
     trial_blocker_keys,
@@ -281,15 +282,20 @@ class CodeTraceValidator:
                     }
                 )
 
-        deterministic_findings = (
-            deterministic_contract_findings(
+        if code_trace_policy is None:
+            deterministic_findings = deterministic_contract_findings(
                 target_path=target_path,
                 work_packet=work_packet,
                 approved_context=approved_context,
             )
-            if code_trace_policy is None
-            else []
-        )
+        elif work_packet.get("schema_version") == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+            assert ast_evidence is not None
+            deterministic_findings = deterministic_typescript_contract_findings(
+                work_packet=work_packet,
+                ast_evidence=ast_evidence,
+            )
+        else:
+            deterministic_findings = []
         static_missing_links = [*missing_links, *deterministic_findings]
         validation_claims = build_validation_claims(
             work_packet=work_packet,
@@ -1215,6 +1221,9 @@ def _code_trace_review_prompt(
             "requirement_coverage_count": _collection_size(work_packet.get("requirement_coverage")),
         },
         "approved_behavior_contracts": _approved_behavior_contracts(work_packet),
+        "implementation_signature_contract": work_packet.get(
+            "implementation_signature_contract", {}
+        ),
         "approved_sequence_evidence": _approved_sequence_evidence(approved_context),
         "fixed_validation_claims": validation_claims,
         "verification_evidence": verification_evidence,
@@ -1234,6 +1243,7 @@ def _code_trace_review_prompt(
             "For mappings with trace_policy=boolean_response or semantic_side_effect, inspect the surrounding branch behavior and tests.",
             "If the only problem is a weak design mapping, return type=trace_mapping_issue instead of asking Developer to change code.",
             "Python recomputes pass/fail. Set blocking=true only for an actionable unresolved finding.",
+            "Do not dismiss or contradict a deterministic TypeScript signature mismatch already listed in static_missing_links.",
             "Every blocking finding must identify evidence_ref and quote exact wording already visible in this review input.",
             "The evidence_quote must directly support the approved behavior claimed in the finding message. When comparing actual and approved call order, quote wording that states the expected approved order and preserve that exact order.",
             "Treat approved_behavior_contracts and approved_sequence_evidence as authoritative. Never infer message order or behavior from a sequence/design reference ID by itself.",

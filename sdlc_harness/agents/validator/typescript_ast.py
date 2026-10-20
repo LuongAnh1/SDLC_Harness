@@ -62,6 +62,27 @@ class TypeScriptAstEvidence:
                         names.add(value)
         return names
 
+    def signatures_for(
+        self,
+        path: str,
+        *,
+        qualified_name: str,
+        symbol_kind: str,
+    ) -> tuple[dict[str, object], ...]:
+        """Tra đúng declaration theo path, qualified name và kind; giữ overload."""
+
+        matches: list[dict[str, object]] = []
+        for item in self.files:
+            if item.get("path") != path:
+                continue
+            for symbol in _dict_items(item.get("symbols")):
+                if (
+                    symbol.get("qualified_name") == qualified_name
+                    and symbol.get("kind") == symbol_kind
+                ):
+                    matches.append(dict(symbol))
+        return tuple(matches)
+
 
 class TypeScriptAstExtractor:
     """Chạy helper code-reviewed bằng Node và package TypeScript của target."""

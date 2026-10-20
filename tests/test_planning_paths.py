@@ -5,6 +5,7 @@ import pytest
 from sdlc_harness.agents.developer import DeveloperPlanAgent
 from sdlc_harness.agents.validator import ImplementationPlanValidator
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import fake_completion
 from sdlc_harness.profiles import (
     build_planning_path_policy,
     build_verification_stage_policy,
@@ -116,6 +117,12 @@ class _HostilePlanningLlm:
                 "open_questions": [],
             }
         )
+
+
+class _ProfiledPlanningLlm:
+    def complete(self, *, system: str, prompt: str) -> str:
+        del system
+        return fake_completion(prompt)
 
 
 def test_policy_routes_typescript_components_and_test_suffixes():
@@ -245,7 +252,7 @@ def test_profiled_validator_rejects_wrong_profile_path_and_component():
     class_graph, sequence_graph = _graphs()
     policy = _policy()
     verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent().plan(
+    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
         issue_key="SDLC-1",
@@ -287,7 +294,7 @@ def test_profiled_validator_accepts_prisma_and_e2e_files_with_correct_owners():
     class_graph, sequence_graph = _graphs()
     policy = _policy()
     verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent().plan(
+    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
         issue_key="SDLC-1",
@@ -356,7 +363,7 @@ def test_profiled_validator_fails_closed_for_invalid_verification_contract(
     class_graph, sequence_graph = _graphs()
     policy = _policy()
     verification_policy = _verification_policy()
-    draft = DeveloperPlanAgent().plan(
+    draft = DeveloperPlanAgent(_ProfiledPlanningLlm()).plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
         issue_key="SDLC-1",

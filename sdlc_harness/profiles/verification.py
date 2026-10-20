@@ -12,14 +12,17 @@ from typing import TYPE_CHECKING
 from ..core.errors import HarnessError
 from .model import ProjectProfile
 from .planning import PlanningPathPolicy
+from .signature import implementation_signature_contract_issues
 
 if TYPE_CHECKING:
     from .snapshot import ProfileSnapshotV1
 
 
 VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v1"
-PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
-PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
+LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
+PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
+LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
+PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v2"
 _ACTIVE_STAGE_IDS_BY_PROJECT = {
     # Chặng A chỉ chạy smoke suite. Catalog full-stack trong ProjectProfile vẫn
     # bất biến; Chặng B phải phát hành policy/profile version mới để mở rộng.
@@ -59,13 +62,17 @@ def profiled_plan_contract_issues(
     *,
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
+    class_graph: dict[str, object] | None = None,
+    allow_legacy: bool = False,
 ) -> list[str]:
     """Kiểm contract profiled plan tại cả Validator và ranh giới Phase 4."""
 
     issues: list[str] = []
     if verification_policy.project_profile_id != planning_policy.project_profile_id:
         issues.append("Verification stages do not belong to the planning project profile.")
-    if structured_plan.get("version") != PROFILED_IMPLEMENTATION_PLAN_VERSION:
+    plan_version = structured_plan.get("version")
+    legacy = plan_version == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    if plan_version != PROFILED_IMPLEMENTATION_PLAN_VERSION and not (allow_legacy and legacy):
         issues.append(
             "Profiled implementation plan version must be "
             f"`{PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
@@ -92,7 +99,25 @@ def profiled_plan_contract_issues(
             issues.append("A profiled test intent is missing stage_id.")
         elif stage_id not in allowed_stage_ids:
             issues.append(f"Test intent references an unsupported verification stage: {stage_id}")
+    if not legacy:
+        issues.extend(
+            implementation_signature_contract_issues(
+                structured_plan.get("implementation_signature_contract"),
+                planning_policy=planning_policy,
+                mappings=_dict_items(structured_plan.get("design_mappings")),
+                class_graph=class_graph,
+            )
+        )
     return issues
+
+
+def is_profiled_work_packet_schema(value: object) -> bool:
+    """Nhận diện cả packet hiện hành và packet profiled lịch sử."""
+
+    return value in {
+        PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    }
 
 
 def profiled_execution_field_paths(value: object, *, path: str = "$") -> list[str]:

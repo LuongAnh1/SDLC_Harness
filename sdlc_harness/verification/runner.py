@@ -26,9 +26,9 @@ from typing import Any
 from ..core.errors import HarnessError
 from ..events import emit_current
 from ..profiles import (
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     QaTestPolicy,
     VerificationStagePolicy,
+    is_profiled_work_packet_schema,
     profiled_execution_field_paths,
 )
 from .registry import VerificationStageSpec, resolve_verification_stage_specs
@@ -616,7 +616,7 @@ def _validate_profiled_work_packet(
     verification_policy: VerificationStagePolicy,
     run_id: str | None,
 ) -> None:
-    if work_packet.get("schema_version") != PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+    if not is_profiled_work_packet_schema(work_packet.get("schema_version")):
         raise HarnessError(
             "verification_stage_policy_invalid",
             "Profiled verification requires the profiled Developer Work Packet schema.",

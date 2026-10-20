@@ -9,6 +9,14 @@ from pathlib import Path
 import re
 from typing import Any
 
+from ...core.errors import HarnessError
+from ...profiles import (
+    IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
+    implementation_signature_contract_digest,
+    signature_shape,
+)
+from .typescript_ast import TypeScriptAstEvidence
+
 
 JAVA_METHOD_RE = re.compile(
     r"(?ms)^[ \t]*(?:@[\w.]+(?:\([^\n]*?\))?[ \t]*\n[ \t]*)*"
@@ -137,6 +145,123 @@ def deterministic_contract_findings(
             finding["canonical_key"] = canonical_finding_key(finding)
             findings.append(finding)
     return _dedupe_findings(findings)
+
+
+def deterministic_typescript_contract_findings(
+    *,
+    work_packet: dict[str, object],
+    ast_evidence: TypeScriptAstEvidence,
+) -> list[dict[str, object]]:
+    """So implementation signature đã duyệt với exact TypeScript AST evidence."""
+
+    contract = work_packet.get("implementation_signature_contract")
+    if not isinstance(contract, dict):
+        raise HarnessError(
+            "implementation_signature_contract_invalid",
+            "Profiled V2 work packet is missing its implementation signature contract.",
+        )
+    if contract.get("version") != IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION:
+        raise HarnessError(
+            "implementation_signature_contract_invalid",
+            "Implementation signature contract version is invalid.",
+        )
+    if contract.get("digest") != implementation_signature_contract_digest(contract):
+        raise HarnessError(
+            "implementation_signature_contract_invalid",
+            "Implementation signature contract digest is invalid.",
+        )
+    entries = contract.get("entries")
+    if not isinstance(entries, list):
+        raise HarnessError(
+            "implementation_signature_contract_invalid",
+            "Implementation signature contract entries must be an array.",
+        )
+
+    findings: list[dict[str, object]] = []
+    for raw in entries:
+        if not isinstance(raw, dict):
+            raise HarnessError(
+                "implementation_signature_contract_invalid",
+                "Implementation signature contract contains an invalid entry.",
+            )
+        source_path = str(raw.get("source_path") or "").strip().replace("\\", "/")
+        qualified_name = str(raw.get("qualified_name") or "").strip()
+        symbol_kind = str(raw.get("symbol_kind") or "").strip()
+        design_element_id = str(raw.get("design_element_id") or "").strip()
+        if not source_path or not qualified_name or symbol_kind not in {"function", "method"}:
+            raise HarnessError(
+                "implementation_signature_contract_invalid",
+                "Implementation signature contract entry identity is invalid.",
+            )
+        actual = ast_evidence.signatures_for(
+            source_path,
+            qualified_name=qualified_name,
+            symbol_kind=symbol_kind,
+        )
+        requirement_ref = _requirement_for_design(work_packet, design_element_id)
+        if not actual:
+            finding = {
+                "type": "missing_code_symbol",
+                "blocking": True,
+                "owner": "developer",
+                "recommended_action": "developer_repair",
+                "message": (
+                    f"Approved signature contract requires {qualified_name} in {source_path}, "
+                    "but exact qualified AST evidence is absent."
+                ),
+                "requirement_ref": requirement_ref,
+                "design_element_id": design_element_id,
+                "code_ref": f"{source_path}#{qualified_name}",
+                "evidence_ref": str(raw.get("contract_id") or IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION),
+                "evidence_quote": _signature_text(raw),
+                "expected_signature": raw,
+                "actual_signatures": [],
+            }
+            finding["canonical_key"] = canonical_finding_key(finding)
+            findings.append(finding)
+            continue
+
+        expected_shape = signature_shape(raw)
+        if any(signature_shape(item) == expected_shape for item in actual):
+            continue
+        finding = {
+            "type": "contract_signature_mismatch",
+            "blocking": True,
+            "owner": "developer",
+            "recommended_action": "developer_repair",
+            "message": (
+                f"Approved TypeScript signature {_signature_text(raw)} does not match "
+                f"the declarations in {source_path}."
+            ),
+            "requirement_ref": requirement_ref,
+            "design_element_id": design_element_id,
+            "code_ref": f"{source_path}#{qualified_name}",
+            "evidence_ref": str(raw.get("contract_id") or IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION),
+            "evidence_quote": _signature_text(raw),
+            "expected_signature": raw,
+            "actual_signatures": [dict(item) for item in actual],
+        }
+        finding["canonical_key"] = canonical_finding_key(finding)
+        findings.append(finding)
+    return _dedupe_findings(findings)
+
+
+def _signature_text(entry: dict[str, object]) -> str:
+    parameters = []
+    for item in _dicts(entry.get("parameters")):
+        prefix = "..." if item.get("rest") is True else ""
+        suffix = "?" if item.get("optional") is True else ""
+        parameters.append(
+            f"{prefix}{str(item.get('name') or '').strip()}{suffix}: "
+            f"{str(item.get('type') or '').strip()}"
+        )
+    type_parameters = _strings(entry.get("type_parameters"))
+    generic = f"<{', '.join(type_parameters)}>" if type_parameters else ""
+    async_prefix = "async " if entry.get("async") is True else ""
+    return (
+        f"{async_prefix}{entry.get('qualified_name')}{generic}"
+        f"({', '.join(parameters)}): {entry.get('return_type')}"
+    )
 
 
 def prepare_semantic_trial(
@@ -273,6 +398,9 @@ def snapshot_fingerprint(
         "requirement_contract": work_packet.get("requirement_contract"),
         "canonical_requirements": work_packet.get("canonical_requirements"),
         "implementation_steps": work_packet.get("implementation_steps"),
+        "implementation_signature_contract": work_packet.get(
+            "implementation_signature_contract"
+        ),
         "code": [
             {"path": item.get("path"), "content": item.get("content"), "chars_total": item.get("chars_total")}
             for item in code_snippets
