@@ -48,6 +48,8 @@ class VerificationStageSpec:
     fixed_env: tuple[tuple[str, str], ...]
     timeout_seconds: int
     required_package_script: str
+    required_test_framework: str
+    machine_reporter_args: tuple[str, ...]
 
     def evidence(self) -> dict[str, object]:
         return {
@@ -55,6 +57,8 @@ class VerificationStageSpec:
             "argv": list(self.argv),
             "cwd": self.cwd,
             "timeout_seconds": self.timeout_seconds,
+            "required_test_framework": self.required_test_framework,
+            "machine_reporter_args": list(self.machine_reporter_args),
         }
 
 
@@ -67,6 +71,8 @@ _TYPESCRIPT_FULLSTACK_V1_SPECS = (
         fixed_env=PROFILED_FIXED_ENV,
         timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
         required_package_script="typecheck",
+        required_test_framework="",
+        machine_reporter_args=(),
     ),
     VerificationStageSpec(
         stage_id="unit",
@@ -76,6 +82,8 @@ _TYPESCRIPT_FULLSTACK_V1_SPECS = (
         fixed_env=PROFILED_FIXED_ENV,
         timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
         required_package_script="test:unit",
+        required_test_framework="vitest",
+        machine_reporter_args=("--reporter=json", "--outputFile={report_path}"),
     ),
 )
 

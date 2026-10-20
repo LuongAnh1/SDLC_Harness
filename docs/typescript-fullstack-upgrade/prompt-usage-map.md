@@ -26,7 +26,7 @@ không sửa hàng loạt file chỉ vì chúng có nội dung Java.
 | Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Active, còn Java-heavy | A2.2b sau khi A3 khóa editable roots/work packet |
 | Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Active, còn Java assumptions | A2.2b/A3; phải dùng execution guard trước khi đổi output |
 | Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Active, còn Java path/symbol evidence | A3 cùng TypeScript AST contract |
-| Phase 4 | `agents/tester/qa.py` | Prompt dựng inline | Active, còn Java test generation | A3 cùng Vitest discovery và generated-test evidence |
+| Phase 4 | `agents/tester/qa.py` | Prompt dựng inline | Profiled run dùng TypeScript/Vitest; legacy branch giữ Java compatibility | A3.3 dùng QA policy, exact selected files và Vitest JSON evidence; browser QA để B4 |
 | Fake mode | `llm/client.py::fake_completion` | Dispatch theo marker prompt | Active trong regression | Phase 3 theo directive ở A2.2a; Phase 4/QA để A2.2b/A3 |
 
 ## File reference-only
@@ -80,8 +80,9 @@ workflow nếu chưa có contract/profile test tương ứng.
 - Refresh, batch apply, implementation repair và QA repair đều resolve lại cùng
   policy từ run snapshot; packet thiếu/sai policy hoặc allowed path ngoài profile
   bị chặn trước khi ghi file.
-- Prompt/fake Developer.act, QA và Code Trace vẫn Java-heavy theo đúng A2.2b;
-  A3.1 chỉ mở guard an toàn, chưa tuyên bố Phase 4 TypeScript đã chạy được.
+- Prompt/fake Developer.act và Code Trace vẫn Java-heavy theo đúng A2.2b; QA
+  profiled đã được chuyển riêng ở A3.3. A3.1 chỉ mở guard an toàn, chưa tuyên bố
+  toàn bộ Phase 4 TypeScript đã chạy được.
 
 ## Trạng thái A3.2
 
@@ -91,5 +92,19 @@ workflow nếu chưa có contract/profile test tương ứng.
   cho `typecheck -> unit`; subprocess luôn dùng argv list và `shell=False`.
 - Test report, quality report và repair feedback mang ordered stage evidence;
   flat fields cũ vẫn được giữ để đọc artifact legacy.
-- QA profiled có `required_test_files` fail closed đến khi QA generation/application
-  chuyển sang Vitest và chứng minh generated test thật sự được execute.
+- A3.2 ban đầu giữ `required_test_files` fail closed; A3.3 đã thay guard tạm đó
+  bằng exact Vitest execution và machine-readable evidence.
+
+## Trạng thái A3.3
+
+- `QaTestPolicy v1` resolve từ immutable profile snapshot, chọn framework Vitest,
+  co-located test roots/suffixes và không cho QA mở rộng sang Playwright/E2E.
+- Prompt, parser và fake QA profiled sinh TypeScript/Vitest; Java prompt/fake chỉ
+  còn ở nhánh compatibility cho artifact legacy.
+- Apply chặn path ngoài policy, duplicate và ghi đè test có sẵn không do cùng run
+  sở hữu; retry chỉ dùng ownership đọc từ artifact QA trước đó cùng policy.
+- Registry unit stage cố định JSON reporter. Runner truyền exact generated paths,
+  đọc `testResults` và chỉ ghi `verified_test_files` khi report khớp chính xác;
+  missing/invalid/mismatched report đều fail dù process trả exit code 0.
+- QA execution/report/quality evidence công bố riêng selected và verified files.
+  Browser QA và TypeScript AST code trace vẫn là các lát tiếp theo.

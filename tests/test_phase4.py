@@ -230,7 +230,8 @@ class ProseWrappedCodeTraceLlm:
 
 
 class FailingQaTester:
-    def generate_tests(self, *, context: dict[str, object]) -> QaGeneratedTestSuite:
+    def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
+        del qa_policy
         path = "src/test/java/com/sdlc/etour/heritage/FailingQaAcceptanceTest.java"
         return QaGeneratedTestSuite(
             summary="QA generated a failing acceptance test for workflow state coverage.",
@@ -258,7 +259,8 @@ class RecordingQaTester:
     def __init__(self):
         self.context: dict[str, object] = {}
 
-    def generate_tests(self, *, context: dict[str, object]) -> QaGeneratedTestSuite:
+    def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
+        del qa_policy
         self.context = context
         path = "src/test/java/com/sdlc/etour/heritage/RecordingQaAcceptanceTest.java"
         return QaGeneratedTestSuite(
@@ -326,8 +328,9 @@ class SequenceVerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
         verification_policy=None,
+        qa_policy=None,
     ) -> VerificationResult:
-        del work_packet, required_test_files, verification_policy
+        del work_packet, required_test_files, verification_policy, qa_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
         self.calls.append(status)
         reason_by_status = {

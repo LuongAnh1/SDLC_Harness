@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import time
 from typing import Any
 
@@ -26,6 +27,7 @@ from ..core.errors import HarnessError
 from ..events import emit_current
 from ..profiles import (
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    QaTestPolicy,
     VerificationStagePolicy,
     profiled_execution_field_paths,
 )
@@ -64,6 +66,8 @@ class VerificationStageResult:
     stderr: str
     reason: str
     timed_out: bool = False
+    selected_test_files: tuple[str, ...] = ()
+    verified_test_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -78,6 +82,8 @@ class VerificationStageResult:
             "stderr": self.stderr,
             "reason": self.reason,
             "timed_out": self.timed_out,
+            "selected_test_files": list(self.selected_test_files),
+            "verified_test_files": list(self.verified_test_files),
         }
 
 
@@ -99,6 +105,8 @@ class VerificationResult:
     planned_stage_ids: tuple[str, ...] = ()
     executed_stage_ids: tuple[str, ...] = ()
     stage_results: tuple[VerificationStageResult, ...] = ()
+    selected_test_files: tuple[str, ...] = ()
+    verified_test_files: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -116,6 +124,8 @@ class VerificationResult:
             "planned_stage_ids": list(self.planned_stage_ids),
             "executed_stage_ids": list(self.executed_stage_ids),
             "stage_results": [item.to_dict() for item in self.stage_results],
+            "selected_test_files": list(self.selected_test_files),
+            "verified_test_files": list(self.verified_test_files),
         }
 
 
@@ -132,6 +142,7 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        qa_policy: QaTestPolicy | None = None,
     ) -> VerificationResult:
         """Run verification and publish bounded result metadata."""
 
@@ -140,6 +151,7 @@ class VerificationRunner:
             work_packet=work_packet,
             required_test_files=required_test_files,
             verification_policy=verification_policy,
+            qa_policy=qa_policy,
         )
         emit_current(
             category="verification",
@@ -154,6 +166,8 @@ class VerificationRunner:
                 "executed_tests": len(result.executed_test_entrypoints),
                 "planned_stages": list(result.planned_stage_ids),
                 "executed_stages": list(result.executed_stage_ids),
+                "selected_test_files": len(result.selected_test_files),
+                "verified_test_files": len(result.verified_test_files),
             },
         )
         return result
@@ -165,6 +179,7 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        qa_policy: QaTestPolicy | None = None,
     ) -> VerificationResult:
         """Chọn runner profile-owned hoặc nhánh Java compatibility."""
 
@@ -180,6 +195,7 @@ class VerificationRunner:
                 work_packet=work_packet,
                 required_test_files=required_test_files,
                 verification_policy=verification_policy,
+                qa_policy=qa_policy,
             )
 
         command = _test_command_from_work_packet(work_packet)
@@ -286,6 +302,7 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None,
         verification_policy: VerificationStagePolicy,
+        qa_policy: QaTestPolicy | None,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
@@ -297,21 +314,6 @@ class VerificationRunner:
             run_id=run_id,
         )
         planned_stage_ids = tuple(spec.stage_id for spec in specs)
-        if required_test_files:
-            return VerificationResult(
-                status="failed",
-                command="",
-                cwd=str(target_path),
-                exit_code=None,
-                duration_seconds=0.0,
-                stdout="",
-                stderr="",
-                reason=(
-                    "Profiled QA test-file verification is not supported until the Vitest QA executor is enabled."
-                ),
-                planned_stage_ids=planned_stage_ids,
-            )
-
         target_root = target_path.resolve()
         if not target_root.is_dir():
             return _profiled_preflight_failure(
@@ -319,21 +321,30 @@ class VerificationRunner:
                 planned_stage_ids=planned_stage_ids,
                 reason="Verification target repository does not exist or is not a directory.",
             )
+        selected_test_files = _profiled_required_test_files(
+            target_root=target_root,
+            required_test_files=required_test_files or [],
+            verification_policy=verification_policy,
+            qa_policy=qa_policy,
+            run_id=run_id,
+        )
         scripts, manifest_error = _package_scripts(target_root)
         if manifest_error:
             return _profiled_preflight_failure(
                 target_path=target_root,
                 planned_stage_ids=planned_stage_ids,
                 reason=manifest_error,
+                selected_test_files=selected_test_files,
             )
 
-        prepared: list[tuple[VerificationStageSpec, Path, list[str], dict[str, str]]] = []
+        prepared: list[tuple[VerificationStageSpec, Path, str, dict[str, str]]] = []
         for spec in specs:
             if spec.required_package_script not in scripts:
                 return _profiled_preflight_failure(
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
                     reason=f"package.json is missing required script: {spec.required_package_script}",
+                    selected_test_files=selected_test_files,
                 )
             stage_cwd = (target_root / spec.cwd).resolve()
             try:
@@ -349,6 +360,7 @@ class VerificationRunner:
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
                     reason=f"Verification stage cwd does not exist: {spec.cwd}",
+                    selected_test_files=selected_test_files,
                 )
             env = _profiled_verification_env(spec)
             executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
@@ -357,11 +369,53 @@ class VerificationRunner:
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
                     reason=f"Verification executable was not found: {spec.argv[0]}",
+                    selected_test_files=selected_test_files,
                 )
-            prepared.append((spec, stage_cwd, [executable, *spec.argv[1:]], env))
+            prepared.append((spec, stage_cwd, executable, env))
 
         stage_results: list[VerificationStageResult] = []
-        for spec, stage_cwd, executable_argv, env in prepared:
+        for spec, stage_cwd, executable, env in prepared:
+            stage_selected_files = selected_test_files if spec.stage_id == "unit" else ()
+            logical_argv = spec.argv
+            executable_argv = [executable, *spec.argv[1:]]
+            report_directory: tempfile.TemporaryDirectory[str] | None = None
+            report_path: Path | None = None
+            if stage_selected_files:
+                if qa_policy is None or qa_policy.framework != spec.required_test_framework:
+                    raise HarnessError(
+                        "qa_test_policy_invalid",
+                        "QA framework does not match the reviewed unit-stage reporter.",
+                        run_id=run_id,
+                    )
+                if not spec.machine_reporter_args:
+                    raise HarnessError(
+                        "verification_stage_policy_invalid",
+                        "The profiled unit stage has no machine-readable reporter contract.",
+                        run_id=run_id,
+                    )
+                report_directory = tempfile.TemporaryDirectory(prefix="sdlc-harness-vitest-")
+                report_path = Path(report_directory.name) / "report.json"
+                logical_reporter_args = tuple(
+                    item.replace("{report_path}", "<temporary-vitest-json-report>")
+                    for item in spec.machine_reporter_args
+                )
+                executable_reporter_args = tuple(
+                    item.replace("{report_path}", str(report_path))
+                    for item in spec.machine_reporter_args
+                )
+                logical_argv = (
+                    *spec.argv,
+                    "--",
+                    *logical_reporter_args,
+                    *stage_selected_files,
+                )
+                executable_argv = [
+                    executable,
+                    *spec.argv[1:],
+                    "--",
+                    *executable_reporter_args,
+                    *stage_selected_files,
+                ]
             start = time.monotonic()
             try:
                 completed = subprocess.run(
@@ -379,7 +433,7 @@ class VerificationRunner:
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
                     status="failed",
-                    argv=spec.argv,
+                    argv=logical_argv,
                     cwd=spec.cwd,
                     timeout_seconds=spec.timeout_seconds,
                     exit_code=None,
@@ -388,12 +442,13 @@ class VerificationRunner:
                     stderr=_truncate_output(_decode_timeout_output(exc.stderr)),
                     reason=f"Verification stage timed out after {spec.timeout_seconds}s: {spec.stage_id}",
                     timed_out=True,
+                    selected_test_files=stage_selected_files,
                 )
             except OSError as exc:
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
                     status="failed",
-                    argv=spec.argv,
+                    argv=logical_argv,
                     cwd=spec.cwd,
                     timeout_seconds=spec.timeout_seconds,
                     exit_code=None,
@@ -401,12 +456,22 @@ class VerificationRunner:
                     stdout="",
                     stderr=_truncate_output(str(exc)),
                     reason=f"Verification stage could not start: {spec.stage_id}",
+                    selected_test_files=stage_selected_files,
                 )
             else:
+                verified_test_files: tuple[str, ...] = ()
+                report_error = ""
+                if report_path is not None:
+                    verified_test_files, report_error = _vitest_verified_test_files(
+                        report_path=report_path,
+                        target_root=target_root,
+                        selected_test_files=stage_selected_files,
+                    )
+                stage_passed = completed.returncode == 0 and not report_error
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
-                    status="passed" if completed.returncode == 0 else "failed",
-                    argv=spec.argv,
+                    status="passed" if stage_passed else "failed",
+                    argv=logical_argv,
                     cwd=spec.cwd,
                     timeout_seconds=spec.timeout_seconds,
                     exit_code=completed.returncode,
@@ -415,10 +480,16 @@ class VerificationRunner:
                     stderr=_truncate_output(completed.stderr),
                     reason=(
                         f"Verification stage completed successfully: {spec.stage_id}"
-                        if completed.returncode == 0
-                        else f"Verification stage exited with code {completed.returncode}: {spec.stage_id}"
+                        if stage_passed
+                        else report_error
+                        or f"Verification stage exited with code {completed.returncode}: {spec.stage_id}"
                     ),
+                    selected_test_files=stage_selected_files,
+                    verified_test_files=verified_test_files,
                 )
+            finally:
+                if report_directory is not None:
+                    report_directory.cleanup()
             stage_results.append(stage_result)
             if stage_result.status != "passed":
                 return _profiled_result(
@@ -426,6 +497,7 @@ class VerificationRunner:
                     planned_stage_ids=planned_stage_ids,
                     stage_results=stage_results,
                     terminal=stage_result,
+                    selected_test_files=selected_test_files,
                 )
 
         terminal = stage_results[-1]
@@ -435,6 +507,7 @@ class VerificationRunner:
             stage_results=stage_results,
             terminal=terminal,
             reason="All profile-owned verification stages completed successfully.",
+            selected_test_files=selected_test_files,
         )
 
     def _run_java_tests(
@@ -601,6 +674,124 @@ def _package_scripts(target_root: Path) -> tuple[set[str], str]:
     return {str(key) for key, value in scripts.items() if isinstance(value, str) and value.strip()}, ""
 
 
+def _profiled_required_test_files(
+    *,
+    target_root: Path,
+    required_test_files: list[str],
+    verification_policy: VerificationStagePolicy,
+    qa_policy: QaTestPolicy | None,
+    run_id: str | None,
+) -> tuple[str, ...]:
+    if not required_test_files:
+        return ()
+    if qa_policy is None:
+        raise HarnessError(
+            "qa_test_policy_invalid",
+            "Profiled required test execution requires the immutable QA test policy.",
+            run_id=run_id,
+        )
+    if qa_policy.project_profile_id != verification_policy.project_profile_id:
+        raise HarnessError(
+            "qa_test_policy_invalid",
+            "QA test policy does not belong to the verification project profile.",
+            run_id=run_id,
+        )
+    selected: list[str] = []
+    for raw_path in required_test_files:
+        path = qa_policy.normalize_test_path(raw_path)
+        if not path:
+            raise HarnessError(
+                "qa_test_out_of_scope",
+                f"Required QA test path is outside the profiled Vitest policy: {raw_path}",
+                run_id=run_id,
+            )
+        if path in selected:
+            raise HarnessError(
+                "qa_test_path_duplicate",
+                f"Required QA test path is duplicated: {path}",
+                run_id=run_id,
+            )
+        target_file = (target_root / path).resolve()
+        try:
+            target_file.relative_to(target_root)
+        except ValueError as exc:
+            raise HarnessError(
+                "qa_test_unsafe_path",
+                f"Required QA test path escapes target repository: {path}",
+                run_id=run_id,
+            ) from exc
+        if not target_file.is_file():
+            raise HarnessError(
+                "qa_test_file_missing",
+                f"Required QA test file does not exist: {path}",
+                run_id=run_id,
+            )
+        selected.append(path)
+    return tuple(selected)
+
+
+def _vitest_verified_test_files(
+    *,
+    report_path: Path,
+    target_root: Path,
+    selected_test_files: tuple[str, ...],
+) -> tuple[tuple[str, ...], str]:
+    """Đọc Vitest JSON và đối chiếu đúng tập file QA đã chọn."""
+
+    if not report_path.is_file():
+        return (), "Vitest did not produce the required machine-readable JSON report."
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return (), "Vitest machine-readable JSON report is missing or invalid."
+    test_results = payload.get("testResults") if isinstance(payload, dict) else None
+    if not isinstance(test_results, list):
+        return (), "Vitest JSON report does not contain a testResults array."
+
+    reported: list[str] = []
+    assertion_error = ""
+    for item in test_results:
+        if not isinstance(item, dict):
+            return (), "Vitest JSON report contains an invalid test result entry."
+        raw_path = str(item.get("name") or item.get("testFilePath") or "").strip()
+        if not raw_path:
+            return (), "Vitest JSON report contains a test result without a file path."
+        candidate = Path(raw_path)
+        if not candidate.is_absolute():
+            candidate = target_root / candidate
+        try:
+            relative = candidate.resolve().relative_to(target_root).as_posix()
+        except (OSError, ValueError):
+            return (), "Vitest JSON report references a test file outside the target repository."
+        if relative in reported:
+            return tuple(reported), "Vitest JSON report contains a duplicate test file entry."
+        reported.append(relative)
+        assertion_results = item.get("assertionResults")
+        if not isinstance(assertion_results, list) or not assertion_results:
+            assertion_error = "Vitest JSON report does not prove that each selected file executed a test."
+            continue
+        statuses = {
+            str(assertion.get("status") or "").strip().lower()
+            for assertion in assertion_results
+            if isinstance(assertion, dict)
+        }
+        if len(statuses) != len(assertion_results) or statuses != {"passed"}:
+            assertion_error = "Vitest JSON report records a non-passing or invalid assertion."
+
+    if set(reported) != set(selected_test_files) or len(reported) != len(selected_test_files):
+        return (
+            tuple(reported),
+            "Vitest JSON report does not match the exact selected QA test files: "
+            f"selected={list(selected_test_files)}, reported={reported}.",
+        )
+    ordered_reported = tuple(path for path in selected_test_files if path in reported)
+    if payload.get("success") is not True:
+        return ordered_reported, "Vitest JSON report records an unsuccessful test run."
+    if assertion_error:
+        return ordered_reported, assertion_error
+    return ordered_reported, ""
+
+
 def _profiled_verification_env(spec: VerificationStageSpec) -> dict[str, str]:
     allowed = {key.casefold() for key in spec.inherited_env_keys}
     env = {key: value for key, value in os.environ.items() if key.casefold() in allowed}
@@ -618,6 +809,7 @@ def _profiled_preflight_failure(
     target_path: Path,
     planned_stage_ids: tuple[str, ...],
     reason: str,
+    selected_test_files: tuple[str, ...] = (),
 ) -> VerificationResult:
     return VerificationResult(
         status="failed",
@@ -629,6 +821,7 @@ def _profiled_preflight_failure(
         stderr="",
         reason=reason,
         planned_stage_ids=planned_stage_ids,
+        selected_test_files=selected_test_files,
     )
 
 
@@ -639,6 +832,7 @@ def _profiled_result(
     stage_results: list[VerificationStageResult],
     terminal: VerificationStageResult,
     reason: str | None = None,
+    selected_test_files: tuple[str, ...] = (),
 ) -> VerificationResult:
     return VerificationResult(
         status=terminal.status,
@@ -653,6 +847,12 @@ def _profiled_result(
         planned_stage_ids=planned_stage_ids,
         executed_stage_ids=tuple(item.stage_id for item in stage_results),
         stage_results=tuple(stage_results),
+        selected_test_files=selected_test_files,
+        verified_test_files=tuple(
+            path
+            for item in stage_results
+            for path in item.verified_test_files
+        ),
     )
 
 

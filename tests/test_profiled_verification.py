@@ -15,7 +15,10 @@ from sdlc_harness.artifacts.writers import _test_report_markdown
 from sdlc_harness.profiles import (
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     VerificationStagePolicy,
+    build_planning_path_policy,
+    build_qa_test_policy,
     build_verification_stage_policy,
+    get_language_profile,
     get_project_profile,
 )
 from sdlc_harness.verification import (
@@ -44,6 +47,13 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.policy = build_verification_stage_policy(
             project=get_project_profile("typescript_fullstack_v1")
         )
+        project = get_project_profile("typescript_fullstack_v1")
+        self.qa_policy = build_qa_test_policy(
+            planning_policy=build_planning_path_policy(
+                project=project,
+                language=get_language_profile(project.language_profile_id),
+            )
+        )
         self.packet = {
             "run_id": "run_profiled_verification",
             "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
@@ -62,6 +72,11 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual([item.stage_id for item in specs], ["typecheck", "unit"])
         self.assertEqual(specs[0].argv, ("npm", "run", "typecheck"))
         self.assertEqual(specs[1].argv, ("npm", "run", "test:unit"))
+        self.assertEqual(specs[1].required_test_framework, "vitest")
+        self.assertEqual(
+            specs[1].machine_reporter_args,
+            ("--reporter=json", "--outputFile={report_path}"),
+        )
 
         drifted = VerificationStagePolicy(
             project_profile_id=self.policy.project_profile_id,
@@ -243,17 +258,223 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
         run.assert_not_called()
 
-    def test_profiled_qa_required_files_fail_closed(self) -> None:
-        with patch("sdlc_harness.verification.runner.subprocess.run") as run:
+    def test_profiled_qa_executes_exact_required_vitest_file(self) -> None:
+        qa_path = "apps/api/src/generated.test.ts"
+        qa_file = self.target / qa_path
+        qa_file.parent.mkdir(parents=True)
+        qa_file.write_text("import { it } from 'vitest';\n", encoding="utf-8")
+        def run_with_report(argv, **kwargs):
+            del kwargs
+            if "test:unit" in argv:
+                report_arg = next(item for item in argv if item.startswith("--outputFile="))
+                Path(report_arg.split("=", 1)[1]).write_text(
+                    json.dumps(
+                        {
+                            "success": True,
+                            "testResults": [
+                                {
+                                    "name": str(qa_file.resolve()),
+                                    "assertionResults": [{"status": "passed"}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="passed", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner.subprocess.run",
+                side_effect=run_with_report,
+            ) as run,
+        ):
             result = VerificationRunner().run(
                 target_path=self.target,
                 work_packet=self.packet,
-                required_test_files=["apps/api/test/generated.test.ts"],
+                required_test_files=[qa_path],
                 verification_policy=self.policy,
+                qa_policy=self.qa_policy,
+            )
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.selected_test_files, (qa_path,))
+        self.assertEqual(result.verified_test_files, (qa_path,))
+        unit_argv = run.call_args_list[1].args[0]
+        self.assertEqual(unit_argv[:5], ["npm", "run", "test:unit", "--", "--reporter=json"])
+        self.assertTrue(unit_argv[5].startswith("--outputFile="))
+        self.assertEqual(unit_argv[6], qa_path)
+        self.assertEqual(
+            result.stage_results[1].argv,
+            (
+                "npm",
+                "run",
+                "test:unit",
+                "--",
+                "--reporter=json",
+                "--outputFile=<temporary-vitest-json-report>",
+                qa_path,
+            ),
+        )
+
+    def test_profiled_qa_fails_without_exact_vitest_json_evidence(self) -> None:
+        qa_path = "apps/api/src/generated.test.ts"
+        qa_file = self.target / qa_path
+        qa_file.parent.mkdir(parents=True)
+        qa_file.write_text("import { it } from 'vitest';\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed),
+        ):
+            missing = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                required_test_files=[qa_path],
+                verification_policy=self.policy,
+                qa_policy=self.qa_policy,
+            )
+        self.assertEqual(missing.status, "failed")
+        self.assertEqual(missing.verified_test_files, ())
+        self.assertIn("machine-readable JSON report", missing.reason)
+
+        def run_with_wrong_report(argv, **kwargs):
+            del kwargs
+            if "test:unit" in argv:
+                report_arg = next(item for item in argv if item.startswith("--outputFile="))
+                Path(report_arg.split("=", 1)[1]).write_text(
+                    json.dumps(
+                        {
+                            "success": True,
+                            "testResults": [
+                                {
+                                    "name": str(
+                                        (self.target / "apps/api/src/other.test.ts").resolve()
+                                    ),
+                                    "assertionResults": [{"status": "passed"}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="passed", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner.subprocess.run",
+                side_effect=run_with_wrong_report,
+            ),
+        ):
+            mismatched = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                required_test_files=[qa_path],
+                verification_policy=self.policy,
+                qa_policy=self.qa_policy,
+            )
+        self.assertEqual(mismatched.status, "failed")
+        self.assertEqual(mismatched.verified_test_files, ("apps/api/src/other.test.ts",))
+        self.assertIn("does not match the exact selected", mismatched.reason)
+
+    def test_profiled_qa_keeps_selected_but_not_verified_when_typecheck_fails(self) -> None:
+        qa_path = "apps/api/src/generated.test.ts"
+        qa_file = self.target / qa_path
+        qa_file.parent.mkdir(parents=True)
+        qa_file.write_text("import { it } from 'vitest';\n", encoding="utf-8")
+        failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="type error")
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                required_test_files=[qa_path],
+                verification_policy=self.policy,
+                qa_policy=self.qa_policy,
+            )
+        self.assertEqual(result.selected_test_files, (qa_path,))
+        self.assertEqual(result.verified_test_files, ())
+        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(run.call_count, 1)
+
+    def test_profiled_qa_records_executed_file_when_vitest_assertion_fails(self) -> None:
+        qa_path = "apps/api/src/generated.test.ts"
+        qa_file = self.target / qa_path
+        qa_file.parent.mkdir(parents=True)
+        qa_file.write_text("import { it } from 'vitest';\n", encoding="utf-8")
+
+        def run_with_failed_report(argv, **kwargs):
+            del kwargs
+            if "test:unit" in argv:
+                report_arg = next(item for item in argv if item.startswith("--outputFile="))
+                Path(report_arg.split("=", 1)[1]).write_text(
+                    json.dumps(
+                        {
+                            "success": False,
+                            "testResults": [
+                                {
+                                    "name": str(qa_file.resolve()),
+                                    "assertionResults": [{"status": "failed"}],
+                                }
+                            ],
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(
+                    args=argv,
+                    returncode=1,
+                    stdout="failed",
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="passed", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner.subprocess.run",
+                side_effect=run_with_failed_report,
+            ),
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                required_test_files=[qa_path],
+                verification_policy=self.policy,
+                qa_policy=self.qa_policy,
             )
         self.assertEqual(result.status, "failed")
-        self.assertIn("Vitest QA executor", result.reason)
-        run.assert_not_called()
+        self.assertEqual(result.selected_test_files, (qa_path,))
+        self.assertEqual(result.verified_test_files, (qa_path,))
+        self.assertIn("unsuccessful", result.reason)
+
+    def test_profiled_qa_required_files_need_policy_and_existing_safe_paths(self) -> None:
+        with self.assertRaises(HarnessError) as missing_policy:
+            VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                required_test_files=["apps/api/src/generated.test.ts"],
+                verification_policy=self.policy,
+            )
+        self.assertEqual(missing_policy.exception.error_code, "qa_test_policy_invalid")
+
+        for path, error_code in (
+            ("--reporter=verbose", "qa_test_out_of_scope"),
+            ("tests/e2e/generated.spec.ts", "qa_test_out_of_scope"),
+            ("apps/api/src/missing.test.ts", "qa_test_file_missing"),
+        ):
+            with self.subTest(path=path), self.assertRaises(HarnessError) as caught:
+                VerificationRunner().run(
+                    target_path=self.target,
+                    work_packet=self.packet,
+                    required_test_files=[path],
+                    verification_policy=self.policy,
+                    qa_policy=self.qa_policy,
+                )
+            self.assertEqual(caught.exception.error_code, error_code)
 
     def test_report_renders_each_stage_evidence(self) -> None:
         stage = VerificationStageResult(

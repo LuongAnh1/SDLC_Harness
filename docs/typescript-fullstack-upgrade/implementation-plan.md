@@ -95,8 +95,17 @@ tất và không tự cho phép cutover.
     `npm run test:unit`, cwd root, timeout 120 giây, env allowlist và `shell=False`.
   - Packet thiếu/sai policy, sai thứ tự stage hoặc chứa raw execution field bị
     chặn trước subprocess; Java command runner chỉ còn cho artifact legacy.
-- [ ] Chuyển QA generation/application sang Vitest test files và xác minh report
-  chứng minh generated test thật sự được execute.
+- [x] A3.3: chuyển QA generation/application sang Vitest test files và xác minh
+  machine-readable report chứng minh generated test thật sự được execute.
+  - Hoàn tất: 2026-10-20.
+  - `QaTestPolicy v1` được suy ra từ immutable project/language snapshot, giới hạn
+    QA vào co-located `.test.ts`/`.test.tsx` của web/API/contracts/database và
+    không mở browser E2E trước Chặng B.
+  - QA không được ghi đè test có sẵn ngoài tập file do chính run đã sinh; retry
+    chỉ được cập nhật path đã lưu trong artifact QA trước đó cùng policy.
+  - Unit stage truyền chính xác generated files cho Vitest, bắt buộc JSON reporter
+    và chỉ công nhận `verified_test_files` khi `testResults` khớp đúng tập đã chọn.
+    Exit code không còn đủ để kết luận QA generated test đã chạy.
 - [ ] Thêm TypeScript AST contract evidence cho code trace.
 
 ### A4. Target Bootstrap Và Cutover

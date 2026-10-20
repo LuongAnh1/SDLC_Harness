@@ -172,6 +172,11 @@ Registry A3.2 hiện resolve hai stage này lần lượt thành `npm run typech
 `npm run test:unit`, cwd root, timeout 120 giây và environment allowlist. Runner
 preflight `package.json`/script/npm, chạy argv list với `shell=False`, dừng ở lỗi
 đầu tiên và không fallback sang raw command hay Java runner cho profiled packet.
+A3.3 bổ sung `QaTestPolicy v1`: QA profiled sinh co-located Vitest files theo
+component rule, unit stage truyền exact file list cùng JSON reporter và Runner
+đối chiếu `testResults` trước khi công nhận `verified_test_files`. Report thiếu,
+không hợp lệ hoặc khác tập selected đều fail; exit code đơn lẻ không còn là bằng
+chứng generated test đã chạy. Playwright/browser evidence vẫn thuộc Chặng B.
 Full-stack suite đích khi đó là:
 
 ```text

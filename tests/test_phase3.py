@@ -156,8 +156,9 @@ class SequenceVerificationRunner:
         work_packet: dict[str, object],
         required_test_files=None,
         verification_policy=None,
+        qa_policy=None,
     ):
-        del work_packet, required_test_files, verification_policy
+        del work_packet, required_test_files, verification_policy, qa_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
         return VerificationResult(
             status=status,

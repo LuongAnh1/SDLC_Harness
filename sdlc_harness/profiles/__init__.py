@@ -45,6 +45,13 @@ from .verification import (
     profiled_plan_contract_issues,
     verification_stage_policy_from_snapshot,
 )
+from .qa import (
+    QA_TEST_POLICY_VERSION,
+    QaComponentTestRule,
+    QaTestPolicy,
+    build_qa_test_policy,
+    qa_test_policy_from_snapshot,
+)
 from .retirement import (
     LEGACY_RETIRED_ALLOWED_COMMANDS,
     public_allowed_actions,
@@ -72,9 +79,13 @@ __all__ = [
     "PROFILED_IMPLEMENTATION_PLAN_VERSION",
     "VerificationStagePolicy",
     "VERIFICATION_STAGE_POLICY_VERSION",
+    "QA_TEST_POLICY_VERSION",
+    "QaComponentTestRule",
+    "QaTestPolicy",
     "build_profile_snapshot",
     "build_planning_path_policy",
     "build_verification_stage_policy",
+    "build_qa_test_policy",
     "get_language_profile",
     "get_prompt_directive",
     "get_project_profile",
@@ -88,6 +99,7 @@ __all__ = [
     "prompt_directive_from_snapshot",
     "resolve_language_prompt_directive",
     "verification_stage_policy_from_snapshot",
+    "qa_test_policy_from_snapshot",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",
     "public_run_summary",

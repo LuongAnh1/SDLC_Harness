@@ -68,8 +68,10 @@ from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..profiles import (
     PlanningPathPolicy,
+    QaTestPolicy,
     VerificationStagePolicy,
     planning_path_policy_from_snapshot,
+    qa_test_policy_from_snapshot,
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
@@ -1906,18 +1908,26 @@ class PhaseFourWorkflow:
     ) -> dict[str, object]:
         """Sinh/apply QA tests, chạy baseline và từng QA class bắt buộc, rồi ghi artifacts."""
 
+        run_id = str(state.get("run_id") or "")
+        qa_policy = _qa_policy_for_state(state, run_id=run_id)
+
         context = _qa_review_context(
             store=self.store,
             state=state,
             artifact_paths=artifact_paths,
-            run_id=str(state.get("run_id") or ""),
+            run_id=run_id,
             target_repo=str(target_info.path),
             branch=target_info.current_branch,
             work_packet=work_packet,
         )
         if repaired_from:
             context["repaired_from"] = repaired_from
-        generated_tests = self.qa_tester.generate_tests(context=context)
+        if qa_policy is not None:
+            context["qa_generation_profile"] = qa_policy.prompt_context()
+        generated_tests = self.qa_tester.generate_tests(
+            context=context,
+            qa_policy=qa_policy,
+        )
         generated_payload = {
             **generated_tests.to_dict(),
             "run_id": state.get("run_id"),
@@ -1929,7 +1939,7 @@ class PhaseFourWorkflow:
         }
         generated_path = write_phase4_qa_generated_tests(
             store=self.store,
-            run_id=str(state.get("run_id") or ""),
+            run_id=run_id,
             generated=generated_payload,
             version=qa_version,
         )
@@ -1937,10 +1947,18 @@ class PhaseFourWorkflow:
             **latest_artifacts,
             "qa_generated_tests": generated_path,
         }
+        prior_qa_paths = _previous_qa_owned_paths(
+            store=self.store,
+            artifact_paths=artifact_paths,
+            qa_policy=qa_policy,
+            run_id=run_id,
+        )
         applied_tests = _apply_qa_generated_tests(
             generated=generated_tests,
             target_path=target_info.path,
-            run_id=str(state.get("run_id") or ""),
+            run_id=run_id,
+            qa_policy=qa_policy,
+            prior_qa_paths=prior_qa_paths,
         )
         execution = self.verification_runner.run(
             target_path=target_info.path,
@@ -1950,6 +1968,7 @@ class PhaseFourWorkflow:
                 state,
                 run_id=str(state.get("run_id") or ""),
             ),
+            qa_policy=qa_policy,
         )
         execution_payload = {
             "run_id": state.get("run_id"),
@@ -1964,7 +1983,7 @@ class PhaseFourWorkflow:
         }
         execution_path = write_phase4_qa_execution_report(
             store=self.store,
-            run_id=str(state.get("run_id") or ""),
+            run_id=run_id,
             report=execution_payload,
             version=qa_version,
         )
@@ -1978,6 +1997,7 @@ class PhaseFourWorkflow:
             execution_path=execution_path,
             generated_path=generated_path,
             applied_tests=applied_tests,
+            qa_policy=qa_policy,
         )
         report_payload = {
             **result.to_dict(),
@@ -1989,6 +2009,9 @@ class PhaseFourWorkflow:
             "qa_generated_tests": generated_path,
             "qa_test_execution": execution_path,
             "execution_status": execution.status,
+            "generation_profile": generated_tests.generation_profile or {},
+            "selected_test_files": list(execution.selected_test_files),
+            "verified_test_files": list(execution.verified_test_files),
             "applied_tests": applied_tests,
             "repaired_from": repaired_from,
             "requirement_contract": work_packet.get("requirement_contract"),
@@ -2002,7 +2025,7 @@ class PhaseFourWorkflow:
         }
         report_path = write_phase4_qa_test_report(
             store=self.store,
-            run_id=str(state.get("run_id") or ""),
+            run_id=run_id,
             report=report_payload,
             version=qa_version,
         )
@@ -3286,7 +3309,7 @@ def _qa_review_context(
             "QA/Tester generates acceptance/system tests from current code and test evidence.",
             "Full design, implementation plan, and trace report are references only; use summaries unless a future slice fetches them.",
             "QA/Tester must not request requirement/design edits in this slice.",
-            "QA-generated test fail/skipped blocks the run; Developer QA repair loop is a later slice.",
+            "QA-generated test fail/skipped enters the bounded Developer QA repair loop.",
         ],
     }
 
@@ -3395,7 +3418,12 @@ def _qa_code_paths(*, work_packet: dict[str, object], run_id: str) -> list[str]:
 
 
 def _qa_code_role(rel_path: str) -> str:
-    return "test" if rel_path.startswith("src/test/java/") else "production"
+    return (
+        "test"
+        if rel_path.startswith("src/test/java/")
+        or rel_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        else "production"
+    )
 
 
 def _qa_traceability_summary(*, trace_report: dict[str, object], trace_path: str) -> dict[str, object]:
@@ -3427,13 +3455,28 @@ def _apply_qa_generated_tests(
     generated: QaGeneratedTestSuite,
     target_path: Path,
     run_id: str,
+    qa_policy: QaTestPolicy | None = None,
+    prior_qa_paths: set[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Apply only QA-generated test files under src/test/java/."""
+    """Apply QA-generated files trong path policy của run."""
 
     applied: list[dict[str, object]] = []
     target_root = target_path.resolve()
+    prior_paths = prior_qa_paths or set()
+    seen_paths: set[str] = set()
     for item in generated.test_files:
-        rel_path = _normalize_qa_test_path(str(item.get("path") or ""), run_id=run_id)
+        rel_path = _normalize_qa_test_path(
+            str(item.get("path") or ""),
+            run_id=run_id,
+            qa_policy=qa_policy,
+        )
+        if rel_path in seen_paths:
+            raise HarnessError(
+                "qa_test_path_duplicate",
+                f"QA generated the same test path more than once: {rel_path}",
+                run_id=run_id,
+            )
+        seen_paths.add(rel_path)
         target_file = (target_root / rel_path).resolve()
         try:
             target_file.relative_to(target_root)
@@ -3443,6 +3486,12 @@ def _apply_qa_generated_tests(
                 f"QA-generated test path escapes target repo: {rel_path}",
                 run_id=run_id,
             ) from exc
+        if qa_policy is not None and target_file.exists() and rel_path not in prior_paths:
+            raise HarnessError(
+                "qa_test_existing_file_conflict",
+                f"QA cannot overwrite a test file it does not own for this run: {rel_path}",
+                run_id=run_id,
+            )
         content = str(item.get("content") or "").strip()
         if not content:
             raise HarnessError(
@@ -3464,7 +3513,21 @@ def _apply_qa_generated_tests(
     return applied
 
 
-def _normalize_qa_test_path(raw_path: str, *, run_id: str) -> str:
+def _normalize_qa_test_path(
+    raw_path: str,
+    *,
+    run_id: str,
+    qa_policy: QaTestPolicy | None = None,
+) -> str:
+    if qa_policy is not None:
+        rel_path = qa_policy.normalize_test_path(raw_path)
+        if not rel_path:
+            raise HarnessError(
+                "qa_test_out_of_scope",
+                f"QA-generated test is outside the profiled Vitest policy: {raw_path}",
+                run_id=run_id,
+            )
+        return rel_path
     rel_path = _normalize_code_path(raw_path, run_id=run_id)
     if not rel_path.startswith("src/test/java/") or not rel_path.endswith(".java"):
         raise HarnessError(
@@ -3475,6 +3538,44 @@ def _normalize_qa_test_path(raw_path: str, *, run_id: str) -> str:
     return rel_path
 
 
+def _previous_qa_owned_paths(
+    *,
+    store: RuntimeStore,
+    artifact_paths: dict[str, str],
+    qa_policy: QaTestPolicy | None,
+    run_id: str,
+) -> set[str]:
+    if qa_policy is None:
+        return set()
+    artifact_ref = str(artifact_paths.get("qa_generated_tests") or "")
+    if not artifact_ref:
+        return set()
+    artifact_path = Path(artifact_ref)
+    if not artifact_path.is_absolute():
+        artifact_path = store.repo_root / artifact_path
+    if not artifact_path.is_file():
+        return set()
+    payload = _read_json_artifact(artifact_path, run_id=run_id)
+    generation_profile = _dict_value(payload.get("generation_profile"))
+    if generation_profile != qa_policy.metadata():
+        raise HarnessError(
+            "qa_test_policy_invalid",
+            "Prior QA-generated tests do not match the immutable QA policy.",
+            run_id=run_id,
+        )
+    owned: set[str] = set()
+    for item in _dict_items(payload.get("test_files")):
+        path = qa_policy.normalize_test_path(item.get("path"))
+        if not path:
+            raise HarnessError(
+                "qa_test_policy_invalid",
+                "Prior QA-generated test artifact contains an out-of-policy path.",
+                run_id=run_id,
+            )
+        owned.add(path)
+    return owned
+
+
 def _qa_result_from_generated_execution(
     *,
     generated: QaGeneratedTestSuite,
@@ -3482,9 +3583,23 @@ def _qa_result_from_generated_execution(
     execution_path: str,
     generated_path: str,
     applied_tests: list[dict[str, object]],
+    qa_policy: QaTestPolicy | None = None,
 ) -> QaTestResult:
     status = _qa_status_from_verification(str(getattr(execution, "status", "")))
     reason = str(getattr(execution, "reason", "") or "")
+    expected_test_files = tuple(str(item.get("path") or "") for item in applied_tests)
+    selected_test_files = tuple(getattr(execution, "selected_test_files", ()) or ())
+    verified_test_files = tuple(getattr(execution, "verified_test_files", ()) or ())
+    if qa_policy is not None and (
+        selected_test_files != expected_test_files
+        or verified_test_files != expected_test_files
+    ):
+        status = "fail"
+        reason = (
+            "QA execution evidence does not prove every generated Vitest file ran; "
+            f"expected={list(expected_test_files)}, selected={list(selected_test_files)}, "
+            f"verified={list(verified_test_files)}."
+        )
     scenarios: list[dict[str, object]] = []
     for item in generated.scenarios:
         scenarios.append(
@@ -3517,6 +3632,8 @@ def _qa_result_from_generated_execution(
         f"QA execution artifact: {execution_path}",
         f"Applied QA test files: {len(applied_tests)}",
         f"Verification Runner status: {getattr(execution, 'status', '')}",
+        f"Selected QA test files: {list(selected_test_files)}",
+        f"Verified QA test files: {list(verified_test_files)}",
     ]
     risks = list(generated.risks)
     if status != "pass":
@@ -3526,6 +3643,8 @@ def _qa_result_from_generated_execution(
         "generated_test_file_count": len(generated.test_files),
         "applied_test_file_count": len(applied_tests),
         "execution_status": getattr(execution, "status", ""),
+        "selected_test_files": list(selected_test_files),
+        "verified_test_files": list(verified_test_files),
     }
     return QaTestResult(
         status=status,
@@ -4085,6 +4204,17 @@ def _verification_policy_for_state(
     )
 
 
+def _qa_policy_for_state(
+    state: dict[str, object],
+    *,
+    run_id: str,
+) -> QaTestPolicy | None:
+    """Resolve QA test policy chỉ từ run snapshot bất biến."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    return qa_test_policy_from_snapshot(snapshot, run_id=run_id) if snapshot else None
+
+
 def _string_items(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
@@ -4259,6 +4389,8 @@ def _verification_quality_report(
         "planned_stage_ids": list(result.planned_stage_ids),
         "executed_stage_ids": list(result.executed_stage_ids),
         "stage_results": [item.to_dict() for item in result.stage_results],
+        "selected_test_files": list(result.selected_test_files),
+        "verified_test_files": list(result.verified_test_files),
         "attempt": attempt,
         "repair_iteration": repair_iteration,
         "repairable": _is_repairable_verification_failure(result),
@@ -4335,6 +4467,8 @@ def _verification_repair_feedback(
             "planned_stage_ids": list(result.planned_stage_ids),
             "executed_stage_ids": list(result.executed_stage_ids),
             "stage_results": [item.to_dict() for item in result.stage_results],
+            "selected_test_files": list(result.selected_test_files),
+            "verified_test_files": list(result.verified_test_files),
         },
         "missing_links": [],
         "developer_constraints": {

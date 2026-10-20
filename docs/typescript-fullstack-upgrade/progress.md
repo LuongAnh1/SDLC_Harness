@@ -451,6 +451,36 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   TypeScript. Việc kế tiếp trong A3 là chuyển QA generation/application sang
   Vitest; A2.2b prompt/fake Developer.act và Code Trace vẫn mở.
 
+## 2026-10-20 - A3.3 Profile-owned Vitest QA Evidence
+
+- Baseline: commit `097961e` đã đóng A3.2 profile-owned Verification Runner; QA
+  profiled khi đó vẫn fail closed nếu truyền generated test files.
+- Thêm `QaTestPolicy v1` suy ra từ immutable planning/profile snapshot. Policy
+  khóa framework Vitest và co-located `.test.ts`/`.test.tsx` cho
+  web/API/contracts/database; Playwright/E2E vẫn ngoài phạm vi Chặng A.
+- QA prompt/parser/fake profiled sinh TypeScript/Vitest và lưu generation profile.
+  Java generation/apply chỉ còn ở nhánh compatibility cho artifact legacy.
+- Apply chặn duplicate, path ngoài policy và ghi đè test có sẵn không do cùng run
+  sở hữu. Retry chỉ được cập nhật các path đọc từ QA artifact trước đó có metadata
+  trùng đúng policy hiện hành.
+- Unit stage nhận exact generated file list, thêm fixed Vitest JSON reporter từ
+  executable registry và dùng temporary report path không ghi vào artifact.
+  Runner chỉ công nhận `verified_test_files` sau khi `testResults` khớp chính xác
+  với `selected_test_files`; missing/invalid/mismatched report đều fail kể cả exit
+  code 0. Cách gọi `--reporter=json --outputFile=...` đã được đối chiếu với tài liệu
+  Vitest chính thức.
+- QA generated/execution/test/quality reports ghi rõ framework, selected files,
+  verified files và per-stage evidence. HTTP/action/checkpoint contract không đổi.
+- Verification: targeted A3.3/Phase 4 `32 passed`; `compileall` thành công;
+  `git diff --check` sạch ngoài cảnh báo line-ending. Full parallel cuối chạy với
+  capture tắt đạt `508 passed, 1 skipped in 105.86s`. Một lượt capture trước đó
+  gặp đúng Windows local HTTP `WinError 10053` đã biết ở Write API; ca này và full
+  suite đều pass khi chạy lại không capture. Skip duy nhất vẫn là symlink escape
+  thiếu quyền trên Windows.
+- Không chạy live workflow, không external sync và chưa bootstrap target
+  TypeScript. Việc tiếp theo trong A3 là TypeScript AST contract evidence cho Code
+  Trace; Developer.act/tool-loop còn thuộc A2.2b.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

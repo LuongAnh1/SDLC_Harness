@@ -809,6 +809,8 @@ def _test_report_markdown(report: dict[str, object]) -> str:
                     f"- Exit code: `{item.get('exit_code', '')}`",
                     f"- Duration: `{item.get('duration_seconds', '')}` seconds",
                     f"- Reason: {item.get('reason', '')}",
+                    f"- Selected test files: `{json.dumps(item.get('selected_test_files') or [], ensure_ascii=False)}`",
+                    f"- Verified test files: `{json.dumps(item.get('verified_test_files') or [], ensure_ascii=False)}`",
                     "",
                     "#### Stdout",
                     "",
@@ -866,6 +868,8 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
     requirement_ids = [
         str(item).strip() for item in report.get("requirement_ids", []) if str(item).strip()
     ] if isinstance(report.get("requirement_ids"), list) else []
+    generation_profile = report.get("generation_profile")
+    generation_profile = generation_profile if isinstance(generation_profile, dict) else {}
     lines = [
         f"# QA Test Report {report.get('artifact_version', 'V1')}",
         "",
@@ -878,12 +882,15 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
         f"- Branch: `{report.get('branch', '')}`",
         f"- Requirement contract: `{requirement_contract.get('version', 'v2')}` revision `{requirement_contract.get('revision', 0)}`",
         f"- Stable requirements covered: `{len(requirement_ids)}`",
+        f"- Test framework: `{generation_profile.get('framework', 'legacy')}`",
         "",
         "## Generated Test Execution",
         "",
         f"- Generated tests artifact: `{report.get('qa_generated_tests', '')}`",
         f"- Execution artifact: `{report.get('qa_test_execution', '')}`",
         f"- Execution status: `{report.get('execution_status', '')}`",
+        f"- Selected test files: `{json.dumps(report.get('selected_test_files') or [], ensure_ascii=False)}`",
+        f"- Verified test files: `{json.dumps(report.get('verified_test_files') or [], ensure_ascii=False)}`",
         "",
         "### Applied Test Files",
         "",
@@ -939,7 +946,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
             "",
             "## Scope",
             "",
-            "- QA/Tester Agent generates acceptance/system tests from a compact packet, applies them under `src/test/java/`, and executes them through Verification Runner.",
+            "- QA/Tester Agent generates acceptance/system tests from a compact packet, applies them inside the run's QA path policy, and executes them through Verification Runner.",
             "- Full design and implementation plan are references, not copied into the QA prompt in Slice 4.7A.",
             "- Developer QA repair loop starts from `qa_repair_needed`; failed QA tests only block after the configured limit.",
             "- Commit/Draft PR is not created in Slice 4.7A.",
@@ -951,6 +958,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
 
 def _qa_execution_report_markdown(report: dict[str, object]) -> str:
     applied_tests = _dict_items(report.get("applied_tests"))
+    stage_results = _dict_items(report.get("stage_results"))
     lines = [
         f"# QA Test Execution {report.get('artifact_version', 'V1')}",
         "",
@@ -977,6 +985,29 @@ def _qa_execution_report_markdown(report: dict[str, object]) -> str:
             f"- Exit code: `{report.get('exit_code', '')}`",
             f"- Duration: `{report.get('duration_seconds', '')}` seconds",
             f"- Reason: {report.get('reason', '')}",
+            f"- Selected test files: `{json.dumps(report.get('selected_test_files') or [], ensure_ascii=False)}`",
+            f"- Verified test files: `{json.dumps(report.get('verified_test_files') or [], ensure_ascii=False)}`",
+            "",
+            "## Verification Stages",
+            "",
+        ]
+    )
+    for item in stage_results:
+        lines.extend(
+            [
+                f"### {item.get('stage_id', '')}",
+                "",
+                f"- Status: `{item.get('status', '')}`",
+                f"- Argv: `{json.dumps(item.get('argv') or [], ensure_ascii=False)}`",
+                f"- Cwd: `{item.get('cwd', '')}`",
+                f"- Timeout: `{item.get('timeout_seconds', '')}` seconds",
+                f"- Selected test files: `{json.dumps(item.get('selected_test_files') or [], ensure_ascii=False)}`",
+                f"- Verified test files: `{json.dumps(item.get('verified_test_files') or [], ensure_ascii=False)}`",
+                "",
+            ]
+        )
+    lines.extend(
+        [
             "",
             "## Stdout",
             "",
@@ -999,6 +1030,8 @@ def _qa_execution_report_markdown(report: dict[str, object]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
 def _dict_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
