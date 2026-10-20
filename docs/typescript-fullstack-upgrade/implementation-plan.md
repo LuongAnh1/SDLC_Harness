@@ -106,7 +106,21 @@ tất và không tự cho phép cutover.
   - Unit stage truyền chính xác generated files cho Vitest, bắt buộc JSON reporter
     và chỉ công nhận `verified_test_files` khi `testResults` khớp đúng tập đã chọn.
     Exit code không còn đủ để kết luận QA generated test đã chạy.
-- [ ] Thêm TypeScript AST contract evidence cho code trace.
+- [x] A3.4a: thêm Code Trace policy, profile-aware source/test discovery và
+  TypeScript Compiler AST bridge fail-closed; dùng AST evidence cho exact symbol
+  existence nhưng chưa đóng signature contract.
+  - Hoàn tất: 2026-10-20.
+  - `CodeTracePolicy v1` được resolve từ immutable workspace-bound snapshot;
+    source chỉ thuộc component production roots, test chỉ là co-located
+    `.test.ts`/`.test.tsx`, browser E2E không được dùng làm unit evidence.
+  - Helper Node code-reviewed chỉ load package `typescript` của target, chạy fixed
+    argv/cwd/env allowlist/timeout với `shell=False`; thiếu Node/package, parse
+    diagnostic hoặc evidence sai contract đều fail closed, không fallback regex.
+  - Code Trace artifact và semantic-review prompt nhận AST evidence; exact
+    interface/class/function/method name thay cho substring source ở profiled run.
+    Java text/signature logic chỉ còn ở nhánh legacy compatibility.
+- [ ] A3.4b: chạy extractor thật trên target đã pin `typescript`, so đầy đủ
+  interface/function/method signature và đóng TypeScript AST contract evidence.
 
 ### A4. Target Bootstrap Và Cutover
 

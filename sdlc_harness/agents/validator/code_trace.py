@@ -19,6 +19,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
+from ...profiles import CodeTracePolicy
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
     aggregate_semantic_trials,
@@ -29,6 +30,7 @@ from .code_contract import (
     snapshot_fingerprint,
     trial_blocker_keys,
 )
+from .typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 
 MAX_SNIPPET_TOTAL_CHARS = 60000
 MAX_SNIPPET_FILE_CHARS = 20000
@@ -64,6 +66,7 @@ class CodeTraceResult:
     rejected_findings: list[dict[str, object]] = field(default_factory=list)
     semantic_consensus: dict[str, object] = field(default_factory=dict)
     verification_evidence: dict[str, object] = field(default_factory=dict)
+    symbol_evidence: dict[str, object] = field(default_factory=dict)
     snapshot_fingerprint: str = ""
     ledger: dict[str, object] = field(default_factory=dict)
     inconclusive: bool = False
@@ -86,6 +89,7 @@ class CodeTraceResult:
             "rejected_findings": self.rejected_findings,
             "semantic_consensus": self.semantic_consensus,
             "verification_evidence": self.verification_evidence,
+            "symbol_evidence": self.symbol_evidence,
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "finding_ledger": self.ledger,
             "inconclusive": self.inconclusive,
@@ -96,6 +100,17 @@ class CodeTraceResult:
     def to_quality_report(self) -> dict[str, object]:
         contract = self.requirement_contract or {"version": "v1", "revision": 0}
         mode = "hybrid_rule_llm_code_trace_v3" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
+        symbol_files = self.symbol_evidence.get("files")
+        symbol_evidence_summary = (
+            {
+                "version": self.symbol_evidence.get("version"),
+                "extractor_id": self.symbol_evidence.get("extractor_id"),
+                "profile": self.symbol_evidence.get("profile"),
+                "file_count": len(symbol_files) if isinstance(symbol_files, list) else 0,
+            }
+            if self.symbol_evidence
+            else {}
+        )
         return {
             "ok": self.ok,
             "mode": mode,
@@ -112,6 +127,7 @@ class CodeTraceResult:
             "consensus_blocking_count": len(self.semantic_consensus.get("stable_blockers", [])),
             "disputed_count": len(self.disputed_findings),
             "semantic_consensus": self.semantic_consensus,
+            "symbol_evidence": symbol_evidence_summary,
             "inconclusive": self.inconclusive,
         }
 
@@ -125,10 +141,12 @@ class CodeTraceValidator:
         *,
         validation_trials: int = 1,
         llm_call_budget: int = 2,
+        symbol_extractor: TypeScriptAstExtractor | None = None,
     ):
         self.llm_client = llm_client
         self.validation_trials = max(1, int(validation_trials))
         self.llm_call_budget = max(1, int(llm_call_budget))
+        self.symbol_extractor = symbol_extractor or TypeScriptAstExtractor()
 
     def validate(
         self,
@@ -138,6 +156,7 @@ class CodeTraceValidator:
         approved_context: dict[str, object] | None = None,
         verification_evidence: dict[str, object] | None = None,
         previous_ledger: dict[str, object] | None = None,
+        code_trace_policy: CodeTracePolicy | None = None,
     ) -> CodeTraceResult:
         approved_context = approved_context or {}
         verification_evidence = verification_evidence or {}
@@ -151,9 +170,25 @@ class CodeTraceValidator:
                 },
             }
         mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
-        test_paths = _test_paths(work_packet)
+        run_id = str(work_packet.get("run_id") or "").strip() or None
+        test_paths = _test_paths(work_packet, policy=code_trace_policy, run_id=run_id)
         existing_test_paths = [path for path in test_paths if (target_path / path).is_file()]
         missing_test_paths = [path for path in test_paths if not (target_path / path).is_file()]
+        ast_evidence: TypeScriptAstEvidence | None = None
+        symbol_evidence: dict[str, object] = {}
+        if code_trace_policy is not None:
+            source_paths = _profiled_source_paths(
+                work_packet,
+                policy=code_trace_policy,
+                run_id=run_id,
+            )
+            ast_evidence = self.symbol_extractor.extract(
+                target_path=target_path,
+                source_paths=source_paths,
+                policy=code_trace_policy,
+                run_id=run_id,
+            )
+            symbol_evidence = ast_evidence.to_dict()
         trace_mappings: list[dict[str, object]] = []
         missing_links: list[dict[str, object]] = []
 
@@ -162,6 +197,9 @@ class CodeTraceValidator:
                 target_path=target_path,
                 work_packet=work_packet,
                 existing_test_paths=existing_test_paths,
+                code_trace_policy=code_trace_policy,
+                ast_evidence=ast_evidence,
+                run_id=run_id,
             )
             missing_links.extend(coverage_missing)
         elif not mappings_by_file:
@@ -190,7 +228,11 @@ class CodeTraceValidator:
 
         for raw_source_path, design_items in ([] if v2 else mappings_by_file.items()):
             for item in design_items:
-                source_path = _normalized_source_file(raw_source_path, item)
+                source_path = _normalized_source_file(
+                    raw_source_path,
+                    item,
+                    legacy=code_trace_policy is None,
+                )
                 source_file = target_path / source_path
                 source_exists = source_file.is_file()
                 source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
@@ -204,8 +246,16 @@ class CodeTraceValidator:
                     )
                 planned_target = str(item.get("planned_code_target") or source_path).strip()
                 raw_symbol = _symbol_from_target(planned_target)
-                symbol = _normalized_symbol(raw_symbol, item)
-                symbol_found = True if not symbol else symbol in source_text
+                symbol = _normalized_symbol(raw_symbol, item, legacy=code_trace_policy is None)
+                symbol_found = (
+                    True
+                    if not symbol
+                    else (
+                        source_exists and symbol in ast_evidence.symbols_for(source_path)
+                        if ast_evidence is not None
+                        else symbol in source_text
+                    )
+                )
                 design_element_id = str(item.get("design_element_id") or "").strip()
                 requirement_ref = _requirement_ref(item)
                 trace_mappings.append(
@@ -220,6 +270,9 @@ class CodeTraceValidator:
                         "symbol": symbol,
                         "raw_symbol": raw_symbol,
                         "symbol_found": symbol_found,
+                        "symbol_evidence_source": (
+                            ast_evidence.extractor_id if ast_evidence is not None else "legacy_text_search"
+                        ),
                         "requires_direct_symbol": bool(symbol),
                         "trace_policy": _trace_policy(raw_symbol, item),
                         "mapping_note": _mapping_note(raw_symbol, item),
@@ -228,10 +281,14 @@ class CodeTraceValidator:
                     }
                 )
 
-        deterministic_findings = deterministic_contract_findings(
-            target_path=target_path,
-            work_packet=work_packet,
-            approved_context=approved_context,
+        deterministic_findings = (
+            deterministic_contract_findings(
+                target_path=target_path,
+                work_packet=work_packet,
+                approved_context=approved_context,
+            )
+            if code_trace_policy is None
+            else []
         )
         static_missing_links = [*missing_links, *deterministic_findings]
         validation_claims = build_validation_claims(
@@ -248,6 +305,7 @@ class CodeTraceValidator:
             code_snippets=code_snippets,
             approved_context=approved_context,
             verification_evidence=verification_evidence,
+            symbol_evidence=symbol_evidence,
         )
         valid_trials: list[dict[str, object]] = []
         invalid_trials: list[dict[str, object]] = []
@@ -268,6 +326,7 @@ class CodeTraceValidator:
                     approved_context=approved_context,
                     validation_claims=validation_claims,
                     verification_evidence=verification_evidence,
+                    symbol_evidence=symbol_evidence,
                     max_attempts=max_attempts,
                 )
             except HarnessError as exc:
@@ -399,6 +458,7 @@ class CodeTraceValidator:
             rejected_findings=rejected_findings,
             semantic_consensus=consensus,
             verification_evidence=verification_evidence,
+            symbol_evidence=symbol_evidence,
             snapshot_fingerprint=fingerprint,
             ledger=ledger,
             inconclusive=inconclusive,
@@ -415,6 +475,7 @@ class CodeTraceValidator:
         approved_context: dict[str, object],
         validation_claims: list[dict[str, object]],
         verification_evidence: dict[str, object],
+        symbol_evidence: dict[str, object],
         max_attempts: int = 2,
     ) -> dict[str, object]:
         """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
@@ -429,6 +490,7 @@ class CodeTraceValidator:
             approved_context=approved_context,
             validation_claims=validation_claims,
             verification_evidence=verification_evidence,
+            symbol_evidence=symbol_evidence,
         )
         try:
             review, llm_metadata = self._complete_review_json(
@@ -537,6 +599,9 @@ def _v2_trace_mappings(
     target_path: Path,
     work_packet: dict[str, object],
     existing_test_paths: list[str],
+    code_trace_policy: CodeTracePolicy | None = None,
+    ast_evidence: TypeScriptAstEvidence | None = None,
+    run_id: str | None = None,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Build one deterministic code-trace row for each canonical stable requirement ID."""
 
@@ -552,6 +617,7 @@ def _v2_trace_mappings(
         raise HarnessError(
             "code_trace_requirement_coverage_invalid",
             "DeveloperWorkPacket must contain each canonical stable requirement ID exactly once.",
+            run_id=run_id,
         )
     mappings_by_file = _dict_of_lists(work_packet.get("design_mappings_by_file"))
     design_by_id = {
@@ -572,6 +638,7 @@ def _v2_trace_mappings(
             raise HarnessError(
                 "code_trace_requirement_coverage_invalid",
                 f"Requirement coverage is incomplete or stale for {requirement_id}.",
+                run_id=run_id,
             )
         evidence: list[dict[str, object]] = []
         for target in targets:
@@ -585,13 +652,24 @@ def _v2_trace_mappings(
                 ),
                 {"planned_code_target": target},
             )
-            source_path = _normalized_source_file(raw_source_path, design_item)
+            source_path = _normalized_source_file(
+                raw_source_path,
+                design_item,
+                legacy=code_trace_policy is None,
+            )
             source_file = target_path / source_path
             source_exists = source_file.is_file()
             source_text = source_file.read_text(encoding="utf-8", errors="replace") if source_exists else ""
             raw_symbol = _symbol_from_target(target)
-            symbol = _normalized_symbol(raw_symbol, design_item)
-            symbol_found = source_exists and (not symbol or symbol in source_text)
+            symbol = _normalized_symbol(raw_symbol, design_item, legacy=code_trace_policy is None)
+            symbol_found = source_exists and (
+                not symbol
+                or (
+                    symbol in ast_evidence.symbols_for(source_path)
+                    if ast_evidence is not None
+                    else symbol in source_text
+                )
+            )
             evidence.append(
                 {
                     "planned_code_target": target,
@@ -600,6 +678,9 @@ def _v2_trace_mappings(
                     "symbol": symbol,
                     "raw_symbol": raw_symbol,
                     "symbol_found": symbol_found,
+                    "symbol_evidence_source": (
+                        ast_evidence.extractor_id if ast_evidence is not None else "legacy_text_search"
+                    ),
                 }
             )
             if not source_exists:
@@ -666,20 +747,66 @@ def _string_items(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-def _test_paths(work_packet: dict[str, object]) -> list[str]:
+def _test_paths(
+    work_packet: dict[str, object],
+    *,
+    policy: CodeTracePolicy | None = None,
+    run_id: str | None = None,
+) -> list[str]:
     paths: list[str] = []
+    candidates: list[object] = []
     for item in _dict_items(work_packet.get("proposed_files")):
-        path = str(item.get("path") or "").strip().replace("\\", "/")
-        if path.startswith("src/test/java/"):
-            paths.append(path)
+        candidates.append(item.get("path"))
     contract = work_packet.get("output_contract")
     allowed = contract.get("allowed_paths") if isinstance(contract, dict) else None
     if isinstance(allowed, list):
-        for item in allowed:
-            path = str(item).strip().replace("\\", "/")
+        candidates.extend(allowed)
+    for item in candidates:
+        if policy is None:
+            path = str(item or "").strip().replace("\\", "/")
             if path.startswith("src/test/java/"):
                 paths.append(path)
+            continue
+        path = policy.normalize_test_path(item)
+        if path:
+            paths.append(path)
+            continue
+        raw_path = str(item or "")
+        editable_path = policy.planning_policy.normalize_editable_path(item)
+        component_id = policy.planning_policy.component_for_path(editable_path) if editable_path else ""
+        looks_like_test = raw_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        if looks_like_test or component_id == "e2e":
+            raise HarnessError(
+                "code_trace_test_out_of_scope",
+                f"Code Trace test path is outside the profile policy: {raw_path}",
+                run_id=run_id,
+            )
     return sorted({path for path in paths if path})
+
+
+def _profiled_source_paths(
+    work_packet: dict[str, object],
+    *,
+    policy: CodeTracePolicy,
+    run_id: str | None,
+) -> list[str]:
+    """Thu thập và kiểm tra mọi production source path trước khi trích xuất AST."""
+
+    candidates: list[object] = list(_dict_of_lists(work_packet.get("design_mappings_by_file")))
+    for item in _dict_items(work_packet.get("requirement_coverage")):
+        candidates.extend(target.split("#", 1)[0] for target in _string_items(item.get("planned_code_targets")))
+    paths: list[str] = []
+    for item in candidates:
+        path = policy.normalize_source_path(item)
+        if not path:
+            raise HarnessError(
+                "code_trace_source_out_of_scope",
+                f"Code Trace source path is outside the profile policy: {item}",
+                run_id=run_id,
+            )
+        if path not in paths:
+            paths.append(path)
+    return paths
 
 
 def _dict_items(value: object) -> list[dict[str, Any]]:
@@ -694,14 +821,18 @@ def _symbol_from_target(planned_target: str) -> str:
     return planned_target.split("#", 1)[1].strip()
 
 
-def _normalized_source_file(source_path: str, item: dict[str, Any]) -> str:
+def _normalized_source_file(source_path: str, item: dict[str, Any], *, legacy: bool = True) -> str:
+    if not legacy:
+        return source_path
     text = _mapping_text(item).lower()
     if ("notifysuccess" in text or "notifyerror" in text) and not source_path.endswith("NotificationService.java"):
         return str(Path(source_path).with_name("NotificationService.java")).replace("\\", "/")
     return source_path
 
 
-def _normalized_symbol(symbol: str, item: dict[str, Any]) -> str:
+def _normalized_symbol(symbol: str, item: dict[str, Any], *, legacy: bool = True) -> str:
+    if not legacy:
+        return symbol
     lower_symbol = symbol.strip().lower()
     text = _mapping_text(item).lower()
     if lower_symbol in {"true", "false"} or "->dc: true" in text or "->dc: false" in text:
@@ -1028,6 +1159,7 @@ def _code_trace_review_prompt(
     approved_context: dict[str, object],
     validation_claims: list[dict[str, object]],
     verification_evidence: dict[str, object],
+    symbol_evidence: dict[str, object],
 ) -> str:
     """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
 
@@ -1086,6 +1218,7 @@ def _code_trace_review_prompt(
         "approved_sequence_evidence": _approved_sequence_evidence(approved_context),
         "fixed_validation_claims": validation_claims,
         "verification_evidence": verification_evidence,
+        "symbol_evidence": symbol_evidence,
         "static_trace_mappings": trace_mappings,
         "static_missing_links": static_missing_links,
         "code_refs": code_refs,
@@ -1113,7 +1246,8 @@ def _code_trace_review_prompt(
             "If evidence and tests already satisfy a mapping, omit it from missing_links or set blocking=false, owner=none, recommended_action=none.",
             "Do not turn a prior implementation choice into an approved requirement.",
             "Treat verification_evidence.executed_test_entrypoints as authoritative proof that those test entrypoints ran.",
-            "Do not require JUnit when the target repository uses a discovered executable main-based test entrypoint.",
+            "When symbol_evidence is present, treat its exact AST declarations as authoritative for symbol existence; never infer a declaration from a source-text substring.",
+            "Do not require a specific test framework when the target repository uses another discovered executable test entrypoint.",
         ],
     }
     return (

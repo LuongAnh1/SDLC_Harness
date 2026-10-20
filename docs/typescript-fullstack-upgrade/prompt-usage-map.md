@@ -25,7 +25,7 @@ không sửa hàng loạt file chỉ vì chúng có nội dung Java.
 | Phase 3 | `agents/validator/plan_review.py` | Prompt dựng inline | Active | A2.2a/A2.3: cùng directive và fail-closed verification stage policy từ snapshot |
 | Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Active, còn Java-heavy | A2.2b sau khi A3 khóa editable roots/work packet |
 | Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Active, còn Java assumptions | A2.2b/A3; phải dùng execution guard trước khi đổi output |
-| Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Active, còn Java path/symbol evidence | A3 cùng TypeScript AST contract |
+| Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Profiled run dùng Code Trace policy và exact TypeScript AST symbol evidence; legacy branch giữ Java compatibility | A3.4a đã nối AST bridge fail-closed; A3.4b còn full signature comparison trên target thật |
 | Phase 4 | `agents/tester/qa.py` | Prompt dựng inline | Profiled run dùng TypeScript/Vitest; legacy branch giữ Java compatibility | A3.3 dùng QA policy, exact selected files và Vitest JSON evidence; browser QA để B4 |
 | Fake mode | `llm/client.py::fake_completion` | Dispatch theo marker prompt | Active trong regression | Phase 3 theo directive ở A2.2a; Phase 4/QA để A2.2b/A3 |
 
@@ -107,4 +107,20 @@ workflow nếu chưa có contract/profile test tương ứng.
   đọc `testResults` và chỉ ghi `verified_test_files` khi report khớp chính xác;
   missing/invalid/mismatched report đều fail dù process trả exit code 0.
 - QA execution/report/quality evidence công bố riêng selected và verified files.
-  Browser QA và TypeScript AST code trace vẫn là các lát tiếp theo.
+  Browser QA vẫn là lát Chặng B.
+
+## Trạng thái A3.4a
+
+- `CodeTracePolicy v1` resolve từ immutable workspace-bound snapshot và khóa
+  source/test discovery theo project/language profile. Test evidence của Chặng A
+  chỉ nhận co-located `.test.ts`/`.test.tsx`, không nhận Playwright/E2E.
+- Node helper là code-reviewed asset được đóng gói cùng Validator, chỉ load package
+  `typescript` của target và trả evidence có version/extractor/profile/path rõ ràng.
+  Thiếu runtime/package, parse diagnostic hoặc payload sai contract đều fail closed;
+  profiled run không fallback sang regex hay substring.
+- Code Trace dùng exact AST declaration names cho interface/class/function/method,
+  đưa evidence vào artifact và semantic-review prompt; rule yêu cầu JUnit đã được
+  thay bằng test-framework-neutral invariant. Java path/text/signature checks chỉ
+  còn ở nhánh legacy.
+- A3.4b vẫn mở: chạy helper thật trên target A4 đã pin `typescript` và so đầy đủ
+  parameter/return/generic/async/optional/rest signature.

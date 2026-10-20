@@ -267,6 +267,7 @@ def snapshot_fingerprint(
     code_snippets: list[dict[str, object]],
     approved_context: dict[str, object],
     verification_evidence: dict[str, object],
+    symbol_evidence: dict[str, object] | None = None,
 ) -> str:
     payload = {
         "requirement_contract": work_packet.get("requirement_contract"),
@@ -282,6 +283,7 @@ def snapshot_fingerprint(
             if isinstance(value, dict) and value.get("artifact_path")
         },
         "verification": verification_evidence,
+        "symbol_evidence": symbol_evidence or {},
     }
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     return f"sha256:{digest}"

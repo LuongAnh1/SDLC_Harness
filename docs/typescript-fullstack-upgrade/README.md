@@ -44,7 +44,7 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3 và A3.1-A3.3 đã hoàn tất; các checklist
+  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3 và A3.1-A3.4a đã hoàn tất; các checklist
   còn lại giữ theo trạng thái thực tế.
 - [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
   reference-only và owner của từng lát migration.
@@ -76,5 +76,8 @@ Work packet, refresh, apply và repair của profiled run đã khóa theo editab
 roots từ immutable snapshot; exact `allowed_paths` của approved plan vẫn là
 phạm vi ghi cuối cùng. QA generation/application đã dùng `QaTestPolicy v1`, sinh
 co-located TypeScript/Vitest test và chỉ pass khi Vitest JSON report chứng minh
-đúng các generated files đã được execute. Browser E2E, TypeScript AST code trace,
-target bootstrap và live workflow trên target TypeScript vẫn chưa thực hiện.
+đúng các generated files đã được execute. Code Trace profiled đã có policy,
+profile-aware discovery và TypeScript Compiler AST bridge fail-closed cho exact
+symbol evidence; chưa chạy extractor thật trên target đã pin `typescript` và chưa
+so signature đầy đủ. Browser E2E, target bootstrap và live workflow trên target
+TypeScript vẫn chưa thực hiện.

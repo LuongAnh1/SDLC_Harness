@@ -52,6 +52,12 @@ from .qa import (
     build_qa_test_policy,
     qa_test_policy_from_snapshot,
 )
+from .code_trace import (
+    CODE_TRACE_POLICY_VERSION,
+    CodeTracePolicy,
+    build_code_trace_policy,
+    code_trace_policy_from_snapshot,
+)
 from .retirement import (
     LEGACY_RETIRED_ALLOWED_COMMANDS,
     public_allowed_actions,
@@ -82,10 +88,13 @@ __all__ = [
     "QA_TEST_POLICY_VERSION",
     "QaComponentTestRule",
     "QaTestPolicy",
+    "CODE_TRACE_POLICY_VERSION",
+    "CodeTracePolicy",
     "build_profile_snapshot",
     "build_planning_path_policy",
     "build_verification_stage_policy",
     "build_qa_test_policy",
+    "build_code_trace_policy",
     "get_language_profile",
     "get_prompt_directive",
     "get_project_profile",
@@ -100,6 +109,7 @@ __all__ = [
     "resolve_language_prompt_directive",
     "verification_stage_policy_from_snapshot",
     "qa_test_policy_from_snapshot",
+    "code_trace_policy_from_snapshot",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",
     "public_run_summary",

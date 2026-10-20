@@ -234,6 +234,15 @@ TypeScript deterministic evidence nên dùng compiler AST/API. Regex chỉ phù 
 cho hint hoặc fallback không blocking. Semantic Validator vẫn review trên
 approved claims và Verification evidence như consensus flow hiện hành.
 
+A3.4a hiện thực phần nền này bằng `CodeTracePolicy v1` và helper Node cố định.
+Policy lấy identity từ immutable workspace snapshot, chỉ cho source production và
+co-located unit test đúng component; helper load `typescript` từ chính target,
+không dùng global compiler và không fallback substring khi runtime/package/evidence
+không hợp lệ. AST evidence exact cho interface/class/function/method được lưu trong
+Code Trace artifact và đưa vào semantic review. Việc đối chiếu đầy đủ signature
+(parameter, return, generic, async, optional/rest) và chạy extractor trên target
+thật thuộc A3.4b sau khi A4 pin toolchain.
+
 ## Tương Thích Và Không Thuộc Phạm Vi Hiện Tại
 
 - HTTP action, operation, idempotency và checkpoint không cần đổi chỉ để hỗ trợ

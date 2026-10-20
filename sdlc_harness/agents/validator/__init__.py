@@ -14,6 +14,7 @@ from .traceability import (
     compute_missing_links,
 )
 from .plan_review import ImplementationPlanReview, ImplementationPlanValidator
+from .typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 
 __all__ = [
     "CodeTraceResult",
@@ -24,6 +25,8 @@ __all__ = [
     "ImplementationPlanReview",
     "ImplementationPlanValidator",
     "TraceabilityResult",
+    "TypeScriptAstEvidence",
+    "TypeScriptAstExtractor",
     "ValidatorAgent",
     "build_requirement_graph",
     "build_requirement_graph_v2",

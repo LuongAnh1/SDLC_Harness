@@ -67,9 +67,11 @@ from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..profiles import (
+    CodeTracePolicy,
     PlanningPathPolicy,
     QaTestPolicy,
     VerificationStagePolicy,
+    code_trace_policy_from_snapshot,
     planning_path_policy_from_snapshot,
     qa_test_policy_from_snapshot,
     read_profile_snapshot,
@@ -998,6 +1000,7 @@ class PhaseFourWorkflow:
             approved_context=approved_context,
             verification_evidence=verification,
             previous_ledger=_dict_value(approved_context.get("prior_implementation_validation_ledger")),
+            code_trace_policy=_code_trace_policy_for_state(state, run_id=run_id),
         )
 
     def _write_implementation_validation_ledger(
@@ -4213,6 +4216,17 @@ def _qa_policy_for_state(
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
     return qa_test_policy_from_snapshot(snapshot, run_id=run_id) if snapshot else None
+
+
+def _code_trace_policy_for_state(
+    state: dict[str, object],
+    *,
+    run_id: str,
+) -> CodeTracePolicy | None:
+    """Resolve discovery/AST policy của Code Trace chỉ từ immutable run snapshot."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    return code_trace_policy_from_snapshot(snapshot, run_id=run_id) if snapshot else None
 
 
 def _string_items(value: object) -> list[str]:

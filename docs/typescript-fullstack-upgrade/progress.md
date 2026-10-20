@@ -481,6 +481,48 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   TypeScript. Việc tiếp theo trong A3 là TypeScript AST contract evidence cho Code
   Trace; Developer.act/tool-loop còn thuộc A2.2b.
 
+## 2026-10-20 - Quyết Định Tách A3.4 TypeScript AST
+
+- Baseline: commit `1359b80` đã đóng A3.3 profile-owned Vitest QA evidence.
+- Máy có Node nhưng chưa có `tsc`/package `typescript`; target repo
+  `SDLC_Target_TypeScript` cũng chưa được bootstrap. Không thay compiler AST bằng
+  regex blocking và không kéo A4 vào cùng lát.
+- Tách A3.4a để nối immutable Code Trace policy, profile-aware discovery và AST
+  bridge fail-closed trước. A3.4b chỉ đóng checklist khi target A4 đã pin
+  TypeScript, extractor chạy thật và signature comparison pass.
+- A3.4a không push, không live workflow, không external sync và sẽ để uncommitted
+  sau khi triển khai để review riêng.
+
+## 2026-10-20 - A3.4a Profile-owned TypeScript AST Bridge
+
+- Baseline: commit `1359b80` đã đóng A3.3; thay đổi A3.4a được giữ uncommitted để
+  review riêng theo kế hoạch.
+- Thêm `CodeTracePolicy v1` resolve từ immutable workspace-bound snapshot. Policy
+  chỉ nhận production source trong component roots và co-located
+  `.test.ts`/`.test.tsx`; Java path, browser E2E, traversal và path không canonical
+  bị chặn bằng error code ổn định.
+- Thêm Node helper dùng TypeScript Compiler API của chính target để trích
+  interface/class/function/method cùng parameter/return/generic/async/optional/rest
+  metadata. Python bridge dùng fixed helper argv, target cwd, env allowlist,
+  timeout và `shell=False`; helper được khai báo package data.
+- Bridge validate version, extractor ID, profile metadata, exact requested paths,
+  diagnostics và symbol schema. Thiếu Node/package `typescript`, parser lỗi hoặc
+  evidence sai đều fail closed; không dùng regex/substr làm blocking fallback.
+- Code Trace profiled dùng exact AST name/qualified name cho symbol existence,
+  ghi `symbol_evidence` vào artifact/quality report và semantic-review prompt.
+  AST evidence cũng tham gia snapshot fingerprint của finding ledger để thay đổi
+  extractor/evidence không bị coi là cùng một code-validation snapshot.
+  Java source normalization, text search và Java signature regex chỉ còn chạy cho
+  artifact legacy. Prompt bỏ giả định JUnit và dùng invariant trung lập framework.
+- Verification: A3.4a unit `11 passed`; profile/Code Trace consensus/Phase 4
+  regression `81 passed`; full parallel `519 passed, 1 skipped in 56.38s`;
+  `py_compile`, Node `--check` và `git diff --check` đều sạch. Skip duy nhất vẫn là
+  symlink escape trên Windows thiếu quyền tạo symlink.
+- Không chạy live workflow, không external sync, không push và chưa bootstrap
+  target TypeScript. A3.4b vẫn mở cho extractor thật trên target đã pin
+  `typescript` và full signature comparison; A2.2b Developer.act/tool-loop cũng
+  chưa thuộc lát này.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
