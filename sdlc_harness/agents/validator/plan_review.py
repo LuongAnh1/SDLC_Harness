@@ -14,6 +14,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
+from ...profiles import PlanningPathPolicy
 
 
 def _expected_design_elements(
@@ -142,6 +143,7 @@ def _executability_issues(
     *,
     structured_plan: dict[str, object],
     mappings: list[dict[str, Any]],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[str]:
     issues: list[str] = []
     repo = structured_plan.get("target_repository")
@@ -152,6 +154,12 @@ def _executability_issues(
         if not str(repo.get(key) or "").strip():
             issues.append(f"Target repository `{key}` is missing.")
 
+    if planning_policy:
+        planning_profile = structured_plan.get("planning_profile")
+        planning_profile = planning_profile if isinstance(planning_profile, dict) else {}
+        if planning_profile != planning_policy.metadata():
+            issues.append("Structured plan planning_profile does not match the frozen run profile.")
+
     if not mappings:
         issues.append("Implementation plan has no design mappings.")
     for item in mappings:
@@ -160,8 +168,17 @@ def _executability_issues(
             issues.append(f"Mapping `{item.get('design_element_id')}` has no planned code target.")
             continue
         path = target.split("#", 1)[0]
-        if not path.startswith(("src/main/java/", "src/test/java/")):
-            issues.append(f"Planned code target is outside Java source/test roots: {target}")
+        normalized = _normalized_plan_path(path, planning_policy=planning_policy, mapping_only=True)
+        if not normalized:
+            issues.append(f"Planned code target is outside approved planning roots: {target}")
+        elif planning_policy:
+            component_id = str(item.get("component_id") or "").strip()
+            expected_component = planning_policy.component_for_path(normalized, mapping_only=True)
+            if component_id != expected_component:
+                issues.append(
+                    f"Mapping component does not match target path: {item.get('design_element_id')} "
+                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
+                )
         if not str(item.get("test_intent") or "").strip():
             issues.append(f"Mapping `{item.get('design_element_id')}` has no test intent.")
 
@@ -173,25 +190,40 @@ def _executability_issues(
             issues.append("A test intent is missing the command.")
 
     proposed = _dict_items(structured_plan.get("proposed_files"))
-    proposed_paths = {_normalized_java_path(item.get("path")) for item in proposed}
+    proposed_paths = {
+        _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
+        for item in proposed
+    }
     proposed_paths.discard("")
     for item in proposed:
-        path = _normalized_java_path(item.get("path"))
+        path = _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
         if not path:
-            issues.append(f"Proposed file is outside Java source/test roots: {item.get('path')}")
+            issues.append(f"Proposed file is outside approved planning roots: {item.get('path')}")
+        elif planning_policy:
+            component_id = str(item.get("component_id") or "").strip()
+            expected_component = planning_policy.component_for_path(path)
+            if component_id != expected_component:
+                issues.append(
+                    f"Proposed file component does not match its path: {path} "
+                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
+                )
     step_paths: set[str] = set()
     for step in _dict_items(structured_plan.get("implementation_steps")):
         raw_files = step.get("files") if isinstance(step.get("files"), list) else []
         for raw_path in raw_files:
-            path = _normalized_java_path(raw_path)
+            path = _normalized_plan_path(raw_path, planning_policy=planning_policy)
             if not path:
-                issues.append(f"Implementation step file is outside Java source/test roots: {raw_path}")
+                issues.append(f"Implementation step file is outside approved planning roots: {raw_path}")
                 continue
             step_paths.add(path)
     for path in sorted(step_paths - proposed_paths):
         issues.append(f"Implementation step file is missing from proposed_files: {path}")
     mapping_paths = {
-        _normalized_java_path(str(item.get("planned_code_target") or "").split("#", 1)[0])
+        _normalized_plan_path(
+            str(item.get("planned_code_target") or "").split("#", 1)[0],
+            planning_policy=planning_policy,
+            mapping_only=True,
+        )
         for item in mappings
     }
     mapping_paths.discard("")
@@ -205,15 +237,36 @@ def _executability_issues(
     }
     if any(item.get("design_element_type") == "sequence_message" for item in mappings):
         controller = next(
-            ((name, path) for name, path in class_targets.items() if name.endswith("Controller")),
+            (
+                (name, path)
+                for name, path in class_targets.items()
+                if name.endswith("Controller") or (planning_policy and name.endswith("Boundary"))
+            ),
             None,
         )
         if controller:
             name, main_path = controller
-            parent = main_path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
-            expected_flow_test = f"{parent}/{name.removesuffix('Controller')}FlowTest.java"
+            if planning_policy:
+                test_stem = name.removesuffix("Controller").removesuffix("Boundary") + "Flow"
+                expected_flow_test = planning_policy.test_path_for_source(main_path, test_stem)
+            else:
+                parent = main_path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
+                expected_flow_test = f"{parent}/{name.removesuffix('Controller')}FlowTest.java"
             if expected_flow_test not in proposed_paths:
                 issues.append(f"Approved sequence flow has no editable flow-test path: {expected_flow_test}")
+
+    if planning_policy:
+        repository = next(
+            ((name, path) for name, path in class_targets.items() if name.endswith("Repository")),
+            None,
+        )
+        if repository:
+            name, main_path = repository
+            expected_repository_test = planning_policy.test_path_for_source(main_path, name)
+            if expected_repository_test not in proposed_paths:
+                issues.append(
+                    f"Approved repository has no editable test path: {expected_repository_test}"
+                )
 
     for adjustment in _dict_items(structured_plan.get("design_adjustments")):
         if adjustment.get("action") == "unresolved" or adjustment.get("status") == "conflict":
@@ -228,6 +281,7 @@ def _mapping_contract_issues(
     mappings: list[dict[str, Any]],
     expected: dict[str, dict[str, str]],
     class_graph: dict[str, object],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[str]:
     issues: list[str] = []
     ids = [str(item.get("design_element_id") or "").strip() for item in mappings]
@@ -265,7 +319,7 @@ def _mapping_contract_issues(
                 issues.append(f"Method mapping does not target an approved method symbol: {element_id}")
             else:
                 path, symbol = target.split("#", 1)
-                owner = path.rsplit("/", 1)[-1].removesuffix(".java")
+                owner = _symbol_owner(path, planning_policy=planning_policy)
                 if symbol not in class_methods.get(owner, set()):
                     issues.append(f"Method target is not an approved class method: {target}")
             continue
@@ -281,7 +335,7 @@ def _mapping_contract_issues(
         if "#" not in target or trace_policy != "direct_symbol":
             continue
         path, symbol = target.split("#", 1)
-        owner = path.rsplit("/", 1)[-1].removesuffix(".java")
+        owner = _symbol_owner(path, planning_policy=planning_policy)
         if symbol not in class_methods.get(owner, set()):
             issues.append(f"Direct sequence target is not an approved class method: {target}")
     return issues
@@ -290,6 +344,27 @@ def _mapping_contract_issues(
 def _normalized_java_path(value: object) -> str:
     path = str(value or "").strip().replace("\\", "/")
     return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
+
+
+def _normalized_plan_path(
+    value: object,
+    *,
+    planning_policy: PlanningPathPolicy | None,
+    mapping_only: bool = False,
+) -> str:
+    if planning_policy:
+        return (
+            planning_policy.normalize_mapping_path(value)
+            if mapping_only
+            else planning_policy.normalize_editable_path(value)
+        )
+    return _normalized_java_path(value)
+
+
+def _symbol_owner(path: str, *, planning_policy: PlanningPathPolicy | None) -> str:
+    if planning_policy:
+        return planning_policy.symbol_owner(path)
+    return path.rsplit("/", 1)[-1].removesuffix(".java")
 
 
 def _dict_items(value: object) -> list[dict[str, Any]]:
@@ -370,6 +445,7 @@ class ImplementationPlanValidator:
         requirement_graph: dict[str, object] | None = None,
         requirement_contract_version: str = "v2",
         canonical_requirement: dict[str, object] | None = None,
+        planning_policy: PlanningPathPolicy | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
 
@@ -380,6 +456,7 @@ class ImplementationPlanValidator:
             sequence_graph=sequence_graph,
             requirement_graph=requirement_graph,
             requirement_contract_version=requirement_contract_version,
+            planning_policy=planning_policy,
         )
         client = llm_client or self.llm_client
         if not client or not requirement_packet.strip() or not design_artifact.strip():
@@ -417,6 +494,7 @@ class ImplementationPlanValidator:
         sequence_graph: dict[str, object],
         requirement_graph: dict[str, object] | None = None,
         requirement_contract_version: str = "v2",
+        planning_policy: PlanningPathPolicy | None = None,
     ) -> ImplementationPlanReview:
         """Hard gate: kiểm coverage/traceability/executability/scope bằng graph."""
 
@@ -443,9 +521,15 @@ class ImplementationPlanValidator:
         executability_issues = _executability_issues(
             structured_plan=structured_plan,
             mappings=mappings,
+            planning_policy=planning_policy,
         )
         executability_issues.extend(
-            _mapping_contract_issues(mappings=mappings, expected=expected, class_graph=class_graph)
+            _mapping_contract_issues(
+                mappings=mappings,
+                expected=expected,
+                class_graph=class_graph,
+                planning_policy=planning_policy,
+            )
         )
         scope_issues = [
             f"Plan references design element outside approved graph: {element_id}"

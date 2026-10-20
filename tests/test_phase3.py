@@ -569,6 +569,29 @@ class PhaseThreeTest(unittest.TestCase):
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
         self.assertEqual(structured["repo_context"]["source_files"], ["apps/api/src/ExistingService.ts"])
+        self.assertEqual(
+            structured["planning_profile"],
+            {
+                "project_profile_id": "typescript_fullstack_v1",
+                "language_profile_id": "typescript_v1",
+                "policy_version": "planning_path_policy_v1",
+            },
+        )
+        self.assertTrue(structured["design_mappings"])
+        self.assertTrue(
+            all(
+                item.get("component_id") in {"web", "api", "contracts", "database"}
+                and ".java" not in str(item.get("planned_code_target") or "")
+                for item in structured["design_mappings"]
+            )
+        )
+        self.assertTrue(
+            all(
+                item.get("component_id") in {"web", "api", "contracts", "database", "e2e"}
+                and ".java" not in str(item.get("path") or "")
+                for item in structured["proposed_files"]
+            )
+        )
 
         revalidated = PhaseThreeWorkflow(settings).revalidate_implementation_plan(
             run_id=str(approved["run_id"])
@@ -582,6 +605,12 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(
             revalidated_plan["repo_context"]["source_files"],
             ["apps/api/src/ExistingService.ts"],
+        )
+        self.assertTrue(
+            all(
+                ".java" not in str(item.get("planned_code_target") or "")
+                for item in revalidated_plan["design_mappings"]
+            )
         )
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:

@@ -17,6 +17,7 @@ from typing import Any
 from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
+from ...profiles import PlanningPathPolicy
 
 
 @dataclass(frozen=True)
@@ -56,6 +57,7 @@ class DeveloperPlanAgent:
         repair_feedback: str,
         previous_review: dict[str, object],
         canonical_requirement: RequirementModelV2 | None,
+        planning_policy: PlanningPathPolicy | None,
     ) -> dict[str, object]:
         """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
 
@@ -82,6 +84,7 @@ class DeveloperPlanAgent:
             repair_feedback=repair_feedback,
             previous_review=previous_review,
             canonical_requirement=canonical_requirement,
+            planning_policy=planning_policy,
         )
         raw = self.llm_client.complete(
             system=(
@@ -121,6 +124,7 @@ class DeveloperPlanAgent:
         canonical_requirement: RequirementModelV2 | None = None,
         requirement_graph: dict[str, object] | None = None,
         requirement_artifact_refs: dict[str, str] | None = None,
+        planning_policy: PlanningPathPolicy | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
@@ -131,12 +135,18 @@ class DeveloperPlanAgent:
             target_files=target_files,
             target_repo_path=target_repo_path,
             requirement_design_trace=requirement_design_trace,
+            planning_policy=planning_policy,
         )
         design_adjustments = _design_adjustments(
             class_graph=class_graph,
-            class_targets=_class_target_files(class_graph=class_graph, target_files=target_files),
+            class_targets=_class_target_files(
+                class_graph=class_graph,
+                target_files=target_files,
+                planning_policy=planning_policy,
+            ),
             target_repo_path=target_repo_path,
             requirement_design_trace=requirement_design_trace,
+            planning_policy=planning_policy,
         )
         mappings = _apply_design_adjustments(mappings, design_adjustments)
         test_intents = _test_intents(mappings=mappings, test_command=test_command)
@@ -161,8 +171,13 @@ class DeveloperPlanAgent:
             repair_feedback=repair_feedback,
             previous_review=previous_review or {},
             canonical_requirement=canonical_requirement,
+            planning_policy=planning_policy,
         )
-        mappings = _merge_mappings(mappings, _dict_items(llm_payload.get("design_mappings")))
+        mappings = _merge_mappings(
+            mappings,
+            _dict_items(llm_payload.get("design_mappings")),
+            planning_policy=planning_policy,
+        )
         mappings = _apply_design_adjustments(mappings, design_adjustments)
         test_intents = _dict_items(llm_payload.get("test_intents")) or test_intents
         requirement_coverage = _requirement_coverage(
@@ -172,15 +187,26 @@ class DeveloperPlanAgent:
         ) if canonical_requirement is not None else []
         llm_parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
         implementation_steps = _apply_design_adjustments_to_steps(
-            _dict_items(llm_payload.get("implementation_steps")) or _implementation_steps_from_mappings(mappings),
+            _dict_items(llm_payload.get("implementation_steps"))
+            or _implementation_steps_from_mappings(mappings, planning_policy=planning_policy),
             design_adjustments,
+        )
+        implementation_steps = _canonicalize_implementation_steps(
+            implementation_steps,
+            mappings=mappings,
+            planning_policy=planning_policy,
         )
         proposed_files = _canonical_proposed_files(
             proposed_files=_dict_items(llm_payload.get("proposed_files")),
             implementation_steps=implementation_steps,
             mappings=mappings,
+            planning_policy=planning_policy,
         )
-        proposed_files = _ensure_executable_test_files(proposed_files=proposed_files, mappings=mappings)
+        proposed_files = _ensure_executable_test_files(
+            proposed_files=proposed_files,
+            mappings=mappings,
+            planning_policy=planning_policy,
+        )
         structured = {
             "version": "implementation_plan_structured_v1",
             "planning_mode": (
@@ -201,6 +227,11 @@ class DeveloperPlanAgent:
                 "workspace_mode": workspace_mode,
                 "workspace_ref": workspace_ref,
                 "base_sha": base_sha,
+            },
+            "planning_profile": planning_policy.metadata() if planning_policy else {
+                "project_profile_id": "legacy_java_v1",
+                "language_profile_id": "java_legacy_v1",
+                "policy_version": "legacy_java_planning_v1",
             },
             "inputs": {
                 "requirement_design_trace_version": requirement_design_trace.get("version", ""),
@@ -226,7 +257,7 @@ class DeveloperPlanAgent:
                 "Các target file chưa tồn tại được hiểu là file Phase 4 có thể tạo mới trong run workspace.",
             ],
             "open_questions": [
-                "Nếu human muốn đổi kiến trúc hoặc đổi package Java, cần request_change trước khi duyệt plan.",
+                "Nếu human muốn đổi kiến trúc hoặc component target, cần request_change trước khi duyệt plan.",
             ],
             "developer_llm": {
                 "used": bool(self.llm_client),
@@ -275,6 +306,7 @@ class DeveloperPlanAgent:
         canonical_requirement: RequirementModelV2 | None = None,
         requirement_graph: dict[str, object] | None = None,
         requirement_artifact_refs: dict[str, str] | None = None,
+        planning_policy: PlanningPathPolicy | None = None,
     ) -> ImplementationPlanDraft:
         """Apply a repair patch to the previous candidate without rebuilding it from scratch."""
 
@@ -307,8 +339,13 @@ class DeveloperPlanAgent:
             repair_feedback=developer_feedback,
             previous_review=compact_review,
             canonical_requirement=canonical_requirement,
+            planning_policy=planning_policy,
         )
-        mappings = _merge_mappings(previous_mappings, _dict_items(llm_payload.get("design_mappings")))
+        mappings = _merge_mappings(
+            previous_mappings,
+            _dict_items(llm_payload.get("design_mappings")),
+            planning_policy=planning_policy,
+        )
         adjustments = _dict_items(previous.get("design_adjustments"))
         mappings = _apply_design_adjustments(mappings, adjustments)
         test_intents = _dict_items(llm_payload.get("test_intents")) or previous_tests
@@ -317,6 +354,11 @@ class DeveloperPlanAgent:
             or _dict_items(previous.get("implementation_steps")),
             adjustments,
         )
+        implementation_steps = _canonicalize_implementation_steps(
+            implementation_steps,
+            mappings=mappings,
+            planning_policy=planning_policy,
+        )
         proposed_files = _canonical_proposed_files(
             proposed_files=[
                 *_dict_items(previous.get("proposed_files")),
@@ -324,8 +366,13 @@ class DeveloperPlanAgent:
             ],
             implementation_steps=implementation_steps,
             mappings=mappings,
+            planning_policy=planning_policy,
         )
-        proposed_files = _ensure_executable_test_files(proposed_files=proposed_files, mappings=mappings)
+        proposed_files = _ensure_executable_test_files(
+            proposed_files=proposed_files,
+            mappings=mappings,
+            planning_policy=planning_policy,
+        )
         requirement_coverage = (
             _requirement_coverage(
                 requirement_graph=requirement_graph or {},
@@ -401,6 +448,7 @@ def _developer_plan_prompt(
     repair_feedback: str,
     previous_review: dict[str, object],
     canonical_requirement: RequirementModelV2 | None,
+    planning_policy: PlanningPathPolicy | None,
 ) -> str:
     canonical_section = (
         "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
@@ -422,6 +470,19 @@ def _developer_plan_prompt(
     class_payload = _compact_class_graph(class_graph) if repair_mode else class_graph
     sequence_payload = _compact_sequence_graph(sequence_graph) if repair_mode else sequence_graph
     mapping_payload = _compact_mappings(base_mappings) if repair_mode else base_mappings
+    if planning_policy:
+        source_example = "apps/api/src/ExampleService.ts"
+        test_example = "apps/api/src/ExampleService.test.ts"
+        path_rules = (
+            "Use only paths accepted by the immutable planning policy below. "
+            "Do not choose or change a component for an existing deterministic mapping."
+        )
+        planning_context = planning_policy.prompt_context()
+    else:
+        source_example = "src/main/java/com/sdlc/ExampleService.java"
+        test_example = "src/test/java/com/sdlc/ExampleServiceTest.java"
+        path_rules = "Proposed files must stay under src/main/java or src/test/java and end in .java."
+        planning_context = {"policy_version": "legacy_java_planning_v1"}
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -437,13 +498,13 @@ Return JSON only with this shape:
       "order": 1,
       "title": "short step title",
       "description": "what Phase 4 should change",
-      "files": ["src/main/java/..."],
+      "files": ["{source_example}"],
       "design_refs": ["class:...", "method:...", "sequence:..."]
     }}
   ],
   "proposed_files": [
     {{
-      "path": "src/main/java/...",
+      "path": "{test_example}",
       "action": "create|update|verify",
       "reason": "why this file is needed",
       "related_design_elements": ["class:..."]
@@ -454,7 +515,7 @@ Return JSON only with this shape:
       "design_element_id": "class:...",
       "design_element_type": "class|method|sequence_message",
       "design_element_name": "...",
-      "planned_code_target": "src/main/java/...#method",
+      "planned_code_target": "{source_example}#method",
       "reason": "concrete implementation reason",
       "test_intent": "how to verify this element"
     }}
@@ -472,11 +533,11 @@ Rules:
   them in Python. In `design_mappings`, return only mappings you improve or
   correct using repo evidence. Return [] when the base mappings are good enough.
 - `implementation_steps` must be 3-6 high-level steps, not one step per design element.
-- `proposed_files` must include every Java file named by implementation steps or design mappings.
+- `proposed_files` must include every file named by implementation steps or design mappings.
 - Keep proposed files grouped by file, not by method.
 - `test_intents` must be max 6 focused tests.
 - Do not add behavior outside the approved requirement/design.
-- Proposed files must stay under src/main/java or src/test/java.
+- {path_rules}
 - Use CodeGraph evidence when naming existing classes/files.
 - If this is a repair iteration, address the validator feedback directly.
 - A mapping with `implementation_status=waived_by_design_adjustment` is intentionally omitted
@@ -496,6 +557,9 @@ Run context:
 
 Target files:
 {json.dumps(target_files, ensure_ascii=False, indent=2)}
+
+Immutable planning path policy:
+{json.dumps(planning_context, ensure_ascii=False, indent=2)}
 
 {canonical_section}
 
@@ -594,17 +658,26 @@ def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) ->
     return expected_keys.issubset(candidate.keys())
 
 
-def _merge_mappings(base: list[dict[str, object]], llm_items: list[dict[str, object]]) -> list[dict[str, object]]:
+def _merge_mappings(
+    base: list[dict[str, object]],
+    llm_items: list[dict[str, object]],
+    *,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[dict[str, object]]:
     by_id = {str(item.get("design_element_id") or ""): dict(item) for item in base}
     for item in llm_items:
         element_id = str(item.get("design_element_id") or "")
-        if not element_id:
+        if not element_id or (planning_policy and element_id not in by_id):
             continue
         current = by_id.get(element_id, {})
-        by_id[element_id] = {
+        merged = {
             **current,
             **{key: value for key, value in item.items() if str(value).strip()},
         }
+        if planning_policy and current:
+            merged["planned_code_target"] = current.get("planned_code_target", "")
+            merged["component_id"] = current.get("component_id", "")
+        by_id[element_id] = merged
     ordered: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in base:
@@ -637,7 +710,11 @@ def _repo_context_evidence_lines(repo_context: dict[str, object]) -> list[str]:
     return lines[:8]
 
 
-def _implementation_steps_from_mappings(mappings: list[dict[str, object]]) -> list[dict[str, object]]:
+def _implementation_steps_from_mappings(
+    mappings: list[dict[str, object]],
+    *,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[dict[str, object]]:
     files = _proposed_files_from_mappings(mappings)
     return [
         {
@@ -651,7 +728,15 @@ def _implementation_steps_from_mappings(mappings: list[dict[str, object]]) -> li
             "order": 2,
             "title": "Run verification",
             "description": "Add or update tests for the mapped behavior, then run the configured target repo test command.",
-            "files": [str(item.get("path") or "") for item in files if "src/test/" in str(item.get("path") or "")],
+            "files": [
+                str(item.get("path") or "")
+                for item in files
+                if (
+                    planning_policy.is_test_path(item.get("path"))
+                    if planning_policy
+                    else "src/test/" in str(item.get("path") or "")
+                )
+            ],
             "design_refs": [str(item.get("design_element_id") or "") for item in mappings],
         },
     ]
@@ -678,41 +763,80 @@ def _proposed_files_from_mappings(mappings: list[dict[str, object]]) -> list[dic
     return list(result.values())
 
 
+def _canonicalize_implementation_steps(
+    steps: list[dict[str, object]],
+    *,
+    mappings: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None,
+) -> list[dict[str, object]]:
+    """Giữ files hợp lệ và khôi phục deterministic mapping paths sau output LLM."""
+
+    if not planning_policy:
+        return steps
+    mapping_paths = {
+        str(item.get("design_element_id") or ""): planning_policy.normalize_mapping_path(
+            str(item.get("planned_code_target") or "").split("#", 1)[0]
+        )
+        for item in mappings
+    }
+    result: list[dict[str, object]] = []
+    for step in steps:
+        item = dict(step)
+        files = [
+            path
+            for raw_path in (item.get("files") if isinstance(item.get("files"), list) else [])
+            for path in [planning_policy.normalize_editable_path(raw_path)]
+            if path
+        ]
+        for design_ref in _string_items(item.get("design_refs")):
+            path = mapping_paths.get(design_ref, "")
+            if path and path not in files:
+                files.append(path)
+        item["files"] = files
+        result.append(item)
+    return result
+
+
 def _canonical_proposed_files(
     *,
     proposed_files: list[dict[str, object]],
     implementation_steps: list[dict[str, object]],
     mappings: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[dict[str, object]]:
-    """Return the executable Java file set as one deterministic union."""
+    """Return the executable profile-approved file set as one deterministic union."""
 
     by_path: dict[str, dict[str, object]] = {}
     for item in proposed_files:
-        path = _java_path(item.get("path"))
+        path = _planning_path(item.get("path"), planning_policy=planning_policy)
         if path:
-            by_path[path] = {**item, "path": path}
+            by_path[path] = _with_path_component({**item, "path": path}, planning_policy)
     for step in implementation_steps:
         for raw_path in step.get("files", []) if isinstance(step.get("files"), list) else []:
-            path = _java_path(raw_path)
+            path = _planning_path(raw_path, planning_policy=planning_policy)
             if path and path not in by_path:
-                by_path[path] = {
+                by_path[path] = _with_path_component({
                     "path": path,
                     "action": "create_or_update",
                     "reason": "Named by an implementation step.",
                     "related_design_elements": _string_items(step.get("design_refs")),
-                }
+                }, planning_policy)
     for mapping in mappings:
-        path = _java_path(str(mapping.get("planned_code_target") or "").split("#", 1)[0])
+        path = _planning_path(
+            str(mapping.get("planned_code_target") or "").split("#", 1)[0],
+            planning_policy=planning_policy,
+            mapping_only=True,
+        )
         if not path:
             continue
         entry = by_path.setdefault(
             path,
-            {
+            _with_path_component({
                 "path": path,
                 "action": "create_or_update",
                 "reason": "Needed by an approved design mapping.",
                 "related_design_elements": [],
-            },
+            }, planning_policy),
         )
         refs = entry.setdefault("related_design_elements", [])
         element_id = str(mapping.get("design_element_id") or "").strip()
@@ -721,13 +845,40 @@ def _canonical_proposed_files(
     return list(by_path.values())
 
 
+def _planning_path(
+    value: object,
+    *,
+    planning_policy: PlanningPathPolicy | None,
+    mapping_only: bool = False,
+) -> str:
+    if planning_policy:
+        return (
+            planning_policy.normalize_mapping_path(value)
+            if mapping_only
+            else planning_policy.normalize_editable_path(value)
+        )
+    return _java_path(value)
+
+
+def _with_path_component(
+    item: dict[str, object],
+    planning_policy: PlanningPathPolicy | None,
+) -> dict[str, object]:
+    if planning_policy:
+        item["component_id"] = planning_policy.component_for_path(item.get("path"))
+    return item
+
+
 def _java_path(value: object) -> str:
     path = str(value or "").strip().replace("\\", "/")
     return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
 
 
 def _ensure_executable_test_files(
-    *, proposed_files: list[dict[str, object]], mappings: list[dict[str, object]]
+    *,
+    proposed_files: list[dict[str, object]],
+    mappings: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[dict[str, object]]:
     """Ensure flow and repository behaviors have editable test targets."""
 
@@ -739,31 +890,58 @@ def _ensure_executable_test_files(
         if item.get("design_element_type") == "class"
     }
     required: list[tuple[str, str, str]] = []
-    controllers = [(name, path) for name, path in class_targets.items() if name.endswith("Controller")]
+    controllers = [
+        (name, path)
+        for name, path in class_targets.items()
+        if name.endswith("Controller") or (planning_policy and name.endswith("Boundary"))
+    ]
     if controllers and any(item.get("design_element_type") == "sequence_message" for item in mappings):
         name, path = controllers[0]
-        flow_name = name.removesuffix("Controller") + "FlowTest"
-        required.append((name, _test_path_for_main(path, flow_name), "Verify the approved sequence and acceptance flow."))
+        flow_base = name.removesuffix("Controller")
+        if planning_policy:
+            flow_base = flow_base.removesuffix("Boundary")
+        flow_name = flow_base + ("Flow" if planning_policy else "FlowTest")
+        required.append(
+            (
+                name,
+                _test_path_for_main(path, flow_name, planning_policy=planning_policy),
+                "Verify the approved sequence and acceptance flow.",
+            )
+        )
     repositories = [(name, path) for name, path in class_targets.items() if name.endswith("Repository")]
     if repositories:
         name, path = repositories[0]
-        required.append((name, _test_path_for_main(path, f"{name}Test"), "Verify repository rules and persistence boundaries."))
+        test_name = name if planning_policy else f"{name}Test"
+        required.append(
+            (
+                name,
+                _test_path_for_main(path, test_name, planning_policy=planning_policy),
+                "Verify repository rules and persistence boundaries.",
+            )
+        )
     for design_name, path, reason in required:
         if not path or path in seen:
             continue
         seen.add(path)
         result.append(
-            {
+            _with_path_component({
                 "path": path,
                 "action": "create_or_update",
                 "reason": reason,
                 "related_design_elements": [f"class:{design_name}"],
-            }
+            }, planning_policy)
         )
     return result
 
 
-def _test_path_for_main(main_path: str, test_class_name: str) -> str:
+def _test_path_for_main(
+    main_path: str,
+    test_class_name: str,
+    *,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> str:
+    if planning_policy:
+        return planning_policy.test_path_for_source(main_path, test_class_name)
     path = _java_path(main_path)
     if not path or not path.startswith("src/main/java/"):
         return ""
@@ -777,8 +955,12 @@ def _design_adjustments(
     class_targets: dict[str, str],
     target_repo_path: str,
     requirement_design_trace: dict[str, object],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[dict[str, object]]:
     """Propose omission of untraced setters that conflict with existing final fields."""
+
+    if planning_policy:
+        return []
 
     directly_traced = {
         str(link.get("target") or "").strip()
@@ -1057,22 +1239,37 @@ def _design_mappings(
     target_files: list[str],
     target_repo_path: str = "",
     requirement_design_trace: dict[str, object] | None = None,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[dict[str, object]]:
     mappings: list[dict[str, object]] = []
-    class_targets = _class_target_files(class_graph=class_graph, target_files=target_files)
+    class_targets = _class_target_files(
+        class_graph=class_graph,
+        target_files=target_files,
+        planning_policy=planning_policy,
+    )
     class_methods = _class_methods(class_graph)
 
     for node in _dict_items(class_graph.get("nodes")):
         class_name = str(node.get("className") or node.get("id") or "").strip()
         if not class_name:
             continue
-        class_file = class_targets.get(class_name) or _default_java_file(class_name)
+        class_file = class_targets.get(class_name) or _default_target_file(
+            class_name,
+            node=node,
+            planning_policy=planning_policy,
+        )
+        component = (
+            planning_policy.component_for_path(class_file, mapping_only=True)
+            if planning_policy
+            else ""
+        )
         mappings.append(
             {
                 "design_element_id": f"class:{class_name}",
                 "design_element_type": "class",
                 "design_element_name": class_name,
                 "planned_code_target": class_file,
+                **({"component_id": component} if component else {}),
                 "reason": f"Implement or update class `{class_name}` from the approved class diagram.",
                 "test_intent": f"Cover behavior exposed through `{class_name}` in unit or flow tests.",
             }
@@ -1087,6 +1284,7 @@ def _design_mappings(
                     "design_element_type": "method",
                     "design_element_name": f"{class_name}.{method_name}",
                     "planned_code_target": f"{class_file}#{method_name}",
+                    **({"component_id": component} if component else {}),
                     "reason": f"Implement method `{class_name}.{method_name}` from the approved class diagram.",
                     "test_intent": f"Exercise `{method_name}` through the primary use-case flow or direct unit test.",
                 }
@@ -1110,6 +1308,12 @@ def _design_mappings(
                 class_methods=class_methods,
                 participant_classes=participant_classes,
                 message_type=message_type,
+                planning_policy=planning_policy,
+            )
+            component = (
+                planning_policy.component_for_path(code_target.split("#", 1)[0], mapping_only=True)
+                if planning_policy
+                else ""
             )
             mappings.append(
                 {
@@ -1117,6 +1321,7 @@ def _design_mappings(
                     "design_element_type": "sequence_message",
                     "design_element_name": f"{source}->{target}: {text}",
                     "planned_code_target": code_target,
+                    **({"component_id": component} if component else {}),
                     "message_type": message_type,
                     "trace_policy": trace_policy,
                     "source_message": text,
@@ -1148,7 +1353,22 @@ def _test_intents(*, mappings: list[dict[str, object]], test_command: str) -> li
     ]
 
 
-def _class_target_files(*, class_graph: dict[str, object], target_files: list[str]) -> dict[str, str]:
+def _class_target_files(
+    *,
+    class_graph: dict[str, object],
+    target_files: list[str],
+    planning_policy: PlanningPathPolicy | None = None,
+) -> dict[str, str]:
+    if planning_policy:
+        result: dict[str, str] = {}
+        for node in _dict_items(class_graph.get("nodes")):
+            class_name = str(node.get("className") or node.get("id") or "").strip()
+            if class_name:
+                result[class_name], _ = planning_policy.resolve_class_target(
+                    node=node,
+                    target_files=target_files,
+                )
+        return result
     existing = {Path(path).stem: path for path in target_files if path.endswith(".java")}
     result: dict[str, str] = {}
     for node in _dict_items(class_graph.get("nodes")):
@@ -1162,6 +1382,18 @@ def _default_java_file(class_name: str) -> str:
     return f"src/main/java/com/sdlc/etour/heritage/{class_name}.java"
 
 
+def _default_target_file(
+    class_name: str,
+    *,
+    node: dict[str, object],
+    planning_policy: PlanningPathPolicy | None,
+) -> str:
+    if not planning_policy:
+        return _default_java_file(class_name)
+    path, _ = planning_policy.resolve_class_target(node=node, target_files=[])
+    return path
+
+
 def _sequence_message_target(
     *,
     message_text: str,
@@ -1171,6 +1403,7 @@ def _sequence_message_target(
     class_methods: dict[str, set[str]],
     participant_classes: dict[str, str],
     message_type: str,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> tuple[str, str]:
     method_name = _message_method_name(message_text)
     source_class = participant_classes.get(source) or _participant_to_class(source, class_targets)
@@ -1181,7 +1414,7 @@ def _sequence_message_target(
         owner = source_class or target_class
         if not owner:
             return "", "return_behavior"
-        code_file = class_targets.get(owner, _default_java_file(owner))
+        code_file = _class_file_for_owner(owner, class_targets, planning_policy)
         if method_name and method_name in class_methods.get(owner, set()):
             return f"{code_file}#{method_name}", "direct_symbol"
         policy = "semantic_side_effect" if method_name.lower().startswith(("display", "show", "notify")) else "return_behavior"
@@ -1191,15 +1424,25 @@ def _sequence_message_target(
         owner = source_class or target_class
         if not owner:
             return "", "exception_path"
-        return class_targets.get(owner, _default_java_file(owner)), "exception_path"
+        return _class_file_for_owner(owner, class_targets, planning_policy), "exception_path"
 
     owner = target_class or source_class
     if not owner:
         return "", "boundary_interaction"
-    code_file = class_targets.get(owner, _default_java_file(owner))
+    code_file = _class_file_for_owner(owner, class_targets, planning_policy)
     if method_name and method_name in class_methods.get(owner, set()):
         return f"{code_file}#{method_name}", "direct_symbol"
     return code_file, "boundary_interaction"
+
+
+def _class_file_for_owner(
+    owner: str,
+    class_targets: dict[str, str],
+    planning_policy: PlanningPathPolicy | None,
+) -> str:
+    if owner in class_targets:
+        return class_targets[owner]
+    return "" if planning_policy else _default_java_file(owner)
 
 
 def _message_method_name(message_text: str) -> str:

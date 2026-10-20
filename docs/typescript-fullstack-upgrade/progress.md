@@ -266,6 +266,42 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Checklist A2.1a hoàn tất. A2.1b vẫn chưa làm: default targets, test targets và
   Validator path rules hiện còn Java-specific.
 
+## 2026-10-20 - A2.1b Profile-aware Planning Paths
+
+- Baseline: commit `0a8fd94` (`feat: discover phase 3 sources from profile`),
+  worktree sạch; branch `main` đang ahead remote 7 commit.
+- Đã rà lại `DeveloperPlanAgent`, `ImplementationPlanValidator`, Phase 3 initial
+  planning/revalidation, profile snapshot, source discovery và fake Phase 2/3.
+- Chốt một planning-path policy bất biến theo `project_profile_id` và
+  `language_profile_id`; planner và Validator phải resolve cùng policy từ frozen
+  workspace snapshot, không nhận policy do LLM cung cấp.
+- Routing class ưu tiên existing symbol duy nhất, sau đó component hint/stereotype
+  và name suffix. Thiếu hoặc mâu thuẫn thông tin sẽ fail closed để sửa design;
+  không fallback sang API. Output LLM không được ghi đè target/component tất định.
+- Phạm vi lát này gồm default source/test target, canonical path union, path hard
+  gate và metadata audit của implementation plan. Raw verification command,
+  Phase 4 code generation và bootstrap target repo vẫn thuộc lát sau.
+- Đã thêm `planning_path_policy_v1` cho `typescript_fullstack_v1`: source/test
+  target theo component, Prisma và E2E có suffix riêng; path phải canonical
+  POSIX-relative và nằm trong editable root của frozen profile.
+- Developer.plan khóa `planned_code_target`/`component_id` do Python resolve,
+  loại path LLM ngoài policy, thêm `planning_profile` để audit và tắt Java-only
+  final-field adjustment ở run TypeScript. Class không phân loại được, có hint
+  mâu thuẫn hoặc trùng nhiều existing symbol sẽ fail closed bằng error code ổn định.
+- Validator.review_plan dùng đúng policy truyền từ workspace-bound snapshot cho
+  mapping, implementation steps, proposed files, owner symbol và bắt buộc flow/
+  repository test target co-located. Nhánh Java chỉ còn compatibility nội bộ.
+- Fake Phase 2 đã có canonical component stereotypes; fake Developer.plan tự trả
+  TypeScript paths khi prompt mang profile mới. Fake Phase 4/QA vẫn giữ Java vì
+  chuyển execution thuộc A3; checklist chuyển toàn bộ prompt/fake fixtures vẫn mở.
+- Regression: planning-path unit `7 passed`; profile/manifest/discovery/Phase 3
+  `73 passed, 1 skipped in 63.82s`; fast suite `173 passed, 1 skipped, 291
+  deselected in 11.73s`; full parallel 4 worker `464 passed, 1 skipped in
+  71.66s`; `compileall` package thành công. Test skip vẫn là symlink escape trên
+  Windows không có quyền tạo symlink.
+- Checklist A2.1b và plan Validator profile-aware hoàn tất. HTTP API, checkpoint
+  schema chính và raw verification command không thay đổi.
+
 ## 2026-10-20 - Test Performance Optimization Baseline
 
 - Full regression A1.2c: `438 passed in 736.48s`; collection `438 tests` chỉ

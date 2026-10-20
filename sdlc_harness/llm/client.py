@@ -244,7 +244,7 @@ def fake_completion(prompt: str) -> str:
     if "Implementation Plan LLM Review v1" in prompt:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
-        return fake_developer_implementation_plan()
+        return fake_developer_implementation_plan(prompt)
     if "Developer Batch Repair v2" in prompt:
         return fake_developer_repair(prompt)
     if "Developer Batch Act v2" in prompt:
@@ -490,24 +490,24 @@ def fake_design_model() -> str:
 
     return """## Class Diagram
 @startuml
-class DeleteCulturalHeritageBoundary {
+class DeleteCulturalHeritageBoundary <<api>> {
   +requestDeletion(heritageId : String) : void
   +showConfirmation() : void
   +showResult(message : String) : void
 }
 
-class DeleteCulturalHeritageService {
+class DeleteCulturalHeritageService <<api>> {
   +validateDeletion(heritageId : String) : boolean
   +deleteHeritage(heritageId : String) : void
   +cancelDeletion() : void
 }
 
-class CulturalHeritageRepository {
+class CulturalHeritageRepository <<database>> {
   +findById(heritageId : String) : CulturalHeritage
   +delete(heritageId : String) : void
 }
 
-class CulturalHeritage {
+class CulturalHeritage <<contracts>> {
   - id : String
   - name : String
 }
@@ -608,25 +608,46 @@ def fake_design_semantic_review() -> str:
     )
 
 
-def fake_developer_implementation_plan() -> str:
+def fake_developer_implementation_plan(prompt: str = "") -> str:
     """Developer.plan giả lập để test Smart Developer không gọi API thật."""
+
+    typescript = '"project_profile_id": "typescript_fullstack_v1"' in prompt
+    service_path = (
+        "apps/api/src/DeleteCulturalHeritageService.ts"
+        if typescript
+        else "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java"
+    )
+    repository_path = (
+        "packages/db/src/CulturalHeritageRepository.ts"
+        if typescript
+        else "src/main/java/com/sdlc/etour/heritage/CulturalHeritageRepository.java"
+    )
+    flow_test_path = (
+        "apps/api/src/DeleteCulturalHeritageFlow.test.ts"
+        if typescript
+        else "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java"
+    )
+    source_evidence = (
+        "Planning profile routes services to apps/api/src and repositories to packages/db/src."
+        if typescript
+        else "CodeGraph context found existing CulturalHeritageRepository in src/main/java."
+    )
+    test_evidence = (
+        "Planning profile co-locates API tests under apps/api/src."
+        if typescript
+        else "Target repo already has a test folder under src/test/java/com/sdlc/etour/heritage."
+    )
 
     return json.dumps(
         {
             "summary": "Plan uses CodeGraph context to map the approved delete heritage design into service, boundary, repository, and tests.",
-            "repo_evidence": [
-                "CodeGraph context found existing CulturalHeritageRepository in src/main/java.",
-                "Target repo already has a test folder under src/test/java/com/sdlc/etour/heritage.",
-            ],
+            "repo_evidence": [source_evidence, test_evidence],
             "implementation_steps": [
                 {
                     "order": 1,
                     "title": "Add delete flow application service",
                     "description": "Implement the approved validation, confirmation, delete, cancel, and result behavior.",
-                    "files": [
-                        "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
-                        "src/main/java/com/sdlc/etour/heritage/CulturalHeritageRepository.java",
-                    ],
+                    "files": [service_path, repository_path],
                     "design_refs": [
                         "class:DeleteCulturalHeritageService",
                         "method:DeleteCulturalHeritageService.deleteHeritage",
@@ -636,19 +657,19 @@ def fake_developer_implementation_plan() -> str:
                     "order": 2,
                     "title": "Verify delete flow",
                     "description": "Cover success, cancellation, interruption, and duplicate-submit prevention.",
-                    "files": ["src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java"],
+                    "files": [flow_test_path],
                     "design_refs": ["sequence:delete_cultural_heritage_main:1"],
                 },
             ],
             "proposed_files": [
                 {
-                    "path": "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java",
+                    "path": service_path,
                     "action": "create",
                     "reason": "Holds the approved delete use-case behavior.",
                     "related_design_elements": ["class:DeleteCulturalHeritageService"],
                 },
                 {
-                    "path": "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageFlowTest.java",
+                    "path": flow_test_path,
                     "action": "create",
                     "reason": "Verifies the approved sequence and exception flows.",
                     "related_design_elements": ["sequence:delete_cultural_heritage_main:1"],

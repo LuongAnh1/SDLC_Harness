@@ -38,13 +38,19 @@ tất và không tự cho phép cutover.
 
 - [x] A2.1a: chuyển source discovery của Phase 3 sang component roots và suffix
   từ immutable run profile snapshot.
-- [ ] A2.1b: chuyển default targets, test targets và path rules sang profile.
+- [x] A2.1b: chuyển default targets, test targets và path rules sang profile.
+  - Hoàn tất: 2026-10-20.
+  - Phạm vi: policy đường dẫn bất biến theo profile, routing component fail-closed,
+    canonicalize output Developer.plan và Validator.review_plan dùng cùng policy.
+  - Quyết định: class không có existing-symbol duy nhất, stereotype/component hint
+    hoặc name suffix không mâu thuẫn sẽ bị chặn để sửa design; không fallback sang
+    API và không giao LLM tự chọn component.
 - [ ] Chuyển prompt context/fake fixtures sang TypeScript.
 - [ ] Tách shared prompt invariant khỏi profile directive; lập usage map và test
   để active TypeScript prompt không còn Java assumption.
 - [ ] Loại raw command khỏi implementation plan; plan chỉ tham chiếu
   verification stage ID.
-- [ ] Chuyển plan Validator sang profile-aware rules.
+- [x] Chuyển plan Validator sang profile-aware rules.
 
 ### A3. Phase 4 Execution
 

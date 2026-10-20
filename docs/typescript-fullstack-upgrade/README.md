@@ -43,8 +43,9 @@ tại trong code.
   Java coupling và khoảng trống full-stack có dẫn chứng.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
-- [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0 và
-  toàn bộ A1 đã hoàn tất, các checklist còn lại giữ theo trạng thái thực tế.
+- [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
+  toàn bộ A1 và A2.1a/A2.1b đã hoàn tất, các checklist còn lại giữ theo trạng
+  thái thực tế.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
   evidence đã khóa trước khi code.
 - [Progress](progress.md): execution log của công việc khảo sát và viết tài liệu.

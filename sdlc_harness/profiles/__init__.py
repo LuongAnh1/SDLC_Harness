@@ -8,6 +8,13 @@ from .manifest import (
     load_and_validate_target_manifest,
 )
 from .registry import get_language_profile, get_project_profile, list_project_profile_ids
+from .planning import (
+    PLANNING_PATH_POLICY_VERSION,
+    ComponentPlanningRule,
+    PlanningPathPolicy,
+    build_planning_path_policy,
+    planning_path_policy_from_snapshot,
+)
 from .snapshot import (
     PROFILE_SNAPSHOT_STATE_KEY,
     PROFILE_SNAPSHOT_VERSION,
@@ -29,6 +36,9 @@ __all__ = [
     "LanguageProfile",
     "ProfileRegistry",
     "ProjectProfile",
+    "ComponentPlanningRule",
+    "PlanningPathPolicy",
+    "PLANNING_PATH_POLICY_VERSION",
     "ResolvedTargetManifest",
     "TargetProfileManifestV1",
     "TARGET_PROFILE_MANIFEST_PATH",
@@ -36,12 +46,14 @@ __all__ = [
     "PROFILE_SNAPSHOT_VERSION",
     "ProfileSnapshotV1",
     "build_profile_snapshot",
+    "build_planning_path_policy",
     "get_language_profile",
     "get_project_profile",
     "list_project_profile_ids",
     "load_and_validate_target_manifest",
     "profile_status_metadata",
     "read_profile_snapshot",
+    "planning_path_policy_from_snapshot",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",
     "public_run_summary",
