@@ -570,6 +570,57 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   hoặc external sync. A4.1b vẫn giữ React/Fastify/Prisma/PostgreSQL/Playwright/CI;
   bước code tiếp theo là A3.4b trên toolchain đã pin.
 
+## 2026-10-20 - Kế Hoạch A3.4b Full TypeScript Signature Contract
+
+- Baseline Harness `8e47d3d`, target local `111b72c`; cả hai worktree sạch.
+- Đóng toàn bộ A3.4b trong một lát. Phase 3 sở hữu nested
+  `implementation_signature_contract_v1` và human duyệt cùng
+  `implementation_plan_structured_v3`; không mở rộng PlantUML/Phase 2.
+- Profiled packet mới là `developer_work_packet_profiled_v2`, mang nguyên
+  signature contract cùng approved-plan binding. V2/V1 lịch sử vẫn đọc/chạy theo
+  symbol-only behavior, không auto-migrate.
+- Comparator dùng exact target AST theo path/qualified symbol/kind và so
+  parameter type/order/optional/rest, return, generic, async; chỉ chuẩn hóa
+  whitespace, không tự coi type alias hoặc `T[]`/`Array<T>` là tương đương.
+- Deterministic mismatch tạo `contract_signature_mismatch`; missing symbol vẫn là
+  `missing_code_symbol`. LLM không được phủ quyết static evidence và profiled run
+  không fallback regex/substr.
+- Controlled smoke chỉ đọc target local với `readHealth` và
+  `HealthService.check`; không sửa target, không push/remote/live workflow/sync.
+
+## 2026-10-20 - A3.4b Full TypeScript Signature Contract
+
+- Baseline Harness `8e47d3d`; target local giữ nguyên commit `111b72c`, worktree
+  sạch sau smoke và không có remote.
+- Phase 3 profiled phát hành `implementation_plan_structured_v3` với nested
+  `implementation_signature_contract_v1`. Contract bind design element, canonical
+  source path, qualified symbol/kind, parameter order/type/optional/rest, return,
+  generic và async; digest tham gia review/work-packet fingerprint.
+- Builder chỉ canonicalize/bind output của Phase 3. Nếu producer bỏ sót method
+  entry thì plan fail closed; không lấy type từ class graph/PlantUML Phase 2.
+  Fake Phase 3 producer đã được nâng theo cùng contract để regression không
+  dựa vào fallback không tồn tại trong production.
+- Phase 4 phát hành `developer_work_packet_profiled_v2`, giữ nguyên contract đã
+  duyệt và so với TypeScript Compiler AST. Một overload khớp là đủ; parameter
+  name chỉ là evidence. Chỉ whitespace được chuẩn hóa, nên `T[]` không
+  tự động tương đương `Array<T>` hay type alias.
+- Missing exact declaration sinh `missing_code_symbol`; sai signature sinh
+  `contract_signature_mismatch`, luôn blocking và owner `developer`. Semantic LLM
+  nhận static evidence nhưng không thể gỡ blocker tất định. Plan V2/packet V1
+  lịch sử tiếp tục AST symbol-only; Java regex chỉ còn cho legacy Java.
+- Controlled read-only smoke trên `apps/api/src/health.ts` trích 1 file/4 symbols:
+  contract đúng cho `readHealth` và `HealthService.check` có 0 finding; đổi
+  return type trong contract tạo đúng `contract_signature_mismatch`.
+- Verification: nhóm Phase 3/signature/prompt `56 passed`; planning paths + Write
+  API rerun `19 passed`; full parallel `534 passed, 1 skipped in 46.72s`.
+  Skip duy nhất vẫn là symlink escape thiếu quyền trên Windows. `compileall`,
+  Node `--check` và `git diff --check` đều sạch ngoài cảnh báo line-ending.
+- Một full run tuần tực trước khi sửa fixture gặp local HTTP `WinError 10053`
+  đã biết; toàn bộ Write API và full parallel đều pass khi chạy lại.
+- Không đổi HTTP API, không chạy live workflow/external sync, không sửa target,
+  không tạo remote, không push. Phần code Chặng A tiếp theo là A2.2b cho
+  Developer.act/tool-loop; A4.1b vẫn giữ full-stack infra skeleton.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

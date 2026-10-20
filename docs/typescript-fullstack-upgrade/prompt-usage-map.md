@@ -25,7 +25,7 @@ không sửa hàng loạt file chỉ vì chúng có nội dung Java.
 | Phase 3 | `agents/validator/plan_review.py` | Prompt dựng inline | Active | A2.2a/A2.3: cùng directive và fail-closed verification stage policy từ snapshot |
 | Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Active, còn Java-heavy | A2.2b sau khi A3 khóa editable roots/work packet |
 | Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Active, còn Java assumptions | A2.2b/A3; phải dùng execution guard trước khi đổi output |
-| Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Profiled run dùng Code Trace policy và exact TypeScript AST symbol evidence; legacy branch giữ Java compatibility | A3.4a đã nối AST bridge fail-closed; A3.4b còn full signature comparison trên target thật |
+| Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Profiled run dùng exact TypeScript AST symbol/signature evidence; legacy branch giữ Java compatibility | A3.4b đã bind plan V3/work packet V2 và giữ deterministic mismatch ngoài quyền phủ quyết của LLM |
 | Phase 4 | `agents/tester/qa.py` | Prompt dựng inline | Profiled run dùng TypeScript/Vitest; legacy branch giữ Java compatibility | A3.3 dùng QA policy, exact selected files và Vitest JSON evidence; browser QA để B4 |
 | Fake mode | `llm/client.py::fake_completion` | Dispatch theo marker prompt | Active trong regression | Phase 3 theo directive ở A2.2a; Phase 4/QA để A2.2b/A3 |
 
@@ -109,7 +109,7 @@ workflow nếu chưa có contract/profile test tương ứng.
 - QA execution/report/quality evidence công bố riêng selected và verified files.
   Browser QA vẫn là lát Chặng B.
 
-## Trạng thái A3.4a
+## Trạng thái A3.4
 
 - `CodeTracePolicy v1` resolve từ immutable workspace-bound snapshot và khóa
   source/test discovery theo project/language profile. Test evidence của Chặng A
@@ -122,5 +122,10 @@ workflow nếu chưa có contract/profile test tương ứng.
   đưa evidence vào artifact và semantic-review prompt; rule yêu cầu JUnit đã được
   thay bằng test-framework-neutral invariant. Java path/text/signature checks chỉ
   còn ở nhánh legacy.
-- A3.4b vẫn mở: chạy helper thật trên target A4 đã pin `typescript` và so đầy đủ
-  parameter/return/generic/async/optional/rest signature.
+- A3.4b đã phát hành `implementation_signature_contract_v1` trong plan V3,
+  mang nguyên qua profiled work packet V2 và so exact parameter order/type,
+  optional/rest, return, generic cùng async. Phase 3 phải phát hành entry; không
+  suy type từ PlantUML khi thiếu.
+- Controlled smoke trên target local pin TypeScript 6.0.3 pass cho function/method
+  thật; deliberate mismatch tạo `contract_signature_mismatch`. Plan V2/packet V1
+  lịch sử tiếp tục symbol-only, không auto-migrate.

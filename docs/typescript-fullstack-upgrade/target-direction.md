@@ -4,8 +4,8 @@
 > selection fail-closed; A1.2b đã thêm snapshot theo run và downstream settings
 > binding; A1.2c đã thêm target manifest preflight cùng workspace binding
 > fail-closed; A1.2d đã hard-retire run Java thiếu snapshot. Profile rỗng chỉ
-> còn phục vụ read/audit/sync-existing/cleanup. A2/A3.1-A3.4a và target bootstrap
-> local A4.1a đã hoàn tất; full-stack infra, signature comparison, remote/cutover
+> còn phục vụ read/audit/sync-existing/cleanup. A2 trừ A2.2b, A3.1-A3.4b và
+> target bootstrap local A4.1a đã hoàn tất; full-stack infra, remote/cutover
 > và các behavior Chặng B dưới đây vẫn chưa hoàn tất.
 
 ## Nguyên Tắc
@@ -240,9 +240,11 @@ Policy lấy identity từ immutable workspace snapshot, chỉ cho source produc
 co-located unit test đúng component; helper load `typescript` từ chính target,
 không dùng global compiler và không fallback substring khi runtime/package/evidence
 không hợp lệ. AST evidence exact cho interface/class/function/method được lưu trong
-Code Trace artifact và đưa vào semantic review. A4.1a đã pin TypeScript 6.0.3 và
-smoke extractor thật trên target local. Việc đối chiếu đầy đủ signature
-(parameter, return, generic, async, optional/rest) vẫn thuộc A3.4b.
+Code Trace artifact và đưa vào semantic review. A4.1a đã pin TypeScript 6.0.3.
+A3.4b đã thêm contract chữ ký do Phase 3 sở hữu, bind qua plan V3/work
+packet V2 và so exact path, qualified symbol/kind, parameter order/type/optional/rest,
+return, generic cùng async trên AST thật. Static mismatch luôn là Developer blocker;
+semantic review không được phủ quyết.
 
 ## Tương Thích Và Không Thuộc Phạm Vi Hiện Tại
 

@@ -119,8 +119,23 @@ tất và không tự cho phép cutover.
   - Code Trace artifact và semantic-review prompt nhận AST evidence; exact
     interface/class/function/method name thay cho substring source ở profiled run.
     Java text/signature logic chỉ còn ở nhánh legacy compatibility.
-- [ ] A3.4b: chạy extractor thật trên target đã pin `typescript`, so đầy đủ
+- [x] A3.4b: chạy extractor thật trên target đã pin `typescript`, so đầy đủ
   interface/function/method signature và đóng TypeScript AST contract evidence.
+  - Hoàn tất: 2026-10-20.
+  - Profiled plan mới phát hành `implementation_plan_structured_v3` chứa nested
+    `implementation_signature_contract_v1`; Phase 3 là owner của implementation
+    signature được human duyệt, còn Phase 2 PlantUML tiếp tục language-neutral.
+    Thiếu entry thì plan fail closed; builder không tự suy luận type từ graph Phase 2.
+  - Contract bind design element, source path, qualified symbol/kind và đầy đủ
+    parameter type/order/optional/rest, return, generic cùng async expectation.
+  - Phase 4 dùng `developer_work_packet_profiled_v2`, kiểm binding/digest và so
+    contract với AST evidence tất định; mismatch là Developer blocker, không cho
+    semantic review phủ quyết và không fallback regex/substr.
+  - Plan V2/packet V1 lịch sử giữ symbol-only compatibility, không auto-migrate;
+    Java signature regex chỉ còn ở nhánh legacy.
+  - Smoke chỉ đọc target local `111b72c` pass cho `readHealth` và
+    `HealthService.check`; mismatch return type tạo đúng blocker tất định.
+    Full regression: `534 passed, 1 skipped`.
 
 ### A4. Target Bootstrap Và Cutover
 
