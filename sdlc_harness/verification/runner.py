@@ -118,6 +118,21 @@ class VerificationRunner:
     ) -> VerificationResult:
         """Chạy baseline command rồi chạy mọi Java test entrypoint đã khám phá."""
 
+        if _has_profiled_verification_contract(work_packet):
+            return VerificationResult(
+                status="failed",
+                command="",
+                cwd=str(target_path),
+                exit_code=None,
+                duration_seconds=0.0,
+                stdout="",
+                stderr="",
+                reason=(
+                    "Profile-owned verification stages require the A3 stage executor; "
+                    "the legacy Java command runner will not execute them."
+                ),
+            )
+
         command = _test_command_from_work_packet(work_packet)
         if not command:
             return VerificationResult(
@@ -359,6 +374,19 @@ def _test_command_from_work_packet(work_packet: dict[str, object]) -> str:
             if command:
                 return command
     return DEFAULT_TEST_COMMAND
+
+
+def _has_profiled_verification_contract(work_packet: dict[str, object]) -> bool:
+    stage_ids = work_packet.get("verification_stage_ids")
+    if isinstance(stage_ids, list) and any(str(item).strip() for item in stage_ids):
+        return True
+    intents = work_packet.get("test_intents")
+    if not isinstance(intents, list):
+        return False
+    return any(
+        isinstance(item, dict) and bool(str(item.get("stage_id") or "").strip())
+        for item in intents
+    )
 
 
 def _verification_env() -> dict[str, str]:

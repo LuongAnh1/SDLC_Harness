@@ -54,12 +54,26 @@ tất và không tự cho phép cutover.
 - [ ] A2.2b: chuyển prompt/fake fixture đang hoạt động của Developer.act,
   tool-loop, QA và Code Trace sang TypeScript sau khi A3 có editable-root,
   work-packet và execution guard tương ứng.
-- [ ] Loại raw command khỏi implementation plan; plan chỉ tham chiếu
+- [x] A2.3: loại raw command khỏi implementation plan; plan chỉ tham chiếu
   verification stage ID.
+  - Hoàn tất: 2026-10-20.
+  - Project profile giữ stage catalog bất biến; `VerificationStagePolicy v1`
+    resolve ordered smoke suite từ frozen snapshot. Developer plan, repair, fake
+    và checkpoint rendering chỉ dùng `stage_id`.
+  - Validator fail-closed với raw execution field, stage thiếu/không thuộc
+    profile hoặc ordered stage list không khớp snapshot.
+  - Profiled plan dùng `implementation_plan_structured_v2`; review lưu SHA-256
+    của đúng structured artifact và Phase 4 kiểm lại binding trước khi tạo packet.
+  - Chặng A chỉ kích hoạt ordered smoke suite `typecheck -> unit`; stage database,
+    service và browser vẫn ở catalog nhưng chỉ được kích hoạt bằng policy/profile
+    version của Chặng B.
+  - Mapping stage sang fixed argv/cwd/env/timeout và thực thi vẫn thuộc A3.
 - [x] Chuyển plan Validator sang profile-aware rules.
 
 ### A3. Phase 4 Execution
 
+- [x] Pre-A3 hardening: packet profiled có `schema_version` riêng, Phase 4 kiểm
+  lại profile/stage contract và legacy Java Runner fail-closed với packet stage-only.
 - [ ] Chuyển work-packet/apply/repair guards sang editable roots của profile.
 - [ ] Chuyển Verification Runner sang profile-owned setup/discovery/execution.
 - [ ] Dùng fixed argv/cwd/env allowlist/timeout từ registry, không execute shell
@@ -98,14 +112,16 @@ pass bằng contract profile mới.
 
 ### B2. Component-aware Plan
 
-- [ ] Version implementation-plan contract có work item/component/dependency.
+- [ ] Tạo version implementation-plan kế tiếp có work item/component/dependency;
+  không ghi đè stage-based `implementation_plan_structured_v2` của Chặng A.
 - [ ] Kiểm missing layer, dependency cycle, migration impact và acceptance
   coverage.
 - [ ] Giữ một human checkpoint trước khi Developer act.
 
 ### B3. Multi-stage Verification
 
-- [ ] Thay single command bằng ordered stage result contract.
+- [ ] Mở rộng active verification suite từ `typecheck/unit` sang ordered stage
+  graph full-stack và thêm ordered stage result contract.
 - [ ] Quản lý PostgreSQL test lifecycle, migration, seed, dynamic resource
   identity và cleanup theo run; cleanup là `always_run` kể cả fail/timeout.
 - [ ] Chạy typecheck, unit, API/DB integration và frontend build.

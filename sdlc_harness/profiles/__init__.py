@@ -1,4 +1,10 @@
-"""Contract profile ngôn ngữ và dự án cho target implementation."""
+"""Mô tả target project bằng profile thay vì hard-code một ngôn ngữ.
+
+Package này sở hữu contract project/language/component, manifest khai báo của
+target repo và snapshot bất biến theo từng run. Từ snapshot, workflow dựng các
+policy cho prompt, đường dẫn lập kế hoạch và stage verification. Package chỉ
+mô tả và kiểm tra policy; việc chạy command thực tế thuộc ``verification``.
+"""
 
 from .model import ComponentProfile, LanguageProfile, ProfileRegistry, ProjectProfile
 from .manifest import (
@@ -29,6 +35,16 @@ from .snapshot import (
     profile_status_metadata,
     read_profile_snapshot,
 )
+from .verification import (
+    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
+    VerificationStagePolicy,
+    build_verification_stage_policy,
+    profiled_execution_field_paths,
+    profiled_plan_contract_issues,
+    verification_stage_policy_from_snapshot,
+)
 from .retirement import (
     LEGACY_RETIRED_ALLOWED_COMMANDS,
     public_allowed_actions,
@@ -52,18 +68,26 @@ __all__ = [
     "PROFILE_SNAPSHOT_STATE_KEY",
     "PROFILE_SNAPSHOT_VERSION",
     "ProfileSnapshotV1",
+    "PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION",
+    "PROFILED_IMPLEMENTATION_PLAN_VERSION",
+    "VerificationStagePolicy",
+    "VERIFICATION_STAGE_POLICY_VERSION",
     "build_profile_snapshot",
     "build_planning_path_policy",
+    "build_verification_stage_policy",
     "get_language_profile",
     "get_prompt_directive",
     "get_project_profile",
     "list_project_profile_ids",
     "load_and_validate_target_manifest",
     "profile_status_metadata",
+    "profiled_execution_field_paths",
+    "profiled_plan_contract_issues",
     "read_profile_snapshot",
     "planning_path_policy_from_snapshot",
     "prompt_directive_from_snapshot",
     "resolve_language_prompt_directive",
+    "verification_stage_policy_from_snapshot",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",
     "public_run_summary",

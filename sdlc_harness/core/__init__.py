@@ -1,4 +1,9 @@
-﻿"""Cấu hình và lỗi dùng chung của core."""
+﻿"""Kiểu cấu hình và lỗi nền tảng dùng chung toàn Harness.
+
+Core chỉ chứa primitive ít phụ thuộc như Settings, schema cấu hình và
+``HarnessError``. Import cấu hình được lazy-load để tránh vòng phụ thuộc với
+``profiles``; logic workflow hoặc adapter bên ngoài không thuộc package này.
+"""
 
 from typing import TYPE_CHECKING, Any
 

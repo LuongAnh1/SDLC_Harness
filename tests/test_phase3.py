@@ -23,7 +23,11 @@ from sdlc_harness.agents.validator import (
 )
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.profiles import get_language_profile, get_project_profile
+from sdlc_harness.profiles import (
+    build_verification_stage_policy,
+    get_language_profile,
+    get_project_profile,
+)
 from sdlc_harness.verification import VerificationResult
 from sdlc_harness.sync.atlassian import (
     _confluence_implementation_plan_storage_body,
@@ -506,6 +510,11 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertTrue(review["rule_review"]["ok"])
         self.assertTrue(review["llm_review"]["ok"])
         self.assertEqual(review["repair_iterations"], 0)
+        self.assertEqual(
+            review["implementation_plan_contract_version"],
+            "implementation_plan_structured_v1",
+        )
+        self.assertRegex(review["implementation_plan_sha256"], r"^sha256:[0-9a-f]{64}$")
 
         sync_report_path = self.repo_root / str(response["last_sync"]["report"])
         sync_report = json.loads(sync_report_path.read_text(encoding="utf-8"))
@@ -568,6 +577,7 @@ class PhaseThreeTest(unittest.TestCase):
             planned["latest_artifacts"]["implementation_plan_structured"]
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
+        self.assertEqual(structured["version"], "implementation_plan_structured_v2")
         self.assertEqual(structured["repo_context"]["source_files"], ["apps/api/src/ExistingService.ts"])
         self.assertEqual(
             structured["planning_profile"],
@@ -577,6 +587,39 @@ class PhaseThreeTest(unittest.TestCase):
                 "policy_version": "planning_path_policy_v1",
             },
         )
+        self.assertEqual(
+            structured["verification_stage_ids"],
+            list(
+                build_verification_stage_policy(
+                    project=get_project_profile("typescript_fullstack_v1")
+                ).stage_ids
+            ),
+        )
+        self.assertTrue(structured["test_intents"])
+        self.assertTrue(all("command" not in item for item in structured["test_intents"]))
+        self.assertTrue(
+            all(
+                item.get("stage_id") in structured["verification_stage_ids"]
+                for item in structured["test_intents"]
+            )
+        )
+        plan_markdown = (
+            self.repo_root / str(planned["latest_artifacts"]["implementation_plan"])
+        ).read_text(encoding="utf-8")
+        self.assertIn("# Implementation Plan V2", plan_markdown)
+        self.assertIn("## Verification Plan", plan_markdown)
+        self.assertIn("Stage `unit`", plan_markdown)
+        self.assertNotIn("scripts/test.ps1", plan_markdown)
+        confluence_body = _confluence_implementation_plan_storage_body(
+            PhaseOneWorkflow(settings).store,
+            str(planned["run_id"]),
+            str(planned["source_ref"]),
+            {str(key): str(value) for key, value in planned["latest_artifacts"].items()},
+        )
+        self.assertIn("<th>Verification stages</th>", confluence_body)
+        self.assertIn("<th>Stage ID</th>", confluence_body)
+        self.assertNotIn("<th>Command</th>", confluence_body)
+        self.assertNotIn("scripts/test.ps1", confluence_body)
         self.assertTrue(structured["design_mappings"])
         self.assertTrue(
             all(
@@ -612,6 +655,11 @@ class PhaseThreeTest(unittest.TestCase):
                 for item in revalidated_plan["design_mappings"]
             )
         )
+        self.assertEqual(
+            revalidated_plan["verification_stage_ids"],
+            structured["verification_stage_ids"],
+        )
+        self.assertTrue(all("command" not in item for item in revalidated_plan["test_intents"]))
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()
@@ -733,7 +781,7 @@ class PhaseThreeTest(unittest.TestCase):
         with self.assertRaises(HarnessError) as caught:
             workflow.approve_implementation_plan_checkpoint(run_id=run_id)
 
-        self.assertEqual(caught.exception.error_code, "requirement_v2_phase4_input_invalid")
+        self.assertEqual(caught.exception.error_code, "implementation_plan_review_binding_invalid")
         self.assertEqual(workflow.store.read_state(run_id), state_before)
 
     @pytest.mark.journey

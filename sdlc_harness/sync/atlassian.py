@@ -1520,7 +1520,10 @@ def _confluence_implementation_plan_storage_body(
     mapping_count = len(mappings)
     mapping_counts = _implementation_mapping_counts(mappings)
     target_groups = _implementation_target_groups(mappings)
+    verification_stage_ids = _string_list(structured_plan.get("verification_stage_ids"))
     unique_commands = _unique_values(str(item.get("command") or "") for item in test_intents)
+    verification_refs = verification_stage_ids or unique_commands
+    stage_only = bool(verification_stage_ids)
     review_ok = bool(review_report.get("ok"))
     issue_count = int(review_report.get("issue_count") or 0)
     artifact_rows = "\n".join(
@@ -1554,7 +1557,8 @@ def _confluence_implementation_plan_storage_body(
         repo=repo,
         target_count=len(target_groups),
         mapping_counts=mapping_counts,
-        test_commands=unique_commands,
+        verification_refs=verification_refs,
+        stage_only=stage_only,
     )
     target_rows = _confluence_implementation_target_rows(target_groups)
     test_rows = _confluence_implementation_test_rows(test_intents)
@@ -1595,7 +1599,7 @@ def _confluence_implementation_plan_storage_body(
 <tr><th>Class mappings</th><td>{mapping_counts.get("class", 0)}</td></tr>
 <tr><th>Method mappings</th><td>{mapping_counts.get("method", 0)}</td></tr>
 <tr><th>Sequence-flow mappings</th><td>{mapping_counts.get("sequence_message", 0)}</td></tr>
-<tr><th>Test commands</th><td>{escape(", ".join(unique_commands) if unique_commands else "Not specified.")}</td></tr>
+<tr><th>{"Verification stages" if stage_only else "Test commands"}</th><td>{escape(", ".join(verification_refs) if verification_refs else "Not specified.")}</td></tr>
 </tbody>
 </table>
 <h2>Requirement Coverage</h2>
@@ -1624,7 +1628,7 @@ def _confluence_implementation_plan_storage_body(
 <h2>Test Plan</h2>
 <table>
 <tbody>
-<tr><th>Scope</th><th>Intent</th><th>Command</th></tr>
+<tr><th>Scope</th><th>Intent</th><th>{"Stage ID" if stage_only else "Command"}</th></tr>
 {test_rows}
 </tbody>
 </table>
@@ -1813,9 +1817,14 @@ def _confluence_implementation_execution_rows(
     repo: dict[str, object],
     target_count: int,
     mapping_counts: dict[str, int],
-    test_commands: list[str],
+    verification_refs: list[str],
+    stage_only: bool = False,
 ) -> str:
-    commands = ", ".join(test_commands) if test_commands else "the configured target repo test command"
+    verification = (
+        ", ".join(verification_refs)
+        if verification_refs
+        else "the configured target repository verification"
+    )
     rows = [
         (
             "1",
@@ -1824,7 +1833,7 @@ def _confluence_implementation_execution_rows(
         ),
         (
             "2",
-            f"Create or update {target_count} Java code target(s) mapped from the approved class diagram.",
+            f"Create or update {target_count} code target(s) mapped from the approved design.",
             f"{mapping_counts.get('class', 0)} class mapping(s) and {mapping_counts.get('method', 0)} method mapping(s).",
         ),
         (
@@ -1834,8 +1843,12 @@ def _confluence_implementation_execution_rows(
         ),
         (
             "4",
-            "Add or update tests, then run the configured command.",
-            commands,
+            (
+                "Add or update tests, then run the profile-owned verification stages."
+                if stage_only
+                else "Add or update tests, then run the configured command."
+            ),
+            verification,
         ),
     ]
     return "\n".join(
@@ -1875,7 +1888,7 @@ def _confluence_implementation_test_rows(test_intents: list[dict[str, object]]) 
         "<tr>"
         f"<td>{escape(str(item.get('scope') or ''))}</td>"
         f"<td>{escape(str(item.get('intent') or ''))}</td>"
-        f"<td><code>{escape(str(item.get('command') or ''))}</code></td>"
+        f"<td><code>{escape(str(item.get('stage_id') or item.get('command') or ''))}</code></td>"
         "</tr>"
         for item in test_intents
     )

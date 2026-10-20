@@ -12,6 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from ...core.errors import HarnessError
+from ...profiles import (
+    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    PlanningPathPolicy,
+    VerificationStagePolicy,
+    profiled_plan_contract_issues,
+)
 from ...storage.runtime import utc_now_iso
 
 MAX_FILE_CONTENT_CHARS = 40000
@@ -31,8 +37,35 @@ def build_developer_work_packet(
     requirement_contract: dict[str, object] | None = None,
     requirement_coverage: list[dict[str, object]] | None = None,
     effective_design_contract: dict[str, object] | None = None,
+    planning_policy: PlanningPathPolicy | None = None,
+    verification_policy: VerificationStagePolicy | None = None,
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
+
+    has_profiled_contract = bool(
+        planning_policy
+        or verification_policy
+        or _string_items(structured_plan.get("verification_stage_ids"))
+    )
+    if has_profiled_contract:
+        if planning_policy is None or verification_policy is None:
+            raise HarnessError(
+                "implementation_plan_profile_invalid",
+                "Profiled implementation plan requires frozen planning and verification policies.",
+                run_id=run_id,
+            )
+        contract_issues = profiled_plan_contract_issues(
+            structured_plan,
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
+        if contract_issues:
+            raise HarnessError(
+                "implementation_plan_profile_invalid",
+                "Profiled implementation plan failed Phase 4 boundary validation: "
+                + "; ".join(contract_issues),
+                run_id=run_id,
+            )
 
     design_mappings = [
         item
@@ -60,6 +93,11 @@ def build_developer_work_packet(
     required_fields = ["path", "content"]
     return {
         "version": "developer_work_packet_v1",
+        "schema_version": (
+            PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+            if has_profiled_contract
+            else "developer_work_packet_legacy_v1"
+        ),
         "mode": "approved_implementation_plan_to_developer_act_v1",
         "run_id": run_id,
         "source_ref": source_ref,
@@ -86,6 +124,7 @@ def build_developer_work_packet(
         "implementation_steps": implementation_steps,
         "proposed_files": enriched_files,
         "design_mappings_by_file": _group_design_mappings_by_file(design_mappings),
+        "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
         "repo_evidence": _string_items(structured_plan.get("repo_evidence")),
         "current_files": [

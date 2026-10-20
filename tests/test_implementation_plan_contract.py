@@ -1,5 +1,8 @@
 import json
 from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 
 from sdlc_harness.agents.developer.planner import (
     DeveloperPlanAgent,
@@ -12,7 +15,14 @@ from sdlc_harness.agents.developer.planner import (
 )
 from sdlc_harness.agents.developer.work_packet import build_developer_work_packet
 from sdlc_harness.agents.validator.plan_review import ImplementationPlanValidator, _llm_review_prompt
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import build_parser
+from sdlc_harness.profiles import (
+    build_planning_path_policy,
+    build_verification_stage_policy,
+    get_language_profile,
+    get_project_profile,
+)
 from sdlc_harness.workflows.phase3 import _next_implementation_plan_version
 
 
@@ -83,17 +93,79 @@ def test_canonical_files_include_step_tests_and_mapping_files(tmp_path: Path):
         source_ref="dataset_use_case:eTour:UC2",
         issue_key="SDLC-2",
         structured_plan={
+            "version": "implementation_plan_structured_v1",
             "target_repository": {},
             "implementation_steps": steps,
             "proposed_files": proposed,
             "design_mappings": mappings,
-            "test_intents": [{"command": "test"}],
+            "verification_stage_ids": [],
+            "test_intents": [{"command": "powershell -File scripts/test.ps1"}],
         },
         target_repo_path=tmp_path,
         run_workspace={},
         approved_plan_refs={},
     )
     assert test_path in packet["output_contract"]["allowed_paths"]
+    assert packet["version"] == "developer_work_packet_v1"
+    assert packet["schema_version"] == "developer_work_packet_legacy_v1"
+    assert packet["verification_stage_ids"] == []
+    assert packet["test_intents"] == [{"command": "powershell -File scripts/test.ps1"}]
+
+
+def test_profiled_work_packet_uses_v2_and_revalidates_execution_contract(tmp_path: Path):
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    source_path = "apps/api/src/ProfileBoundary.ts"
+    plan = {
+        "version": "implementation_plan_structured_v2",
+        "planning_profile": planning_policy.metadata(),
+        "target_repository": {},
+        "implementation_steps": [{"order": 1, "files": [source_path]}],
+        "proposed_files": [{"path": source_path}],
+        "design_mappings": [],
+        "verification_stage_ids": list(verification_policy.stage_ids),
+        "test_intents": [{"stage_id": "unit"}],
+    }
+
+    # Editable-root enforcement itself remains the first A3 slice. This unit
+    # test isolates the new artifact/verification boundary without enabling it.
+    with patch(
+        "sdlc_harness.agents.developer.work_packet.ALLOWED_CODE_PATH_PREFIXES",
+        ("apps/api/src/",),
+    ):
+        packet = build_developer_work_packet(
+            run_id="run_profiled_packet",
+            source_ref="fixture:profiled",
+            issue_key="SDLC-1",
+            structured_plan=plan,
+            target_repo_path=tmp_path,
+            run_workspace={},
+            approved_plan_refs={},
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
+
+    assert packet["version"] == "developer_work_packet_v1"
+    assert packet["schema_version"] == "developer_work_packet_profiled_v1"
+    tampered = json.loads(json.dumps(plan))
+    tampered["test_intents"][0]["command"] = "npm test"
+    with pytest.raises(HarnessError) as context:
+        build_developer_work_packet(
+            run_id="run_profiled_packet",
+            source_ref="fixture:profiled",
+            issue_key="SDLC-1",
+            structured_plan=tampered,
+            target_repo_path=tmp_path,
+            run_workspace={},
+            approved_plan_refs={},
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
+    assert context.value.error_code == "implementation_plan_profile_invalid"
 
 
 def test_immutable_final_field_proposes_explicit_design_adjustment(tmp_path: Path):

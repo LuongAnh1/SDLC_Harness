@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -121,6 +122,29 @@ class RuntimeDirectoryTemplate:
             if path.suffix in {".md", ".txt", ".jsonl"}:
                 content = path.read_text(encoding="utf-8")
                 path.write_text(self._rewrite_text(content, substitutions), encoding="utf-8")
+        self._refresh_implementation_plan_bindings(destination)
+
+    @staticmethod
+    def _refresh_implementation_plan_bindings(destination: Path) -> None:
+        """Rebind copied Phase 3 fixtures after their machine-local paths change."""
+
+        for review_path in destination.glob(
+            "runs/*/artifacts/implementation_plan_review_v*.json"
+        ):
+            suffix = review_path.stem.removeprefix("implementation_plan_review_")
+            plan_path = review_path.with_name(f"implementation_plan_structured_{suffix}.json")
+            if not plan_path.is_file():
+                continue
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            review["implementation_plan_contract_version"] = str(plan.get("version") or "")
+            review["implementation_plan_sha256"] = (
+                "sha256:" + hashlib.sha256(plan_path.read_bytes()).hexdigest()
+            )
+            review_path.write_text(
+                json.dumps(review, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     def _rewrite_value(self, value: object, substitutions: dict[str, str]) -> object:
         if isinstance(value, dict):

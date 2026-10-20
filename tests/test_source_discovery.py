@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import os
 from pathlib import Path
 
 import pytest
@@ -127,8 +129,22 @@ def test_rejects_source_symlink_that_escapes_approved_root(tmp_path: Path) -> No
     link = tmp_path / "apps" / "api" / "src" / "escape.ts"
     try:
         link.symlink_to(outside)
-    except OSError:
-        pytest.skip("Môi trường hiện tại không cho phép tạo symlink.")
+    except OSError as exc:
+        unsupported_errnos = {
+            code
+            for code in (
+                errno.EACCES,
+                errno.EPERM,
+                getattr(errno, "ENOTSUP", None),
+                getattr(errno, "EOPNOTSUPP", None),
+            )
+            if code is not None
+        }
+        if exc.errno in unsupported_errnos or (
+            os.name == "nt" and getattr(exc, "winerror", None) in {5, 1314}
+        ):
+            pytest.skip("Môi trường hiện tại không cho phép tạo symlink.")
+        raise
 
     with pytest.raises(HarnessError) as context:
         discover_profile_source_files(

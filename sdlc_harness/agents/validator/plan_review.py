@@ -17,7 +17,11 @@ from ...llm.client import strip_code_fence
 from ...profiles import (
     LanguagePromptDirective,
     PlanningPathPolicy,
+    VerificationStagePolicy,
+    build_verification_stage_policy,
     get_language_profile,
+    get_project_profile,
+    profiled_plan_contract_issues,
     resolve_language_prompt_directive,
 )
 
@@ -149,6 +153,7 @@ def _executability_issues(
     structured_plan: dict[str, object],
     mappings: list[dict[str, Any]],
     planning_policy: PlanningPathPolicy | None = None,
+    verification_policy: VerificationStagePolicy | None = None,
 ) -> list[str]:
     issues: list[str] = []
     repo = structured_plan.get("target_repository")
@@ -159,7 +164,7 @@ def _executability_issues(
         if not str(repo.get(key) or "").strip():
             issues.append(f"Target repository `{key}` is missing.")
 
-    if planning_policy:
+    if planning_policy and not verification_policy:
         planning_profile = structured_plan.get("planning_profile")
         planning_profile = planning_profile if isinstance(planning_profile, dict) else {}
         if planning_profile != planning_policy.metadata():
@@ -188,11 +193,23 @@ def _executability_issues(
             issues.append(f"Mapping `{item.get('design_element_id')}` has no test intent.")
 
     test_intents = _dict_items(structured_plan.get("test_intents"))
-    if not test_intents:
-        issues.append("Implementation plan has no test intent block.")
-    for item in test_intents:
-        if not str(item.get("command") or "").strip():
-            issues.append("A test intent is missing the command.")
+    if verification_policy:
+        if planning_policy is None:
+            issues.append("Profiled implementation plan is missing its planning path policy.")
+        else:
+            issues.extend(
+                profiled_plan_contract_issues(
+                    structured_plan,
+                    planning_policy=planning_policy,
+                    verification_policy=verification_policy,
+                )
+            )
+    else:
+        if not test_intents:
+            issues.append("Implementation plan has no test intent block.")
+        for item in test_intents:
+            if not str(item.get("command") or "").strip():
+                issues.append("A test intent is missing the command.")
 
     proposed = _dict_items(structured_plan.get("proposed_files"))
     proposed_paths = {
@@ -279,6 +296,27 @@ def _executability_issues(
                 f"Design/repository conflict is unresolved: {adjustment.get('design_element_id')}"
             )
     return issues
+
+
+def _resolve_verification_policy(
+    *,
+    planning_policy: PlanningPathPolicy | None,
+    verification_policy: VerificationStagePolicy | None,
+) -> VerificationStagePolicy | None:
+    if planning_policy and verification_policy is None:
+        verification_policy = build_verification_stage_policy(
+            project=get_project_profile(planning_policy.project_profile_id)
+        )
+    if (
+        planning_policy
+        and verification_policy
+        and verification_policy.project_profile_id != planning_policy.project_profile_id
+    ):
+        raise HarnessError(
+            "verification_stage_policy_mismatch",
+            "Verification stages do not belong to the planning project profile.",
+        )
+    return verification_policy
 
 
 def _mapping_contract_issues(
@@ -452,6 +490,7 @@ class ImplementationPlanValidator:
         canonical_requirement: dict[str, object] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
 
@@ -463,6 +502,7 @@ class ImplementationPlanValidator:
             requirement_graph=requirement_graph,
             requirement_contract_version=requirement_contract_version,
             planning_policy=planning_policy,
+            verification_policy=verification_policy,
         )
         client = llm_client or self.llm_client
         if not client or not requirement_packet.strip() or not design_artifact.strip():
@@ -486,6 +526,7 @@ class ImplementationPlanValidator:
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         return _hybrid_review(
             rule_review=rule_review,
@@ -503,9 +544,14 @@ class ImplementationPlanValidator:
         requirement_graph: dict[str, object] | None = None,
         requirement_contract_version: str = "v2",
         planning_policy: PlanningPathPolicy | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> ImplementationPlanReview:
         """Hard gate: kiểm coverage/traceability/executability/scope bằng graph."""
 
+        verification_policy = _resolve_verification_policy(
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
         expected = _expected_design_elements(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -530,6 +576,7 @@ class ImplementationPlanValidator:
             structured_plan=structured_plan,
             mappings=mappings,
             planning_policy=planning_policy,
+            verification_policy=verification_policy,
         )
         executability_issues.extend(
             _mapping_contract_issues(
@@ -586,6 +633,7 @@ class ImplementationPlanValidator:
         canonical_requirement: dict[str, object] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> dict[str, object]:
         """Nhờ LLM đánh giá plan theo ngữ nghĩa requirement/design đã duyệt."""
 
@@ -606,6 +654,7 @@ class ImplementationPlanValidator:
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         raw = client.complete(
             system=(
@@ -701,7 +750,12 @@ def _llm_review_prompt(
     canonical_requirement: dict[str, object] | None = None,
     planning_policy: PlanningPathPolicy | None = None,
     prompt_directive: LanguagePromptDirective | None = None,
+    verification_policy: VerificationStagePolicy | None = None,
 ) -> str:
+    verification_policy = _resolve_verification_policy(
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+    )
     canonical_section = (
         "Canonical Requirement V2 (source of truth; stable IDs are authoritative):\n"
         + json.dumps(canonical_requirement, ensure_ascii=False, indent=2)
@@ -730,6 +784,11 @@ def _llm_review_prompt(
         language_context = prompt_directive.validator_review_context()
     else:
         language_context = {"prompt_directive_id": "legacy_compatibility"}
+    verification_context = (
+        verification_policy.prompt_context()
+        if verification_policy
+        else {"policy_version": "legacy_command_compatibility_v1"}
+    )
     return f"""Implementation Plan LLM Review v1
 
 You must compare the implementation plan against the approved requirement and design.
@@ -766,6 +825,9 @@ Review boundaries:
 
 Language prompt directive:
 {json.dumps(language_context, ensure_ascii=False, indent=2)}
+
+Verification stage policy:
+{json.dumps(verification_context, ensure_ascii=False, indent=2)}
 
 Approved requirement packet:
 {_excerpt(requirement_packet, limit=6000)}

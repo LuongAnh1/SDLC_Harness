@@ -155,7 +155,13 @@ và requirement không có downstream acceptance evidence.
 Verification không còn là một raw command. Project profile khai báo ordered
 stage IDs. Plan và LLM chỉ được tham chiếu ID; registry đã code-review mới được
 map ID sang argv, cwd, environment allowlist và timeout. Không dùng shell string
-nội suy từ model. Ví dụ:
+nội suy từ model.
+
+Project profile giữ full-stack stage catalog để target manifest khai báo
+capability. `VerificationStagePolicy v1` của Chặng A chỉ kích hoạt smoke suite
+`typecheck -> unit`. Khi sang Chặng B phải phát hành policy/profile schema version
+mới để mở rộng active suite; không đổi ý nghĩa của policy đã snapshot cho run cũ.
+Full-stack suite đích khi đó là:
 
 ```text
 dependency_setup

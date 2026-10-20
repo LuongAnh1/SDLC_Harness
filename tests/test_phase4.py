@@ -717,6 +717,26 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(any(path.startswith("src/main/java/") for path in grouped))
         self.assertTrue(any(item["exists"] for item in packet["proposed_files"]))
 
+    def test_approve_implementation_plan_rejects_plan_changed_after_review(self) -> None:
+        phase3 = self._create_phase3_run()
+        structured_path = self.repo_root / str(
+            phase3["latest_artifacts"]["implementation_plan_structured"]
+        )
+        structured_path.write_text(
+            structured_path.read_text(encoding="utf-8") + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(HarnessError) as context:
+            CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+                run_id=str(phase3["run_id"])
+            )
+
+        self.assertEqual(
+            context.exception.error_code,
+            "implementation_plan_review_binding_invalid",
+        )
+
     def test_v2_developer_rejects_invented_requirement_id(self) -> None:
         path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
         packet = {
@@ -1962,6 +1982,22 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(result.status, "passed")
         self.assertIn("javac visible", result.stdout)
+
+    def test_verification_runner_rejects_profiled_packet_before_java_fallback(self) -> None:
+        work_packet = {
+            "verification_stage_ids": ["typecheck", "unit"],
+            "test_intents": [{"stage_id": "unit"}],
+        }
+
+        with patch("sdlc_harness.verification.runner.subprocess.run") as subprocess_run:
+            result = VerificationRunner(timeout_seconds=10).run(
+                target_path=self.target_repo,
+                work_packet=work_packet,
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("A3 stage executor", result.reason)
+        subprocess_run.assert_not_called()
 
     def test_verification_runner_executes_required_qa_test_class(self) -> None:
         if not shutil.which("javac") or not shutil.which("java"):

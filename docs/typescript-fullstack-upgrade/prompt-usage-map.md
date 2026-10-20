@@ -21,8 +21,8 @@ không sửa hàng loạt file chỉ vì chúng có nội dung Java.
 | Phase 1 | `agents/requirements/refiner_v2.py`, `clarification_v2.py` | File template được `read_text` | Active, độc lập target implementation | Giữ ngoài Chặng A trừ khi phát hiện target-language coupling mới |
 | Phase 2 | `agents/designer/designer.py` | File template được `read_text` | Active, chủ yếu design/PlantUML | Giữ language-neutral; component projection thuộc Chặng B |
 | Phase 2 | `agents/validator/traceability.py` | `traceability_class.txt`, `traceability_sequence.txt` | Active | Giữ invariant traceability; không gắn target language |
-| Phase 3 | `agents/developer/planner.py` | Prompt dựng inline | Active | A2.2a: invariant dùng chung + `LanguagePromptDirective` + `PlanningPathPolicy` |
-| Phase 3 | `agents/validator/plan_review.py` | Prompt dựng inline | Active | A2.2a: dùng cùng directive đã resolve từ run snapshot |
+| Phase 3 | `agents/developer/planner.py` | Prompt dựng inline | Active | A2.2a/A2.3: invariant + language/path directive; test intent chỉ tham chiếu profile stage ID |
+| Phase 3 | `agents/validator/plan_review.py` | Prompt dựng inline | Active | A2.2a/A2.3: cùng directive và fail-closed verification stage policy từ snapshot |
 | Phase 4 | `agents/developer/actor.py` | Prompt dựng inline | Active, còn Java-heavy | A2.2b sau khi A3 khóa editable roots/work packet |
 | Phase 4 | `agents/developer/execution.py` | Prompt tool-loop dựng inline | Active, còn Java assumptions | A2.2b/A3; phải dùng execution guard trước khi đổi output |
 | Phase 4 | `agents/validator/code_trace.py` | Prompt dựng inline | Active, còn Java path/symbol evidence | A3 cùng TypeScript AST contract |
@@ -56,3 +56,19 @@ workflow nếu chưa có contract/profile test tương ứng.
 - Fake Developer.plan nhận biết directive ID và sinh TypeScript paths.
 - Prompt Phase 4, QA và Code Trace vẫn được đánh dấu pending, không bị coi là đã
   chuyển đổi trong lát này.
+
+## Trạng thái A2.3
+
+- Project profile cung cấp stage catalog; Phase 3 không chứa mapping stage sang
+  lệnh thực thi.
+- `VerificationStagePolicy v1` khóa active stage list ở `typecheck -> unit` từ
+  frozen project snapshot. Full-stack catalog không đồng nghĩa mọi stage đang
+  bắt buộc; Chặng B phải phát hành policy/profile version mới để kích hoạt thêm.
+- Developer plan/repair và fake profiled dùng `test_intents[].stage_id`; prompt
+  cấm `command`, `argv`, `cwd`, `env` và timeout.
+- Validator so exact ordered stage list với frozen snapshot, chặn stage do LLM
+  tự tạo và mọi execution field trong profiled plan.
+- Profiled plan dùng `implementation_plan_structured_v2`; review bind SHA-256
+  của artifact và Phase 4 kiểm lại contract trước khi tạo work packet.
+- Markdown/Confluence hiển thị stage ID; artifact legacy command-based vẫn được
+  đọc bởi nhánh compatibility đã bị public Application Service retire.

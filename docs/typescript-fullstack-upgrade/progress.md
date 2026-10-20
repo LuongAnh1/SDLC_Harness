@@ -357,6 +357,50 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - HTTP API, state/checkpoint và artifact contract không thay đổi; raw
   verification command vẫn thuộc lát A2 tiếp theo.
 
+## 2026-10-20 - A2.3 Verification Stage ID
+
+- Baseline: commit `60584ca`; A2.2a đã chuyển prompt Phase 3 sang language
+  directive nhưng profiled plan vẫn nhận raw PowerShell command.
+- Thêm `VerificationStagePolicy` bất biến theo project-profile identity trong
+  snapshot; policy chỉ chứa ordered active stage IDs và không chứa dữ liệu thực thi.
+- Developer plan/repair, prompt và fake profiled phát `verification_stage_ids`
+  cùng `test_intents[].stage_id`; Markdown/Confluence hiển thị stage thay command.
+- Validator chặn exact-list mismatch, stage thiếu/không hợp lệ và mọi field
+  `command`/`argv`/`cwd`/`env`/timeout trong profiled plan.
+- Work packet chuyển tiếp stage IDs nhưng A2.3 chưa sửa Runner; mapping fixed
+  argv/cwd/env/timeout, execution và editable-root guard vẫn thuộc A3.
+- Nhánh command-based chỉ được giữ để đọc/test artifact legacy đã bị public
+  Application Service retire; không dùng cho run có project profile.
+- Verification: targeted profile/prompt/Phase 3 `31 passed`; Phase 3 và
+  implementation-plan contract `43 passed`; fast suite `182 passed, 1 skipped`;
+  full parallel cuối `473 passed, 1 skipped in 101.79s`; `compileall` thành công.
+- Một lượt full trung gian gặp Windows local HTTP connection abort tại một ca
+  Write API; ca đó pass khi chạy riêng và full rerun ngay sau đó pass toàn bộ.
+- Không có live run hoặc external sync; HTTP API/action contract không đổi.
+
+## 2026-10-20 - Pre-A3 Logic Review Và Hardening
+
+- Review A2.3 phát hiện profiled plan đã đổi `command` sang `stage_id` nhưng vẫn
+  dùng schema V1; đồng thời profile công bố full-stack stage list dù acceptance
+  Chặng A chỉ yêu cầu typecheck/unit.
+- Chuyển profiled plan sang `implementation_plan_structured_v2`; legacy plan giữ
+  V1. Developer work packet thêm `schema_version=developer_work_packet_profiled_v1`
+  riêng, không chiếm field `version` đang dùng cho revision/repair.
+- Review report bind SHA-256 và contract version của structured plan; Phase 4
+  chặn artifact bị đổi hoặc khác schema trước khi chuẩn bị work packet.
+- Giữ nguyên full-stack stage catalog của `typescript_fullstack_v1`; khóa active
+  `VerificationStagePolicy v1` của Chặng A còn `typecheck -> unit`. Chặng B phải
+  phát hành policy/profile version mới thay vì đổi ngầm contract của run cũ.
+- Legacy Java Verification Runner fail-closed khi nhận packet stage-only, tránh
+  chạy `scripts/test.ps1` nếu editable-root guard được mở trước stage executor A3.
+- Test symlink chỉ skip lỗi quyền/không hỗ trợ đã biết; OSError bất thường được
+  phát lại để không che lỗi setup hoặc regression.
+- Verification: contract/profile trọng điểm `37 passed`; Phase 3-4 `96 passed`;
+  profile/manifest/workspace `81 passed, 1 skipped`; full parallel 4 worker
+  `477 passed, 1 skipped in 70.47s`; `compileall` package và `git diff --check`
+  thành công. Skip duy nhất vẫn là Windows không có quyền tạo symlink; Node/JDK
+  conditional tests đều chạy và pass trong full suite.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

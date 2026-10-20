@@ -1,4 +1,9 @@
-"""Event workflow bền vững và context instrumentation cục bộ của execution."""
+"""Ghi event bền vững và truyền context quan sát cho một workflow run.
+
+EventStore lưu timeline máy đọc được; context helper cho phép tầng đang chạy
+phát event mà không truyền store qua mọi lời gọi. Event chỉ phục vụ quan sát và
+không thay thế state nghiệp vụ trong ``storage``.
+"""
 
 from .context import (
     EventDraft,

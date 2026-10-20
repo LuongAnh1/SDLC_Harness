@@ -16,6 +16,7 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import fake_completion
 from sdlc_harness.profiles import (
     build_planning_path_policy,
+    build_verification_stage_policy,
     build_profile_snapshot,
     get_language_profile,
     get_project_profile,
@@ -34,11 +35,12 @@ def _typescript_prompt_context():
     return (
         build_planning_path_policy(project=project, language=language),
         resolve_language_prompt_directive(language),
+        build_verification_stage_policy(project=project),
     )
 
 
 def _developer_prompt(*, repair_feedback: str = "") -> str:
-    policy, directive = _typescript_prompt_context()
+    policy, directive, verification_policy = _typescript_prompt_context()
     return _developer_plan_prompt(
         run_id="run_prompt_contract",
         source_ref="jira_issue:SDLC-1",
@@ -56,12 +58,13 @@ def _developer_prompt(*, repair_feedback: str = "") -> str:
         target_base_branch="main",
         planned_branch="feature/run_prompt_contract",
         target_files=[],
-        test_command="verification-stage:unit",
+        test_command="",
         repair_feedback=repair_feedback,
         previous_review={"ok": False} if repair_feedback else {},
         canonical_requirement=None,
         planning_policy=policy,
         prompt_directive=directive,
+        verification_policy=verification_policy,
     )
 
 
@@ -94,11 +97,17 @@ def test_active_typescript_developer_prompt_has_no_java_assumptions(repair_feedb
     assert "TypeScript" in prompt
     assert "apps/web/src/Example.tsx" in prompt
     assert "apps/web/src/Example.test.tsx" in prompt
+    assert '"policy_version": "verification_stage_policy_v1"' in prompt
+    assert '"stage_id": "unit"' in prompt
+    assert '"command"' not in prompt
+    assert "test_command" not in prompt
+    assert "powershell" not in lowered
+    assert "scripts/test.ps1" not in lowered
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 
 def test_active_typescript_validator_prompt_uses_same_directive() -> None:
-    policy, directive = _typescript_prompt_context()
+    policy, directive, verification_policy = _typescript_prompt_context()
     prompt = _llm_review_prompt(
         structured_plan={"planning_profile": policy.metadata(), "design_mappings": []},
         requirement_packet="Delete one approved record.",
@@ -109,11 +118,13 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
         rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v2"),
         planning_policy=policy,
         prompt_directive=directive,
+        verification_policy=verification_policy,
     )
     lowered = prompt.lower()
 
     assert '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     assert "TypeScript" in prompt
+    assert '"policy_version": "verification_stage_policy_v1"' in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 
@@ -125,3 +136,5 @@ def test_fake_developer_plan_follows_language_directive() -> None:
     assert ".java" not in encoded
     assert "src/main/java" not in encoded
     assert "src/test/java" not in encoded
+    assert "command" not in encoded
+    assert [item["stage_id"] for item in payload["test_intents"]] == ["unit", "typecheck"]

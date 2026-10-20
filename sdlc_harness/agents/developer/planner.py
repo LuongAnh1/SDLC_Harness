@@ -19,8 +19,12 @@ from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
     LanguagePromptDirective,
+    PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
+    VerificationStagePolicy,
+    build_verification_stage_policy,
     get_language_profile,
+    get_project_profile,
     resolve_language_prompt_directive,
 )
 
@@ -64,6 +68,7 @@ class DeveloperPlanAgent:
         canonical_requirement: RequirementModelV2 | None,
         planning_policy: PlanningPathPolicy | None,
         prompt_directive: LanguagePromptDirective | None,
+        verification_policy: VerificationStagePolicy | None,
     ) -> dict[str, object]:
         """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
 
@@ -92,6 +97,7 @@ class DeveloperPlanAgent:
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         raw = self.llm_client.complete(
             system=(
@@ -121,7 +127,7 @@ class DeveloperPlanAgent:
         target_base_branch: str,
         planned_branch: str,
         target_files: list[str],
-        test_command: str,
+        test_command: str = "",
         repo_context: dict[str, object] | None = None,
         repair_feedback: str = "",
         previous_review: dict[str, object] | None = None,
@@ -133,9 +139,14 @@ class DeveloperPlanAgent:
         requirement_artifact_refs: dict[str, str] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
+        verification_policy = _resolve_verification_policy(
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
         repo_context = repo_context or {}
         mappings = _design_mappings(
             class_graph=class_graph,
@@ -157,7 +168,11 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         mappings = _apply_design_adjustments(mappings, design_adjustments)
-        test_intents = _test_intents(mappings=mappings, test_command=test_command)
+        test_intents = _test_intents(
+            mappings=mappings,
+            test_command=test_command,
+            verification_policy=verification_policy,
+        )
         llm_payload = self._llm_plan(
             run_id=run_id,
             source_ref=source_ref,
@@ -181,6 +196,7 @@ class DeveloperPlanAgent:
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         mappings = _merge_mappings(
             mappings,
@@ -217,7 +233,11 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         structured = {
-            "version": "implementation_plan_structured_v1",
+            "version": (
+                PROFILED_IMPLEMENTATION_PLAN_VERSION
+                if verification_policy
+                else "implementation_plan_structured_v1"
+            ),
             "planning_mode": (
                 "llm_developer_with_codegraph_context_v1"
                 if self.llm_client and not llm_parse_error
@@ -242,6 +262,9 @@ class DeveloperPlanAgent:
                 "language_profile_id": "java_legacy_v1",
                 "policy_version": "legacy_java_planning_v1",
             },
+            "verification_stage_ids": (
+                list(verification_policy.stage_ids) if verification_policy else []
+            ),
             "inputs": {
                 "requirement_design_trace_version": requirement_design_trace.get("version", ""),
                 "class_graph_version": class_graph.get("version", ""),
@@ -307,7 +330,7 @@ class DeveloperPlanAgent:
         target_base_branch: str,
         planned_branch: str,
         target_files: list[str],
-        test_command: str,
+        test_command: str = "",
         repo_context: dict[str, object] | None = None,
         workspace_mode: str = "",
         workspace_ref: str = "",
@@ -317,9 +340,14 @@ class DeveloperPlanAgent:
         requirement_artifact_refs: dict[str, str] | None = None,
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
     ) -> ImplementationPlanDraft:
         """Apply a repair patch to the previous candidate without rebuilding it from scratch."""
 
+        verification_policy = _resolve_verification_policy(
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
         previous = dict(previous_draft.structured)
         previous_mappings = _dict_items(previous.get("design_mappings"))
         previous_tests = _dict_items(previous.get("test_intents"))
@@ -351,6 +379,7 @@ class DeveloperPlanAgent:
             canonical_requirement=canonical_requirement,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         mappings = _merge_mappings(
             previous_mappings,
@@ -414,6 +443,11 @@ class DeveloperPlanAgent:
             "design_mappings": mappings,
             "design_adjustments": adjustments,
             "requirement_coverage": requirement_coverage,
+            "verification_stage_ids": (
+                list(verification_policy.stage_ids)
+                if verification_policy
+                else _string_items(previous.get("verification_stage_ids"))
+            ),
             "test_intents": test_intents,
             "repair_iteration": iteration,
             "repair_source": "validator_review_plan",
@@ -461,6 +495,7 @@ def _developer_plan_prompt(
     canonical_requirement: RequirementModelV2 | None,
     planning_policy: PlanningPathPolicy | None,
     prompt_directive: LanguagePromptDirective | None,
+    verification_policy: VerificationStagePolicy | None = None,
 ) -> str:
     canonical_section = (
         "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
@@ -508,6 +543,56 @@ def _developer_plan_prompt(
         test_example = "src/test/java/com/sdlc/ExampleServiceTest.java"
         path_rules = "Proposed files must stay under src/main/java or src/test/java and end in .java."
         planning_context = {"policy_version": "legacy_java_planning_v1"}
+    if verification_policy:
+        if test_command.strip():
+            raise HarnessError(
+                "verification_stage_policy_mismatch",
+                "Profiled Phase 3 planning cannot receive a raw test command.",
+            )
+        if planning_policy and verification_policy.project_profile_id != planning_policy.project_profile_id:
+            raise HarnessError(
+                "verification_stage_policy_mismatch",
+                "Verification stages do not belong to the frozen planning project profile.",
+            )
+        stage_example = "unit" if "unit" in verification_policy.stage_ids else verification_policy.stage_ids[0]
+        test_intent_schema = json.dumps(
+            [
+                {
+                    "scope": "unit_or_service",
+                    "intent": "specific behavior to verify",
+                    "stage_id": stage_example,
+                }
+            ],
+            ensure_ascii=False,
+        )
+        verification_rules = (
+            "Every test_intents item must reference exactly one allowed stage_id. "
+            "Never emit command, shell, argv, cwd, env, or timeout fields."
+        )
+        verification_context = json.dumps(
+            verification_policy.prompt_context(),
+            ensure_ascii=False,
+            indent=2,
+        )
+        verification_run_context = ""
+    else:
+        test_intent_schema = json.dumps(
+            [
+                {
+                    "scope": "unit_or_service",
+                    "intent": "specific behavior to verify",
+                    "command": test_command,
+                }
+            ],
+            ensure_ascii=False,
+        )
+        verification_rules = "Legacy compatibility: preserve the supplied test command."
+        verification_context = json.dumps(
+            {"policy_version": "legacy_command_compatibility_v1"},
+            ensure_ascii=False,
+            indent=2,
+        )
+        verification_run_context = f"- legacy_test_command: {test_command}"
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -545,9 +630,7 @@ Return JSON only with this shape:
       "test_intent": "how to verify this element"
     }}
   ],
-  "test_intents": [
-    {{"scope": "unit_or_service", "intent": "specific behavior to verify", "command": "{test_command}"}}
-  ],
+  "test_intents": {test_intent_schema},
   "assumptions": [],
   "open_questions": []
 }}
@@ -561,6 +644,7 @@ Rules:
 - `proposed_files` must include every file named by implementation steps or design mappings.
 - Keep proposed files grouped by file, not by method.
 - `test_intents` must be max 6 focused tests.
+- {verification_rules}
 - Do not add behavior outside the approved requirement/design.
 - {path_rules}
 - Use CodeGraph evidence when naming existing classes/files.
@@ -578,13 +662,16 @@ Run context:
 - target_repo_remote: {target_repo_remote}
 - target_base_branch: {target_base_branch}
 - planned_branch: {planned_branch}
-- test_command: {test_command}
+{verification_run_context}
 
 Target files:
 {json.dumps(target_files, ensure_ascii=False, indent=2)}
 
 Immutable planning path policy:
 {json.dumps(planning_context, ensure_ascii=False, indent=2)}
+
+Immutable verification stage policy:
+{verification_context}
 
 {canonical_section}
 
@@ -653,6 +740,29 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
         "assumptions": _string_items(parsed.get("assumptions")),
         "open_questions": _string_items(parsed.get("open_questions")),
     }
+
+
+def _resolve_verification_policy(
+    *,
+    planning_policy: PlanningPathPolicy | None,
+    verification_policy: VerificationStagePolicy | None,
+) -> VerificationStagePolicy | None:
+    """Giữ direct-call compatibility nhưng không cho profiled plan rơi về command."""
+
+    if planning_policy and verification_policy is None:
+        verification_policy = build_verification_stage_policy(
+            project=get_project_profile(planning_policy.project_profile_id)
+        )
+    if (
+        planning_policy
+        and verification_policy
+        and verification_policy.project_profile_id != planning_policy.project_profile_id
+    ):
+        raise HarnessError(
+            "verification_stage_policy_mismatch",
+            "Verification stages do not belong to the planning project profile.",
+        )
+    return verification_policy
 
 
 def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, object]:
@@ -752,7 +862,11 @@ def _implementation_steps_from_mappings(
         {
             "order": 2,
             "title": "Run verification",
-            "description": "Add or update tests for the mapped behavior, then run the configured target repo test command.",
+            "description": (
+                "Add or update tests for the mapped behavior, then run the profile-owned verification stages."
+                if planning_policy
+                else "Add or update tests for the mapped behavior, then run the configured target repo test command."
+            ),
             "files": [
                 str(item.get("path") or "")
                 for item in files
@@ -1357,13 +1471,40 @@ def _design_mappings(
     return mappings
 
 
-def _test_intents(*, mappings: list[dict[str, object]], test_command: str) -> list[dict[str, str]]:
+def _test_intents(
+    *,
+    mappings: list[dict[str, object]],
+    test_command: str,
+    verification_policy: VerificationStagePolicy | None = None,
+) -> list[dict[str, str]]:
     methods = [
         str(item.get("design_element_name") or "")
         for item in mappings
         if item.get("design_element_type") == "method"
     ]
     primary_methods = ", ".join(methods[:5]) if methods else "primary use-case behavior"
+    if verification_policy:
+        primary_stage = "unit" if "unit" in verification_policy.stage_ids else verification_policy.stage_ids[0]
+        regression_stage = (
+            "typecheck"
+            if "typecheck" in verification_policy.stage_ids
+            else next(
+                (stage_id for stage_id in verification_policy.stage_ids if stage_id != primary_stage),
+                primary_stage,
+            )
+        )
+        return [
+            {
+                "scope": "unit_or_service",
+                "intent": f"Validate {primary_methods}.",
+                "stage_id": primary_stage,
+            },
+            {
+                "scope": "regression",
+                "intent": "Run profile-owned static and regression verification after Phase 4 changes.",
+                "stage_id": regression_stage,
+            },
+        ]
     return [
         {
             "scope": "unit_or_service",
@@ -1521,15 +1662,21 @@ def _markdown_plan(
     mappings = _dict_items(structured.get("design_mappings"))
     requirement_coverage = _dict_items(structured.get("requirement_coverage"))
     test_intents = _dict_items(structured.get("test_intents"))
+    verification_stage_ids = _string_items(structured.get("verification_stage_ids"))
     implementation_steps = _dict_items(structured.get("implementation_steps"))
     proposed_files = _dict_items(structured.get("proposed_files"))
     repo_evidence = [str(item) for item in structured.get("repo_evidence", []) if str(item).strip()]
     assumptions = [str(item) for item in structured.get("assumptions", []) if str(item).strip()]
     open_questions = [str(item) for item in structured.get("open_questions", []) if str(item).strip()]
     out_of_scope = [str(item) for item in structured.get("out_of_scope", []) if str(item).strip()]
+    plan_label = (
+        "V2"
+        if structured.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
+        else "V1"
+    )
 
     lines = [
-        "# Implementation Plan V1",
+        f"# Implementation Plan {plan_label}",
         "",
         "## Run Context",
         "",
@@ -1646,12 +1793,22 @@ def _markdown_plan(
     lines.extend(
         [
             "",
-            "## Test Intent",
+            "## Verification Plan" if verification_stage_ids else "## Test Intent",
             "",
         ]
     )
+    if verification_stage_ids:
+        lines.append(
+            "- Ordered profile stages: "
+            + ", ".join(f"`{stage_id}`" for stage_id in verification_stage_ids)
+            + "."
+        )
     for item in test_intents:
-        lines.append(f"- {item.get('scope')}: {item.get('intent')} Run `{item.get('command')}`.")
+        stage_id = str(item.get("stage_id") or "").strip()
+        if stage_id:
+            lines.append(f"- {item.get('scope')}: {item.get('intent')} Stage `{stage_id}`.")
+        else:
+            lines.append(f"- {item.get('scope')}: {item.get('intent')} Run `{item.get('command')}`.")
 
     lines.extend(["", "## Assumptions / Open Questions", ""])
     for item in assumptions:

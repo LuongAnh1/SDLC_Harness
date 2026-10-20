@@ -15,6 +15,7 @@ from sdlc_harness.profiles import (
     ProfileSnapshotV1,
     ProjectProfile,
     build_profile_snapshot,
+    build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
     list_project_profile_ids,
@@ -79,6 +80,10 @@ class ProfileRegistryTests(unittest.TestCase):
             ),
         )
         self.assertEqual(project.verification_stage_ids[-1], "cleanup")
+        self.assertEqual(
+            build_verification_stage_policy(project=project).stage_ids,
+            ("typecheck", "unit"),
+        )
         self.assertIn(".sdlc/target-profile.json", project.required_paths)
         self.assertIn("package-lock.json", project.protected_paths)
 

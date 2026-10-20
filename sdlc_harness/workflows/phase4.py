@@ -65,6 +65,11 @@ from ..artifacts.writers import (
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
+from ..profiles import (
+    planning_path_policy_from_snapshot,
+    read_profile_snapshot,
+    verification_stage_policy_from_snapshot,
+)
 from ..repo_context import CodeGraphContextProvider
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync.github import (
@@ -298,11 +303,15 @@ class PhaseFourWorkflow:
         ):
             _required_phase4_artifact(artifact_paths, key, run_id=run_id)
 
-        structured_plan = _read_json_artifact(
-            self._existing_artifact_path(structured_plan_path, run_id=run_id),
+        structured_plan_file = self._existing_artifact_path(structured_plan_path, run_id=run_id)
+        structured_plan = _read_json_artifact(structured_plan_file, run_id=run_id)
+        review = _read_json_artifact(self._existing_artifact_path(review_path, run_id=run_id), run_id=run_id)
+        _require_implementation_plan_review_binding(
+            structured_plan_path=structured_plan_file,
+            structured_plan=structured_plan,
+            review=review,
             run_id=run_id,
         )
-        review = _read_json_artifact(self._existing_artifact_path(review_path, run_id=run_id), run_id=run_id)
         if review.get("ok") is not True:
             raise HarnessError(
                 "implementation_plan_review_not_passed",
@@ -359,6 +368,17 @@ class PhaseFourWorkflow:
         try:
             workspace = self.workspace_manager.resolve(run_id)
             target_info = self._workspace_target_info(run_id=run_id, allow_dirty=False)
+            snapshot = read_profile_snapshot(state, run_id=run_id)
+            planning_policy = (
+                planning_path_policy_from_snapshot(snapshot, run_id=run_id)
+                if snapshot
+                else None
+            )
+            verification_policy = (
+                verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
+                if snapshot
+                else None
+            )
             packet = build_developer_work_packet(
                 run_id=run_id,
                 source_ref=str(state.get("source_ref") or ""),
@@ -379,6 +399,8 @@ class PhaseFourWorkflow:
                     **effective_design_contract,
                     "artifact_path": effective_design_contract_path,
                 },
+                planning_policy=planning_policy,
+                verification_policy=verification_policy,
             )
         except HarnessError as exc:
             state.update(
@@ -3063,6 +3085,27 @@ def _dirty_status_without_codegraph(status: str) -> str:
             continue
         lines.append(line)
     return "\n".join(lines).strip()
+
+
+def _require_implementation_plan_review_binding(
+    *,
+    structured_plan_path: Path,
+    structured_plan: dict[str, object],
+    review: dict[str, object],
+    run_id: str,
+) -> None:
+    """Chặn plan bị đổi hoặc khác schema sau lần Validator đã review."""
+
+    expected_version = str(review.get("implementation_plan_contract_version") or "")
+    expected_digest = str(review.get("implementation_plan_sha256") or "")
+    actual_version = str(structured_plan.get("version") or "")
+    actual_digest = "sha256:" + hashlib.sha256(structured_plan_path.read_bytes()).hexdigest()
+    if not expected_version or expected_version != actual_version or expected_digest != actual_digest:
+        raise HarnessError(
+            "implementation_plan_review_binding_invalid",
+            "Implementation plan content/version no longer matches its Validator review.",
+            run_id=run_id,
+        )
 
 
 def _require_work_packet_workspace(

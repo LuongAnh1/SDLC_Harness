@@ -11,6 +11,7 @@ from __future__ import annotations
 # Smart Developer V1 đọc CodeGraph từ snapshot worktree riêng của run. Phase 3
 # đã tạo branch/worktree nhưng chỉ đọc context để lập plan, chưa sửa code/commit/PR.
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -26,6 +27,7 @@ from ..profiles import (
     planning_path_policy_from_snapshot,
     prompt_directive_from_snapshot,
     read_profile_snapshot,
+    verification_stage_policy_from_snapshot,
 )
 from ..repo_context import CodeGraphContextProvider, discover_profile_source_files
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -39,6 +41,7 @@ ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
+LEGACY_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 
 
 class PhaseThreeWorkflow:
@@ -117,7 +120,10 @@ class PhaseThreeWorkflow:
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
-        planning_policy, prompt_directive = _phase3_profile_context(state=state, run_id=run_id)
+        planning_policy, prompt_directive, verification_policy = _phase3_profile_context(
+            state=state,
+            run_id=run_id,
+        )
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
         repo_context = self.repo_context_provider.collect(
@@ -142,7 +148,7 @@ class PhaseThreeWorkflow:
             target_base_branch=self.settings.target_base_branch,
             planned_branch=workspace.branch,
             target_files=target_files,
-            test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+            test_command="" if verification_policy else LEGACY_TEST_COMMAND,
             repo_context=repo_context,
             workspace_mode=workspace.workspace_mode,
             workspace_ref=artifact_paths["run_workspace"],
@@ -152,6 +158,7 @@ class PhaseThreeWorkflow:
             requirement_artifact_refs=frozen_requirement.approved_artifacts,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
         )
         start_version = _next_implementation_plan_version(self.store.run_dir(run_id) / "artifacts")
         versions = list(
@@ -193,6 +200,7 @@ class PhaseThreeWorkflow:
                 canonical_requirement=frozen_requirement.canonical_model.to_dict(),
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -201,8 +209,14 @@ class PhaseThreeWorkflow:
                 structured_plan=plan_draft.structured,
                 version=version,
             )
+            review_payload = _bind_plan_review_to_structured_plan(
+                store=self.store,
+                structured_plan_path=plan_paths["implementation_plan_structured"],
+                structured_plan=plan_draft.structured,
+                review_report=review.to_dict(),
+            )
             review_report_path = write_phase3_plan_review_report(
-                store=self.store, run_id=run_id, review_report=review.to_dict(), version=version
+                store=self.store, run_id=run_id, review_report=review_payload, version=version
             )
             version_label = f"v{version}"
             if version_label not in versions:
@@ -215,7 +229,7 @@ class PhaseThreeWorkflow:
             quality_reports = {
                 **quality_reports,
                 "implementation_plan_review": {
-                    **review.to_dict(),
+                    **review_payload,
                     "versions": versions,
                     "report": review_report_path,
                 },
@@ -248,7 +262,7 @@ class PhaseThreeWorkflow:
                 target_base_branch=self.settings.target_base_branch,
                 planned_branch=workspace.branch,
                 target_files=target_files,
-                test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                test_command="" if verification_policy else LEGACY_TEST_COMMAND,
                 repo_context=repo_context,
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
@@ -258,6 +272,7 @@ class PhaseThreeWorkflow:
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
             )
         if review is None or not review.ok:
             error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
@@ -340,7 +355,10 @@ class PhaseThreeWorkflow:
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
-        planning_policy, prompt_directive = _phase3_profile_context(state=state, run_id=run_id)
+        planning_policy, prompt_directive, verification_policy = _phase3_profile_context(
+            state=state,
+            run_id=run_id,
+        )
         self.repo_context_provider.prepare_index(target_path)
 
         state.update(
@@ -393,7 +411,7 @@ class PhaseThreeWorkflow:
                 target_base_branch=self.settings.target_base_branch,
                 planned_branch=workspace.branch,
                 target_files=target_files,
-                test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                test_command="" if verification_policy else LEGACY_TEST_COMMAND,
                 repo_context=repo_context,
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
@@ -403,6 +421,7 @@ class PhaseThreeWorkflow:
                 requirement_artifact_refs=frozen_requirement.approved_artifacts,
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
             )
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -457,6 +476,7 @@ class PhaseThreeWorkflow:
                 canonical_requirement=frozen_requirement.canonical_model.to_dict(),
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -465,10 +485,16 @@ class PhaseThreeWorkflow:
                 structured_plan=plan_draft.structured,
                 version=version,
             )
+            review_payload = _bind_plan_review_to_structured_plan(
+                store=self.store,
+                structured_plan_path=plan_paths["implementation_plan_structured"],
+                structured_plan=plan_draft.structured,
+                review_report=review.to_dict(),
+            )
             review_report_path = write_phase3_plan_review_report(
                 store=self.store,
                 run_id=run_id,
-                review_report=review.to_dict(),
+                review_report=review_payload,
                 version=version,
             )
             versions.append(f"v{version}")
@@ -480,7 +506,7 @@ class PhaseThreeWorkflow:
             quality_reports = {
                 **_dict_value(state.get("quality_reports")),
                 "implementation_plan_review": {
-                    **review.to_dict(),
+                    **review_payload,
                     "versions": versions,
                     "report": review_report_path,
                 },
@@ -521,7 +547,7 @@ class PhaseThreeWorkflow:
                     target_base_branch=self.settings.target_base_branch,
                     planned_branch=workspace.branch,
                     target_files=target_files,
-                    test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
+                    test_command="" if verification_policy else LEGACY_TEST_COMMAND,
                     repo_context=repo_context,
                     workspace_mode=workspace.workspace_mode,
                     workspace_ref=artifact_paths["run_workspace"],
@@ -531,6 +557,7 @@ class PhaseThreeWorkflow:
                     requirement_artifact_refs=frozen_requirement.approved_artifacts,
                     planning_policy=planning_policy,
                     prompt_directive=prompt_directive,
+                    verification_policy=verification_policy,
                 )
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -765,10 +792,11 @@ def _phase3_profile_context(*, state: dict[str, object], run_id: str):
     if snapshot is None:
         # Compatibility nội bộ cho direct workflow tests trong A2-A3. Public
         # Application Service đã hard-retire execution của run legacy.
-        return None, None
+        return None, None, None
     return (
         planning_path_policy_from_snapshot(snapshot, run_id=run_id),
         prompt_directive_from_snapshot(snapshot, run_id=run_id),
+        verification_stage_policy_from_snapshot(snapshot, run_id=run_id),
     )
 
 
@@ -786,10 +814,31 @@ def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[st
         "implementation_steps": structured_plan.get("implementation_steps", []),
         "proposed_files": structured_plan.get("proposed_files", []),
         "design_mappings": structured_plan.get("design_mappings", []),
+        "verification_stage_ids": structured_plan.get("verification_stage_ids", []),
         "test_intents": structured_plan.get("test_intents", []),
         "issues": issues,
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _bind_plan_review_to_structured_plan(
+    *,
+    store: RuntimeStore,
+    structured_plan_path: str,
+    structured_plan: dict[str, object],
+    review_report: dict[str, object],
+) -> dict[str, object]:
+    """Bind review với đúng bytes/version của structured plan đã được ghi."""
+
+    path = Path(structured_plan_path)
+    if not path.is_absolute():
+        path = store.repo_root / path
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    return {
+        **review_report,
+        "implementation_plan_contract_version": str(structured_plan.get("version") or ""),
+        "implementation_plan_sha256": f"sha256:{digest}",
+    }
 
 
 def _required_artifact(artifact_paths: dict[str, str], key: str, *, run_id: str) -> str:

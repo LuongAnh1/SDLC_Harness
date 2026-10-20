@@ -58,7 +58,10 @@ manifest và registry phải fail closed trước khi LLM hoặc subprocess ch�
 Các artifact mới dùng version riêng, dự kiến:
 
 - `design_bundle_v1` cho component/UI/API/data projections;
-- `implementation_plan_structured_v2` cho work item/component/dependency;
+- `implementation_plan_structured_v2` cho profiled plan chỉ tham chiếu stage ID;
+- version implementation-plan kế tiếp cho work item/component/dependency Chặng B;
+- `developer_work_packet_profiled_v1` trong field `schema_version`, tách khỏi
+  field `version` đang biểu diễn revision của packet;
 - `verification_report_v2` cho ordered stage results;
 - `requirement_implementation_trace_v2` cho cross-layer trace;
 - `qa_generated_tests_v2` và `qa_test_report_v2` cho browser acceptance.

@@ -1,4 +1,9 @@
-﻿"""Các bộ ghi artifact cho đầu ra workflow."""
+﻿"""Đọc, ghi và render các artifact có contract của workflow.
+
+Package quản lý định dạng lưu trữ cho requirement, source snapshot, work packet
+và report Phase 4. Nó không quyết định khi nào artifact được tạo hoặc duyệt;
+workflow sở hữu vòng đời, còn ``storage`` sở hữu state/runtime layout.
+"""
 
 from .requirement_v2 import (
     read_requirement_model_v2,

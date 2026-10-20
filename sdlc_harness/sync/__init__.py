@@ -1,4 +1,9 @@
-﻿"""Các adapter đồng bộ với công cụ cộng tác."""
+﻿"""Đồng bộ checkpoint và kết quả Harness sang công cụ cộng tác.
+
+Runner chọn mock/real adapter; Atlassian cập nhật Jira/Confluence và GitHub xử
+lý trạng thái code review theo contract. Package chỉ phản chiếu kết quả đã có,
+không tạo requirement, design, code hay quyết định checkpoint được duyệt.
+"""
 
 from .atlassian import (
     real_sync_code_review_checkpoint,

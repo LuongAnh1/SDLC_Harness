@@ -7,6 +7,7 @@ from sdlc_harness.agents.validator import ImplementationPlanValidator
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
     build_planning_path_policy,
+    build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
 )
@@ -16,6 +17,12 @@ def _policy():
     project = get_project_profile("typescript_fullstack_v1")
     language = get_language_profile(project.language_profile_id)
     return build_planning_path_policy(project=project, language=language)
+
+
+def _verification_policy():
+    return build_verification_stage_policy(
+        project=get_project_profile("typescript_fullstack_v1")
+    )
 
 
 def _graphs():
@@ -194,6 +201,7 @@ def test_policy_accepts_only_profile_owned_file_kinds():
 def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_paths():
     class_graph, sequence_graph = _graphs()
     policy = _policy()
+    verification_policy = _verification_policy()
     draft = DeveloperPlanAgent(_HostilePlanningLlm()).plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
@@ -208,11 +216,12 @@ def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_path
         target_base_branch="main",
         planned_branch="feature/profiled",
         target_files=[],
-        test_command="legacy command retained until the verification-stage slice",
         planning_policy=policy,
     )
 
     assert draft.structured["planning_profile"] == policy.metadata()
+    assert draft.structured["verification_stage_ids"] == list(verification_policy.stage_ids)
+    assert all("command" not in item for item in draft.structured["test_intents"])
     mappings = draft.structured["design_mappings"]
     assert not any(".java" in str(item["planned_code_target"]) for item in mappings)
     service = next(item for item in mappings if item["design_element_id"] == "class:DeleteHeritageService")
@@ -235,6 +244,7 @@ def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_path
 def test_profiled_validator_rejects_wrong_profile_path_and_component():
     class_graph, sequence_graph = _graphs()
     policy = _policy()
+    verification_policy = _verification_policy()
     draft = DeveloperPlanAgent().plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
@@ -249,8 +259,8 @@ def test_profiled_validator_rejects_wrong_profile_path_and_component():
         target_base_branch="main",
         planned_branch="feature/profiled",
         target_files=[],
-        test_command="test",
         planning_policy=policy,
+        verification_policy=verification_policy,
     )
     tampered = dict(draft.structured)
     tampered["design_mappings"] = [dict(item) for item in draft.structured["design_mappings"]]
@@ -265,6 +275,7 @@ def test_profiled_validator_rejects_wrong_profile_path_and_component():
         sequence_graph=sequence_graph,
         requirement_contract_version="v1",
         planning_policy=policy,
+        verification_policy=verification_policy,
     )
 
     assert not review.ok
@@ -275,6 +286,7 @@ def test_profiled_validator_rejects_wrong_profile_path_and_component():
 def test_profiled_validator_accepts_prisma_and_e2e_files_with_correct_owners():
     class_graph, sequence_graph = _graphs()
     policy = _policy()
+    verification_policy = _verification_policy()
     draft = DeveloperPlanAgent().plan(
         run_id="run_profiled",
         source_ref="fixture:profiled",
@@ -289,8 +301,8 @@ def test_profiled_validator_accepts_prisma_and_e2e_files_with_correct_owners():
         target_base_branch="main",
         planned_branch="feature/profiled",
         target_files=[],
-        test_command="test",
         planning_policy=policy,
+        verification_policy=verification_policy,
     )
     structured = dict(draft.structured)
     structured["proposed_files"] = [
@@ -321,6 +333,67 @@ def test_profiled_validator_accepts_prisma_and_e2e_files_with_correct_owners():
         sequence_graph=sequence_graph,
         requirement_contract_version="v1",
         planning_policy=policy,
+        verification_policy=verification_policy,
     )
 
     assert review.ok, review.issues
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_issue"),
+    (
+        ("raw_command", "must not contain execution field"),
+        ("missing_stage", "missing stage_id"),
+        ("unknown_stage", "unsupported verification stage"),
+        ("reordered_stages", "do not match the frozen project profile"),
+        ("wrong_version", "version must be"),
+    ),
+)
+def test_profiled_validator_fails_closed_for_invalid_verification_contract(
+    mutation: str,
+    expected_issue: str,
+):
+    class_graph, sequence_graph = _graphs()
+    policy = _policy()
+    verification_policy = _verification_policy()
+    draft = DeveloperPlanAgent().plan(
+        run_id="run_profiled",
+        source_ref="fixture:profiled",
+        issue_key="SDLC-1",
+        requirement_packet="requirement",
+        design_artifact="design",
+        requirement_design_trace={},
+        class_graph=class_graph,
+        sequence_graph=sequence_graph,
+        target_repo_path=".",
+        target_repo_remote="remote",
+        target_base_branch="main",
+        planned_branch="feature/profiled",
+        target_files=[],
+        planning_policy=policy,
+        verification_policy=verification_policy,
+    )
+    structured = json.loads(json.dumps(draft.structured))
+    if mutation == "raw_command":
+        structured["test_intents"][0]["command"] = "npm test"
+    elif mutation == "missing_stage":
+        structured["test_intents"][0].pop("stage_id")
+    elif mutation == "unknown_stage":
+        structured["test_intents"][0]["stage_id"] = "llm_invented_stage"
+    elif mutation == "reordered_stages":
+        structured["verification_stage_ids"].reverse()
+    else:
+        structured["version"] = "implementation_plan_structured_v1"
+
+    review = ImplementationPlanValidator().review_rules(
+        structured_plan=structured,
+        requirement_design_trace={},
+        class_graph=class_graph,
+        sequence_graph=sequence_graph,
+        requirement_contract_version="v1",
+        planning_policy=policy,
+        verification_policy=verification_policy,
+    )
+
+    assert not review.ok
+    assert any(expected_issue in issue for issue in review.executability_issues)

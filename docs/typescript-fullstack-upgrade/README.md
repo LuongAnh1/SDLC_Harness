@@ -44,7 +44,7 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1, A2.1a/A2.1b và A2.2a đã hoàn tất, các checklist còn lại giữ theo
+  toàn bộ A1, A2.1a/A2.1b, A2.2a và A2.3 đã hoàn tất, các checklist còn lại giữ theo
   trạng thái thực tế.
 - [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
   reference-only và owner của từng lát migration.
@@ -68,3 +68,7 @@ Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19
 profile contract, selector, immutable run snapshot, target manifest/workspace
 binding và legacy retirement. Run mới bắt buộc chọn profile; target repo mới
 chưa được tạo và chưa chạy migration hay live workflow cho hướng TypeScript.
+Phase 3 profiled hiện phát hành `implementation_plan_structured_v2`, bind review
+với SHA-256 của artifact và chỉ kích hoạt smoke suite `typecheck -> unit`.
+Verification Runner đã fail-closed với packet stage-only nhưng chưa ánh xạ hoặc
+thực thi các stage này cho tới lát A3.

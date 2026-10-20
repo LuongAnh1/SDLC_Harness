@@ -1,4 +1,9 @@
-"""Các agent Requirement cho Phase 1."""
+"""Chuẩn hóa, làm rõ và kiểm tra requirement trong Phase 1.
+
+Package cung cấp model V2, refiner, clarification, validation, projection và
+renderer. Nó biến source snapshot thành requirement có cấu trúc; việc nạp Jira
+hay fixture thuộc ``sources``, còn checkpoint và chuyển phase thuộc workflow.
+"""
 
 from .model_v2 import (
     DecisionStatus,
