@@ -10,6 +10,9 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
+from ...core.errors import HarnessError
+from ...profiles import get_language_profile
+
 
 _SYMBOL = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 _DIAGNOSTIC_SYMBOL = re.compile(
@@ -69,10 +72,11 @@ def build_repair_closure(
         if Path(path).stem in symbols:
             reasons.setdefault(path, set()).add("compiler_symbol")
 
+    source_suffixes = _repair_source_suffixes(work_packet=work_packet, allowed=allowed)
     if target_path is not None:
         for path in allowed:
             source = target_path / path
-            if not source.is_file() or source.suffix.casefold() != ".java":
+            if not source.is_file() or not _has_source_suffix(source, source_suffixes):
                 continue
             text = source.read_text(encoding="utf-8", errors="replace")
             matched = [symbol for symbol in symbols if _contains_symbol(text, symbol)]
@@ -124,6 +128,40 @@ def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
             if str(value).strip()
         )
     )
+
+
+def _repair_source_suffixes(
+    *,
+    work_packet: dict[str, object],
+    allowed: list[str],
+) -> tuple[str, ...]:
+    """Lấy suffix source từ profile đã khóa; packet legacy thì suy từ allowlist."""
+
+    output = _dict_value(work_packet.get("output_contract"))
+    path_policy = _dict_value(output.get("path_policy"))
+    language_profile_id = str(path_policy.get("language_profile_id") or "").strip()
+    if language_profile_id:
+        try:
+            language = get_language_profile(language_profile_id)
+        except HarnessError:
+            # Bước kiểm tra packet chính sẽ báo metadata profile sai sau đó.
+            # Việc dựng gợi ý không được thay thế mã lỗi chuẩn của bước kiểm tra ấy.
+            pass
+        else:
+            return tuple(dict.fromkeys(suffix.casefold() for suffix in language.source_suffixes))
+
+    return tuple(
+        dict.fromkeys(
+            suffix
+            for path in allowed
+            if (suffix := Path(path).suffix.casefold())
+        )
+    )
+
+
+def _has_source_suffix(path: Path, source_suffixes: tuple[str, ...]) -> bool:
+    name = path.name.casefold()
+    return any(name.endswith(suffix) for suffix in source_suffixes)
 
 
 def _current_repair_evidence(feedback: dict[str, object]) -> dict[str, object]:

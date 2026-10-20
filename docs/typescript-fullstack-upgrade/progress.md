@@ -657,6 +657,68 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   implementation repair và QA repair trong một lát control-flow riêng; sau đó
   mới cân nhắc đổi execution mode mặc định.
 
+## 2026-10-20 - Kế Hoạch A3.5 Phase 4 Tool-loop Integration
+
+- Baseline Harness `83519e8`; A2.2b đã được commit riêng trước khi thay đổi
+  control-flow. Target local giữ nguyên `111b72c` và không thuộc phạm vi sửa đổi.
+- Nối `DeveloperToolLoopExecutor` vào initial act, implementation repair và QA
+  repair khi `SDLC_DEVELOPER_EXECUTION_MODE=tool_loop`; `legacy` vẫn là mặc định.
+- Bind executor/mode/iteration vào `developer_execution` để retry dùng lại đúng
+  durable session dù config đổi. Manifest/journal là evidence của tool-loop;
+  batch legacy giữ raw-response và atomic apply hiện tại.
+- Retriable failure phải pause và giữ iteration; non-retriable failure phải
+  block. Tool-loop repair no-change hợp lệ vẫn phải chạy lại Verification, Code
+  Trace và QA như đường repair hiện tại.
+- Acceptance gồm targeted tool-loop/Phase 4/API regression, full parallel
+  pytest, compileall, Node helper syntax check và git diff check. Không live run,
+  external sync, remote, push hoặc đổi default mode trong lát này.
+
+## 2026-10-21 - A3.5 Phase 4 Tool-loop Integration
+
+- Baseline A2.2b đã được tách thành commit `83519e8`; A3.5 chưa commit để review.
+- `PhaseFourWorkflow` dùng tool-loop cho initial act, implementation repair và
+  QA repair khi flag là `tool_loop`; default `legacy` và batch path giữ nguyên.
+- `developer_execution_state_v1` bind executor/mode/iteration/artifact version.
+  Pause/resume giữ nguyên durable session và frozen work packet dù config đổi.
+- Tool-loop ghi trực tiếp worktree, không qua `_apply_developer_changes`; report
+  dùng manifest/result và ghi before/after SHA-256. Manifest nâng V7 để hash-bind
+  QA-owned dirty baseline mà không thêm các path đó vào Developer write scope.
+- Retriable/non-retriable failure lần lượt pause/block; fake execution dùng đúng
+  act/repair contract, cho phép repair subset/no-change như real executor.
+- Verification: A3.5 targeted `26 passed`; Phase 4/tool-loop/API/application
+  regression `152 passed`; full parallel `546 passed, 1 skipped in 84.60s`;
+  compileall, hai Node `--check` và `git diff --check` pass. Skip duy nhất vẫn là
+  symlink escape thiếu quyền trên Windows.
+- Không chạy live workflow, external sync, remote/push, không sửa target repo và
+  chưa đổi `SDLC_DEVELOPER_EXECUTION_MODE` mặc định.
+- Review sau triển khai phát hiện repair-context chỉ quét symbol reference trong
+  `.java`. Bộ lọc này đã được thay bằng `source_suffixes` của language profile;
+  packet legacy suy suffix từ approved paths. Diagnostic paths tiếp tục chỉ là
+  hint, Developer vẫn có thể sửa mọi related path thuộc `allowed_paths`.
+- Verification sau review: Developer/profile regression `39 passed`; full
+  parallel `547 passed, 1 skipped in 59.53s`. Skip vẫn là ca symlink Windows đã
+  biết; không có live workflow, external sync hoặc thay đổi target repo.
+
+## 2026-10-21 - A3.5 Logic-Audit Hardening
+
+- Rà lại chuỗi state transition từ Developer act/repair qua Verification, Code
+  Trace và QA; không mở lại hạng mục source context của implementation plan.
+- Lỗi `HarnessError` phát sinh khi tool-loop dựng/kiểm tra contract nay giữ nguyên
+  error code và được đổi thành non-retriable `DeveloperExecutionError`; workflow
+  ghi `blocked` thay vì `implementation_paused` rồi retry vô hạn.
+- Last-resort recovery của implementation repair chỉ pause durable tool-loop.
+  Batch legacy gặp lỗi nội bộ sẽ block và không tự bind/chuyển executor sang
+  tool-loop giữa execution session.
+- Code Trace failure sau QA repair nay phân loại giống initial/revalidate path:
+  missing link do Developer sở hữu và còn lượt sẽ ghi implementation feedback,
+  chuyển `implementation_repair_needed`; hết lượt hoặc lỗi không repairable mới
+  block với action policy tương ứng.
+- Bổ sung ba regression test cho contract failure, legacy executor preservation
+  và QA-repair -> implementation-repair routing. Targeted Phase 4/tool-loop:
+  `90 passed`; full parallel `550 passed, 1 skipped in 62.92s`. Skip duy nhất vẫn
+  là ca symlink Windows thiếu quyền đã biết; `compileall` và `git diff --check`
+  đều pass.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

@@ -164,7 +164,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
         repair_iteration=0,
     )
 
-    assert manifest["version"] == "developer_execution_manifest_v6"
+    assert manifest["version"] == "developer_execution_manifest_v7"
     assert manifest["items"][0]["paths"] == [SOURCE_PATH, TEST_PATH]
     source = manifest["items"][0]["files"][0]
     assert source["approved_signatures"][0]["qualified_name"] == "HealthService.check"

@@ -707,6 +707,32 @@ def _code_change_report_markdown(report: dict[str, object]) -> str:
             )
             + " |"
         )
+    if report.get("execution_mode") == "tool_loop":
+        lines.extend(
+            [
+                "",
+                "## Developer Execution Evidence",
+                "",
+                "- Execution mode: `tool_loop`",
+                f"- Manifest: `{report.get('developer_execution_manifest', '')}`",
+                f"- Journal: `{report.get('developer_execution_journal', '')}`",
+                "",
+                "| File | Before SHA-256 | After SHA-256 |",
+                "| --- | --- | --- |",
+            ]
+        )
+        for item in files:
+            lines.append(
+                "| "
+                + " | ".join(
+                    [
+                        _table_cell(f"`{item.get('path') or ''}`"),
+                        _table_cell(f"`{item.get('before_sha256') or ''}`"),
+                        _table_cell(f"`{item.get('after_sha256') or ''}`"),
+                    ]
+                )
+                + " |"
+            )
     if report.get("repair_iteration"):
         lines.extend(
             [

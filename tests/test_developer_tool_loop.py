@@ -18,6 +18,7 @@ from sdlc_harness.agents.developer.execution import (
     _selected_repair_paths,
     repair_scope_mismatch_retry_allowed,
 )
+from sdlc_harness.agents.developer.repair_context import build_repair_closure
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
@@ -146,6 +147,47 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(result.progress["completed_items"], 1)
         self.assertTrue((self.repo / "src" / "Main.java").exists())
         self.assertTrue((self.repo / "src" / "MainTest.java").exists())
+
+    def test_expected_dirty_baseline_is_read_only_and_hash_bound(self) -> None:
+        qa_path = self.repo / "qa" / "Generated.test.ts"
+        qa_path.parent.mkdir(parents=True)
+        qa_path.write_text("test('baseline', () => {});\n", encoding="utf-8")
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action("complete", {"summary": "implementation written"}),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_expected_dirty",
+            work_packet=self.one_file_packet(),
+            target_path=self.repo,
+            expected_dirty_paths=["qa/Generated.test.ts"],
+        )
+
+        self.assertEqual(result.progress["completed_items"], 1)
+        self.assertIn("before_sha256", result.files[0])
+        qa_path.write_text("test('tampered', () => {});\n", encoding="utf-8")
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(ScriptedLlm([])).execute(
+                run_id="run_expected_dirty",
+                work_packet=self.one_file_packet(),
+                target_path=self.repo,
+                expected_dirty_paths=["qa/Generated.test.ts"],
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_workspace_drift")
+        self.assertFalse(caught.exception.retriable)
+
+        with self.assertRaises(HarnessError) as unsafe:
+            self.executor(ScriptedLlm([])).execute(
+                run_id="run_unsafe_dirty",
+                work_packet=self.one_file_packet(),
+                target_path=self.repo,
+                expected_dirty_paths=["/outside/repo.test.ts"],
+            )
+        self.assertEqual(unsafe.exception.error_code, "developer_tool_unsafe_path")
 
     def test_write_action_cannot_escape_current_work_item(self) -> None:
         llm = ScriptedLlm(
@@ -635,10 +677,49 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
 
         manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
-        self.assertEqual(manifest["version"], "developer_execution_manifest_v6")
+        self.assertEqual(manifest["version"], "developer_execution_manifest_v7")
         self.assertIn("src/Caller.java", manifest["items"][0]["context_paths"])
         self.assertIn("new Main().run()", caller.read_text(encoding="utf-8"))
         self.assertIn("workspace_allowed_paths", llm.prompts[0])
+
+    def test_profiled_repair_context_discovers_related_typescript_source_by_symbol(self) -> None:
+        paths = ["src/Handler.ts", "src/Adapter.ts", "config/schema.json"]
+        packet = self.work_packet()
+        packet["output_contract"] = {
+            "allowed_paths": paths,
+            "path_policy": {"language_profile_id": "typescript_v1"},
+        }
+        contents = {
+            "src/Handler.ts": "export function handle(value: string) { return adapt(value); }\n",
+            "src/Adapter.ts": "export function adapt(value: string): string { return value; }\n",
+            "config/schema.json": '{"description":"adapt must remain stable"}\n',
+        }
+        for path, content in contents.items():
+            target = self.repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+        closure = build_repair_closure(
+            work_packet=packet,
+            feedback={
+                "feedback_source": "verification",
+                "verification": {"stderr": "src/Handler.ts:1: cannot find name adapt"},
+                "repair_objective": {
+                    "contract_findings": [
+                        {
+                            "code_ref": "src/Handler.ts#handle",
+                            "expected_signature": {"name": "adapt"},
+                        }
+                    ]
+                },
+            },
+            target_path=self.repo,
+        )
+
+        self.assertEqual(closure["context_paths"], paths)
+        self.assertIn("src/Adapter.ts", closure["diagnostic_paths"])
+        self.assertIn("symbol_reference", closure["path_reasons"]["src/Adapter.ts"])
+        self.assertNotIn("config/schema.json", closure["diagnostic_paths"])
 
 
     def test_same_hash_write_is_not_counted_as_repair_progress(self) -> None:

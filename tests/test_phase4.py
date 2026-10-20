@@ -17,7 +17,12 @@ from unittest.mock import patch
 import pytest
 
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.developer import DeveloperActResult, build_developer_work_packet
+from sdlc_harness.agents.developer import (
+    DeveloperActResult,
+    DeveloperExecutionError,
+    DeveloperExecutionResult,
+    build_developer_work_packet,
+)
 from sdlc_harness.agents.tester import QaGeneratedTestSuite, QaTesterAgent
 from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.core.config import load_settings
@@ -1013,7 +1018,7 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "implementation_writing")
-        self.assertEqual(response["status"], "implementation_written")
+        self.assertEqual(response["status"], "implementation_written", response)
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("code_change_report", response["latest_artifacts"])
         workspace_path = self._workspace_path(response)
@@ -1043,6 +1048,187 @@ class PhaseFourTest(unittest.TestCase):
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Code Change Report V1", report)
         self.assertIn("Tests: not run in Slice 4.2", report)
+
+    def test_continue_run_uses_tool_loop_for_initial_developer_act(self) -> None:
+        ready = self._create_phase4_ready_run()
+        workflow = PhaseFourWorkflow(
+            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
+        )
+
+        with patch(
+            "sdlc_harness.workflows.phase4._apply_developer_changes",
+            side_effect=AssertionError("tool-loop output must not be applied twice"),
+        ):
+            response = workflow.continue_run(run_id=str(ready["run_id"]))
+
+        self.assertEqual(response["status"], "implementation_written", response)
+        self.assertEqual(response["developer_execution"]["schema_version"], "developer_execution_state_v1")
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["developer_execution"]["mode"], "developer_act")
+        self.assertEqual(response["developer_execution"]["status"], "completed")
+        self.assertIn("developer_execution_manifest", response["latest_artifacts"])
+        self.assertIn("developer_execution_journal", response["latest_artifacts"])
+        manifest_path = self.repo_root / str(response["latest_artifacts"]["developer_execution_manifest"])
+        journal_path = self.repo_root / str(response["latest_artifacts"]["developer_execution_journal"])
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["version"], "developer_execution_manifest_v7")
+        self.assertEqual(json.loads(journal_path.read_text(encoding="utf-8"))["status"], "completed")
+        report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
+        report = report_path.read_text(encoding="utf-8")
+        self.assertIn("Execution mode: `tool_loop`", report)
+        self.assertIn("Before SHA-256", report)
+
+    def test_paused_tool_loop_resume_keeps_bound_executor_after_config_flip(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        paused_error = DeveloperExecutionError(
+            "developer_action_limit_exceeded",
+            "pause for retry",
+            run_id=run_id,
+            retriable=True,
+            manifest_path=f".runtime/runs/{run_id}/developer_execution/act_v1/manifest.json",
+            journal_path=f".runtime/runs/{run_id}/developer_execution/act_v1/journal.json",
+            progress={"total_items": 1, "completed_items": 0, "remaining_items": 1},
+        )
+        with patch.object(first.developer_tool_loop, "execute", side_effect=paused_error):
+            paused = first.continue_run(run_id=run_id)
+
+        self.assertEqual(paused["status"], "implementation_paused")
+        self.assertEqual(paused["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(paused["developer_execution"]["status"], "paused")
+        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        completed = DeveloperExecutionResult(
+            summary="resumed tool-loop",
+            files=[],
+            manifest_path=str(paused["latest_artifacts"]["developer_execution_manifest"]),
+            journal_path=str(paused["latest_artifacts"]["developer_execution_journal"]),
+            progress={"total_items": 1, "completed_items": 1, "remaining_items": 0},
+        )
+        with patch.object(second.developer_tool_loop, "execute", return_value=completed) as execute:
+            response = second.continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "implementation_written")
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["developer_execution"]["status"], "completed")
+        execute.assert_called_once()
+
+    def test_paused_repair_resume_reuses_frozen_packet_and_artifact_version(self) -> None:
+        tested = self._create_phase4_tested_run()
+        test_file = (
+            self._workspace_path(tested)
+            / "src"
+            / "test"
+            / "java"
+            / "com"
+            / "sdlc"
+            / "etour"
+            / "heritage"
+            / "DeleteCulturalHeritageFlowTest.java"
+        )
+        test_file.unlink()
+        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+        run_id = str(repair_needed["run_id"])
+        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        paused_error = DeveloperExecutionError(
+            "developer_action_limit_exceeded",
+            "pause repair for retry",
+            run_id=run_id,
+            retriable=True,
+            manifest_path=f".runtime/runs/{run_id}/developer_execution/implementation_repair_v1/manifest.json",
+            journal_path=f".runtime/runs/{run_id}/developer_execution/implementation_repair_v1/journal.json",
+            progress={"total_items": 1, "completed_items": 0, "remaining_items": 1},
+        )
+        with patch.object(first.developer_tool_loop, "execute", side_effect=paused_error):
+            paused = first.continue_run(run_id=run_id)
+
+        frozen_packet = str(paused["latest_artifacts"]["developer_work_packet"])
+        self.assertIn("developer_work_packet_v2.json", frozen_packet)
+        self.assertEqual(paused["implementation_repair_iterations"], 0)
+        self.assertEqual(paused["developer_execution"]["artifact_version"], 2)
+        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        completed = DeveloperExecutionResult(
+            summary="repair session resumed",
+            files=[],
+            manifest_path=str(paused["latest_artifacts"]["developer_repair_execution_manifest"]),
+            journal_path=str(paused["latest_artifacts"]["developer_repair_execution_journal"]),
+            progress={"total_items": 1, "completed_items": 1, "remaining_items": 0},
+        )
+        with patch.object(second.developer_tool_loop, "execute", return_value=completed) as execute:
+            response = second.continue_run(run_id=run_id)
+
+        execute.assert_called_once()
+        resumed_packet = execute.call_args.kwargs["work_packet"]
+        self.assertEqual(resumed_packet["artifact_ref"], "developer_work_packet_v2")
+        self.assertEqual(response["latest_artifacts"]["developer_work_packet"], frozen_packet)
+        self.assertEqual(response["developer_execution"]["artifact_version"], 2)
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+
+    def test_non_retriable_initial_tool_loop_failure_blocks(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        blocked_error = DeveloperExecutionError(
+            "developer_workspace_drift",
+            "workspace drift",
+            run_id=run_id,
+            retriable=False,
+            progress={"total_items": 1, "completed_items": 0, "remaining_items": 1},
+        )
+
+        with patch.object(workflow.developer_tool_loop, "execute", side_effect=blocked_error):
+            response = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(response["developer_execution"]["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "developer_workspace_drift")
+
+    def test_plain_tool_loop_contract_failure_is_non_retriable(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+
+        with patch.object(
+            workflow.developer_tool_loop,
+            "execute",
+            side_effect=HarnessError(
+                "developer_tool_unsafe_path",
+                "Unsafe expected dirty path.",
+                run_id=run_id,
+            ),
+        ):
+            response = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["developer_execution"]["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "developer_tool_unsafe_path")
+
+    def test_legacy_repair_internal_failure_does_not_switch_to_tool_loop(self) -> None:
+        tested = self._create_phase4_tested_run()
+        test_file = (
+            self._workspace_path(tested)
+            / "src"
+            / "test"
+            / "java"
+            / "com"
+            / "sdlc"
+            / "etour"
+            / "heritage"
+            / "DeleteCulturalHeritageFlowTest.java"
+        )
+        test_file.unlink()
+        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+
+        with patch.object(workflow.developer, "repair", side_effect=RuntimeError("unexpected legacy failure")):
+            response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(response["last_error"]["error_code"], "developer_execution_internal_error")
+        self.assertNotEqual(response.get("developer_execution", {}).get("executor"), "tool_loop")
 
     def test_canonical_checkout_change_does_not_redirect_run_workspace(self) -> None:
         ready = self._create_phase4_ready_run()
@@ -1197,7 +1383,7 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "qa_tested")
+        self.assertEqual(response["status"], "qa_tested", response)
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("qa_generated_tests", response["latest_artifacts"])
         self.assertIn("qa_test_execution", response["latest_artifacts"])
@@ -1297,6 +1483,49 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("test_report_v2.md", response["latest_artifacts"]["test_report"])
         self.assertIn("requirement_design_code_trace_v2.json", response["latest_artifacts"]["requirement_design_code_trace"])
         self.assertIn("qa_generated_tests_v2.json", response["latest_artifacts"]["qa_generated_tests"])
+
+    def test_repairable_code_trace_failure_after_qa_repair_returns_to_implementation_repair(self) -> None:
+        traced = self._create_phase4_traced_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.qa_tester = FailingQaTester()
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        qa_repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
+
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        response = workflow.continue_run(run_id=str(qa_repair_needed["run_id"]))
+
+        self.assertEqual(response["current_phase"], "implementation_repair")
+        self.assertEqual(response["status"], "implementation_repair_needed", response)
+        self.assertEqual(response["allowed_next_actions"], ["continue_run", "revalidate_implementation", "get_status", "cancel_run"])
+        self.assertEqual(response["implementation_repair_iterations"], 0)
+        self.assertEqual(response["qa_repair_iterations"], 1)
+        self.assertIsNone(response["last_error"])
+        self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
+        self.assertTrue(response["quality_reports"]["implementation_repair"]["needed"])
+
+    def test_qa_repair_uses_tool_loop_and_records_durable_artifacts(self) -> None:
+        traced = self._create_phase4_traced_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.qa_tester = FailingQaTester()
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
+
+        workflow = PhaseFourWorkflow(
+            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
+        )
+        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
+        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
+
+        self.assertEqual(response["status"], "qa_tested", response)
+        self.assertEqual(response["qa_repair_iterations"], 1)
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["developer_execution"]["mode"], "qa_repair")
+        self.assertEqual(response["developer_execution"]["status"], "completed")
+        self.assertIn("developer_qa_repair_execution_manifest", response["latest_artifacts"])
+        self.assertIn("developer_qa_repair_execution_journal", response["latest_artifacts"])
+        self.assertNotIn("developer_repair_raw_response_v2", json.dumps(response["latest_artifacts"]))
 
     def test_continue_run_from_qa_repair_needed_blocks_when_qa_still_fails_at_limit(self) -> None:
         self.settings = self._settings(SDLC_QA_REPAIR_LIMIT="1")
@@ -1543,7 +1772,7 @@ class PhaseFourTest(unittest.TestCase):
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(repair_needed["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "implementation_traced")
+        self.assertEqual(response["status"], "implementation_traced", response)
         self.assertIsNone(response["last_error"])
         self.assertEqual(response["quality_reports"]["implementation_repair"]["needed"], False)
         self.assertEqual(response["quality_reports"]["implementation_repair"]["repair_iterations"], 1)
@@ -1566,6 +1795,37 @@ class PhaseFourTest(unittest.TestCase):
         report = (self.repo_root / str(response["latest_artifacts"]["code_change_report"])).read_text(encoding="utf-8")
         self.assertIn("Developer work packet:", report)
         self.assertIn("developer_work_packet_v2.json", report)
+
+    def test_implementation_repair_uses_tool_loop_and_records_durable_artifacts(self) -> None:
+        tested = self._create_phase4_tested_run()
+        test_file = (
+            self._workspace_path(tested)
+            / "src"
+            / "test"
+            / "java"
+            / "com"
+            / "sdlc"
+            / "etour"
+            / "heritage"
+            / "DeleteCulturalHeritageFlowTest.java"
+        )
+        test_file.unlink()
+        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+
+        workflow = PhaseFourWorkflow(
+            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
+        )
+        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
+
+        self.assertEqual(response["status"], "implementation_traced", response)
+        self.assertEqual(response["implementation_repair_iterations"], 1)
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["developer_execution"]["mode"], "implementation_repair")
+        self.assertEqual(response["developer_execution"]["status"], "completed")
+        self.assertIn("developer_repair_execution_manifest", response["latest_artifacts"])
+        self.assertIn("developer_repair_execution_journal", response["latest_artifacts"])
+        report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
+        self.assertIn("Execution mode: `tool_loop`", report_path.read_text(encoding="utf-8"))
 
     def test_repair_refreshes_developer_work_packet_from_current_target_repo(self) -> None:
         tested = self._create_phase4_tested_run()

@@ -150,6 +150,28 @@ tất và không tự cho phép cutover.
   - Smoke chỉ đọc target local `111b72c` pass cho `readHealth` và
     `HealthService.check`; mismatch return type tạo đúng blocker tất định.
     Full regression: `534 passed, 1 skipped`.
+- [x] A3.5: nối `DeveloperToolLoopExecutor` vào Phase 4 cho Developer act ban
+  đầu, implementation repair và QA repair sau feature flag hiện có.
+  - `SDLC_DEVELOPER_EXECUTION_MODE=legacy` tiếp tục là mặc định; mỗi execution
+    session bind executor vào state để pause/resume không đổi cơ chế giữa chừng.
+  - Tool-loop ghi trực tiếp vào worktree và dùng manifest/journal làm evidence;
+    workflow không apply lại nội dung như batch legacy.
+  - Lỗi retriable chuyển `implementation_paused`, lỗi không retriable chuyển
+    `blocked`; repair iteration chỉ tăng sau lần thực thi thành công.
+  - Không đổi HTTP action, không chạy live sync và chưa cutover executor mặc định.
+  - Hoàn tất: 2026-10-21. Workflow bind `developer_execution_state_v1`, giữ
+    packet/artifact version qua resume và ghi manifest/journal vào status.
+  - Manifest V7 tách QA-owned dirty baseline có hash khỏi Developer write scope;
+    code-change report ghi execution mode cùng before/after SHA-256.
+  - Sau review, repair context lấy source suffix từ language profile để dò file
+    liên quan theo symbol; diagnostic path vẫn chỉ là gợi ý, còn write boundary
+    tiếp tục là toàn bộ `allowed_paths` đã được duyệt.
+  - Logic-audit hardening giữ nguyên error code của lỗi contract và block thay vì
+    pause/retry; lỗi nội bộ của batch legacy không được đổi executor sang
+    tool-loop. Code Trace repairable sau QA repair quay về
+    `implementation_repair_needed` khi còn lượt, thay vì block sai luồng.
+  - Regression sau hardening: Phase 4/tool-loop `90 passed`; full parallel
+    `550 passed, 1 skipped in 62.92s`.
 
 ### A4. Target Bootstrap Và Cutover
 

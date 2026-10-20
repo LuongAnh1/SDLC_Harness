@@ -86,6 +86,7 @@ class DeveloperToolLoopExecutor:
         repair_feedback: dict[str, object] | None = None,
         repair_iteration: int = 0,
         repair_scope: str = "implementation",
+        expected_dirty_paths: list[str] | None = None,
         on_progress: Callable[[dict[str, object], str, str], None] | None = None,
     ) -> DeveloperExecutionResult:
         normalized_scope = re.sub(r"[^a-z0-9_]+", "_", repair_scope.strip().lower()).strip("_")
@@ -109,6 +110,7 @@ class DeveloperToolLoopExecutor:
             mode=mode,
             repair_feedback=repair_feedback,
             repair_iteration=repair_iteration,
+            expected_dirty_paths=expected_dirty_paths,
         )
         if manifest_file.exists():
             existing = _read_json(manifest_file, run_id=run_id)
@@ -133,8 +135,10 @@ class DeveloperToolLoopExecutor:
                     and existing.get("version") in {
                         "developer_execution_manifest_v3",
                         "developer_execution_manifest_v4",
+                        "developer_execution_manifest_v5",
+                        "developer_execution_manifest_v6",
                     }
-                    and manifest.get("version") == "developer_execution_manifest_v6"
+                    and manifest.get("version") == "developer_execution_manifest_v7"
                     and existing.get("mode") == manifest.get("mode")
                     and existing.get("repair_iteration") == manifest.get("repair_iteration")
                     and existing.get("repair_feedback") == manifest.get("repair_feedback")
@@ -150,6 +154,7 @@ class DeveloperToolLoopExecutor:
                         repair_feedback=repair_feedback,
                         repair_iteration=repair_iteration,
                         selected_paths=persisted_paths,
+                        expected_dirty_paths=expected_dirty_paths,
                     )
                 if legacy_context_schema:
                     existing = compatible_manifest or manifest
@@ -222,6 +227,7 @@ class DeveloperToolLoopExecutor:
                                     mode=mode,
                                     repair_feedback=repair_feedback,
                                     repair_iteration=repair_iteration,
+                                    expected_dirty_paths=expected_dirty_paths,
                                 )
                             )
                         ),
@@ -257,6 +263,8 @@ class DeveloperToolLoopExecutor:
                 on_progress=on_progress,
                 manifest_path=manifest_path,
                 journal_path=journal_path,
+                repair_feedback=repair_feedback,
+                repair_iteration=repair_iteration,
             )
         else:
             for item in _dict_items(manifest.get("items")):
@@ -314,8 +322,19 @@ class DeveloperToolLoopExecutor:
         on_progress: Callable[[dict[str, object], str, str], None] | None,
         manifest_path: str,
         journal_path: str,
+        repair_feedback: dict[str, object] | None,
+        repair_iteration: int,
     ) -> None:
-        generated = DeveloperActAgent(None).act(work_packet=work_packet)
+        fake_developer = DeveloperActAgent(self.llm_client)
+        generated = (
+            fake_developer.repair(
+                work_packet=work_packet,
+                repair_feedback=repair_feedback,
+                repair_iteration=repair_iteration,
+            )
+            if repair_feedback
+            else fake_developer.act(work_packet=work_packet)
+        )
         by_path = {str(item.get("path") or ""): item for item in generated.files}
         for item in _dict_items(manifest.get("items")):
             item_id = str(item.get("id") or "")
@@ -331,32 +350,47 @@ class DeveloperToolLoopExecutor:
                 journal_file=journal_file,
             )
             mutated_paths: set[str] = set()
+            inspected_paths: set[str] = set()
+            unchanged_paths: set[str] = set()
             reasons: list[str] = []
             for path in _item_paths(item):
                 generated_file = by_path.get(path)
                 if not generated_file:
-                    raise DeveloperExecutionError(
-                        "developer_execution_incomplete",
-                        f"Fake Developer did not return planned file {path}.",
-                        run_id=run_id,
-                        retriable=False,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
+                    if repair_feedback:
+                        inspected_paths.add(path)
+                        unchanged_paths.add(path)
+                    continue
                 target = _safe_write_target(target_path, path, _item_paths(item), run_id=run_id)
                 target.parent.mkdir(parents=True, exist_ok=True)
+                before_sha256 = _file_hash(target)
                 target.write_text(str(generated_file.get("content") or "").rstrip() + "\n", encoding="utf-8")
-                mutated_paths.add(path)
+                inspected_paths.add(path)
+                if _file_hash(target) == before_sha256:
+                    unchanged_paths.add(path)
+                else:
+                    mutated_paths.add(path)
                 reason = str(generated_file.get("reason") or "")
                 if reason:
                     reasons.append(reason)
+            if not mutated_paths and not repair_feedback:
+                raise DeveloperExecutionError(
+                    "developer_execution_incomplete",
+                    "Fake Developer did not mutate any approved implementation path.",
+                    run_id=run_id,
+                    retriable=False,
+                    manifest_path=manifest_path,
+                    journal_path=journal_path,
+                    progress=_progress(journal),
+                )
+            entry["inspected_paths"] = sorted(inspected_paths)
+            entry["unchanged_paths"] = sorted(unchanged_paths)
             self._complete_item(
                 item=item,
                 entry=entry,
                 target_path=target_path,
-                summary="; ".join(reasons),
+                summary="; ".join(reasons) or generated.summary,
                 mutated_paths=mutated_paths,
+                no_change_required=bool(repair_feedback and not mutated_paths),
             )
             journal["updated_at"] = utc_now_iso()
             _write_json_atomic(journal_file, journal)
@@ -762,6 +796,8 @@ class DeveloperToolLoopExecutor:
         journal_path: str,
     ) -> None:
         allowed = set(_string_items(manifest.get("workspace_allowed_paths")))
+        expected_dirty_files = _dict_items(manifest.get("expected_dirty_files"))
+        allowed.update(str(item.get("path") or "") for item in expected_dirty_files)
         status = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=str(target_path),
@@ -788,6 +824,19 @@ class DeveloperToolLoopExecutor:
                 journal_path=journal_path,
                 progress=_progress(journal),
             )
+        for item in expected_dirty_files:
+            path = str(item.get("path") or "")
+            expected = str(item.get("initial_sha256") or "")
+            if not path or _file_hash(target_path / path) != expected:
+                raise DeveloperExecutionError(
+                    "developer_workspace_drift",
+                    f"Expected pre-existing workspace change drifted outside the Developer journal: {path}",
+                    run_id=run_id,
+                    retriable=False,
+                    manifest_path=manifest_path,
+                    journal_path=journal_path,
+                    progress=_progress(journal),
+                )
         for item in _dict_items(manifest.get("items")):
             entry = _journal_item(journal, str(item.get("id") or ""))
             after_by_path = _dict_value(entry.get("after_sha256_by_path"))
@@ -853,6 +902,7 @@ def _build_manifest(
     repair_feedback: dict[str, object] | None,
     repair_iteration: int,
     selected_paths: set[str] | None = None,
+    expected_dirty_paths: list[str] | None = None,
 ) -> dict[str, object]:
     output_contract = _dict_value(work_packet.get("output_contract"))
     allowed = [str(value).strip().replace("\\", "/") for value in output_contract.get("allowed_paths", []) if str(value).strip()]
@@ -946,6 +996,32 @@ def _build_manifest(
             "Developer execution unit has no approved paths selected from the work packet.",
             run_id=run_id,
         )
+    expected_dirty_files = []
+    for raw_path in sorted(set(expected_dirty_paths or [])):
+        normalized_dirty_path = raw_path.strip().replace("\\", "/")
+        if (
+            not normalized_dirty_path
+            or normalized_dirty_path.startswith("/")
+            or Path(normalized_dirty_path).is_absolute()
+            or normalized_dirty_path == ".."
+            or normalized_dirty_path.startswith("../")
+            or "/../" in normalized_dirty_path
+        ):
+            raise HarnessError(
+                "developer_tool_unsafe_path",
+                f"Unsafe expected dirty path: {raw_path}",
+                run_id=run_id,
+            )
+        target = _safe_read_path(target_path, normalized_dirty_path, run_id=run_id)
+        relative = str(target.relative_to(target_path.resolve())).replace("\\", "/")
+        if relative in allowed:
+            continue
+        expected_dirty_files.append(
+            {
+                "path": relative,
+                "initial_sha256": _file_hash(target),
+            }
+        )
     requirement_ids = list(
         dict.fromkeys(
             requirement_id
@@ -987,9 +1063,10 @@ def _build_manifest(
             }
         ],
         "repair_feedback": repair_feedback or {},
+        **({"expected_dirty_paths": [item["path"] for item in expected_dirty_files]} if expected_dirty_files else {}),
     }
     return {
-        "version": "developer_execution_manifest_v6",
+        "version": "developer_execution_manifest_v7",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -997,6 +1074,7 @@ def _build_manifest(
         "base_sha": _dict_value(work_packet.get("run_workspace")).get("base_sha"),
         "input_hash": _json_hash(input_payload),
         "workspace_allowed_paths": allowed,
+        "expected_dirty_files": expected_dirty_files,
         "repair_feedback": repair_feedback or {},
         "developer_generation_context": generation_context,
         "items": [item],
@@ -1922,6 +2000,7 @@ def _completed_files(item: dict[str, object], entry: dict[str, object]) -> list[
                 ],
                 "covered_requirement_ids": _string_items(file_item.get("requirement_ids")),
                 "work_item_id": item.get("id"),
+                "before_sha256": file_item.get("initial_sha256"),
                 "after_sha256": after_by_path.get(path),
                 "no_change_required": False,
             }
