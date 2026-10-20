@@ -4,8 +4,9 @@
 > selection fail-closed; A1.2b đã thêm snapshot theo run và downstream settings
 > binding; A1.2c đã thêm target manifest preflight cùng workspace binding
 > fail-closed; A1.2d đã hard-retire run Java thiếu snapshot. Profile rỗng chỉ
-> còn phục vụ read/audit/sync-existing/cleanup. Các
-> artifact và behavior Phase 2-4 dưới đây vẫn là proposal.
+> còn phục vụ read/audit/sync-existing/cleanup. A2/A3.1-A3.4a và target bootstrap
+> local A4.1a đã hoàn tất; full-stack infra, signature comparison, remote/cutover
+> và các behavior Chặng B dưới đây vẫn chưa hoàn tất.
 
 ## Nguyên Tắc
 
@@ -80,7 +81,7 @@ Repo mới: `SDLC_Target_TypeScript`.
 
 Canonical remote dự kiến là
 `https://github.com/LuongAnh1/SDLC_Target_TypeScript.git`, base branch `main`.
-Repo/remote chỉ được tạo ở A4, không thuộc Gate 0.
+Repo local đã được tạo ở A4.1a; canonical remote vẫn chưa được tạo.
 
 ```text
 apps/web/              React + Vite frontend
@@ -239,9 +240,9 @@ Policy lấy identity từ immutable workspace snapshot, chỉ cho source produc
 co-located unit test đúng component; helper load `typescript` từ chính target,
 không dùng global compiler và không fallback substring khi runtime/package/evidence
 không hợp lệ. AST evidence exact cho interface/class/function/method được lưu trong
-Code Trace artifact và đưa vào semantic review. Việc đối chiếu đầy đủ signature
-(parameter, return, generic, async, optional/rest) và chạy extractor trên target
-thật thuộc A3.4b sau khi A4 pin toolchain.
+Code Trace artifact và đưa vào semantic review. A4.1a đã pin TypeScript 6.0.3 và
+smoke extractor thật trên target local. Việc đối chiếu đầy đủ signature
+(parameter, return, generic, async, optional/rest) vẫn thuộc A3.4b.
 
 ## Tương Thích Và Không Thuộc Phạm Vi Hiện Tại
 

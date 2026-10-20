@@ -523,6 +523,53 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   `typescript` và full signature comparison; A2.2b Developer.act/tool-loop cũng
   chưa thuộc lát này.
 
+## 2026-10-20 - Kế Hoạch A4.1a Local Stage-A Target Bootstrap
+
+- Baseline: commit `5108194` đã đóng A3.4a TypeScript AST bridge; worktree Harness
+  sạch trước khi ghi kế hoạch A4.1a.
+- Target local dự kiến tại `../SDLC_Target_TypeScript`, branch `main`, chưa tạo
+  GitHub remote và không push trong lát này.
+- Phạm vi chỉ đủ contract Chặng A: exact target manifest/component roots, npm
+  workspaces, committed lockfile, fixed `typecheck`/`test:unit`, một API health
+  source cùng co-located Vitest test để chạy runner và AST extractor thật.
+- Khóa toolchain theo máy và npm registry đã kiểm tra: Node `24.18.0`, npm
+  `11.16.0`, TypeScript `6.0.3`, Vitest `5.0.5`, Vite `8.3.4`, `@types/node`
+  `24.19.2`; không dùng range hoặc `latest` trong package metadata.
+- Ban đầu đã thử bản registry mới nhất TypeScript `7.0.2`, nhưng actual AST smoke
+  cho thấy package chỉ public unstable AST API và không còn Compiler API contract
+  mà helper A3.4a dùng. Lát này pin `6.0.3` thay vì đổi Harness sang API unstable.
+- React application shell, Fastify server, Prisma/PostgreSQL lifecycle,
+  Playwright, full CI, canonical remote, config cutover và live workflow đều để
+  A4.1b/lát sau. A4.1a không đóng toàn bộ A4 hoặc A3.4b.
+
+## 2026-10-20 - A4.1a Local Stage-A Target Bootstrap
+
+- Baseline Harness là `5108194`; target local được tạo tại
+  `../SDLC_Target_TypeScript`, branch `main`, commit `111b72c`, không có remote
+  và không push.
+- Target có exact `.sdlc/target-profile.json`, năm component roots, npm
+  workspaces, protected config, committed lockfile và API health fixture/test tối
+  thiểu. Đây là contract/evidence fixture, chưa phải business feature.
+- Toolchain cuối cùng: Node `24.18.0`, npm `11.16.0`, TypeScript `6.0.3`, Vitest
+  `5.0.5`, Vite `8.3.4`, `@types/node` `24.19.2`. `npm ci`, `npm run typecheck`
+  và `npm run test:unit` đều pass; Vitest chạy một file với hai assertions.
+- Manifest preflight tạo digest
+  `sha256:dcbdbfbae37ea6b5637ffd41df6ef8f60323480949053eafa283ed6067710b94`
+  và bind base SHA `111b72cb6af92cbd2774d6ac82377b6fef79a20b`. Profiled Runner chạy đúng
+  thứ tự `typecheck -> unit` và xác nhận `apps/api/src/health.test.ts` đã execute.
+- AST helper đã load `typescript` từ chính target và đọc được interface,
+  function, class, method cùng generic/optional/rest/async return metadata từ
+  source thật. Kết quả này chỉ xác nhận bridge; checklist signature comparison
+  đầy đủ vẫn thuộc A3.4b.
+- Actual Vitest 5 report làm lộ lỗi Runner: parser so số lượng `set(status)` với
+  số assertions nên hai test cùng pass vẫn bị coi là fail. Điều kiện đã đổi sang
+  kiểm từng assertion có status `passed`; regression fixture nay chứa hai passing
+  assertions. Targeted regression `29 passed`; full Harness regression
+  `519 passed, 1 skipped in 103.03s`.
+- Không tạo remote, không push, không đổi target config, không chạy live workflow
+  hoặc external sync. A4.1b vẫn giữ React/Fastify/Prisma/PostgreSQL/Playwright/CI;
+  bước code tiếp theo là A3.4b trên toolchain đã pin.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

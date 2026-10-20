@@ -124,7 +124,19 @@ tất và không tự cho phép cutover.
 
 ### A4. Target Bootstrap Và Cutover
 
-- [ ] Tạo repo infra skeleton `SDLC_Target_TypeScript`.
+- [x] A4.1a: tạo repo local `SDLC_Target_TypeScript` đủ contract Chặng A.
+  - Branch local `main`, chưa có remote và chưa push.
+  - Manifest/profile roots hợp lệ; npm workspace có `typecheck` và `test:unit`.
+  - Khóa Node `24.18.0`, npm `11.16.0`, TypeScript `6.0.3`, Vitest `5.0.5`,
+    Vite `8.3.4` và `@types/node` `24.19.2` bằng package metadata/lockfile.
+  - Có API health source/test tối thiểu để chạy Verification Runner và AST helper
+    thật; không coi đây là business feature acceptance.
+  - Hoàn tất: 2026-10-20 tại target commit `111b72c`; `npm ci`, typecheck, hai
+    Vitest assertions, profiled Verification Runner và AST extraction thật đều
+    pass trên base SHA đã snapshot. TypeScript 7.0.2 bị loại sau smoke vì package
+    hiện dùng unstable AST export không tương thích Compiler API contract A3.4a.
+- [ ] A4.1b: hoàn thiện infra skeleton React/Vite, Fastify, Prisma/PostgreSQL,
+  Playwright và CI trước full-stack cutover.
 - [ ] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
   kiểm tra quyền fetch/push trước controlled smoke.
 - [ ] Khóa npm workspace, exact toolchain/dependency versions, lockfile và

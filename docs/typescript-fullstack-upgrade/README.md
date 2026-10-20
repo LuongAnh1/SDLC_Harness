@@ -5,7 +5,8 @@ mốc HTTP API-only và live E2E ngày 2026-10-19. Audit/Gate 0 đã hoàn tất
 đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a-A1.2d đã thêm
 selector config, snapshot profile theo run, downstream settings binding, target
 manifest preflight, workspace binding fail-closed và retirement guard cho run
-Java cũ. Profile rỗng không còn được mở run mới; target TypeScript chưa được tạo.
+Java cũ. Profile rỗng không còn được mở run mới; target TypeScript local tối thiểu
+đã được bootstrap cho contract Chặng A nhưng chưa có remote hoặc cutover.
 
 ## Mục Tiêu
 
@@ -44,8 +45,8 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3 và A3.1-A3.4a đã hoàn tất; các checklist
-  còn lại giữ theo trạng thái thực tế.
+  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3, A3.1-A3.4a và A4.1a đã hoàn tất; các
+  checklist còn lại giữ theo trạng thái thực tế.
 - [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
   reference-only và owner của từng lát migration.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
@@ -66,8 +67,9 @@ Trước khi triển khai code cần review đủ bốn câu hỏi:
 
 Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. A1 hiện đã khóa
 profile contract, selector, immutable run snapshot, target manifest/workspace
-binding và legacy retirement. Run mới bắt buộc chọn profile; target repo mới
-chưa được tạo và chưa chạy migration hay live workflow cho hướng TypeScript.
+binding và legacy retirement. Run mới bắt buộc chọn profile; target repo local
+đã có manifest/npm workspace/toolchain khóa phiên bản và smoke fixture, nhưng
+chưa có canonical remote, config cutover hay live workflow cho hướng TypeScript.
 Phase 3 profiled hiện phát hành `implementation_plan_structured_v2`, bind review
 với SHA-256 của artifact và chỉ kích hoạt smoke suite `typecheck -> unit`.
 Verification Runner đã ánh xạ smoke suite qua code-reviewed registry sang fixed
@@ -78,6 +80,7 @@ phạm vi ghi cuối cùng. QA generation/application đã dùng `QaTestPolicy v
 co-located TypeScript/Vitest test và chỉ pass khi Vitest JSON report chứng minh
 đúng các generated files đã được execute. Code Trace profiled đã có policy,
 profile-aware discovery và TypeScript Compiler AST bridge fail-closed cho exact
-symbol evidence; chưa chạy extractor thật trên target đã pin `typescript` và chưa
-so signature đầy đủ. Browser E2E, target bootstrap và live workflow trên target
-TypeScript vẫn chưa thực hiện.
+symbol evidence. Extractor và Verification Runner đã smoke thật trên target local
+pin TypeScript 6.0.3; đối chiếu signature đầy đủ vẫn thuộc A3.4b. Infra
+React/Fastify/Prisma/PostgreSQL/Playwright/CI, browser E2E, remote và live
+workflow vẫn chưa thực hiện.
