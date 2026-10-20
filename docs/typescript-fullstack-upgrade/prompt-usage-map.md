@@ -72,3 +72,13 @@ workflow nếu chưa có contract/profile test tương ứng.
   của artifact và Phase 4 kiểm lại contract trước khi tạo work packet.
 - Markdown/Confluence hiển thị stage ID; artifact legacy command-based vẫn được
   đọc bởi nhánh compatibility đã bị public Application Service retire.
+
+## Trạng thái A3.1
+
+- Work packet profiled đã dùng editable roots từ frozen profile thay cho prefix
+  Java và lưu metadata `editable_path_policy_v1` để audit.
+- Refresh, batch apply, implementation repair và QA repair đều resolve lại cùng
+  policy từ run snapshot; packet thiếu/sai policy hoặc allowed path ngoài profile
+  bị chặn trước khi ghi file.
+- Prompt/fake Developer.act, QA và Code Trace vẫn Java-heavy theo đúng A2.2b;
+  A3.1 chỉ mở guard an toàn, chưa tuyên bố Phase 4 TypeScript đã chạy được.

@@ -12,7 +12,11 @@ from .execution import (
     repair_scope_mismatch_retry_allowed,
 )
 from .planner import DeveloperPlanAgent, ImplementationPlanDraft
-from .work_packet import build_developer_work_packet, refresh_developer_work_packet
+from .work_packet import (
+    build_developer_work_packet,
+    refresh_developer_work_packet,
+    validate_developer_work_packet_path_policy,
+)
 
 __all__ = [
     "DeveloperActAgent",
@@ -26,5 +30,6 @@ __all__ = [
     "ImplementationPlanDraft",
     "build_developer_work_packet",
     "refresh_developer_work_packet",
+    "validate_developer_work_packet_path_policy",
 ]
 

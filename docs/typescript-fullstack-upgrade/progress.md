@@ -401,6 +401,31 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   thành công. Skip duy nhất vẫn là Windows không có quyền tạo symlink; Node/JDK
   conditional tests đều chạy và pass trong full suite.
 
+## 2026-10-20 - A3.1 Profile-owned Editable Path Guards
+
+- Baseline: commit `4f91cd6`; profiled work packet đã có schema riêng nhưng
+  build/refresh/apply vẫn bị khóa bởi prefix Java.
+- Thay prefix đó bằng `PlanningPathPolicy` resolve từ immutable run snapshot.
+  `developer_work_packet_profiled_v1.output_contract` lưu metadata
+  `editable_path_policy_v1` gồm profile identity, policy version, component roots
+  và protected paths để audit.
+- Build, refresh, batch apply, implementation repair, QA repair và revalidate đều
+  dùng lại policy từ state; thiếu policy, metadata mismatch hoặc file ngoài
+  editable roots/sai file kind bị chặn trước khi đọc hay ghi target file.
+- Giữ hai lớp scope: profile editable root là biên trên, exact `allowed_paths`
+  trong approved plan là quyền ghi thực tế. Nhánh Java chỉ còn compatibility cho
+  artifact legacy đã bị retirement guard chặn khỏi execution công khai.
+- Test thêm đủ web/API/contracts/database/Prisma/E2E roots và các trường hợp
+  protected/outside root, sai suffix, traversal, absolute path, backslash,
+  missing/tampered policy và direct apply với packet bị sửa.
+- Verification: test mới trọng điểm `13 passed`; regression profile/Phase 4
+  `105 passed`; full parallel 4 worker `488 passed, 1 skipped in 56.51s`;
+  `compileall` và `git diff --check` thành công. Skip duy nhất vẫn là symlink
+  escape trên Windows thiếu quyền tạo symlink.
+- Không chạy live workflow hoặc external sync. A2.2b vẫn mở; lát kế tiếp của A3
+  là registry fixed argv/cwd/env/timeout và Verification Runner cho
+  `typecheck -> unit`.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

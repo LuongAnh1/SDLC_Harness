@@ -17,11 +17,17 @@ from unittest.mock import patch
 import pytest
 
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.developer import DeveloperActResult
+from sdlc_harness.agents.developer import DeveloperActResult, build_developer_work_packet
 from sdlc_harness.agents.tester import QaGeneratedTestSuite, QaTesterAgent
 from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.profiles import (
+    build_planning_path_policy,
+    build_verification_stage_policy,
+    get_language_profile,
+    get_project_profile,
+)
 from sdlc_harness.verification import VerificationResult, VerificationRunner
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
@@ -770,6 +776,71 @@ class PhaseFourTest(unittest.TestCase):
             )
 
         self.assertEqual(caught.exception.error_code, "developer_act_requirement_coverage_invalid")
+
+    def test_profiled_apply_rejects_tampered_allowed_path_before_writing(self) -> None:
+        project = get_project_profile("typescript_fullstack_v1")
+        planning_policy = build_planning_path_policy(
+            project=project,
+            language=get_language_profile(project.language_profile_id),
+        )
+        verification_policy = build_verification_stage_policy(project=project)
+        safe_path = "apps/api/src/ProfileController.ts"
+        packet = build_developer_work_packet(
+            run_id="run-profiled-apply",
+            source_ref="fixture:profiled",
+            issue_key="SDLC-1",
+            structured_plan={
+                "version": "implementation_plan_structured_v2",
+                "planning_profile": planning_policy.metadata(),
+                "target_repository": {},
+                "implementation_steps": [{"order": 1, "files": [safe_path]}],
+                "proposed_files": [{"path": safe_path}],
+                "design_mappings": [],
+                "verification_stage_ids": list(verification_policy.stage_ids),
+                "test_intents": [{"stage_id": "unit"}],
+            },
+            target_repo_path=self.target_repo,
+            run_workspace={},
+            approved_plan_refs={},
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+        )
+        unsafe_path = "scripts/test.ps1"
+        packet["output_contract"]["allowed_paths"] = [unsafe_path]
+        result = DeveloperActResult(
+            summary="tampered path",
+            files=[{"path": unsafe_path, "content": "Write-Host 'tampered'"}],
+        )
+        before = (self.target_repo / unsafe_path).read_bytes()
+
+        with self.assertRaises(HarnessError) as caught:
+            _apply_developer_changes(
+                result=result,
+                work_packet=packet,
+                target_path=self.target_repo,
+                run_id="run-profiled-apply",
+                planning_policy=planning_policy,
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_work_packet_unsafe_path")
+        self.assertEqual((self.target_repo / unsafe_path).read_bytes(), before)
+
+        packet["output_contract"]["allowed_paths"] = [safe_path]
+        unapproved_editable_path = "apps/api/src/OtherController.ts"
+        with self.assertRaises(HarnessError) as out_of_scope:
+            _apply_developer_changes(
+                result=DeveloperActResult(
+                    summary="valid root but unapproved file",
+                    files=[{"path": unapproved_editable_path, "content": "export {};"}],
+                ),
+                work_packet=packet,
+                target_path=self.target_repo,
+                run_id="run-profiled-apply",
+                planning_policy=planning_policy,
+            )
+
+        self.assertEqual(out_of_scope.exception.error_code, "developer_act_out_of_scope")
+        self.assertFalse((self.target_repo / unapproved_editable_path).exists())
 
     def test_v2_code_trace_emits_one_mapping_per_stable_requirement(self) -> None:
         source_path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"

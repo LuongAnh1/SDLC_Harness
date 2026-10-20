@@ -103,6 +103,13 @@ không cho feature run tự thêm dependency. Business source/test, Prisma
 schema/migrations và approved Playwright specs là các editable roots theo
 component policy.
 
+Từ A3.1, `developer_work_packet_profiled_v1` chụp metadata
+`editable_path_policy_v1` vào output contract. Phase 4 không tin metadata này
+một mình: mỗi lần build, refresh, act hoặc repair đều resolve lại policy từ
+immutable run snapshot, so khớp metadata rồi kiểm tra từng allowed path. Editable
+root là biên trên; Developer vẫn chỉ được ghi exact file trong `allowed_paths`
+của approved implementation plan.
+
 ## Design Bundle Đề Xuất Cho Phase 2
 
 Class/sequence graph có thể tiếp tục là evidence, nhưng design checkpoint cần

@@ -21,7 +21,8 @@ from ...profiles import (
 from ...storage.runtime import utc_now_iso
 
 MAX_FILE_CONTENT_CHARS = 40000
-ALLOWED_CODE_PATH_PREFIXES = ("src/main/java/", "src/test/java/")
+LEGACY_CODE_PATH_PREFIXES = ("src/main/java/", "src/test/java/")
+PROFILED_EDITABLE_PATH_POLICY_VERSION = "editable_path_policy_v1"
 
 
 def build_developer_work_packet(
@@ -75,21 +76,31 @@ def build_developer_work_packet(
     implementation_steps = _dict_items(structured_plan.get("implementation_steps"))
     proposed_files = _merge_mapping_targets_into_proposed_files(
         proposed_files=_merge_step_targets_into_proposed_files(
-            proposed_files=_normalize_proposed_files(structured_plan.get("proposed_files"), run_id=run_id),
+            proposed_files=_normalize_proposed_files(
+                structured_plan.get("proposed_files"),
+                run_id=run_id,
+                planning_policy=planning_policy,
+            ),
             implementation_steps=implementation_steps,
             run_id=run_id,
+            planning_policy=planning_policy,
         ),
         design_mappings=design_mappings,
+        planning_policy=planning_policy,
     )
     enriched_files = [
-        _enrich_proposed_file(target_repo_path=target_repo_path, file_item=item, run_id=run_id)
+        _enrich_proposed_file(
+            target_repo_path=target_repo_path,
+            file_item=item,
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
         for item in proposed_files
     ]
     allowed_paths = [str(item["path"]) for item in enriched_files]
     canonical_requirements = canonical_requirements or []
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
-    coverage_by_file = _group_requirement_coverage_by_file(requirement_coverage)
     required_fields = ["path", "content"]
     return {
         "version": "developer_work_packet_v1",
@@ -120,10 +131,16 @@ def build_developer_work_packet(
         "requirement_contract": requirement_contract,
         "canonical_requirements": canonical_requirements,
         "requirement_coverage": requirement_coverage,
-        "requirement_coverage_by_file": coverage_by_file,
+        "requirement_coverage_by_file": _group_requirement_coverage_by_file(
+            requirement_coverage,
+            planning_policy=planning_policy,
+        ),
         "implementation_steps": implementation_steps,
         "proposed_files": enriched_files,
-        "design_mappings_by_file": _group_design_mappings_by_file(design_mappings),
+        "design_mappings_by_file": _group_design_mappings_by_file(
+            design_mappings,
+            planning_policy=planning_policy,
+        ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
         "repo_evidence": _string_items(structured_plan.get("repo_evidence")),
@@ -141,6 +158,11 @@ def build_developer_work_packet(
             "changed_files_only": True,
             "allowed_paths": allowed_paths,
             "required_fields": required_fields,
+            **(
+                {"path_policy": _profiled_path_policy_contract(planning_policy)}
+                if planning_policy is not None
+                else {}
+            ),
         },
         "constraints": [
             "Chỉ tạo/sửa file nằm trong output_contract.allowed_paths ở slice Developer.act V1.",
@@ -160,15 +182,16 @@ def refresh_developer_work_packet(
     target_repo_path: Path,
     version: int,
     run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> dict[str, object]:
     """Làm mới snapshot code/test trong packet trước mỗi vòng Developer.repair."""
 
     output_contract = _dict_value(packet.get("output_contract"))
-    allowed_paths = [
-        _clean_repo_path(str(item), run_id=run_id)
-        for item in output_contract.get("allowed_paths", [])
-        if str(item).strip()
-    ]
+    allowed_paths = validate_developer_work_packet_path_policy(
+        packet,
+        planning_policy=planning_policy,
+        run_id=run_id,
+    )
     if not allowed_paths:
         raise HarnessError(
             "developer_work_packet_allowed_paths_missing",
@@ -181,13 +204,18 @@ def refresh_developer_work_packet(
             target_repo_path=target_repo_path,
             file_item={"path": path},
             run_id=run_id,
+            planning_policy=planning_policy,
         )
         for path in allowed_paths
     }
     proposed_files = []
     seen: set[str] = set()
     for item in _dict_items(packet.get("proposed_files")):
-        path = _clean_repo_path(str(item.get("path") or ""), run_id=run_id)
+        path = _clean_repo_path(
+            str(item.get("path") or ""),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
         refreshed = refreshed_by_path.get(path)
         if not refreshed:
             continue
@@ -221,7 +249,12 @@ def refresh_developer_work_packet(
     }
 
 
-def _normalize_proposed_files(value: object, *, run_id: str) -> list[dict[str, object]]:
+def _normalize_proposed_files(
+    value: object,
+    *,
+    run_id: str,
+    planning_policy: PlanningPathPolicy | None,
+) -> list[dict[str, object]]:
     files = _dict_items(value)
     if not files:
         raise HarnessError(
@@ -232,7 +265,11 @@ def _normalize_proposed_files(value: object, *, run_id: str) -> list[dict[str, o
     normalized: list[dict[str, object]] = []
     seen: set[str] = set()
     for item in files:
-        path = _clean_repo_path(str(item.get("path") or ""), run_id=run_id)
+        path = _clean_repo_path(
+            str(item.get("path") or ""),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
         if path in seen:
             continue
         seen.add(path)
@@ -245,8 +282,13 @@ def _enrich_proposed_file(
     target_repo_path: Path,
     file_item: dict[str, object],
     run_id: str,
+    planning_policy: PlanningPathPolicy | None,
 ) -> dict[str, object]:
-    rel_path = _clean_repo_path(str(file_item.get("path") or ""), run_id=run_id)
+    rel_path = _clean_repo_path(
+        str(file_item.get("path") or ""),
+        run_id=run_id,
+        planning_policy=planning_policy,
+    )
     absolute_path = (target_repo_path / rel_path).resolve()
     try:
         absolute_path.relative_to(target_repo_path.resolve())
@@ -276,11 +318,15 @@ def _enrich_proposed_file(
     }
 
 
-def _group_design_mappings_by_file(mappings: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
+def _group_design_mappings_by_file(
+    mappings: list[dict[str, object]],
+    *,
+    planning_policy: PlanningPathPolicy | None,
+) -> dict[str, list[dict[str, object]]]:
     grouped: dict[str, list[dict[str, object]]] = {}
     for item in mappings:
         target = str(item.get("planned_code_target") or "")
-        file_path = _target_file_from_mapping(target)
+        file_path = _target_file_from_mapping(target, planning_policy=planning_policy)
         if not file_path:
             continue
         grouped.setdefault(file_path, []).append(item)
@@ -289,6 +335,8 @@ def _group_design_mappings_by_file(mappings: list[dict[str, object]]) -> dict[st
 
 def _group_requirement_coverage_by_file(
     coverage: list[dict[str, object]],
+    *,
+    planning_policy: PlanningPathPolicy | None,
 ) -> dict[str, list[dict[str, object]]]:
     """Project canonical V2 coverage to files without changing the approved rows."""
 
@@ -298,7 +346,7 @@ def _group_requirement_coverage_by_file(
         if not requirement_id:
             continue
         for target in _string_items(item.get("planned_code_targets")):
-            file_path = _target_file_from_mapping(target)
+            file_path = _target_file_from_mapping(target, planning_policy=planning_policy)
             if not file_path:
                 continue
             projected = {
@@ -318,12 +366,13 @@ def _merge_mapping_targets_into_proposed_files(
     *,
     proposed_files: list[dict[str, object]],
     design_mappings: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None,
 ) -> list[dict[str, object]]:
     merged = list(proposed_files)
     seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
     for mapping in design_mappings:
         target = str(mapping.get("planned_code_target") or "")
-        file_path = _target_file_from_mapping(target)
+        file_path = _target_file_from_mapping(target, planning_policy=planning_policy)
         if not file_path or file_path in seen:
             continue
         seen.add(file_path)
@@ -342,13 +391,18 @@ def _merge_step_targets_into_proposed_files(
     proposed_files: list[dict[str, object]],
     implementation_steps: list[dict[str, object]],
     run_id: str,
+    planning_policy: PlanningPathPolicy | None,
 ) -> list[dict[str, object]]:
     merged = list(proposed_files)
     seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
     for step in implementation_steps:
         raw_files = step.get("files") if isinstance(step.get("files"), list) else []
         for raw_path in raw_files:
-            path = _clean_repo_path(str(raw_path), run_id=run_id)
+            path = _clean_repo_path(
+                str(raw_path),
+                run_id=run_id,
+                planning_policy=planning_policy,
+            )
             if path in seen:
                 continue
             seen.add(path)
@@ -362,31 +416,122 @@ def _merge_step_targets_into_proposed_files(
     return merged
 
 
-def _target_file_from_mapping(target: str) -> str:
+def _target_file_from_mapping(
+    target: str,
+    *,
+    planning_policy: PlanningPathPolicy | None,
+) -> str:
     file_path = target.split("#", 1)[0].strip().replace("\\", "/")
     if not file_path:
         return ""
     try:
-        return _clean_repo_path(file_path, run_id="")
+        return _clean_repo_path(
+            file_path,
+            run_id="",
+            planning_policy=planning_policy,
+        )
     except HarnessError:
         return ""
 
 
-def _clean_repo_path(raw_path: str, *, run_id: str) -> str:
-    normalized = raw_path.strip().replace("\\", "/").lstrip("/")
-    if (
+def _clean_repo_path(
+    raw_path: str,
+    *,
+    run_id: str,
+    planning_policy: PlanningPathPolicy | None,
+) -> str:
+    normalized = raw_path.strip()
+    invalid_shape = (
         not normalized
+        or normalized != raw_path
+        or "\\" in normalized
+        or normalized.startswith("/")
+        or normalized.endswith("/")
+        or "//" in normalized
+        or normalized == ".."
         or normalized.startswith("../")
         or "/../" in normalized
-        or normalized == ".."
-        or not normalized.startswith(ALLOWED_CODE_PATH_PREFIXES)
-    ):
+        or any(part in {"", ".", ".."} for part in normalized.split("/"))
+        or (len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha())
+    )
+    supported = (
+        planning_policy.normalize_editable_path(normalized) == normalized
+        if planning_policy is not None and not invalid_shape
+        else normalized.startswith(LEGACY_CODE_PATH_PREFIXES)
+    )
+    if invalid_shape or not supported:
         raise HarnessError(
             "developer_work_packet_unsafe_path",
             f"Unsafe or unsupported proposed file path: {raw_path}",
             run_id=run_id or None,
         )
     return normalized
+
+
+def validate_developer_work_packet_path_policy(
+    packet: dict[str, object],
+    *,
+    planning_policy: PlanningPathPolicy | None,
+    run_id: str,
+) -> list[str]:
+    """Xác minh policy và toàn bộ allowed paths trước refresh/apply/repair."""
+
+    schema_version = str(packet.get("schema_version") or "")
+    profiled = schema_version == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+    if profiled and planning_policy is None:
+        raise HarnessError(
+            "developer_work_packet_path_policy_missing",
+            "Profiled DeveloperWorkPacket requires the frozen editable path policy.",
+            run_id=run_id or None,
+        )
+    if not profiled and planning_policy is not None:
+        raise HarnessError(
+            "developer_work_packet_path_policy_mismatch",
+            "Profiled Phase 4 state cannot use a legacy DeveloperWorkPacket.",
+            run_id=run_id or None,
+        )
+
+    output_contract = _dict_value(packet.get("output_contract"))
+    values = output_contract.get("allowed_paths")
+    if not isinstance(values, list) or not values:
+        raise HarnessError(
+            "developer_work_packet_allowed_paths_missing",
+            "DeveloperWorkPacket has no allowed paths.",
+            run_id=run_id or None,
+        )
+    if profiled:
+        assert planning_policy is not None
+        expected = _profiled_path_policy_contract(planning_policy)
+        actual = output_contract.get("path_policy")
+        if actual != expected:
+            raise HarnessError(
+                "developer_work_packet_path_policy_mismatch",
+                "DeveloperWorkPacket editable path policy does not match the frozen run profile.",
+                run_id=run_id or None,
+            )
+
+    return [
+        _clean_repo_path(
+            str(value),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
+        for value in values
+    ]
+
+
+def _profiled_path_policy_contract(policy: PlanningPathPolicy) -> dict[str, object]:
+    return {
+        "version": PROFILED_EDITABLE_PATH_POLICY_VERSION,
+        "project_profile_id": policy.project_profile_id,
+        "language_profile_id": policy.language_profile_id,
+        "planning_policy_version": policy.policy_version,
+        "component_roots": {
+            component_id: list(roots)
+            for component_id, roots in policy.component_roots
+        },
+        "protected_paths": list(policy.protected_paths),
+    }
 
 
 def _dict_items(value: object) -> list[dict[str, Any]]:

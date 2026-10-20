@@ -40,6 +40,7 @@ from ..agents.developer import (
     build_developer_work_packet,
     repair_scope_mismatch_retry_allowed,
     refresh_developer_work_packet,
+    validate_developer_work_packet_path_policy,
 )
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
@@ -66,6 +67,7 @@ from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
 from ..profiles import (
+    PlanningPathPolicy,
     planning_path_policy_from_snapshot,
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
@@ -369,11 +371,7 @@ class PhaseFourWorkflow:
             workspace = self.workspace_manager.resolve(run_id)
             target_info = self._workspace_target_info(run_id=run_id, allow_dirty=False)
             snapshot = read_profile_snapshot(state, run_id=run_id)
-            planning_policy = (
-                planning_path_policy_from_snapshot(snapshot, run_id=run_id)
-                if snapshot
-                else None
-            )
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
             verification_policy = (
                 verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
                 if snapshot
@@ -1052,6 +1050,7 @@ class PhaseFourWorkflow:
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet, allow_dirty=False)
             branch = target_info.current_branch
             result = self.developer.act(work_packet=work_packet)
@@ -1067,6 +1066,7 @@ class PhaseFourWorkflow:
                 work_packet=work_packet,
                 target_path=target_info.path,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             report = {
                 "run_id": run_id,
@@ -1605,11 +1605,13 @@ class PhaseFourWorkflow:
                     run_id=run_id,
                 )
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
                 version=artifact_version,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             refreshed_packet_path = write_phase4_developer_work_packet(
                 store=self.store,
@@ -1638,6 +1640,7 @@ class PhaseFourWorkflow:
                 work_packet=work_packet,
                 target_path=target_info.path,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             developer_summary = result.summary
             developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
@@ -2236,11 +2239,13 @@ class PhaseFourWorkflow:
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
                 version=artifact_version,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             refreshed_packet_path = write_phase4_developer_work_packet(
                 store=self.store,
@@ -2517,11 +2522,13 @@ class PhaseFourWorkflow:
                     run_id=run_id,
                 )
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
             work_packet = refresh_developer_work_packet(
                 packet=work_packet,
                 target_repo_path=target_info.path,
                 version=artifact_version,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             refreshed_packet_path = write_phase4_developer_work_packet(
                 store=self.store,
@@ -2550,6 +2557,7 @@ class PhaseFourWorkflow:
                 work_packet=work_packet,
                 target_path=target_info.path,
                 run_id=run_id,
+                planning_policy=planning_policy,
             )
             developer_summary = result.summary
             developer_raw_response = latest_artifacts.get("developer_repair_raw_response")
@@ -3730,12 +3738,17 @@ def _apply_developer_changes(
     work_packet: dict[str, object],
     target_path: Path,
     run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[dict[str, object]]:
     """Validate a complete Developer batch, then apply it with rollback on failure."""
 
-    allowed_paths = set(_allowed_paths(work_packet))
-    if not allowed_paths:
-        raise HarnessError("developer_act_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.")
+    allowed_paths = set(
+        validate_developer_work_packet_path_policy(
+            work_packet,
+            planning_policy=planning_policy,
+            run_id=run_id,
+        )
+    )
 
     requirement_contract = _dict_value(work_packet.get("requirement_contract"))
     v2 = requirement_contract.get("version") == "v2"
@@ -3751,7 +3764,11 @@ def _apply_developer_changes(
     seen_paths: set[str] = set()
 
     for item in result.files:
-        rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
+        rel_path = _normalize_code_path(
+            str(item.get("path") or ""),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
         if rel_path in seen_paths:
             raise HarnessError(
                 "developer_act_duplicate_path",
@@ -3983,21 +4000,53 @@ def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
     return [_normalize_code_path(str(value), run_id="") for value in values if str(value).strip()]
 
 
-def _normalize_code_path(raw_path: str, *, run_id: str) -> str:
-    path = raw_path.strip().replace("\\", "/").lstrip("/")
-    if (
+def _normalize_code_path(
+    raw_path: str,
+    *,
+    run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> str:
+    path = raw_path.strip()
+    invalid_shape = (
         not path
+        or path != raw_path
+        or "\\" in path
+        or path.startswith("/")
+        or path.endswith("/")
+        or "//" in path
         or path.startswith("../")
         or "/../" in path
         or path == ".."
-        or not (path.startswith("src/main/java/") or path.startswith("src/test/java/"))
-    ):
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+        or (len(path) >= 2 and path[1] == ":" and path[0].isalpha())
+    )
+    supported = (
+        planning_policy.normalize_editable_path(path) == path
+        if planning_policy is not None and not invalid_shape
+        else path.startswith(("src/main/java/", "src/test/java/"))
+    )
+    if invalid_shape or not supported:
         raise HarnessError(
             "developer_act_unsafe_path",
             f"Unsafe or unsupported Developer.act path: {raw_path}",
             run_id=run_id or None,
         )
     return path
+
+
+def _planning_policy_for_state(
+    state: dict[str, object],
+    *,
+    run_id: str,
+) -> PlanningPathPolicy | None:
+    """Resolve editable-path policy chỉ từ run snapshot bất biến."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    return (
+        planning_path_policy_from_snapshot(snapshot, run_id=run_id)
+        if snapshot
+        else None
+    )
 
 
 def _string_items(value: object) -> list[str]:

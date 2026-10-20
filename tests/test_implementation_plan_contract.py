@@ -1,6 +1,5 @@
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -13,7 +12,10 @@ from sdlc_harness.agents.developer.planner import (
     _design_mappings,
     _ensure_executable_test_files,
 )
-from sdlc_harness.agents.developer.work_packet import build_developer_work_packet
+from sdlc_harness.agents.developer.work_packet import (
+    build_developer_work_packet,
+    refresh_developer_work_packet,
+)
 from sdlc_harness.agents.validator.plan_review import ImplementationPlanValidator, _llm_review_prompt
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import build_parser
@@ -131,26 +133,34 @@ def test_profiled_work_packet_uses_v2_and_revalidates_execution_contract(tmp_pat
         "test_intents": [{"stage_id": "unit"}],
     }
 
-    # Editable-root enforcement itself remains the first A3 slice. This unit
-    # test isolates the new artifact/verification boundary without enabling it.
-    with patch(
-        "sdlc_harness.agents.developer.work_packet.ALLOWED_CODE_PATH_PREFIXES",
-        ("apps/api/src/",),
-    ):
-        packet = build_developer_work_packet(
-            run_id="run_profiled_packet",
-            source_ref="fixture:profiled",
-            issue_key="SDLC-1",
-            structured_plan=plan,
-            target_repo_path=tmp_path,
-            run_workspace={},
-            approved_plan_refs={},
-            planning_policy=planning_policy,
-            verification_policy=verification_policy,
-        )
+    packet = build_developer_work_packet(
+        run_id="run_profiled_packet",
+        source_ref="fixture:profiled",
+        issue_key="SDLC-1",
+        structured_plan=plan,
+        target_repo_path=tmp_path,
+        run_workspace={},
+        approved_plan_refs={},
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+    )
 
     assert packet["version"] == "developer_work_packet_v1"
     assert packet["schema_version"] == "developer_work_packet_profiled_v1"
+    assert packet["output_contract"]["path_policy"] == {
+        "version": "editable_path_policy_v1",
+        "project_profile_id": "typescript_fullstack_v1",
+        "language_profile_id": "typescript_v1",
+        "planning_policy_version": "planning_path_policy_v1",
+        "component_roots": {
+            "web": ["apps/web/src"],
+            "api": ["apps/api/src"],
+            "contracts": ["packages/contracts/src"],
+            "database": ["packages/db/src", "packages/db/prisma"],
+            "e2e": ["tests/e2e"],
+        },
+        "protected_paths": list(project.protected_paths),
+    }
     tampered = json.loads(json.dumps(plan))
     tampered["test_intents"][0]["command"] = "npm test"
     with pytest.raises(HarnessError) as context:
@@ -166,6 +176,153 @@ def test_profiled_work_packet_uses_v2_and_revalidates_execution_contract(tmp_pat
             verification_policy=verification_policy,
         )
     assert context.value.error_code == "implementation_plan_profile_invalid"
+
+
+def test_profiled_work_packet_accepts_each_editable_component_root(tmp_path: Path):
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    paths = [
+        "apps/web/src/ProfilePage.tsx",
+        "apps/api/src/ProfileController.ts",
+        "packages/contracts/src/ProfileResponse.ts",
+        "packages/db/src/ProfileRepository.test.ts",
+        "packages/db/prisma/profile.prisma",
+        "tests/e2e/profile.spec.ts",
+    ]
+    packet = build_developer_work_packet(
+        run_id="run_profiled_roots",
+        source_ref="fixture:profiled",
+        issue_key="SDLC-1",
+        structured_plan={
+            "version": "implementation_plan_structured_v2",
+            "planning_profile": planning_policy.metadata(),
+            "target_repository": {},
+            "implementation_steps": [{"order": 1, "files": paths}],
+            "proposed_files": [{"path": path} for path in paths],
+            "design_mappings": [],
+            "verification_stage_ids": list(verification_policy.stage_ids),
+            "test_intents": [{"stage_id": "unit"}],
+        },
+        target_repo_path=tmp_path,
+        run_workspace={},
+        approved_plan_refs={},
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+    )
+
+    assert packet["output_contract"]["allowed_paths"] == paths
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    [
+        "package.json",
+        "apps/api/package.json",
+        "apps/other/src/Outside.ts",
+        "apps/api/src/Wrong.java",
+        "apps/api/src/../Escape.ts",
+        "/apps/api/src/Absolute.ts",
+        "C:/repo/apps/api/src/Absolute.ts",
+        "apps\\api\\src\\Backslash.ts",
+    ],
+)
+def test_profiled_work_packet_refresh_rejects_paths_outside_frozen_policy(
+    tmp_path: Path,
+    unsafe_path: str,
+):
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    safe_path = "apps/api/src/ProfileBoundary.ts"
+    packet = build_developer_work_packet(
+        run_id="run_profiled_refresh",
+        source_ref="fixture:profiled",
+        issue_key="SDLC-1",
+        structured_plan={
+            "version": "implementation_plan_structured_v2",
+            "planning_profile": planning_policy.metadata(),
+            "target_repository": {},
+            "implementation_steps": [{"order": 1, "files": [safe_path]}],
+            "proposed_files": [{"path": safe_path}],
+            "design_mappings": [],
+            "verification_stage_ids": list(verification_policy.stage_ids),
+            "test_intents": [{"stage_id": "unit"}],
+        },
+        target_repo_path=tmp_path,
+        run_workspace={},
+        approved_plan_refs={},
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+    )
+    packet["output_contract"]["allowed_paths"] = [unsafe_path]
+
+    with pytest.raises(HarnessError) as context:
+        refresh_developer_work_packet(
+            packet=packet,
+            target_repo_path=tmp_path,
+            version=2,
+            run_id="run_profiled_refresh",
+            planning_policy=planning_policy,
+        )
+
+    assert context.value.error_code == "developer_work_packet_unsafe_path"
+
+
+def test_profiled_work_packet_refresh_requires_matching_frozen_policy(tmp_path: Path):
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    source_path = "apps/api/src/ProfileBoundary.ts"
+    packet = build_developer_work_packet(
+        run_id="run_profiled_policy",
+        source_ref="fixture:profiled",
+        issue_key="SDLC-1",
+        structured_plan={
+            "version": "implementation_plan_structured_v2",
+            "planning_profile": planning_policy.metadata(),
+            "target_repository": {},
+            "implementation_steps": [{"order": 1, "files": [source_path]}],
+            "proposed_files": [{"path": source_path}],
+            "design_mappings": [],
+            "verification_stage_ids": list(verification_policy.stage_ids),
+            "test_intents": [{"stage_id": "unit"}],
+        },
+        target_repo_path=tmp_path,
+        run_workspace={},
+        approved_plan_refs={},
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+    )
+
+    with pytest.raises(HarnessError) as missing:
+        refresh_developer_work_packet(
+            packet=packet,
+            target_repo_path=tmp_path,
+            version=2,
+            run_id="run_profiled_policy",
+        )
+    assert missing.value.error_code == "developer_work_packet_path_policy_missing"
+
+    packet["output_contract"]["path_policy"]["planning_policy_version"] = "tampered"
+    with pytest.raises(HarnessError) as mismatch:
+        refresh_developer_work_packet(
+            packet=packet,
+            target_repo_path=tmp_path,
+            version=2,
+            run_id="run_profiled_policy",
+            planning_policy=planning_policy,
+        )
+    assert mismatch.value.error_code == "developer_work_packet_path_policy_mismatch"
 
 
 def test_immutable_final_field_proposes_explicit_design_adjustment(tmp_path: Path):

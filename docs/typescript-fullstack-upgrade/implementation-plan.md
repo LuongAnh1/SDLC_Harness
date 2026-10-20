@@ -74,7 +74,15 @@ tất và không tự cho phép cutover.
 
 - [x] Pre-A3 hardening: packet profiled có `schema_version` riêng, Phase 4 kiểm
   lại profile/stage contract và legacy Java Runner fail-closed với packet stage-only.
-- [ ] Chuyển work-packet/apply/repair guards sang editable roots của profile.
+- [x] A3.1: chuyển work-packet/apply/repair guards sang editable roots của profile.
+  - Hoàn tất: 2026-10-20.
+  - Profiled work packet lưu `editable_path_policy_v1` trong output contract;
+    build, refresh và apply đều resolve policy từ immutable run snapshot và
+    fail closed nếu metadata hoặc allowed path bị sửa.
+  - Editable root chỉ xác nhận file thuộc vùng có thể sửa; phạm vi ghi thực tế
+    vẫn là exact `allowed_paths` đã được implementation plan duyệt.
+  - Java path guard chỉ còn cho artifact legacy; prompt/fake Phase 4 vẫn thuộc
+    A2.2b và Verification Runner stage executor vẫn thuộc lát A3 kế tiếp.
 - [ ] Chuyển Verification Runner sang profile-owned setup/discovery/execution.
 - [ ] Dùng fixed argv/cwd/env allowlist/timeout từ registry, không execute shell
   string do LLM hoặc plan cung cấp.

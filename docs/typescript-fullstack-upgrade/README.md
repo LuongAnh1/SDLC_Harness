@@ -44,8 +44,8 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1, A2.1a/A2.1b, A2.2a và A2.3 đã hoàn tất, các checklist còn lại giữ theo
-  trạng thái thực tế.
+  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3 và A3.1 đã hoàn tất; các checklist còn
+  lại giữ theo trạng thái thực tế.
 - [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
   reference-only và owner của từng lát migration.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
@@ -71,4 +71,6 @@ chưa được tạo và chưa chạy migration hay live workflow cho hướng T
 Phase 3 profiled hiện phát hành `implementation_plan_structured_v2`, bind review
 với SHA-256 của artifact và chỉ kích hoạt smoke suite `typecheck -> unit`.
 Verification Runner đã fail-closed với packet stage-only nhưng chưa ánh xạ hoặc
-thực thi các stage này cho tới lát A3.
+thực thi các stage này cho tới lát A3 kế tiếp. Work packet, refresh, apply và
+repair của profiled run đã khóa theo editable roots từ immutable snapshot; exact
+`allowed_paths` của approved plan vẫn là phạm vi ghi cuối cùng.
