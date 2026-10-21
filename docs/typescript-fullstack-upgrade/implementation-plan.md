@@ -288,6 +288,18 @@ tất và không tự cho phép cutover.
       four-cycle Developer repair, Code Trace, profiled QA và publication. QA xác minh
       đúng hai generated acceptance test; Draft PR #1 tại commit `fc80323` có hosted
       CI run `39551258446` xanh, checkpoint Code Review đã sync real. PR vẫn là Draft.
+  - [x] A4.2b: bổ sung hygiene cho CodeGraph index local của target bootstrap.
+    - Root `.gitignore` của `SDLC_Target_TypeScript` phải ignore toàn bộ
+      `.codegraph/`; file `.codegraph/.gitignore` do `codegraph init` sinh không được
+      xuất hiện trong `git status`, publication manifest hoặc PR.
+    - Chỉ sửa canonical target bootstrap; không thay đổi branch/commit/evidence của
+      live run đang dừng tại Draft Code Review. Existing run worktree tiếp tục được
+      Harness coi là generated state và dọn ở lifecycle cleanup hiện hành.
+    - Acceptance: `git check-ignore -v .codegraph/.gitignore` trỏ về root
+      `.gitignore`; không cần chạy lại application test vì không đổi runtime code.
+    - Hoàn tất: 2026-10-21. Canonical target root ignore `.codegraph/` và
+      `git check-ignore` trả đúng rule. Live PR worktree giữ nguyên SHA/evidence và
+      để lifecycle cleanup xóa index đã sinh trước thay đổi này.
   - Dừng tại từng human checkpoint; Phase 4 phải tạo production `.ts`, Vitest
     test, stable-ID trace và Draft PR có hosted CI xanh. Không mark Ready hoặc
     merge trong lát cutover.

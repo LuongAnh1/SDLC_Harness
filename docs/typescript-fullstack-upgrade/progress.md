@@ -1124,6 +1124,23 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   in 204.58s` bằng pytest-xdist; skip duy nhất vẫn là ca Windows symlink thiếu quyền
   đã biết. `compileall` và `git diff --check` đều pass.
 
+## 2026-10-21 - Kế Hoạch CodeGraph Local-index Hygiene
+
+- Phase 3 chủ động chạy `codegraph init` trong per-run worktree trước khi collect repo
+  context. CodeGraph sinh `.codegraph/.gitignore` với rule ignore mọi dữ liệu trừ chính
+  file này; root target chưa ignore `.codegraph/` nên worktree hiện báo một untracked
+  file dù Harness đã loại generated directory khỏi dirty/publication/cleanup guards.
+- Lát nhỏ này chỉ thêm `.codegraph/` vào root `.gitignore` của canonical
+  `SDLC_Target_TypeScript`, rồi xác minh bằng `git check-ignore` và status. Không sửa
+  live Draft PR #1, không refresh CodeGraph, không đổi Phase 3/4 workflow và chưa mở
+  cải tiến CodeGraph read-tool cho Developer Phase 4.
+- Đã thêm rule ở dòng 2 root `.gitignore`; `git check-ignore -v
+  .codegraph/.gitignore` trỏ đúng về `.gitignore:2:.codegraph/` và target diff check
+  pass. Canonical target chỉ dirty đúng file bootstrap này.
+- Existing live worktree vẫn giữ untracked `.codegraph/.gitignore` vì branch của PR
+  đang pin commit `fc80323`; không backport vào PR để tránh làm lệch Code Review
+  artifact. Harness đã có generated-state allowance và safe cleanup cho trường hợp này.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
