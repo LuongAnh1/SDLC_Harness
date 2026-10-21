@@ -221,10 +221,15 @@ tất và không tự cho phép cutover.
   kiểm tra quyền fetch/push trước controlled smoke.
   - Hoàn tất: 2026-10-21. Private remote có default branch `main`; push/fetch
     pass và hosted CI hoàn tất thành công trong 1 phút 28 giây.
-- [ ] Khóa npm workspace, exact toolchain/dependency versions, lockfile và
+- [x] Khóa npm workspace, exact toolchain/dependency versions, lockfile và
   `.sdlc/target-profile.json`; không dùng dependency `latest` theo run.
-- [ ] Bảo vệ manifest, package scripts/lockfile, tool configs, Compose và CI;
+  - Hoàn tất: 2026-10-21. Protected bootstrap validator kiểm 5 package file,
+    exact toolchain cùng 23 dependency spec và lockfile v3; local/hosted CI pass.
+- [x] Bảo vệ manifest, package scripts/lockfile, tool configs, Compose và CI;
   skeleton phải cài sẵn dependency cần cho V1 feature.
+  - Hoàn tất: 2026-10-21. Registry/manifest khớp 19 protected path tồn tại;
+    bootstrap positive/negative tests và full React/Fastify/Prisma/Playwright
+    lifecycle pass trên local lẫn GitHub Actions.
 - [ ] Chuyển target path/remote sau regression và controlled smoke.
 - [ ] Xóa Java runtime-only behavior và migration flag; giữ historical
   docs/evidence/read path có nhãn.

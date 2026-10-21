@@ -85,8 +85,30 @@ class ProfileRegistryTests(unittest.TestCase):
             ("typecheck", "unit"),
         )
         self.assertIn(".sdlc/target-profile.json", project.required_paths)
-        self.assertIn("package-lock.json", project.protected_paths)
-        self.assertIn("packages/db/prisma7.config.ts", project.protected_paths)
+        self.assertEqual(
+            project.protected_paths,
+            (
+                ".sdlc",
+                ".github",
+                "package.json",
+                "package-lock.json",
+                "compose.yaml",
+                "tsconfig.json",
+                "tsconfig.base.json",
+                "vitest.config.ts",
+                "playwright.config.ts",
+                "apps/web/package.json",
+                "apps/web/tsconfig.json",
+                "apps/web/vite.config.ts",
+                "apps/api/package.json",
+                "apps/api/tsconfig.json",
+                "packages/contracts/package.json",
+                "packages/contracts/tsconfig.json",
+                "packages/db/package.json",
+                "packages/db/prisma7.config.ts",
+                "packages/db/tsconfig.json",
+            ),
+        )
 
     def test_profiles_and_nested_collections_are_immutable(self) -> None:
         roots = ["apps/web/src"]

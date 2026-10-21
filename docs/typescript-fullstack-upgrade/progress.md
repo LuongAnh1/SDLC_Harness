@@ -916,6 +916,52 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - A4.1b.3b nay hoàn tất end-to-end, không chỉ local-ready. Chưa đổi Harness
   target config, chưa chạy controlled live SDLC workflow và chưa mở Chặng B.
 
+## 2026-10-21 - Kế Hoạch A4 Bootstrap Contract Closure
+
+- Baseline Harness `395e2f0`, target `5afbe16`; cả hai worktree sạch và target
+  đã đồng bộ canonical private remote trước khi triển khai.
+- Audit 5 package manifest tìm thấy 23 dependency declaration, tất cả dùng exact
+  version; package-lock v3 có 300 package entry. Manifest preflight vẫn pass với
+  digest hiện tại nhưng ba protected path không tồn tại: root `vite.config.ts`
+  và hai workspace `vitest.config.ts`.
+- Đồng bộ registry/manifest theo topology thật, giữ root `vitest.config.ts` và
+  `apps/web/vite.config.ts`; không tạo config rỗng chỉ để khớp danh sách cũ.
+- Thêm bootstrap validator/test được bảo vệ trong `.sdlc`, npm scripts và hai CI
+  step chạy trước install. Validator chặn dependency range/tag/protocol, kiểm
+  exact toolchain/package versions, lockfile workspace entries và sự tồn tại của
+  protected/required/component paths.
+- Không đổi HTTP API, workflow state, active Verification Runner, target runtime
+  config hoặc Chặng B. Không có TypeScript run lịch sử/active cần tương thích.
+- Acceptance dự kiến: bootstrap positive/negative tests, full target lifecycle,
+  manifest preflight với digest mới, targeted/full Harness regression,
+  `compileall`, diff check và GitHub-hosted CI đều pass.
+
+## 2026-10-21 - A4 Bootstrap Contract Closure
+
+- Harness registry và target manifest bỏ ba protected path không tồn tại; topology
+  thật giữ root `vitest.config.ts` và `apps/web/vite.config.ts`. Manifest preflight
+  pass với 19 protected path và digest mới
+  `sha256:a1520dd257f7441691f035b01125412fb3d296b8178d7a0d39633b0ff4ad2038`.
+- Target commit `b6704a3` thêm protected bootstrap validator cùng Node built-in
+  tests. Audit target thật báo 5 package file, 23 exact dependency spec, lockfile
+  v3, 9 required path và 6 component root; range, `latest`, protocol tùy ý,
+  protected path thiếu và workspace lock mismatch đều bị chặn.
+- Local target pass: bootstrap `6 tests`, clean install 245 package với
+  `0 vulnerabilities`, Prisma validate, typecheck, Vitest `6 files, 10 tests`,
+  Vite `18 modules`, migrate từ volume rỗng, seed hai lần vẫn đúng một bootstrap
+  row, DB smoke và Playwright `1 passed`; Docker resources cùng port được dọn.
+- Harness targeted regression `44 passed`; full parallel regression
+  `550 passed, 1 skipped in 142.59s`; `compileall` và diff check pass. Skip duy
+  nhất vẫn là ca symlink Windows thiếu quyền đã biết.
+- Target đã push lên canonical `main`. GitHub-hosted run `39536008339` trên SHA
+  `b6704a3d5f219d6f5af101eae0877cd770e37b40` pass trong 1 phút 28 giây; hai
+  bootstrap gate chạy trước `npm ci`, toàn bộ DB/typecheck/unit/browser stages
+  đều xanh và failure artifact được skip đúng trên success. Evidence:
+  `https://github.com/LuongAnh1/SDLC_Target_TypeScript/actions/runs/39536008339`.
+- Hai checklist exact dependency/lockfile và protected bootstrap files được đóng.
+  Chưa đổi Harness target config, chưa chạy controlled live Phase 1-4 và chưa
+  triển khai local-CI repair loop Chặng B.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

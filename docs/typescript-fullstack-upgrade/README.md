@@ -7,8 +7,8 @@ selector config, snapshot profile theo run, downstream settings binding, target
 manifest preflight, workspace binding fail-closed và retirement guard cho run
 Java cũ. Profile rỗng không còn được mở run mới; target TypeScript local đã có
 web/API/contracts, Prisma/PostgreSQL/Compose, Playwright Chromium smoke chạy
-thật; canonical private remote và GitHub-hosted CI run đầu tiên đều đã hoàn
-tất. Config cutover và live Harness workflow vẫn chưa triển khai.
+thật; canonical private remote, GitHub-hosted CI và protected bootstrap audit
+đều đã hoàn tất. Config cutover và live Harness workflow vẫn chưa triển khai.
 
 ## Mục Tiêu
 
