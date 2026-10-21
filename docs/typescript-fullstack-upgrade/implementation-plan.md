@@ -186,8 +186,15 @@ tất và không tự cho phép cutover.
     Vitest assertions, profiled Verification Runner và AST extraction thật đều
     pass trên base SHA đã snapshot. TypeScript 7.0.2 bị loại sau smoke vì package
     hiện dùng unstable AST export không tương thích Compiler API contract A3.4a.
-- [ ] A4.1b: hoàn thiện infra skeleton React/Vite, Fastify, Prisma/PostgreSQL,
-  Playwright và CI trước full-stack cutover.
+- [ ] A4.1b: hoàn thiện infra skeleton trước full-stack cutover theo ba lát độc lập:
+  - [x] A4.1b.1: dựng React/Vite, Fastify và shared contracts chạy thật; giữ active
+    verification suite ở `typecheck -> unit` và chưa đổi Harness runtime.
+    - Hoàn tất: 2026-10-21. Target pin exact dependency, có web production build,
+      Fastify `GET /health`, shared runtime-validated contract và sáu unit tests.
+    - Manifest/profile không đổi; `typecheck -> unit` vẫn là active suite. Full
+      Harness regression `550 passed, 1 skipped`.
+  - [ ] A4.1b.2: dựng Prisma/PostgreSQL cùng Compose lifecycle đã review.
+  - [ ] A4.1b.3: dựng Playwright và CI trên skeleton đã khóa dependency/config.
 - [ ] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
   kiểm tra quyền fetch/push trước controlled smoke.
 - [ ] Khóa npm workspace, exact toolchain/dependency versions, lockfile và

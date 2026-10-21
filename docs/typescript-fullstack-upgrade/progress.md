@@ -719,6 +719,48 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   là ca symlink Windows thiếu quyền đã biết; `compileall` và `git diff --check`
   đều pass.
 
+## 2026-10-21 - Kế Hoạch A4.1b.1 Web/API Skeleton
+
+- Baseline Harness `fea1898`, target local `111b72c`; cả hai worktree sạch trước
+  khi triển khai.
+- Tách A4.1b thành ba lát: web/API/contracts, database/Compose và Playwright/CI.
+  Lát đầu chỉ dựng React/Vite, Fastify và shared health contract chạy thật.
+- Pin exact React `19.3.1`, React DOM `19.3.1`, React types `19.3.0`, Vite React
+  plugin `6.1.2`, Fastify `5.12.7`, `@fastify/cors` `11.3.1` và `tsx` `4.23.15`;
+  cập nhật lockfile bằng npm, không dùng range hoặc `latest`.
+- Thêm web entry/build, Fastify app factory/server, `GET /health`, shared contract
+  và test bằng React server render cùng Fastify injection. Giữ nguyên symbol
+  baseline `readHealth`/`HealthService.check` phục vụ AST evidence.
+- Không đổi profile/schema, HTTP API của Harness hay active verification suite;
+  chưa triển khai Prisma/PostgreSQL, Playwright, CI, remote, config cutover hoặc
+  live workflow. Checklist A4.1b tổng chỉ đóng sau đủ ba lát.
+- Acceptance dự kiến: `npm ci`, typecheck, unit và web build của target; manifest
+  preflight, regression Harness, `compileall` và `git diff --check` đều pass.
+
+## 2026-10-21 - A4.1b.1 Web/API Skeleton
+
+- Target bootstrap được đóng riêng tại commit `73860a6` trên branch `main` của
+  `SDLC_Target_TypeScript`; chưa tạo remote và chưa push.
+- Giữ nguyên Harness runtime/profile/schema và target manifest. Target bổ sung
+  React/Vite application shell, Fastify app factory/server, `GET /health` và
+  package contracts làm workspace dependency dùng chung cho web/API.
+- Web health client kiểm payload runtime thay vì chỉ ép kiểu TypeScript; unit test
+  bao phủ payload hợp lệ/sai contract, React server render và Fastify injection.
+  Symbol baseline `readHealth`/`HealthService.check` cùng chữ ký cũ được giữ lại.
+- Dependency trực tiếp được pin đúng kế hoạch; npm `allowScripts` chỉ cho phép
+  đúng `esbuild@0.28.2` phục vụ Vite. `npm ci` cài sạch 102 package, audit 107
+  package và không có vulnerability; `npm ls --depth=0 --workspaces` xác nhận
+  đúng exact versions cùng local contracts workspace.
+- Target verification: typecheck pass; Vitest `4 files, 6 tests` pass; Vite build
+  18 module pass; HTTP smoke thật qua `npm run start:api` trả `{"status":"ok"}`.
+- Harness manifest preflight pass với digest không đổi
+  `sha256:dcbdbfbae37ea6b5637ffd41df6ef8f60323480949053eafa283ed6067710b94`;
+  profile/manifest/runner regression `32 passed`; full parallel regression
+  `550 passed, 1 skipped in 114.86s`; `compileall` pass. Skip duy nhất vẫn là ca
+  symlink Windows thiếu quyền đã biết.
+- Chưa triển khai Prisma/PostgreSQL/Compose lifecycle, Playwright, CI, remote,
+  config cutover hoặc live workflow. A4.1b tổng vẫn mở cho A4.1b.2/A4.1b.3.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
