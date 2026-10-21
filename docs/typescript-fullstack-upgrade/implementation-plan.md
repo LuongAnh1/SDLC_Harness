@@ -186,7 +186,7 @@ tất và không tự cho phép cutover.
     Vitest assertions, profiled Verification Runner và AST extraction thật đều
     pass trên base SHA đã snapshot. TypeScript 7.0.2 bị loại sau smoke vì package
     hiện dùng unstable AST export không tương thích Compiler API contract A3.4a.
-- [ ] A4.1b: hoàn thiện infra skeleton trước full-stack cutover theo ba lát độc lập:
+- [x] A4.1b: hoàn thiện infra skeleton trước full-stack cutover theo ba lát độc lập:
   - [x] A4.1b.1: dựng React/Vite, Fastify và shared contracts chạy thật; giữ active
     verification suite ở `typecheck -> unit` và chưa đổi Harness runtime.
     - Hoàn tất: 2026-10-21. Target pin exact dependency, có web production build,
@@ -206,15 +206,21 @@ tất và không tự cho phép cutover.
     - Hoàn tất: 2026-10-21. Prisma validate, target typecheck/unit/build, live
       migrate + seed hai lần + query và cleanup đều pass; full Harness regression
       `550 passed, 1 skipped`.
-  - [ ] A4.1b.3: dựng Playwright và CI trên skeleton đã khóa dependency/config.
+  - [x] A4.1b.3: dựng Playwright và CI trên skeleton đã khóa dependency/config.
     - [x] A4.1b.3a: pin Playwright/Chromium, dựng local web/API lifecycle, một
       browser smoke và JSON report; chưa kích hoạt `browser_e2e` trong Harness.
       - Hoàn tất: 2026-10-21. Chromium smoke xác minh React -> Fastify health,
         JSON report đúng spec/project/status và hai service port được giải phóng.
-    - [ ] A4.1b.3b: thêm CI workflow cùng failure artifact trên nền local smoke
+    - [x] A4.1b.3b: thêm CI workflow cùng failure artifact trên nền local smoke
       đã ổn định.
-- [ ] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
+      - Hoàn tất: 2026-10-21. Workflow pin immutable action SHA, dùng Node/npm và
+        PostgreSQL image exact, chạy DB/typecheck/unit/Chromium smoke, đồng thời
+        upload Playwright artifact khi lỗi. Full local parity và GitHub-hosted
+        run `39533230388` trên SHA `5afbe16` đều pass.
+- [x] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
   kiểm tra quyền fetch/push trước controlled smoke.
+  - Hoàn tất: 2026-10-21. Private remote có default branch `main`; push/fetch
+    pass và hosted CI hoàn tất thành công trong 1 phút 28 giây.
 - [ ] Khóa npm workspace, exact toolchain/dependency versions, lockfile và
   `.sdlc/target-profile.json`; không dùng dependency `latest` theo run.
 - [ ] Bảo vệ manifest, package scripts/lockfile, tool configs, Compose và CI;

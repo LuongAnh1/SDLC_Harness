@@ -853,6 +853,69 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   Chưa thêm CI, remote/push, DB browser flow hay B3/B4 evidence contract;
   A4.1b.3 tổng vẫn mở cho A4.1b.3b.
 
+## 2026-10-21 - Kế Hoạch A4.1b.3b CI Workflow
+
+- Baseline Harness `3795858`, target local `23edb0d`; cả hai worktree sạch và
+  target chưa có remote trước khi triển khai.
+- Thêm một GitHub Actions workflow cho push `main`, pull request và
+  `workflow_dispatch`; job Ubuntu dùng Node/npm exact, PostgreSQL service đúng
+  image đã khóa và chuỗi kiểm tra npm/Prisma/typecheck/unit/Playwright hiện có.
+- GitHub Actions phải pin immutable commit SHA. Playwright trên CI chỉ cài
+  Chromium cùng system dependencies; khi lỗi upload `playwright-report/` và
+  `test-results/` để chẩn đoán.
+- Kiểm chứng workflow bằng parse YAML và chạy chuỗi lệnh tương đương CI ở local
+  với Compose project/port cô lập, seed hai lần và cleanup bắt buộc.
+- Không tạo remote, push, cutover hoặc bật database/browser stage trong active
+  Harness suite. GitHub-hosted run được kiểm chứng ở bước tạo canonical remote.
+- Acceptance dự kiến: target DB/typecheck/unit/build/E2E pass, artifact policy
+  đúng, manifest preflight cùng targeted/full Harness regression, `compileall`
+  và `git diff --check` đều pass.
+
+## 2026-10-21 - A4.1b.3b CI Workflow
+
+- Target thêm `.github/workflows/ci.yml` cho push `main`, pull request và manual
+  dispatch. Job Ubuntu có read-only contents permission, timeout 20 phút,
+  concurrency theo ref và PostgreSQL service `postgres:17.11-alpine3.24`.
+- Workflow dùng Node `24.18.0`, npm `11.16.0`; pin checkout `v7.0.1`, setup-node
+  `v7.1.0` và upload-artifact `v7.0.2` bằng immutable commit SHA. Chuỗi verify
+  gồm clean install, Prisma validate/migrate, seed hai lần, DB smoke, typecheck,
+  unit và Playwright Chromium. Failure upload report/test-results trong 7 ngày.
+- Thêm `test:e2e:install:ci` để CI cài Chromium cùng system dependencies; script
+  cài browser local giữ nguyên. Không đổi dependency, lockfile, profile/manifest
+  hoặc active Harness verification suite.
+- PyYAML parse và policy assertions pass. Target `npm ci` cài 245 package với
+  `0 vulnerabilities`; Prisma validate, typecheck, Vitest `6 files, 10 tests`,
+  Vite build `18 modules` và Playwright `1 passed in 7.7s`; JSON report có một
+  expected test, không lỗi và hai port `3001/4173` đã được giải phóng.
+- Tiến trình Codex giữ PATH cũ nên ban đầu không resolve được Docker. Persistent
+  user PATH cho thấy CLI tại `AppData/Local/Programs/DockerDesktop/resources/bin`;
+  dùng đường dẫn tuyệt đối xác nhận Docker Engine `29.9.1` và Compose `v5.6.0`.
+  Compose project/volume mới đã migrate từ DB rỗng, seed hai lần, query đúng một
+  bootstrap row và báo database reachable; container/network/volume được xóa,
+  port `54329` được giải phóng. GitHub-hosted run vẫn chờ canonical remote.
+- Manifest preflight pass với digest
+  `sha256:9ca5e0628f55ca155c79881897478f6dfa06c12084ff7b31a8520464d0ac3c8f` và 5
+  component. Targeted regression `44 passed`; full Harness regression
+  `550 passed, 1 skipped in 57.94s`; `compileall` và `git diff --check` pass.
+  Skip duy nhất vẫn là ca symlink Windows thiếu quyền đã biết.
+- A4.1b.3 và A4.1b được đóng ở mức skeleton/CI local. Chưa tạo remote, push,
+  cutover, DB browser flow, B3/B4 evidence contract hay active browser/DB stage.
+
+## 2026-10-21 - Canonical Remote Và GitHub-hosted CI
+
+- Commit target `5afbe16` thêm full-stack workflow và CI browser-install script.
+  Tạo private remote `https://github.com/LuongAnh1/SDLC_Target_TypeScript`, default
+  branch `main`; local `main` theo dõi `origin/main`, push và fetch đều pass.
+- Push workflow kích hoạt run `39533230388` trên đúng SHA
+  `5afbe165f202649c3a02dccab557a6a7beeb436d`. Job Ubuntu hoàn tất thành công
+  trong 1 phút 28 giây: PostgreSQL service, clean install, exact toolchain,
+  Prisma validate/migrate, seed hai lần, DB smoke, typecheck, unit, Chromium
+  system dependencies và browser smoke đều pass.
+- Failure artifact step được skip đúng trên success. Run evidence:
+  `https://github.com/LuongAnh1/SDLC_Target_TypeScript/actions/runs/39533230388`.
+- A4.1b.3b nay hoàn tất end-to-end, không chỉ local-ready. Chưa đổi Harness
+  target config, chưa chạy controlled live SDLC workflow và chưa mở Chặng B.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
