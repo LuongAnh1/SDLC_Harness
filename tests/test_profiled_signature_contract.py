@@ -25,6 +25,7 @@ from sdlc_harness.profiles import (
     build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
+    implementation_signature_contract_digest,
     implementation_signature_contract_issues,
 )
 
@@ -464,6 +465,82 @@ def test_function_signature_can_implement_an_approved_interface_operation(polici
         mappings=[mapping],
         class_graph=graph,
     )
+    assert deterministic_typescript_contract_findings(
+        work_packet={"implementation_signature_contract": contract},
+        ast_evidence=_evidence(planning, [actual]),
+    ) == []
+
+
+def test_interface_promise_signature_does_not_require_async_modifier(policies) -> None:
+    planning, _ = policies
+    mapping = {
+        **_mapping(),
+        "design_element_id": "method:HealthPort.readHealth",
+        "design_element_name": "HealthPort.readHealth",
+        "planned_code_target": f"{SOURCE_PATH}#readHealth",
+    }
+    graph = {
+        "nodes": [
+            {
+                "type": "interface",
+                "className": "HealthPort",
+                "methods": [
+                    {
+                        "name": "readHealth",
+                        "parameters": [],
+                        "returnType": "Promise<HealthSnapshot>",
+                    }
+                ],
+            }
+        ]
+    }
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=[mapping],
+        class_graph=graph,
+        candidate={
+            "entries": [
+                {
+                    "design_element_id": "method:HealthPort.readHealth",
+                    "symbol_kind": "method",
+                    "owner_kind": "interface",
+                    "qualified_name": "HealthPort.readHealth",
+                    "parameters": [],
+                    "return_type": "Promise<HealthSnapshot>",
+                    "type_parameters": [],
+                    "async": True,
+                }
+            ]
+        },
+    )
+    assert contract["entries"][0]["async"] is False
+    actual = {
+        "kind": "method",
+        "name": "readHealth",
+        "qualified_name": "HealthPort.readHealth",
+        "parameters": [],
+        "return_type": "Promise<HealthSnapshot>",
+        "type_parameters": [],
+        "async": False,
+        "exported": False,
+    }
+
+    assert deterministic_typescript_contract_findings(
+        work_packet={"implementation_signature_contract": contract},
+        ast_evidence=_evidence(planning, [actual]),
+    ) == []
+
+
+def test_legacy_interface_contract_with_async_true_matches_promise_declaration(policies) -> None:
+    planning, _ = policies
+    contract = _contract(planning)
+    entry = contract["entries"][0]
+    entry["owner_kind"] = "interface"
+    entry["async"] = True
+    contract["digest"] = implementation_signature_contract_digest(contract)
+    actual = _actual_symbol()
+    actual["async"] = False
+
     assert deterministic_typescript_contract_findings(
         work_packet={"implementation_signature_contract": contract},
         ast_evidence=_evidence(planning, [actual]),

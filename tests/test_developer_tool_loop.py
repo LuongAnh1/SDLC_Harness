@@ -461,6 +461,30 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("qa_repair_v1", qa.manifest_path)
         self.assertNotEqual(implementation.manifest_path, qa.manifest_path)
 
+    def test_repair_session_uses_cumulative_ordinal_without_changing_logical_iteration(self) -> None:
+        result = self.executor(
+            ScriptedLlm(
+                [
+                    action(
+                        "write_file",
+                        {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                    ),
+                    action("complete", {"summary": "new repair cycle"}),
+                ]
+            )
+        ).execute(
+            run_id="run_repair_cycle_two",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+            repair_feedback={"path": "src/Main.java", "message": "fix implementation"},
+            repair_iteration=1,
+            session_iteration=5,
+        )
+
+        self.assertIn("implementation_repair_v5", result.manifest_path)
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["repair_iteration"], 1)
+
     def test_verification_feedback_does_not_treat_incidental_type_mentions_as_repair_targets(self) -> None:
         packet = self.work_packet()
         selected = _selected_repair_paths(

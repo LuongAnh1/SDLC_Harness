@@ -25,6 +25,8 @@ from sdlc_harness.verification import (
     VerificationResult,
     VerificationRunner,
     VerificationStageResult,
+    resolve_verification_preparation_spec,
+    resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
 
@@ -68,6 +70,16 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_registry_resolves_exact_order_and_rejects_drift(self) -> None:
+        preparation = resolve_verification_preparation_spec(self.policy)
+        self.assertIsNotNone(preparation)
+        self.assertEqual(preparation.preparation_id, "dependency_setup")
+        self.assertEqual(preparation.argv, ("npm", "ci"))
+        preparations = resolve_verification_preparation_specs(self.policy)
+        self.assertEqual(
+            [item.preparation_id for item in preparations],
+            ["dependency_setup", "generated_source_setup"],
+        )
+        self.assertEqual(preparations[1].argv, ("npm", "run", "db:generate"))
         specs = resolve_verification_stage_specs(self.policy)
         self.assertEqual([item.stage_id for item in specs], ["typecheck", "unit"])
         self.assertEqual(specs[0].argv, ("npm", "run", "typecheck"))
@@ -102,6 +114,182 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         with self.assertRaises(HarnessError):
             resolve_verification_stage_specs(wrong_version)
+
+    def test_runner_prepares_dependencies_once_per_lockfile(self) -> None:
+        (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+        runner = VerificationRunner()
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+        ):
+            first = runner.run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+            second = runner.run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(first.status, "passed")
+        self.assertEqual(first.preparation_results[0].reason, "Verification preparation completed successfully.")
+        self.assertIn("current inputs", second.preparation_results[0].reason)
+        self.assertEqual(run.call_count, 5)
+        self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "typecheck"])
+        marker = self.target / "node_modules" / ".sdlc-harness-dependency-setup.json"
+        self.assertTrue(marker.is_file())
+
+    def test_runner_refreshes_generated_source_when_schema_changes(self) -> None:
+        (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        (self.target / "packages/db/prisma").mkdir(parents=True)
+        (self.target / "packages/db/package.json").write_text("{}\n", encoding="utf-8")
+        (self.target / "packages/db/prisma7.config.ts").write_text("export default {};\n", encoding="utf-8")
+        schema = self.target / "packages/db/prisma/schema.prisma"
+        schema.write_text("model First { id String @id }\n", encoding="utf-8")
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+        ):
+            first = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+            second = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+            schema.write_text("model Second { id String @id }\n", encoding="utf-8")
+            third = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(first.status, "passed")
+        self.assertEqual(second.status, "passed")
+        self.assertEqual(third.status, "passed")
+        self.assertEqual(
+            [item.stage_id for item in first.preparation_results],
+            ["dependency_setup", "generated_source_setup"],
+        )
+        self.assertEqual(run.call_count, 9)
+        self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "db:generate"])
+        self.assertEqual(run.call_args_list[6].args[0], ["npm", "run", "db:generate"])
+        marker = self.target / "node_modules" / ".sdlc-harness-generated-source-setup.json"
+        self.assertTrue(marker.is_file())
+
+    def test_runner_reports_generated_source_failure_as_implementation(self) -> None:
+        (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        (self.target / "packages/db/prisma").mkdir(parents=True)
+        (self.target / "packages/db/package.json").write_text("{}\n", encoding="utf-8")
+        (self.target / "packages/db/prisma7.config.ts").write_text("export default {};\n", encoding="utf-8")
+        (self.target / "packages/db/prisma/schema.prisma").write_text(
+            'datasource db { provider = "postgresql" url = env("DATABASE_URL") }\n',
+            encoding="utf-8",
+        )
+        installed = subprocess.CompletedProcess(args=[], returncode=0, stdout="installed", stderr="")
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="Prisma schema validation failed at schema.prisma:1",
+            stderr="npm error Lifecycle script failed",
+        )
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner.subprocess.run",
+                side_effect=[installed, failed],
+            ) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_kind, "implementation")
+        self.assertEqual(result.executed_stage_ids, ())
+        self.assertEqual(
+            [item.stage_id for item in result.preparation_results],
+            ["dependency_setup", "generated_source_setup"],
+        )
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("Prisma schema", result.stdout)
+
+    def test_runner_classifies_dependency_network_failure_as_environment(self) -> None:
+        (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="npm error ENOTFOUND registry.npmjs.org",
+        )
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_kind, "environment")
+        self.assertEqual(result.executed_stage_ids, ())
+        self.assertEqual(result.preparation_results[0].stage_id, "dependency_setup")
+        self.assertEqual(run.call_count, 1)
+
+    def test_runner_keeps_source_lifecycle_failure_repairable(self) -> None:
+        (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="Prisma schema validation failed at schema.prisma:8",
+            stderr="npm error Lifecycle script failed",
+        )
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed),
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(result.failure_kind, "implementation")
+        self.assertIn("Prisma schema", result.stdout)
+
+    def test_runner_classifies_missing_nested_tool_as_environment(self) -> None:
+        failed = subprocess.CompletedProcess(
+            args=[],
+            returncode=1,
+            stdout="",
+            stderr="'tsc' is not recognized as an internal or external command",
+        )
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=failed),
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(result.failure_kind, "environment")
 
     def test_runner_executes_fixed_stages_in_order_with_restricted_environment(self) -> None:
         completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
@@ -480,6 +668,18 @@ class ProfiledVerificationTest(unittest.TestCase):
             self.assertEqual(caught.exception.error_code, error_code)
 
     def test_report_renders_each_stage_evidence(self) -> None:
+        preparation = VerificationStageResult(
+            stage_id="dependency_setup",
+            status="passed",
+            argv=("npm", "ci"),
+            cwd=".",
+            timeout_seconds=300,
+            exit_code=0,
+            duration_seconds=1.5,
+            stdout="installed",
+            stderr="",
+            reason="Dependency preparation completed successfully.",
+        )
         stage = VerificationStageResult(
             stage_id="typecheck",
             status="passed",
@@ -504,11 +704,14 @@ class ProfiledVerificationTest(unittest.TestCase):
             planned_stage_ids=("typecheck", "unit"),
             executed_stage_ids=("typecheck",),
             stage_results=(stage,),
+            preparation_results=(preparation,),
         )
 
         markdown = _test_report_markdown(result.to_dict())
 
         self.assertIn("## Verification Stages", markdown)
+        self.assertIn("## Verification Preparation", markdown)
+        self.assertIn("### dependency_setup", markdown)
         self.assertIn("### typecheck", markdown)
         self.assertIn('[\"npm\", \"run\", \"typecheck\"]', markdown)
         self.assertIn("- Timeout: `120` seconds", markdown)

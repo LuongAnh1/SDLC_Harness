@@ -221,8 +221,7 @@ def deterministic_typescript_contract_findings(
             findings.append(finding)
             continue
 
-        expected_shape = signature_shape(raw)
-        if any(signature_shape(item) == expected_shape for item in actual):
+        if any(_typescript_signature_matches(expected=raw, actual=item) for item in actual):
             continue
         finding = {
             "type": "contract_signature_mismatch",
@@ -257,11 +256,29 @@ def _signature_text(entry: dict[str, object]) -> str:
         )
     type_parameters = _strings(entry.get("type_parameters"))
     generic = f"<{', '.join(type_parameters)}>" if type_parameters else ""
-    async_prefix = "async " if entry.get("async") is True else ""
+    async_prefix = (
+        "async "
+        if entry.get("async") is True and str(entry.get("owner_kind") or "") != "interface"
+        else ""
+    )
     return (
         f"{async_prefix}{entry.get('qualified_name')}{generic}"
         f"({', '.join(parameters)}): {entry.get('return_type')}"
     )
+
+
+def _typescript_signature_matches(
+    *,
+    expected: dict[str, object],
+    actual: dict[str, object],
+) -> bool:
+    """So shape chính xác, riêng interface dùng Promise thay cho modifier async."""
+
+    expected_shape = signature_shape(expected)
+    actual_shape = signature_shape(actual)
+    if str(expected.get("owner_kind") or "").strip().lower() == "interface":
+        expected_shape = {**expected_shape, "async": False}
+    return actual_shape == expected_shape
 
 
 def prepare_semantic_trial(

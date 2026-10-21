@@ -231,6 +231,68 @@ tất và không tự cho phép cutover.
     bootstrap positive/negative tests và full React/Fastify/Prisma/Playwright
     lifecycle pass trên local lẫn GitHub Actions.
 - [ ] Chuyển target path/remote sau regression và controlled smoke.
+  - Controlled smoke dùng Jira `SDLC-2`, DeepSeek/tool-loop, Jira/Confluence
+    real sync và canonical GitHub target; cấu hình TypeScript chỉ được override
+    theo process trước khi đổi default.
+  - Tiến độ 2026-10-21: cùng run `run_20261021_032521_a7c9d772` đã pass
+    Requirement V2, Design V3 và Implementation Plan V5. Hai gap live-only ở
+    design component routing và signature repair merge đã được sửa, có regression;
+    plan V5 đã được human duyệt và Phase 4 đã chạy. Controlled smoke phát hiện
+    dependency chưa được bootstrap trong worktree: `tsc` không tồn tại nhưng bị
+    phân loại nhầm thành code defect, làm tiêu hết repair budget trước khi có
+    diagnostic TypeScript thật.
+  - [x] A4.2a: harden preparation/repair recovery trước khi tiếp tục controlled smoke.
+    - Resolve dependency preparation từ executable registry đã review theo project
+      profile; workflow không hard-code npm/TypeScript và LLM không được cung cấp argv.
+    - Chạy preparation trước verification khi lockfile chưa có success marker tương
+      ứng; ghi evidence riêng, không trộn preparation vào ordered stage contract đã
+      được Plan V5 duyệt.
+    - Dependency cache theo lockfile không được làm stale generated source. Với
+      TypeScript/Prisma, chạy thêm profile-owned code-generation preparation
+      (`npm run db:generate`) khi Prisma schema/config đổi; marker riêng phải fingerprint
+      toàn bộ input sinh client và lỗi schema/generate được phân loại là
+      `implementation` để Developer nhận đúng feedback trước `typecheck`.
+    - Phân loại lỗi `environment` khác `implementation`: thiếu executable, không khởi
+      động được hoặc timeout không được gửi vào Developer repair; lỗi lifecycle có
+      diagnostic từ source vẫn được phép tạo repair feedback.
+    - `revalidate_implementation` từ `implementation_repair_limit_exceeded` mở một
+      repair cycle mới có giới hạn và giữ cumulative audit count, không sửa tăng
+      global limit và không tạo run mới.
+    - Resume tool-loop sau lỗi atomic state write phải ưu tiên đúng versioned
+      Developer Work Packet đã khóa trong execution session; không fallback sang
+      packet cũ và không tắt input-drift guard.
+    - Repair cycle mới dùng cumulative repair ordinal làm namespace session để
+      không đụng `implementation_repair_vN` của cycle cũ; logical iteration trong
+      report vẫn bắt đầu lại từ 1 và manifest hash guard giữ nguyên. Ordinal được
+      lưu trong `developer_execution`; state cũ thiếu trường này phải chọn namespace
+      chưa dùng tiếp theo từ evidence, không đoán lại bằng cycle-local counter.
+    - TypeScript signature validator phải hiểu semantics của declaration kind:
+      interface method biểu diễn bất đồng bộ bằng `Promise<T>` và không được phép có
+      modifier `async`. Contract mới canonicalize `async=false` cho owner
+      `interface`; comparator vẫn normalize contract cũ để không tạo blocker bất khả
+      thi hoặc khiến Developer thêm wrapper không cần thiết.
+    - Lỗi transport/timeout khi Developer tool-loop gọi LLM là lỗi tạm thời: giữ
+      nguyên execution session, packet, journal, logical/cumulative repair counters và
+      cho phép `continue_run` resume. Không đổi nó thành terminal `blocked`, không mở
+      session mới và không tiêu thêm repair budget chỉ vì retry cùng session.
+    - Mọi consumer của `DeveloperWorkPacket.output_contract.allowed_paths` trong QA và
+      publication phải resolve cùng `PlanningPathPolicy` từ immutable run snapshot;
+      không được rơi về Java path guard khi run là TypeScript. QA chỉ đọc code thuộc
+      exact `allowed_paths`, còn manifest publication tiếp tục qua path-safety guard
+      riêng trước khi commit/push.
+    - Bổ sung regression cho bootstrap success/cache/failure classification,
+      generated-source refresh, TypeScript interface/Promise signature semantics,
+      transient LLM pause/resume, profiled QA/publication path propagation, test report
+      evidence và recovery repair cycle; sau đó khôi phục cùng live run.
+    - Hoàn tất: 2026-10-21. Cùng live run đã resume qua dependency/code-generation,
+      four-cycle Developer repair, Code Trace, profiled QA và publication. QA xác minh
+      đúng hai generated acceptance test; Draft PR #1 tại commit `fc80323` có hosted
+      CI run `39551258446` xanh, checkpoint Code Review đã sync real. PR vẫn là Draft.
+  - Dừng tại từng human checkpoint; Phase 4 phải tạo production `.ts`, Vitest
+    test, stable-ID trace và Draft PR có hosted CI xanh. Không mark Ready hoặc
+    merge trong lát cutover.
+  - Chỉ sau khi smoke pass mới đổi default profile/path/remote trong config,
+    schema và `.env.example`; nếu smoke fail thì giữ nguyên default Java cũ.
 - [ ] Xóa Java runtime-only behavior và migration flag; giữ historical
   docs/evidence/read path có nhãn.
 

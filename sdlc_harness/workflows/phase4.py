@@ -40,6 +40,7 @@ from ..agents.developer import (
     DeveloperExecutionResult,
     DeveloperToolLoopExecutor,
     build_developer_work_packet,
+    developer_transport_retry_allowed,
     repair_scope_mismatch_retry_allowed,
     refresh_developer_work_packet,
     validate_developer_work_packet_path_policy,
@@ -124,6 +125,7 @@ IMPLEMENTATION_AUTOMATION_STATUSES = {
 
 REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "implementation_repair_limit_exceeded",
+    "verification_environment_failed",
     "test_failed",
     "test_skipped",
     "validator_evidence_or_mapping_issue",
@@ -585,6 +587,13 @@ class PhaseFourWorkflow:
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
                 return self._continue_qa_repair(state=state, run_id=run_id)
             return self._continue_implementation_repair(state=state, run_id=run_id)
+        if status == "blocked" and developer_transport_retry_allowed(state):
+            execution = _dict_value(state.get("developer_execution"))
+            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
+                return self._continue_qa_repair(state=state, run_id=run_id)
+            if execution.get("mode") == "implementation_repair":
+                return self._continue_implementation_repair(state=state, run_id=run_id)
+            return self._continue_developer_act(state=state, run_id=run_id)
         if status == "blocked" and self._legacy_verification_repair_allowed(state):
             prepared = self._prepare_legacy_verification_repair(state=state, run_id=run_id)
             if str(prepared.get("status")) == "implementation_repair_needed":
@@ -662,6 +671,7 @@ class PhaseFourWorkflow:
                 work_packet=work_packet,
                 qa_generated=qa_generated,
                 run_id=run_id,
+                planning_policy=_planning_policy_for_state(state, run_id=run_id),
             )
             pr_title = f"[{issue_key}] Implement approved use case"
             pr_body = _code_review_pr_body(
@@ -1086,6 +1096,7 @@ class PhaseFourWorkflow:
         executor: str,
         mode: str,
         repair_iteration: int,
+        session_iteration: int | None = None,
         artifact_version: int,
         progress: dict[str, object] | None = None,
         status: str,
@@ -1097,12 +1108,18 @@ class PhaseFourWorkflow:
             and _int_value(existing.get("repair_iteration")) == repair_iteration
             and _int_value(existing.get("artifact_version")) == artifact_version
         )
+        session_ordinal = (
+            _int_value(existing.get("session_iteration"))
+            if session_iteration is None
+            else max(0, session_iteration)
+        )
         return {
             **(existing if same_session else {}),
             "schema_version": "developer_execution_state_v1",
             "executor": executor,
             "mode": mode,
             "repair_iteration": repair_iteration,
+            **({"session_iteration": session_ordinal} if session_ordinal else {}),
             "artifact_version": artifact_version,
             **(progress or {}),
             "status": status,
@@ -1119,6 +1136,7 @@ class PhaseFourWorkflow:
         mode: str,
         current_phase: str,
         repair_iteration: int,
+        session_iteration: int | None = None,
         artifact_version: int,
         manifest_key: str,
         journal_key: str,
@@ -1142,6 +1160,7 @@ class PhaseFourWorkflow:
                     executor="tool_loop",
                     mode=mode,
                     repair_iteration=repair_iteration,
+                    session_iteration=session_iteration,
                     artifact_version=artifact_version,
                     status="executing",
                 ),
@@ -1162,6 +1181,7 @@ class PhaseFourWorkflow:
                         executor="tool_loop",
                         mode=mode,
                         repair_iteration=repair_iteration,
+                        session_iteration=session_iteration,
                         artifact_version=artifact_version,
                         progress=progress,
                         status="executing",
@@ -1177,6 +1197,7 @@ class PhaseFourWorkflow:
                 target_path=target_path,
                 repair_feedback=repair_feedback,
                 repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
                 repair_scope=repair_scope,
                 expected_dirty_paths=expected_dirty_paths,
                 on_progress=persist_progress,
@@ -1184,9 +1205,8 @@ class PhaseFourWorkflow:
         except DeveloperExecutionError:
             raise
         except HarnessError as exc:
-            session_name = (
-                f"{repair_scope}_repair_v{repair_iteration}" if repair_feedback else "act_v1"
-            )
+            session_ordinal = repair_iteration if session_iteration is None else session_iteration
+            session_name = f"{repair_scope}_repair_v{session_ordinal}" if repair_feedback else "act_v1"
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
@@ -1196,15 +1216,16 @@ class PhaseFourWorkflow:
                 exc.error_code,
                 exc.message,
                 run_id=run_id,
-                retriable=False,
+                retriable=exc.error_code == "llm_transport_failed",
                 manifest_path=manifest_path,
                 journal_path=journal_path,
-                progress={"status": "blocked"},
+                progress={
+                    "status": "paused" if exc.error_code == "llm_transport_failed" else "blocked"
+                },
             ) from exc
         except Exception as exc:
-            session_name = (
-                f"{repair_scope}_repair_v{repair_iteration}" if repair_feedback else "act_v1"
-            )
+            session_ordinal = repair_iteration if session_iteration is None else session_iteration
+            session_name = f"{repair_scope}_repair_v{session_ordinal}" if repair_feedback else "act_v1"
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
@@ -1228,6 +1249,7 @@ class PhaseFourWorkflow:
             executor="tool_loop",
             mode=mode,
             repair_iteration=repair_iteration,
+            session_iteration=session_iteration,
             artifact_version=artifact_version,
             progress=result.progress,
             status="completed",
@@ -1676,6 +1698,9 @@ class PhaseFourWorkflow:
                 f"Implementation repair limit reached after {repair_iteration} iteration(s); "
                 f"latest verification result: {result.reason}"
             )
+        elif result.failure_kind == "environment":
+            error_code = "verification_environment_failed"
+            message = result.reason
         else:
             error_code = "test_skipped" if result.status == "skipped" else "test_failed"
             message = result.reason
@@ -2361,6 +2386,7 @@ class PhaseFourWorkflow:
             target_repo=str(target_info.path),
             branch=target_info.current_branch,
             work_packet=work_packet,
+            planning_policy=_planning_policy_for_state(state, run_id=run_id),
         )
         if repaired_from:
             context["repaired_from"] = repaired_from
@@ -2703,6 +2729,10 @@ class PhaseFourWorkflow:
         latest_artifacts = dict(artifact_paths)
         previous_iterations = _int_value(state.get("implementation_repair_iterations"))
         revalidated_from = str(_dict_value(state.get("last_error")).get("error_code") or "blocked")
+        reopen_repair_cycle = (
+            revalidated_from == "implementation_repair_limit_exceeded"
+            and previous_iterations >= self.settings.implementation_repair_limit
+        )
         artifact_version = _next_phase4_artifact_version(self.store, run_id)
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
@@ -2788,6 +2818,20 @@ class PhaseFourWorkflow:
             ),
         }
         if verification_result.status != "passed":
+            repair_iteration = previous_iterations
+            if reopen_repair_cycle and _is_repairable_verification_failure(verification_result):
+                repair_iteration = 0
+                state["implementation_repair_cycle"] = _int_value(state.get("implementation_repair_cycle")) + 1
+                state["implementation_repair_total_iterations"] = max(
+                    _int_value(state.get("implementation_repair_total_iterations")),
+                    previous_iterations,
+                )
+                quality_reports["verification"] = {
+                    **_dict_value(quality_reports.get("verification")),
+                    "repair_iteration": repair_iteration,
+                    "repair_cycle_reopened": True,
+                    "previous_repair_iterations": previous_iterations,
+                }
             self._apply_verification_failure_state(
                 state=state,
                 run_id=run_id,
@@ -2797,7 +2841,7 @@ class PhaseFourWorkflow:
                 result=verification_result,
                 report_path=test_report_path,
                 artifact_version=artifact_version,
-                repair_iteration=previous_iterations,
+                repair_iteration=repair_iteration,
                 current_phase="implementation_repair",
                 latest_artifacts=latest_artifacts,
                 quality_reports=quality_reports,
@@ -2861,6 +2905,14 @@ class PhaseFourWorkflow:
             **quality_reports,
             "implementation_traceability": trace_result.to_quality_report(),
         }
+        trace_repair_iterations = previous_iterations
+        if reopen_repair_cycle and _is_repairable_code_trace_failure(trace_result):
+            trace_repair_iterations = 0
+            state["implementation_repair_cycle"] = _int_value(state.get("implementation_repair_cycle")) + 1
+            state["implementation_repair_total_iterations"] = max(
+                _int_value(state.get("implementation_repair_total_iterations")),
+                previous_iterations,
+            )
         if trace_result.ok:
             quality_reports["implementation_repair"] = {
                 "needed": False,
@@ -2885,7 +2937,10 @@ class PhaseFourWorkflow:
                     ),
                 }
             )
-        elif _is_repairable_code_trace_failure(trace_result) and previous_iterations < self.settings.implementation_repair_limit:
+        elif (
+            _is_repairable_code_trace_failure(trace_result)
+            and trace_repair_iterations < self.settings.implementation_repair_limit
+        ):
             feedback = _implementation_repair_feedback(
                 run_id=run_id,
                 state=state,
@@ -2895,7 +2950,7 @@ class PhaseFourWorkflow:
                 target_repo=str(target_info.path),
                 branch=target_info.current_branch,
                 feedback_version=artifact_version,
-                repair_iteration=previous_iterations,
+                repair_iteration=trace_repair_iterations,
             )
             feedback_path = write_phase4_repair_feedback(
                 store=self.store,
@@ -2911,8 +2966,10 @@ class PhaseFourWorkflow:
                 "needed": True,
                 "feedback_artifact": feedback_path,
                 "missing_count": len(trace_result.missing_links),
-                "repair_iterations": previous_iterations,
+                "repair_iterations": trace_repair_iterations,
                 "revalidated": True,
+                "repair_cycle_reopened": reopen_repair_cycle,
+                "previous_repair_iterations": previous_iterations,
                 "summary": trace_result.summary,
             }
             state.update(
@@ -2924,7 +2981,7 @@ class PhaseFourWorkflow:
                     "quality_reports": quality_reports,
                     "pending_checkpoint": None,
                     "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
-                    "implementation_repair_iterations": previous_iterations,
+                    "implementation_repair_iterations": trace_repair_iterations,
                     "last_error": None,
                     "summary_for_user": (
                         f"Revalidate implementation cho run {run_id} da tao feedback moi v{artifact_version}: "
@@ -2937,7 +2994,7 @@ class PhaseFourWorkflow:
                 error_code = "implementation_repair_limit_exceeded"
                 message = (
                     f"Implementation repair limit is still reached after revalidation: "
-                    f"iterations={previous_iterations}, limit={self.settings.implementation_repair_limit}. "
+                    f"iterations={trace_repair_iterations}, limit={self.settings.implementation_repair_limit}. "
                     f"{trace_result.summary}"
                 )
                 allowed_actions = ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS
@@ -2949,7 +3006,7 @@ class PhaseFourWorkflow:
                 "needed": True,
                 "feedback_artifact": latest_artifacts.get("implementation_repair_feedback"),
                 "missing_count": len(trace_result.missing_links),
-                "repair_iterations": previous_iterations,
+                "repair_iterations": trace_repair_iterations,
                 "limit_exceeded": error_code == "implementation_repair_limit_exceeded",
                 "revalidated": True,
                 "summary": trace_result.summary,
@@ -2963,7 +3020,7 @@ class PhaseFourWorkflow:
                     "quality_reports": quality_reports,
                     "pending_checkpoint": None,
                     "allowed_next_actions": allowed_actions,
-                    "implementation_repair_iterations": previous_iterations,
+                    "implementation_repair_iterations": trace_repair_iterations,
                     "last_error": HarnessError(error_code, message, run_id=run_id).to_response(),
                     "summary_for_user": (
                         f"Revalidate implementation van chua pass cho run {run_id}: {message} "
@@ -2994,6 +3051,12 @@ class PhaseFourWorkflow:
             artifact_version = _next_phase4_artifact_version(self.store, run_id)
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
+            packet_path = self._bound_repair_work_packet_path(
+                run_id=run_id,
+                current_packet_path=packet_path,
+                artifact_version=artifact_version,
+                resume_tool_loop=resume_tool_loop,
+            )
             feedback_path = _required_phase4_artifact(
                 artifact_paths,
                 "implementation_repair_feedback",
@@ -3005,7 +3068,27 @@ class PhaseFourWorkflow:
                 run_id=run_id,
             )
             previous_iterations = _int_value(state.get("implementation_repair_iterations"))
-            repair_iteration = previous_iterations + 1
+            previous_total_iterations = max(
+                _int_value(state.get("implementation_repair_total_iterations")),
+                previous_iterations,
+            )
+            bound_session_iteration = _int_value(bound_execution.get("session_iteration"))
+            if resume_tool_loop:
+                repair_iteration = max(
+                    1,
+                    _int_value(bound_execution.get("repair_iteration")),
+                )
+                session_iteration = max(1, bound_session_iteration)
+                total_repair_iterations = max(previous_total_iterations, session_iteration)
+            else:
+                repair_iteration = previous_iterations + 1
+                total_repair_iterations = previous_total_iterations + 1
+                session_iteration = self._next_repair_session_iteration(
+                    run_id=run_id,
+                    repair_scope="implementation",
+                    minimum=total_repair_iterations,
+                )
+                total_repair_iterations = max(total_repair_iterations, session_iteration)
             if repair_iteration > self.settings.implementation_repair_limit:
                 raise HarnessError(
                     "implementation_repair_limit_exceeded",
@@ -3038,6 +3121,7 @@ class PhaseFourWorkflow:
                 "developer_work_packet": refreshed_packet_path,
             }
             if execution_mode == "tool_loop":
+                state["implementation_repair_total_iterations"] = total_repair_iterations
                 result = self._execute_developer_tool_loop(
                     state=state,
                     run_id=run_id,
@@ -3047,6 +3131,7 @@ class PhaseFourWorkflow:
                     mode="implementation_repair",
                     current_phase="implementation_repair",
                     repair_iteration=repair_iteration,
+                    session_iteration=session_iteration,
                     artifact_version=artifact_version,
                     manifest_key="developer_repair_execution_manifest",
                     journal_key="developer_repair_execution_journal",
@@ -3244,6 +3329,7 @@ class PhaseFourWorkflow:
             ),
         }
         if verification_result.status != "passed":
+            state["implementation_repair_total_iterations"] = total_repair_iterations
             self._apply_verification_failure_state(
                 state=state,
                 run_id=run_id,
@@ -3301,6 +3387,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": _implementation_blocked_actions(exc.error_code),
                     "implementation_repair_iterations": repair_iteration,
+                    "implementation_repair_total_iterations": total_repair_iterations,
                     "last_error": exc.to_response(),
                     "summary_for_user": f"Phase 4 bị chặn khi Validator trace lại sau Developer.repair: {exc.message}",
                 }
@@ -3333,6 +3420,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": ALLOWED_IMPLEMENTATION_TRACED_ACTIONS,
                     "implementation_repair_iterations": repair_iteration,
+                    "implementation_repair_total_iterations": total_repair_iterations,
                     "last_error": None,
                     "summary_for_user": (
                         f"Developer.repair iteration {repair_iteration} đã pass test và Validator code trace "
@@ -3380,6 +3468,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
                     "implementation_repair_iterations": repair_iteration,
+                    "implementation_repair_total_iterations": total_repair_iterations,
                     "last_error": None,
                     "summary_for_user": (
                         f"Developer.repair iteration {repair_iteration} đã chạy xong nhưng Validator vẫn còn "
@@ -3416,6 +3505,7 @@ class PhaseFourWorkflow:
                     "pending_checkpoint": None,
                     "allowed_next_actions": _implementation_blocked_actions(error_code),
                     "implementation_repair_iterations": repair_iteration,
+                    "implementation_repair_total_iterations": total_repair_iterations,
                     "last_error": HarnessError(error_code, message, run_id=run_id).to_response(),
                     "summary_for_user": (
                         f"Validator code trace vẫn chưa pass sau Developer.repair iteration {repair_iteration}: "
@@ -3425,6 +3515,56 @@ class PhaseFourWorkflow:
             )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _bound_repair_work_packet_path(
+        self,
+        *,
+        run_id: str,
+        current_packet_path: str,
+        artifact_version: int,
+        resume_tool_loop: bool,
+    ) -> str:
+        """Resume bằng đúng packet version đã khóa cùng execution session."""
+
+        if not resume_tool_loop:
+            return current_packet_path
+        bound_path = self.store.artifact_path(
+            run_id,
+            f"developer_work_packet_v{artifact_version}.json",
+        )
+        if not bound_path.is_file():
+            raise HarnessError(
+                "developer_input_drift",
+                (
+                    "The Developer execution session is missing its bound work packet: "
+                    f"developer_work_packet_v{artifact_version}.json"
+                ),
+                run_id=run_id,
+            )
+        return self.store.relative(bound_path)
+
+    def _next_repair_session_iteration(
+        self,
+        *,
+        run_id: str,
+        repair_scope: str,
+        minimum: int,
+    ) -> int:
+        """Chọn namespace session chưa dùng, kể cả khi state legacy thiếu ordinal."""
+
+        normalized_scope = re.sub(r"[^a-z0-9_]+", "_", repair_scope.strip().lower()).strip("_")
+        normalized_scope = normalized_scope or "implementation"
+        pattern = re.compile(rf"^{re.escape(normalized_scope)}_repair_v(?P<ordinal>\d+)$")
+        execution_root = self.store.run_dir(run_id) / "developer_execution"
+        highest = 0
+        if execution_root.is_dir():
+            for candidate in execution_root.iterdir():
+                if not candidate.is_dir():
+                    continue
+                match = pattern.fullmatch(candidate.name)
+                if match:
+                    highest = max(highest, int(match.group("ordinal")))
+        return max(1, minimum, highest + 1)
 
     def _require_code_review_checkpoint(
         self,
@@ -3554,6 +3694,8 @@ class PhaseFourWorkflow:
             allowed_next_actions.insert(0, "continue_run")
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
+        if developer_transport_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
         if (
             str(state.get("status") or "") in {"implementation_repair_needed", "implementation_traced"}
             and "revalidate_implementation" not in allowed_next_actions
@@ -3573,6 +3715,11 @@ class PhaseFourWorkflow:
             "last_error": state.get("last_error"),
             "quality_reports": state.get("quality_reports", {}),
             "implementation_repair_iterations": state.get("implementation_repair_iterations", 0),
+            "implementation_repair_cycle": state.get("implementation_repair_cycle", 0),
+            "implementation_repair_total_iterations": state.get(
+                "implementation_repair_total_iterations",
+                state.get("implementation_repair_iterations", 0),
+            ),
             "qa_repair_iterations": state.get("qa_repair_iterations", 0),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
@@ -3602,8 +3749,16 @@ class PhaseFourWorkflow:
             return False
         if str(state.get("current_phase") or "") != "qa_testing":
             return False
-        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
-        return error_code in RETRYABLE_QA_GENERATION_ERROR_CODES
+        last_error = _dict_value(state.get("last_error"))
+        error_code = str(last_error.get("error_code") or "")
+        if error_code in RETRYABLE_QA_GENERATION_ERROR_CODES:
+            return True
+        message = str(last_error.get("message") or "")
+        return (
+            error_code == "developer_act_unsafe_path"
+            and message.startswith("Unsafe or unsupported Developer.act path:")
+            and bool(_dict_value(state.get("profile_snapshot")))
+        )
 
     @staticmethod
     def _legacy_verification_repair_allowed(state: dict[str, object]) -> bool:
@@ -3717,6 +3872,7 @@ def _qa_review_context(
     target_repo: str,
     branch: str,
     work_packet: dict[str, object],
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> dict[str, object]:
     """Đóng gói context QA ngắn, có metadata truncation để tránh prompt quá dài."""
 
@@ -3742,6 +3898,7 @@ def _qa_review_context(
         target_repo=Path(target_repo),
         work_packet=work_packet,
         run_id=run_id,
+        planning_policy=planning_policy,
     )
     traceability = _qa_traceability_summary(trace_report=trace_report, trace_path=trace_path)
     requirement_contract = _dict_value(work_packet.get("requirement_contract"))
@@ -3847,13 +4004,18 @@ def _qa_code_under_test(
     target_repo: Path,
     work_packet: dict[str, object],
     run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> dict[str, object]:
     """Lay source/test code hien tai tu target repo, khong dung snapshot cu trong packet."""
 
     files: list[dict[str, object]] = []
     chars_sent = 0
     chars_total = 0
-    for rel_path in _qa_code_paths(work_packet=work_packet, run_id=run_id):
+    for rel_path in _qa_code_paths(
+        work_packet=work_packet,
+        run_id=run_id,
+        planning_policy=planning_policy,
+    ):
         target_file = (target_repo / rel_path).resolve()
         try:
             target_file.relative_to(target_repo.resolve())
@@ -3903,17 +4065,30 @@ def _qa_code_under_test(
     }
 
 
-def _qa_code_paths(*, work_packet: dict[str, object], run_id: str) -> list[str]:
+def _qa_code_paths(
+    *,
+    work_packet: dict[str, object],
+    run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
-    for rel_path in _allowed_paths(work_packet):
+    for rel_path in _allowed_paths(
+        work_packet,
+        run_id=run_id,
+        planning_policy=planning_policy,
+    ):
         if rel_path not in seen:
             paths.append(rel_path)
             seen.add(rel_path)
     if paths:
         return paths
     for item in _dict_items(work_packet.get("proposed_files")) + _dict_items(work_packet.get("current_files")):
-        rel_path = _normalize_code_path(str(item.get("path") or ""), run_id=run_id)
+        rel_path = _normalize_code_path(
+            str(item.get("path") or ""),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
         if rel_path not in seen:
             paths.append(rel_path)
             seen.add(rel_path)
@@ -4271,10 +4446,18 @@ def _code_review_publication_paths(
     work_packet: dict[str, object],
     qa_generated: dict[str, object],
     run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
 ) -> list[str]:
     """Lập manifest file từ evidence của Developer, QA và Verification Runner."""
 
-    paths = {_normalize_publication_path(path, run_id=run_id) for path in _allowed_paths(work_packet)}
+    paths = {
+        _normalize_publication_path(path, run_id=run_id)
+        for path in _allowed_paths(
+            work_packet,
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
+    }
     for test_file in _dict_items(qa_generated.get("test_files")):
         paths.add(_normalize_publication_path(str(test_file.get("path") or ""), run_id=run_id))
     for value in _nested_strings(work_packet):
@@ -4679,12 +4862,25 @@ def _require_exact_v2_coverage(
             )
 
 
-def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
+def _allowed_paths(
+    work_packet: dict[str, object],
+    *,
+    run_id: str,
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[str]:
     output_contract = _dict_value(work_packet.get("output_contract"))
     values = output_contract.get("allowed_paths")
     if not isinstance(values, list):
         return []
-    return [_normalize_code_path(str(value), run_id="") for value in values if str(value).strip()]
+    return [
+        _normalize_code_path(
+            str(value),
+            run_id=run_id,
+            planning_policy=planning_policy,
+        )
+        for value in values
+        if str(value).strip()
+    ]
 
 
 def _normalize_code_path(
@@ -4921,6 +5117,8 @@ def _implementation_blocked_actions(error_code: str) -> list[str]:
 def _is_repairable_verification_failure(result: VerificationResult) -> bool:
     """Only route concrete code/test diagnostics into the Developer loop."""
 
+    if result.failure_kind:
+        return result.status == "failed" and result.failure_kind == "implementation"
     return (
         result.status == "failed"
         and not result.timed_out
@@ -4939,6 +5137,7 @@ def _verification_quality_report(
         "ok": result.status == "passed",
         "status": result.status,
         "reason": result.reason,
+        "failure_kind": result.failure_kind,
         "command": result.command,
         "exit_code": result.exit_code,
         "timed_out": result.timed_out,
@@ -4947,6 +5146,7 @@ def _verification_quality_report(
         "planned_stage_ids": list(result.planned_stage_ids),
         "executed_stage_ids": list(result.executed_stage_ids),
         "stage_results": [item.to_dict() for item in result.stage_results],
+        "preparation_results": [item.to_dict() for item in result.preparation_results],
         "selected_test_files": list(result.selected_test_files),
         "verified_test_files": list(result.verified_test_files),
         "attempt": attempt,

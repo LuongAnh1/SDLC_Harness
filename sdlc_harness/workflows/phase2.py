@@ -20,6 +20,7 @@ from ..artifacts.writers import write_phase2_design_artifacts, write_phase2_trac
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
+from ..profiles import build_planning_path_policy, read_profile_snapshot
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
 from .design_experiment import (
@@ -35,6 +36,15 @@ ALLOWED_DESIGN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
+
+DESIGN_ROUTING_ERROR_CODES = frozenset(
+    {
+        "implementation_target_unclassified",
+        "implementation_target_conflict",
+        "implementation_target_ambiguous",
+        "implementation_target_component_invalid",
+    }
+)
 
 
 class PhaseTwoWorkflow:
@@ -78,7 +88,11 @@ class PhaseTwoWorkflow:
         try:
             self.progressive.llm.require(2, category="designer_draft")
             draft = self.designer.draft(
-                requirement_packet=approved.requirement_packet,
+                requirement_packet=_designer_requirement_packet(
+                    state=state,
+                    requirement_packet=approved.requirement_packet,
+                    run_id=run_id,
+                ),
                 formal_use_case=approved.formal_use_case,
                 canonical_requirement=approved.canonical_model,
             )
@@ -107,7 +121,12 @@ class PhaseTwoWorkflow:
             and phase.startswith("design_")
             and str(last_error.get("error_code") or "") == "validator_traceability_failed"
         )
-        if not recoverable_trace_failure and (
+        recoverable_routing_failure = (
+            status == "failed"
+            and phase == "implementation_planning"
+            and str(last_error.get("error_code") or "") in DESIGN_ROUTING_ERROR_CODES
+        )
+        if not recoverable_trace_failure and not recoverable_routing_failure and (
             phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
         ):
             raise HarnessError(
@@ -268,7 +287,11 @@ class PhaseTwoWorkflow:
             if repair_iteration > 0:
                 self.progressive.llm.require(1, category="designer_repair")
                 design_model = self.designer.update_design(
-                    requirement_packet=approved.requirement_packet,
+                    requirement_packet=_designer_requirement_packet(
+                        state=state,
+                        requirement_packet=approved.requirement_packet,
+                        run_id=run_id,
+                    ),
                     formal_use_case=approved.formal_use_case,
                     current_design=design_model,
                     audit_report=repair_feedback,
@@ -280,9 +303,16 @@ class PhaseTwoWorkflow:
             gate_details: dict[str, object] = {}
             disputed_findings: list[DesignFinding] = []
             traceability = _traceability_not_run(approved.canonical_model)
-            selected_findings = self.design_validator.preflight(
-                class_graph=parsed.class_graph,
-                sequence_graph=parsed.sequence_graph,
+            selected_findings = (
+                _profile_component_routing_findings(
+                    state=state,
+                    class_graph=parsed.class_graph,
+                    run_id=run_id,
+                )
+                + self.design_validator.preflight(
+                    class_graph=parsed.class_graph,
+                    sequence_graph=parsed.sequence_graph,
+                )
             )[:3]
             pending_after_gate: list[SemanticCandidate] = []
 
@@ -555,7 +585,11 @@ class PhaseTwoWorkflow:
 
             if repair_iteration > 0:
                 design_model = self.designer.update_design(
-                    requirement_packet=approved.requirement_packet,
+                    requirement_packet=_designer_requirement_packet(
+                        state=state,
+                        requirement_packet=approved.requirement_packet,
+                        run_id=run_id,
+                    ),
                     formal_use_case=approved.formal_use_case,
                     current_design=design_model,
                     audit_report=validation.feedback if validation is not None else "",
@@ -1022,6 +1056,102 @@ def _traceability_not_run(canonical_model: object) -> TraceabilityResult:
         missing_links={"class_diagram": [], "sequence_diagram": []},
         mode="not_run_preflight_blocked",
     )
+
+
+def _designer_requirement_packet(
+    *,
+    state: dict[str, object],
+    requirement_packet: str,
+    run_id: str,
+) -> str:
+    """Attach run-frozen component ownership rules only to Designer input."""
+
+    directive = _profile_component_routing_directive(state=state, run_id=run_id)
+    if not directive:
+        return requirement_packet
+    return f"{requirement_packet.rstrip()}\n\n{directive}"
+
+
+def _profile_component_routing_directive(*, state: dict[str, object], run_id: str) -> str:
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    if snapshot is None:
+        return ""
+    project, language = snapshot.resolve_profiles(run_id=run_id)
+    policy = build_planning_path_policy(project=project, language=language)
+    component_ids = ", ".join(f"`<<{rule.component_id}>>`" for rule in policy.component_rules)
+    return "\n".join(
+        [
+            "# Project Component Routing Contract (Designer-only instruction)",
+            f"Project profile: `{policy.project_profile_id}`; language profile: `{policy.language_profile_id}`.",
+            (
+                "Every class, interface, abstract class, and enum declaration in the PlantUML class diagram "
+                f"must declare exactly one ownership stereotype from: {component_ids}."
+            ),
+            "The PlantUML declaration keyword still defines the symbol kind; the stereotype defines component ownership.",
+            "Use `<<web>>` for views/pages/forms/UI components.",
+            "Use `<<api>>` for controllers/services/use cases/validators/gateways/adapters/guards.",
+            "Use `<<contracts>>` for DTOs/requests/responses/results and shared domain models.",
+            "Use `<<database>>` for repositories/entities/records/stores.",
+            "Do not invent a component and do not leave ownership implicit.",
+        ]
+    )
+
+
+def _profile_component_routing_findings(
+    *,
+    state: dict[str, object],
+    class_graph: dict[str, object],
+    run_id: str,
+) -> list[DesignFinding]:
+    """Fail Phase 2 before approval when Phase 3 cannot route a design symbol."""
+
+    snapshot = read_profile_snapshot(state, run_id=run_id)
+    if snapshot is None:
+        return []
+    project, language = snapshot.resolve_profiles(run_id=run_id)
+    policy = build_planning_path_policy(project=project, language=language)
+    failures: list[tuple[str, HarnessError]] = []
+    nodes = class_graph.get("nodes")
+    for node in nodes if isinstance(nodes, list) else []:
+        if not isinstance(node, dict):
+            continue
+        class_name = str(node.get("className") or node.get("id") or "").strip()
+        if not class_name:
+            continue
+        try:
+            policy.infer_component(node=node, class_name=class_name, run_id=run_id)
+        except HarnessError as exc:
+            if exc.error_code not in DESIGN_ROUTING_ERROR_CODES:
+                raise
+            failures.append((class_name, exc))
+    if not failures:
+        return []
+
+    component_ids = ", ".join(rule.component_id for rule in policy.component_rules)
+    class_names = ", ".join(name for name, _ in failures)
+    return [
+        DesignFinding(
+            finding_id="RULE-PROFILE-COMPONENT-ROUTING",
+            category="project_component_routing",
+            severity="blocking",
+            message=f"Design symbols do not have unambiguous project-component ownership: {class_names}.",
+            expected_change=(
+                "Add or correct exactly one supported component stereotype on every listed declaration "
+                f"({component_ids}); do not use a default/fallback component."
+            ),
+            diagram_ids=["class_diagram"],
+            evidence=[
+                {
+                    "source": "class_diagram",
+                    "ref": class_name,
+                    "excerpt": f"{exc.error_code}: {exc.message}",
+                }
+                for class_name, exc in failures
+            ],
+            subject_ref=policy.project_profile_id,
+            origin="deterministic",
+        )
+    ]
 
 
 def _build_progressive_claims(traceability: TraceabilityResult) -> list[dict[str, object]]:

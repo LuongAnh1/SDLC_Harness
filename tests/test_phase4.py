@@ -355,6 +355,22 @@ class SequenceVerificationRunner:
         )
 
 
+class EnvironmentFailureVerificationRunner:
+    def run(self, *, target_path: Path, **kwargs) -> VerificationResult:
+        del kwargs
+        return VerificationResult(
+            status="failed",
+            command="npm run typecheck",
+            cwd=str(target_path),
+            exit_code=1,
+            duration_seconds=0.01,
+            stdout="",
+            stderr="'tsc' is not recognized as an internal or external command",
+            reason="Verification stage exited with code 1: typecheck",
+            failure_kind="environment",
+        )
+
+
 class PhaseFourTest(unittest.TestCase):
     ISOLATED_REPOSITORY_TESTS = {
         "test_canonical_checkout_change_does_not_redirect_run_workspace",
@@ -626,6 +642,54 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response, resumed)
         repair.assert_called_once_with(state=state, run_id=run_id)
 
+    def test_resume_repair_uses_packet_bound_to_execution_artifact_version(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        run_id = "run_bound_repair_packet"
+        current = workflow.store.write_json_artifact(
+            run_id,
+            "developer_work_packet_v7.json",
+            {"version": "developer_work_packet_v7"},
+        )
+        bound = workflow.store.write_json_artifact(
+            run_id,
+            "developer_work_packet_v8.json",
+            {"version": "developer_work_packet_v8"},
+        )
+
+        resolved = workflow._bound_repair_work_packet_path(
+            run_id=run_id,
+            current_packet_path=workflow.store.relative(current),
+            artifact_version=8,
+            resume_tool_loop=True,
+        )
+
+        self.assertEqual(resolved, workflow.store.relative(bound))
+        bound.unlink()
+        with self.assertRaises(HarnessError) as caught:
+            workflow._bound_repair_work_packet_path(
+                run_id=run_id,
+                current_packet_path=workflow.store.relative(current),
+                artifact_version=8,
+                resume_tool_loop=True,
+            )
+        self.assertEqual(caught.exception.error_code, "developer_input_drift")
+
+    def test_legacy_repair_state_uses_next_unused_session_ordinal(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        run_id = "run_next_repair_session"
+        execution_root = workflow.store.run_dir(run_id) / "developer_execution"
+        (execution_root / "implementation_repair_v1").mkdir(parents=True)
+        (execution_root / "implementation_repair_v5").mkdir()
+        (execution_root / "qa_repair_v9").mkdir()
+
+        ordinal = workflow._next_repair_session_iteration(
+            run_id=run_id,
+            repair_scope="implementation",
+            minimum=2,
+        )
+
+        self.assertEqual(ordinal, 6)
+
     def _settings(self, **extra_overrides: str):
         overrides = {
             "SDLC_LLM_MODE": "fake",
@@ -851,6 +915,24 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(out_of_scope.exception.error_code, "developer_act_out_of_scope")
         self.assertFalse((self.target_repo / unapproved_editable_path).exists())
+
+    def test_profiled_qa_legacy_java_path_block_can_retry_after_policy_fix(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "qa_testing",
+            "profile_snapshot": {"project_profile_id": "typescript_fullstack_v1"},
+            "last_error": {
+                "error_code": "developer_act_unsafe_path",
+                "message": (
+                    "Unsafe or unsupported Developer.act path: "
+                    "packages/contracts/src/CulturalHeritage.ts"
+                ),
+            },
+        }
+
+        self.assertTrue(PhaseFourWorkflow._qa_generation_retry_allowed(state))
+        state.pop("profile_snapshot")
+        self.assertFalse(PhaseFourWorkflow._qa_generation_retry_allowed(state))
 
     def test_v2_code_trace_emits_one_mapping_per_stable_requirement(self) -> None:
         source_path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
@@ -1144,6 +1226,7 @@ class PhaseFourTest(unittest.TestCase):
         frozen_packet = str(paused["latest_artifacts"]["developer_work_packet"])
         self.assertIn("developer_work_packet_v2.json", frozen_packet)
         self.assertEqual(paused["implementation_repair_iterations"], 0)
+        self.assertEqual(paused["implementation_repair_total_iterations"], 1)
         self.assertEqual(paused["developer_execution"]["artifact_version"], 2)
         second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
         completed = DeveloperExecutionResult(
@@ -1162,6 +1245,9 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["latest_artifacts"]["developer_work_packet"], frozen_packet)
         self.assertEqual(response["developer_execution"]["artifact_version"], 2)
         self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        self.assertEqual(response["implementation_repair_total_iterations"], 1)
+        self.assertEqual(execute.call_args.kwargs["repair_iteration"], 1)
+        self.assertEqual(execute.call_args.kwargs["session_iteration"], 1)
 
     def test_non_retriable_initial_tool_loop_failure_blocks(self) -> None:
         ready = self._create_phase4_ready_run()
@@ -1204,6 +1290,57 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
         self.assertEqual(response["developer_execution"]["status"], "blocked")
         self.assertEqual(response["last_error"]["error_code"], "developer_tool_unsafe_path")
+
+    def test_llm_transport_failure_pauses_tool_loop_and_legacy_state_can_resume(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+
+        with patch.object(
+            first.developer_tool_loop,
+            "execute",
+            side_effect=HarnessError(
+                "llm_transport_failed",
+                "LLM request failed: timed out",
+                run_id=run_id,
+            ),
+        ):
+            paused = first.continue_run(run_id=run_id)
+
+        self.assertEqual(paused["status"], "implementation_paused")
+        self.assertIn("continue_run", paused["allowed_next_actions"])
+        self.assertEqual(paused["developer_execution"]["status"], "paused")
+
+        store = PhaseOneWorkflow(self.settings).store
+        legacy = store.read_state(run_id)
+        legacy["status"] = "blocked"
+        legacy["allowed_next_actions"] = ["get_status", "cancel_run"]
+        legacy["last_error"] = HarnessError(
+            "requirement_refiner_failed",
+            "LLM request failed: legacy timeout",
+            run_id=run_id,
+        ).to_response()
+        execution = dict(legacy["developer_execution"])
+        execution["status"] = "blocked"
+        legacy["developer_execution"] = execution
+        store.write_state(legacy)
+
+        status = PhaseOneWorkflow(self.settings).get_status(run_id=run_id)
+        self.assertIn("continue_run", status["allowed_next_actions"])
+        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        completed = DeveloperExecutionResult(
+            summary="resumed after transport failure",
+            files=[],
+            manifest_path="",
+            journal_path="",
+            progress={"total_items": 1, "completed_items": 1, "remaining_items": 0},
+        )
+        with patch.object(second.developer_tool_loop, "execute", return_value=completed) as execute:
+            response = second.continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "implementation_written")
+        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
+        execute.assert_called_once()
 
     def test_legacy_repair_internal_failure_does_not_switch_to_tool_loop(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -1971,6 +2108,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "implementation_repair_needed")
         self.assertIsNone(response["last_error"])
         self.assertEqual(response["implementation_repair_iterations"], 1)
+        self.assertEqual(response["implementation_repair_total_iterations"], 1)
         self.assertIn("test_report_v2.md", response["latest_artifacts"]["test_report"])
         self.assertIn("implementation_repair_feedback_v2.json", response["latest_artifacts"]["implementation_repair_feedback"])
         self.assertEqual(response["quality_reports"]["implementation_repair"]["feedback_source"], "verification")
@@ -2035,6 +2173,44 @@ class PhaseFourTest(unittest.TestCase):
         )
         self.assertTrue(response["quality_reports"]["implementation_repair"]["revalidated"])
         self.assertFalse(response["quality_reports"]["implementation_repair"].get("limit_exceeded", False))
+
+    def test_environment_failure_does_not_consume_developer_repair_budget(self) -> None:
+        written = self._create_phase4_written_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = EnvironmentFailureVerificationRunner()
+
+        response = workflow.continue_run(run_id=str(written["run_id"]))
+
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "verification_environment_failed")
+        self.assertEqual(response["implementation_repair_iterations"], 0)
+        self.assertNotIn("implementation_repair_feedback", response["latest_artifacts"])
+        self.assertIn("revalidate_implementation", response["allowed_next_actions"])
+
+    def test_revalidate_blocked_limit_opens_new_bounded_repair_cycle(self) -> None:
+        self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
+        tested = self._create_phase4_tested_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        repair_needed = workflow.continue_run(run_id=str(tested["run_id"]))
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        blocked = workflow.continue_run(run_id=str(repair_needed["run_id"]))
+        self.assertEqual(blocked["implementation_repair_iterations"], 1)
+
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        response = workflow.revalidate_implementation(run_id=str(blocked["run_id"]))
+
+        self.assertEqual(response["status"], "implementation_repair_needed")
+        self.assertEqual(response["implementation_repair_iterations"], 0)
+        self.assertEqual(response["implementation_repair_cycle"], 1)
+        self.assertEqual(response["implementation_repair_total_iterations"], 1)
+        self.assertEqual(response["quality_reports"]["implementation_repair"]["repair_iterations"], 0)
+        self.assertTrue(response["quality_reports"]["implementation_repair"]["repair_cycle_reopened"])
+        self.assertEqual(response["quality_reports"]["implementation_repair"]["previous_repair_iterations"], 1)
+        self.assertIsNone(response["last_error"])
+        self.assertIn("continue_run", response["allowed_next_actions"])
 
     def test_revalidate_blocked_limit_can_pass_without_more_repair(self) -> None:
         self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")

@@ -429,15 +429,13 @@ class DeveloperPlanAgent:
             mappings=mappings,
             planning_policy=planning_policy,
         )
-        signature_candidate = llm_payload.get("implementation_signature_contract")
-        if not isinstance(signature_candidate, dict):
-            signature_candidate = previous.get("implementation_signature_contract")
         signature_contract = (
-            build_implementation_signature_contract(
+            _merge_implementation_signature_contract(
                 planning_policy=planning_policy,
                 mappings=mappings,
                 class_graph=class_graph,
-                candidate=signature_candidate,
+                previous=previous.get("implementation_signature_contract"),
+                patch=llm_payload.get("implementation_signature_contract"),
             )
             if planning_policy and verification_policy
             else None
@@ -821,6 +819,45 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
         "assumptions": _string_items(parsed.get("assumptions")),
         "open_questions": _string_items(parsed.get("open_questions")),
     }
+
+
+def _merge_implementation_signature_contract(
+    *,
+    planning_policy: PlanningPathPolicy,
+    mappings: list[dict[str, object]],
+    class_graph: dict[str, object],
+    previous: object,
+    patch: object,
+) -> dict[str, object]:
+    """Merge a valid signature patch without dropping untouched prior entries."""
+
+    previous_contract = build_implementation_signature_contract(
+        planning_policy=planning_policy,
+        mappings=mappings,
+        class_graph=class_graph,
+        candidate=previous,
+    )
+    patch_contract = build_implementation_signature_contract(
+        planning_policy=planning_policy,
+        mappings=mappings,
+        class_graph=class_graph,
+        candidate=patch,
+    )
+    merged_entries = {
+        str(entry.get("design_element_id") or ""): entry
+        for entry in _dict_items(previous_contract.get("entries"))
+        if str(entry.get("design_element_id") or "")
+    }
+    for entry in _dict_items(patch_contract.get("entries")):
+        design_id = str(entry.get("design_element_id") or "")
+        if design_id:
+            merged_entries[design_id] = entry
+    return build_implementation_signature_contract(
+        planning_policy=planning_policy,
+        mappings=mappings,
+        class_graph=class_graph,
+        candidate={"entries": list(merged_entries.values())},
+    )
 
 
 def _resolve_verification_policy(

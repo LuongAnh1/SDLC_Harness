@@ -26,6 +26,8 @@ from sdlc_harness.profiles import (
 from sdlc_harness.verification import VerificationResult
 from sdlc_harness.workflows.phase4 import (
     _apply_qa_generated_tests,
+    _code_review_publication_paths,
+    _qa_code_paths,
     _qa_result_from_generated_execution,
 )
 
@@ -48,6 +50,7 @@ class ProfiledQaTest(unittest.TestCase):
             project=project,
             language=get_language_profile(project.language_profile_id),
         )
+        self.planning_policy = planning
         self.qa_policy = build_qa_test_policy(planning_policy=planning)
         self.context = {
             "run_id": "run_profiled_qa",
@@ -95,6 +98,60 @@ class ProfiledQaTest(unittest.TestCase):
         for path in rejected:
             with self.subTest(path=path):
                 self.assertEqual(self.qa_policy.normalize_test_path(path), "")
+
+    def test_profiled_allowed_paths_feed_qa_context_and_publication_manifest(self) -> None:
+        work_packet = {
+            "output_contract": {
+                "allowed_paths": [
+                    "packages/contracts/src/CulturalHeritage.ts",
+                    "apps/api/src/CulturalHeritageService.ts",
+                ]
+            }
+        }
+
+        self.assertEqual(
+            _qa_code_paths(
+                work_packet=work_packet,
+                run_id="run_profiled_qa",
+                planning_policy=self.planning_policy,
+            ),
+            [
+                "packages/contracts/src/CulturalHeritage.ts",
+                "apps/api/src/CulturalHeritageService.ts",
+            ],
+        )
+        self.assertEqual(
+            _code_review_publication_paths(
+                work_packet=work_packet,
+                qa_generated={
+                    "test_files": [
+                        {"path": "apps/api/src/CulturalHeritageAcceptance.test.ts"}
+                    ]
+                },
+                run_id="run_profiled_qa",
+                planning_policy=self.planning_policy,
+            ),
+            [
+                "apps/api/src/CulturalHeritageAcceptance.test.ts",
+                "apps/api/src/CulturalHeritageService.ts",
+                "packages/contracts/src/CulturalHeritage.ts",
+            ],
+        )
+
+    def test_profiled_allowed_paths_still_reject_paths_outside_editable_roots(self) -> None:
+        work_packet = {
+            "output_contract": {
+                "allowed_paths": ["package.json"],
+            }
+        }
+
+        with self.assertRaises(HarnessError) as caught:
+            _qa_code_paths(
+                work_packet=work_packet,
+                run_id="run_profiled_qa",
+                planning_policy=self.planning_policy,
+            )
+        self.assertEqual(caught.exception.error_code, "developer_act_unsafe_path")
 
     def test_fake_profiled_qa_generates_vitest_and_profile_metadata(self) -> None:
         generated = QaTesterAgent().generate_tests(

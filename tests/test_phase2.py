@@ -71,6 +71,36 @@ class PreflightRepairDesigner(RepairingDesigner):
         return DesignDraft(analysis_report="test progressive architecture", design_model=broken)
 
 
+class ComponentRoutingRepairDesigner(RepairingDesigner):
+    def __init__(self) -> None:
+        super().__init__()
+        self.draft_requirement_packet = ""
+        self.repair_requirement_packet = ""
+
+    def draft(self, *, requirement_packet: str, formal_use_case: str = "", canonical_requirement=None) -> DesignDraft:
+        self.draft_requirement_packet = requirement_packet
+        broken = fake_design_model().replace("class CulturalHeritage <<contracts>>", "class CulturalHeritage")
+        return DesignDraft(analysis_report="test component routing", design_model=broken)
+
+    def update_design(
+        self,
+        *,
+        requirement_packet: str,
+        formal_use_case: str,
+        current_design: str,
+        audit_report: str,
+        canonical_requirement=None,
+    ) -> str:
+        self.repair_requirement_packet = requirement_packet
+        return super().update_design(
+            requirement_packet=requirement_packet,
+            formal_use_case=formal_use_case,
+            current_design=current_design,
+            audit_report=audit_report,
+            canonical_requirement=canonical_requirement,
+        )
+
+
 class SequencedTraceabilityValidator:
     def __init__(self, missing_by_call: list[bool]):
         self.missing_by_call = missing_by_call
@@ -253,6 +283,26 @@ class PhaseTwoTest(unittest.TestCase):
         )
         self.assertEqual(response["quality_reports"]["design_validation"]["mode"], "design_validation_progressive_v1")
         self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
+
+    def test_profile_component_routing_is_repaired_before_design_approval(self) -> None:
+        created = self._create_phase1_run()
+        workflow = PhaseTwoWorkflow(self.settings)
+        designer = ComponentRoutingRepairDesigner()
+        workflow.designer = designer
+
+        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertEqual(designer.update_calls, 1)
+        self.assertIn("Project Component Routing Contract", designer.draft_requirement_packet)
+        self.assertIn("Project Component Routing Contract", designer.repair_requirement_packet)
+        self.assertIn("RULE-PROFILE-COMPONENT-ROUTING", designer.last_audit_report)
+        self.assertEqual(
+            [item["gate_stage"] for item in response["design_progressive_validation"]["trajectory"]],
+            ["deterministic_preflight", "semantic_consensus"],
+        )
+        artifact_path = self.repo_root / str(response["latest_artifacts"]["design_artifact"])
+        self.assertIn("class CulturalHeritage <<contracts>>", artifact_path.read_text(encoding="utf-8"))
 
     def test_production_flow_blocks_safely_when_design_llm_budget_is_exhausted(self) -> None:
         settings = load_settings(
@@ -1069,6 +1119,44 @@ class OnlyClass {
         self.assertTrue(response["latest_artifacts"]["design_validation_report"].endswith("design_validation_report_v2.json"))
         self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
         self.assertNotEqual(initial["pending_checkpoint"]["artifact_ref"], response["pending_checkpoint"]["artifact_ref"])
+
+    def test_revalidate_design_recovers_failed_phase3_component_routing(self) -> None:
+        created = self._create_phase1_run()
+        designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        workflow = PhaseTwoWorkflow(self.settings)
+        state = workflow.store.read_state(str(created["run_id"]))
+        design_path = self.repo_root / str(designed["latest_artifacts"]["design_artifact"])
+        design_path.write_text(
+            design_path.read_text(encoding="utf-8").replace(
+                "class CulturalHeritage <<contracts>>",
+                "class CulturalHeritage",
+            ),
+            encoding="utf-8",
+        )
+        state.update(
+            {
+                "current_phase": "implementation_planning",
+                "status": "failed",
+                "pending_checkpoint": None,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": HarnessError(
+                    "implementation_target_unclassified",
+                    "CulturalHeritage has no component.",
+                    run_id=str(created["run_id"]),
+                ).to_response(),
+            }
+        )
+        workflow.store.write_state(state)
+
+        response = workflow.revalidate_design(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertIsNone(response["last_error"])
+        self.assertEqual(
+            response["design_progressive_validation"]["trajectory"][0]["gate_stage"],
+            "deterministic_preflight",
+        )
+        self.assertIn("revalidate_design", response["allowed_next_actions"])
 
     def test_get_status_adds_revalidate_design_to_legacy_design_checkpoint(self) -> None:
         created = self._create_phase1_run()

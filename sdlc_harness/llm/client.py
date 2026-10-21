@@ -183,7 +183,7 @@ class LlmClient:
             ) from exc
         except OSError as exc:
             raise HarnessError(
-                "requirement_refiner_failed",
+                "llm_transport_failed",
                 f"LLM request failed: {exc}",
             ) from exc
 

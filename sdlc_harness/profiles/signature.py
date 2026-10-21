@@ -219,7 +219,9 @@ def _canonical_entry(
         "parameters": normalized_parameters,
         "return_type": return_type,
         "type_parameters": [str(item).strip() for item in type_parameters],
-        "async": raw.get("async") is True,
+        # TypeScript interface methods cannot carry the `async` modifier. Their
+        # asynchronous contract is represented by the Promise return type.
+        "async": raw.get("async") is True and owner_kind != "interface",
     }
     entry["contract_id"] = _contract_id(entry)
     return entry

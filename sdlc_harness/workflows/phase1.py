@@ -20,7 +20,10 @@ from ..profiles import build_profile_snapshot, profile_status_metadata
 from ..sources.fixtures import UseCaseSource, load_use_case
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
-from ..agents.developer import repair_scope_mismatch_retry_allowed
+from ..agents.developer import (
+    developer_transport_retry_allowed,
+    repair_scope_mismatch_retry_allowed,
+)
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementModelV2Refiner,
@@ -448,6 +451,21 @@ class PhaseOneWorkflow:
         if legacy_verification_repair and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
+        if developer_transport_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
+        profiled_qa_path_retry = (
+            str(state.get("status") or "") == "blocked"
+            and str(state.get("current_phase") or "") == "qa_testing"
+            and isinstance(last_error, dict)
+            and last_error.get("error_code") == "developer_act_unsafe_path"
+            and str(last_error.get("message") or "").startswith(
+                "Unsafe or unsupported Developer.act path:"
+            )
+            and isinstance(state.get("profile_snapshot"), dict)
+            and bool(state.get("profile_snapshot"))
+        )
+        if profiled_qa_path_retry and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if (
             str(state.get("status") or "") in {"implementation_repair_needed", "implementation_traced"}

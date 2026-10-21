@@ -962,6 +962,168 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   Chưa đổi Harness target config, chưa chạy controlled live Phase 1-4 và chưa
   triển khai local-CI repair loop Chặng B.
 
+## 2026-10-21 - Kế Hoạch A4 Controlled Live Smoke Và Config Cutover
+
+- Baseline Harness `5babf3d`, target `b6704a3`; target `main` sạch, đồng bộ
+  `origin/main`, GitHub CLI đã đăng nhập đúng account và Jira `SDLC-2` đọc được
+  source 1.651 ký tự, chưa có active run.
+- Chạy Harness HTTP bằng process-only override cho
+  `typescript_fullstack_v1`, canonical TypeScript path/remote, DeepSeek,
+  tool-loop và real Jira/Confluence sync. Default đang chạy không bị đổi trước
+  khi smoke hoàn tất.
+- Đi qua từng human checkpoint. Phase 4 phải snapshot đúng profile/manifest/base
+  SHA, sinh production `.ts` cùng Vitest test, pass `typecheck -> unit`, QA
+  discovery và stable-ID Code Trace, rồi push branch và tạo Draft PR thật.
+- Chờ GitHub-hosted CI của PR xanh và xác nhận Jira/Confluence sync đầy đủ.
+  Không mark Ready, merge hoặc auto-merge trong lát này.
+- Nếu lỗi code/test thì dùng bounded repair hiện hành; lỗi hạ tầng hoặc tool sync
+  dùng retry/resume/sync, không giao nhầm cho Developer và không tạo run mới khi
+  operation có kết quả mơ hồ.
+- Chỉ sau khi smoke pass mới đổi default project profile, target path và remote
+  sang TypeScript; cập nhật config schema, `.env.example`, tests và docs rồi chạy
+  targeted/full regression. Java runtime compatibility và migration flag thuộc
+  lát A4 cuối kế tiếp, không bị xóa trong cutover này.
+
+## 2026-10-21 - Kế Hoạch Sửa Design-to-Planning Routing Gap
+
+- Live run `run_20261021_032521_a7c9d772` đã pass Requirement V2 và Design V1
+  với `0 blocker`, nhưng Phase 3 fail-closed trước khi lập plan bằng
+  `implementation_target_unclassified`: class `CulturalHeritage` không có
+  existing symbol, component stereotype hoặc name suffix duy nhất.
+- Root cause là contract hai phía chưa khép kín: Planning Path Policy cố ý không
+  fallback sang API, trong khi Phase 2 chưa đưa component-routing directive vào
+  Designer context và deterministic preflight chưa kiểm mọi design class có thể
+  được route trước human checkpoint.
+- Giữ nguyên policy fail-closed. Bổ sung directive sinh từ frozen profile cho
+  Designer/repair context, deterministic blocker tổng hợp cho class không phân
+  loại hoặc có hint mâu thuẫn, và recovery `revalidate_design` từ đúng nhóm lỗi
+  Phase 3 này. Không cho LLM chọn path, không thêm fallback component mặc định.
+- Thêm regression cho repair trước design checkpoint và recovery của run đã fail
+  tại Phase 3. Sau khi test pass, restart smoke server trên cùng runtime rồi
+  revalidate Design hiện tại; không tạo run mới và không lặp approval mơ hồ.
+
+## 2026-10-21 - Kế Hoạch Sửa Phase 3 Signature Repair Merge Gap
+
+- Routing fix đã phục hồi đúng live run `run_20261021_032521_a7c9d772`; Design V3
+  pass `0 blocker`, real Jira/Confluence sync thành công và được human duyệt.
+- Phase 3 không còn lỗi routing nhưng dừng sau plan V4 vì còn 11 method thiếu
+  implementation signature. Các vòng repair lần lượt sửa nhóm method đang thiếu
+  nhưng thay toàn bộ `implementation_signature_contract`, làm mất entry đúng từ
+  version trước và khiến blocker luân phiên thay vì hội tụ.
+- Giữ semantics repair patch: canonicalize riêng contract hiện tại và patch mới,
+  chỉ để patch hợp lệ override cùng `design_element_id`, đồng thời giữ toàn bộ
+  entry hợp lệ không được nhắc tới. Sau đó canonicalize lại contract hợp nhất và
+  tạo digest mới; patch thiếu/sai không được xóa signature đã đúng.
+- Thêm regression với hai LLM response bổ sung signature theo từng vòng, chạy
+  targeted Phase 3/profile tests rồi revalidate implementation plan trên chính
+  run hiện tại. Không tăng repair limit để che lỗi và không tạo run mới.
+
+## 2026-10-21 - Live Smoke Qua Implementation Plan V5
+
+- Commit baseline `5babf3d`; thay đổi docs/code/test hiện tại chưa commit. Routing
+  fix thêm profile-derived Designer directive, deterministic Phase 2 blocker và
+  recovery từ lỗi routing Phase 3. Run thật được phục hồi tại Design V3 với
+  `0 blocker`, `0 warning`, `0 disputed`, 3/3 semantic trial và consistency 1.0.
+- Human duyệt Design V3. Phase 3 lần đầu sinh plan đến V4 nhưng dừng với 11
+  signature thiếu; chẩn đoán xác nhận mỗi partial repair đã thay toàn bộ contract.
+  Planner nay canonicalize contract cũ và patch riêng, merge theo
+  `design_element_id`, chỉ cho patch hợp lệ override và tính lại digest.
+- Regression Phase 2/3/planning `91 passed`; API tests tách nhóm `7 passed` và
+  `54 passed`; `compileall` cùng `git diff --check` pass. Một lượt API ghép nhóm
+  từng gặp `WinError 10053`, nhưng test socket chạy riêng pass và full regression
+  sau đó cũng pass, xác nhận đây không phải assertion/regression logic mới.
+- Revalidate trên cùng run tạo Implementation Plan V5, đủ 25 signature, 64
+  design mapping thuộc `api/contracts/database`; rule review và LLM review đều
+  pass, không còn coverage/traceability/executability/scope/test issue. Real
+  Jira/Confluence sync đều `synced`.
+- Run hiện ở `waiting_implementation_plan_review`, checkpoint
+  `checkpoint_implementation_plan_run_20261021_032521_a7c9d772`. Chưa chạy
+  Phase 4, chưa sửa/push target branch, chưa tạo Draft PR và chưa cutover default.
+- Full Harness regression cuối lát: `554 passed, 1 skipped in 405.57s`; skip duy
+  nhất vẫn là ca symlink Windows thiếu quyền đã biết.
+
+## 2026-10-21 - Phase 4 Dependency Bootstrap Và Repair-cycle Recovery
+
+- Human đã duyệt Implementation Plan V5; Phase 4 sinh production TypeScript trong
+  worktree nhưng Verification Runner lặp bốn lần với `'tsc' is not recognized`.
+- Root cause: worktree mới có lockfile nhưng chưa cài dependency. Runner chỉ kiểm tra
+  executable ngoài (`npm`), không chuẩn bị toolchain nội bộ trước `typecheck`; heuristic
+  "có stdout/stderr" lại phân loại lỗi môi trường thành code defect và tiêu repair budget.
+- `npm ci` thủ công làm lộ diagnostic code thật: Prisma 7 không chấp nhận datasource
+  URL trong schema và các import workspace/generated client chưa resolve. Revalidate
+  hiện chỉ kiểm tra lại với counter đã đạt limit nên không tạo feedback mới.
+- Kế hoạch sửa trước khi tiếp tục smoke: thêm profile-owned dependency preparation
+  với success marker theo lockfile; thêm `failure_kind`/preparation evidence; chặn
+  environment failure khỏi Developer; và cho human-triggered revalidate mở repair
+  cycle mới có giới hạn, đồng thời giữ tổng số repair để audit.
+- Khi resume live repair, Windows từng từ chối atomic replace `state.json` sau khi
+  packet/session V8 đã được tạo. State cũ còn trỏ V7 nên input-drift guard chặn đúng.
+  Recovery phải lấy packet theo `developer_execution.artifact_version` nếu artifact
+  đó tồn tại; thiếu packet thì tiếp tục fail-closed, tuyệt đối không bỏ hash guard.
+- Packet V8 sau đó vẫn bị manifest cũ chặn vì cycle mới reset iteration về 1 và tái
+  sử dụng folder `implementation_repair_v1` của cycle trước. Session namespace sẽ
+  dùng cumulative repair ordinal (`v5` trong run hiện tại), còn report/state vẫn dùng
+  logical iteration 1 của cycle mới; evidence cũ được giữ nguyên để audit.
+- Sau repair V5, verification tạo feedback kế tiếp nhưng total counter chưa được ghi
+  ở nhánh verification-failed; logical iteration 2 vì thế lại suy ra V5. Fix bổ sung
+  persist `session_iteration` trong execution state, cập nhật total trước khi route
+  feedback, và với state cũ chọn ordinal chưa dùng tiếp theo từ session evidence.
+- Controlled retry đã xác nhận dependency setup cache và cumulative session hoạt động:
+  cycle 1 dùng session V6-V8, total repair tăng đến 8 và dừng đúng bounded limit. Tuy
+  nhiên typecheck vẫn đọc Prisma client cũ: schema đã thêm `SystemMetadata` sau lần
+  `npm ci`, còn dependency marker chỉ fingerprint lockfile nên postinstall/generate
+  không chạy lại. Đây là preparation gap, không phải lý do tăng repair budget.
+- Điều chỉnh tiếp theo: tách code generation thành profile-owned preparation có marker
+  riêng fingerprint Prisma schema/config; chạy trước ordered `typecheck -> unit`, ghi
+  evidence riêng và chuyển lỗi generate có diagnostic source cho Developer sửa.
+- Targeted regression hiện tại: `112 passed in 125.87s` cho profiled verification,
+  Phase 4 và Developer tool-loop. Cần chạy lại sau code-generation fix rồi mới
+  revalidate cùng live run.
+- Code-generation fix đã có regression `114 passed in 142.54s`. Live cycle 2 sau đó
+  sửa được Prisma schema, regenerate client, pass `typecheck` và 11 file/34 unit test.
+  Validator tiếp tục phát hiện một gap semantic thật ở `confirm()`, nhưng deterministic
+  comparator đồng thời đòi `async` modifier trên `ETourGateway.store` thuộc interface.
+  Đây là contract bất khả thi trong TypeScript: interface chỉ khai báo return
+  `Promise<boolean>`, không được viết `async`.
+- Fix tiếp theo canonicalize interface signature với `async=false` khi tạo contract và
+  normalize contract cũ lúc so AST; class/function implementation vẫn giữ kiểm tra
+  `async` nghiêm ngặt. Sau regression sẽ revalidate cùng run để Developer chỉ nhận
+  blocker semantic còn thực sự sửa được.
+- Signature fix pass `137` targeted tests; live revalidate xác nhận deterministic
+  blocker giảm từ 1 xuống 0. Cycle 3 sửa tiếp các semantic/test gap và giữ
+  `typecheck` xanh, nhưng kết thúc với unit test dở dang sau feedback semantic thay đổi.
+- Cycle 4 đã mở từ đúng unit diagnostic. Developer session V17 chưa kịp sửa vì request
+  DeepSeek gặp `WinError 10060`; Harness lại đánh dấu non-retriable
+  `requirement_refiner_failed` và chỉ cho `get_status/cancel_run`. Đây là recovery gap:
+  transport timeout phải pause/resume đúng V17, không tạo session/packet mới và không
+  tăng cumulative repair count khi retry cùng session.
+- Transport recovery đã resume đúng session V17; session V18 hoàn tất repair. Live
+  verification pass `typecheck` và 11 file/34 unit test, Code Trace pass 30 mappings,
+  5 test files, 0 blocker; run đi tới `implementation_traced` mà không tạo run mới.
+- Lần `continue_run` vào QA bị chặn trước khi gọi Tester với
+  `developer_act_unsafe_path` tại `packages/contracts/src/CulturalHeritage.ts`. Root
+  cause là `_qa_code_paths` đọc `allowed_paths` qua helper legacy tự áp Java-only guard,
+  dù run snapshot đã bind `typescript_fullstack_v1`. Cùng helper còn nằm trên đường
+  lập publication manifest nên có thể chặn tiếp sau QA.
+- Sửa theo hướng truyền `PlanningPathPolicy` từ immutable run snapshot xuyên suốt
+  QA code-context và publication path collection; giữ exact `allowed_paths` cùng
+  path-safety/publication guard hiện tại, không nới quyền đọc/ghi. Bổ sung regression
+  chứng minh TypeScript path được chấp nhận và path ngoài profile vẫn fail closed,
+  sau đó tiếp tục chính live run tới checkpoint kế tiếp.
+- QA/path fix pass `85` test trong `test_profiled_qa.py` + `test_phase4.py`; ba ca
+  recovery/path mới pass riêng. GET status có compatibility recovery cho profiled run
+  đã bị helper Java cũ block, nhưng state không profile vẫn không được mở retry này.
+- Live run tiếp tục đúng từ `qa_testing`: Tester sinh hai Vitest acceptance files,
+  Verification Runner xác nhận cả hai thật sự được chọn/chạy; toàn suite pass 13 file,
+  37 test. Harness commit/push target commit `fc80323`, tạo Draft PR #1 và sync Code
+  Review checkpoint real tới Jira/Confluence.
+- GitHub-hosted workflow `Verify full-stack skeleton` pass trong 1 phút 22 giây tại
+  run `39551258446`. Run dừng đúng `code_review_ready`; PR vẫn Draft, chưa approve
+  Ready for review, chưa merge/auto-merge và chưa cutover default config.
+- Full Harness regression sau toàn bộ hardening/live recovery: `572 passed, 1 skipped
+  in 204.58s` bằng pytest-xdist; skip duy nhất vẫn là ca Windows symlink thiếu quyền
+  đã biết. `compileall` và `git diff --check` đều pass.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

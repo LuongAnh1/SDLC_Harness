@@ -928,3 +928,29 @@ class PhaseOneTest(unittest.TestCase):
         response = workflow.get_status(run_id=run_id)
 
         self.assertEqual(response["allowed_next_actions"][0], "continue_run")
+
+    def test_status_exposes_safe_retry_for_profiled_qa_blocked_by_legacy_java_path_guard(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        run_id = "run_profiled_qa_legacy_path_guard"
+        workflow.store.write_state(
+            {
+                "run_id": run_id,
+                "source_ref": "jira_issue:SDLC-2",
+                "current_phase": "qa_testing",
+                "status": "blocked",
+                "latest_artifacts": {"developer_work_packet": "packet.json"},
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": {
+                    "error_code": "developer_act_unsafe_path",
+                    "message": (
+                        "Unsafe or unsupported Developer.act path: "
+                        "packages/contracts/src/CulturalHeritage.ts"
+                    ),
+                },
+                "profile_snapshot": self.profile_snapshot(),
+            }
+        )
+
+        response = workflow.get_status(run_id=run_id)
+
+        self.assertEqual(response["allowed_next_actions"][0], "continue_run")

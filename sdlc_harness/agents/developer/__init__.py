@@ -9,6 +9,7 @@ from .execution import (
     DeveloperExecutionError,
     DeveloperExecutionResult,
     DeveloperToolLoopExecutor,
+    developer_transport_retry_allowed,
     repair_scope_mismatch_retry_allowed,
 )
 from .planner import DeveloperPlanAgent, ImplementationPlanDraft
@@ -25,6 +26,7 @@ __all__ = [
     "DeveloperExecutionError",
     "DeveloperExecutionResult",
     "DeveloperToolLoopExecutor",
+    "developer_transport_retry_allowed",
     "repair_scope_mismatch_retry_allowed",
     "DeveloperPlanAgent",
     "ImplementationPlanDraft",

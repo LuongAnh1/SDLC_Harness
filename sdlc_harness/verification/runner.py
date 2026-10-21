@@ -13,6 +13,7 @@ từng class. Chỉ compile test source không còn đủ để báo pass.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -31,7 +32,12 @@ from ..profiles import (
     is_profiled_work_packet_schema,
     profiled_execution_field_paths,
 )
-from .registry import VerificationStageSpec, resolve_verification_stage_specs
+from .registry import (
+    VerificationPreparationSpec,
+    VerificationStageSpec,
+    resolve_verification_preparation_specs,
+    resolve_verification_stage_specs,
+)
 
 DEFAULT_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 DEFAULT_TIMEOUT_SECONDS = 120
@@ -65,6 +71,7 @@ class VerificationStageResult:
     stdout: str
     stderr: str
     reason: str
+    failure_kind: str = ""
     timed_out: bool = False
     selected_test_files: tuple[str, ...] = ()
     verified_test_files: tuple[str, ...] = ()
@@ -81,6 +88,7 @@ class VerificationStageResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "reason": self.reason,
+            "failure_kind": self.failure_kind,
             "timed_out": self.timed_out,
             "selected_test_files": list(self.selected_test_files),
             "verified_test_files": list(self.verified_test_files),
@@ -99,12 +107,14 @@ class VerificationResult:
     stdout: str
     stderr: str
     reason: str
+    failure_kind: str = ""
     timed_out: bool = False
     discovered_test_entrypoints: tuple[str, ...] = ()
     executed_test_entrypoints: tuple[str, ...] = ()
     planned_stage_ids: tuple[str, ...] = ()
     executed_stage_ids: tuple[str, ...] = ()
     stage_results: tuple[VerificationStageResult, ...] = ()
+    preparation_results: tuple[VerificationStageResult, ...] = ()
     selected_test_files: tuple[str, ...] = ()
     verified_test_files: tuple[str, ...] = ()
 
@@ -118,12 +128,14 @@ class VerificationResult:
             "stdout": self.stdout,
             "stderr": self.stderr,
             "reason": self.reason,
+            "failure_kind": self.failure_kind,
             "timed_out": self.timed_out,
             "discovered_test_entrypoints": list(self.discovered_test_entrypoints),
             "executed_test_entrypoints": list(self.executed_test_entrypoints),
             "planned_stage_ids": list(self.planned_stage_ids),
             "executed_stage_ids": list(self.executed_stage_ids),
             "stage_results": [item.to_dict() for item in self.stage_results],
+            "preparation_results": [item.to_dict() for item in self.preparation_results],
             "selected_test_files": list(self.selected_test_files),
             "verified_test_files": list(self.verified_test_files),
         }
@@ -308,6 +320,7 @@ class VerificationRunner:
 
         run_id = str(work_packet.get("run_id") or "") or None
         specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
+        preparation_specs = resolve_verification_preparation_specs(verification_policy, run_id=run_id)
         _validate_profiled_work_packet(
             work_packet,
             verification_policy=verification_policy,
@@ -335,7 +348,27 @@ class VerificationRunner:
                 planned_stage_ids=planned_stage_ids,
                 reason=manifest_error,
                 selected_test_files=selected_test_files,
+                failure_kind="policy",
             )
+
+        preparation_results: list[VerificationStageResult] = []
+        for preparation_spec in preparation_specs:
+            preparation_result = _run_profiled_preparation(
+                target_root=target_root,
+                spec=preparation_spec,
+            )
+            if preparation_result is None:
+                continue
+            preparation_results.append(preparation_result)
+            if preparation_result.status != "passed":
+                return _profiled_result(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    stage_results=[],
+                    preparation_results=preparation_results,
+                    terminal=preparation_result,
+                    selected_test_files=selected_test_files,
+                )
 
         prepared: list[tuple[VerificationStageSpec, Path, str, dict[str, str]]] = []
         for spec in specs:
@@ -345,6 +378,7 @@ class VerificationRunner:
                     planned_stage_ids=planned_stage_ids,
                     reason=f"package.json is missing required script: {spec.required_package_script}",
                     selected_test_files=selected_test_files,
+                    failure_kind="policy",
                 )
             stage_cwd = (target_root / spec.cwd).resolve()
             try:
@@ -361,6 +395,7 @@ class VerificationRunner:
                     planned_stage_ids=planned_stage_ids,
                     reason=f"Verification stage cwd does not exist: {spec.cwd}",
                     selected_test_files=selected_test_files,
+                    failure_kind="policy",
                 )
             env = _profiled_verification_env(spec)
             executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
@@ -370,6 +405,7 @@ class VerificationRunner:
                     planned_stage_ids=planned_stage_ids,
                     reason=f"Verification executable was not found: {spec.argv[0]}",
                     selected_test_files=selected_test_files,
+                    failure_kind="environment",
                 )
             prepared.append((spec, stage_cwd, executable, env))
 
@@ -441,6 +477,7 @@ class VerificationRunner:
                     stdout=_truncate_output(_decode_timeout_output(exc.stdout)),
                     stderr=_truncate_output(_decode_timeout_output(exc.stderr)),
                     reason=f"Verification stage timed out after {spec.timeout_seconds}s: {spec.stage_id}",
+                    failure_kind="environment",
                     timed_out=True,
                     selected_test_files=stage_selected_files,
                 )
@@ -456,6 +493,7 @@ class VerificationRunner:
                     stdout="",
                     stderr=_truncate_output(str(exc)),
                     reason=f"Verification stage could not start: {spec.stage_id}",
+                    failure_kind="environment",
                     selected_test_files=stage_selected_files,
                 )
             else:
@@ -468,6 +506,13 @@ class VerificationRunner:
                         selected_test_files=stage_selected_files,
                     )
                 stage_passed = completed.returncode == 0 and not report_error
+                failure_kind = ""
+                if not stage_passed:
+                    failure_kind = (
+                        "policy"
+                        if report_error
+                        else _command_failure_kind(stdout=completed.stdout, stderr=completed.stderr)
+                    )
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
                     status="passed" if stage_passed else "failed",
@@ -484,6 +529,7 @@ class VerificationRunner:
                         else report_error
                         or f"Verification stage exited with code {completed.returncode}: {spec.stage_id}"
                     ),
+                    failure_kind=failure_kind,
                     selected_test_files=stage_selected_files,
                     verified_test_files=verified_test_files,
                 )
@@ -496,6 +542,7 @@ class VerificationRunner:
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
                     stage_results=stage_results,
+                    preparation_results=preparation_results,
                     terminal=stage_result,
                     selected_test_files=selected_test_files,
                 )
@@ -505,6 +552,7 @@ class VerificationRunner:
             target_path=target_root,
             planned_stage_ids=planned_stage_ids,
             stage_results=stage_results,
+            preparation_results=preparation_results,
             terminal=terminal,
             reason="All profile-owned verification stages completed successfully.",
             selected_test_files=selected_test_files,
@@ -791,7 +839,7 @@ def _vitest_verified_test_files(
     return ordered_reported, ""
 
 
-def _profiled_verification_env(spec: VerificationStageSpec) -> dict[str, str]:
+def _profiled_verification_env(spec: VerificationStageSpec | VerificationPreparationSpec) -> dict[str, str]:
     allowed = {key.casefold() for key in spec.inherited_env_keys}
     env = {key: value for key, value in os.environ.items() if key.casefold() in allowed}
     env.update(dict(spec.fixed_env))
@@ -809,6 +857,7 @@ def _profiled_preflight_failure(
     planned_stage_ids: tuple[str, ...],
     reason: str,
     selected_test_files: tuple[str, ...] = (),
+    failure_kind: str = "environment",
 ) -> VerificationResult:
     return VerificationResult(
         status="failed",
@@ -819,6 +868,7 @@ def _profiled_preflight_failure(
         stdout="",
         stderr="",
         reason=reason,
+        failure_kind=failure_kind,
         planned_stage_ids=planned_stage_ids,
         selected_test_files=selected_test_files,
     )
@@ -829,6 +879,7 @@ def _profiled_result(
     target_path: Path,
     planned_stage_ids: tuple[str, ...],
     stage_results: list[VerificationStageResult],
+    preparation_results: list[VerificationStageResult] | None = None,
     terminal: VerificationStageResult,
     reason: str | None = None,
     selected_test_files: tuple[str, ...] = (),
@@ -838,14 +889,18 @@ def _profiled_result(
         command="",
         cwd=str(target_path),
         exit_code=terminal.exit_code,
-        duration_seconds=sum(item.duration_seconds for item in stage_results),
+        duration_seconds=sum(
+            item.duration_seconds for item in [*(preparation_results or []), *stage_results]
+        ),
         stdout=terminal.stdout,
         stderr=terminal.stderr,
         reason=reason or terminal.reason,
+        failure_kind=terminal.failure_kind,
         timed_out=terminal.timed_out,
         planned_stage_ids=planned_stage_ids,
         executed_stage_ids=tuple(item.stage_id for item in stage_results),
         stage_results=tuple(stage_results),
+        preparation_results=tuple(preparation_results or []),
         selected_test_files=selected_test_files,
         verified_test_files=tuple(
             path
@@ -853,6 +908,216 @@ def _profiled_result(
             for path in item.verified_test_files
         ),
     )
+
+
+def _run_profiled_preparation(
+    *,
+    target_root: Path,
+    spec: VerificationPreparationSpec | None,
+) -> VerificationStageResult | None:
+    """Chạy một preparation theo fingerprint và trả evidence tách biệt."""
+
+    if spec is None:
+        return None
+    trigger_path = (target_root / spec.trigger_path).resolve()
+    try:
+        trigger_path.relative_to(target_root)
+    except ValueError:
+        return _preparation_failure(spec, reason="Verification preparation trigger escapes target repository.")
+    if not trigger_path.is_file():
+        return None
+
+    fingerprint = _preparation_fingerprint(target_root=target_root, spec=spec)
+    if not fingerprint:
+        return _preparation_failure(spec, reason="Verification preparation fingerprint could not be computed.")
+    marker_path = (target_root / spec.success_marker_path).resolve()
+    try:
+        marker_path.relative_to(target_root)
+    except ValueError:
+        return _preparation_failure(spec, reason="Verification preparation marker escapes target repository.")
+    if _preparation_marker_matches(marker_path, fingerprint=fingerprint):
+        return VerificationStageResult(
+            stage_id=spec.preparation_id,
+            status="passed",
+            argv=spec.argv,
+            cwd=spec.cwd,
+            timeout_seconds=spec.timeout_seconds,
+            exit_code=0,
+            duration_seconds=0.0,
+            stdout="",
+            stderr="",
+            reason="Verification preparation already completed for the current inputs.",
+        )
+
+    stage_cwd = (target_root / spec.cwd).resolve()
+    try:
+        stage_cwd.relative_to(target_root)
+    except ValueError:
+        return _preparation_failure(spec, reason="Verification preparation cwd escapes target repository.")
+    if not stage_cwd.is_dir():
+        return _preparation_failure(spec, reason=f"Verification preparation cwd does not exist: {spec.cwd}")
+    env = _profiled_verification_env(spec)
+    executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
+    if not executable:
+        return _preparation_failure(
+            spec,
+            reason=f"Verification preparation executable was not found: {spec.argv[0]}",
+        )
+
+    started = time.monotonic()
+    try:
+        completed = subprocess.run(
+            [executable, *spec.argv[1:]],
+            cwd=str(stage_cwd),
+            env=env,
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=spec.timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return VerificationStageResult(
+            stage_id=spec.preparation_id,
+            status="failed",
+            argv=spec.argv,
+            cwd=spec.cwd,
+            timeout_seconds=spec.timeout_seconds,
+            exit_code=None,
+            duration_seconds=time.monotonic() - started,
+            stdout=_truncate_output(_decode_timeout_output(exc.stdout)),
+            stderr=_truncate_output(_decode_timeout_output(exc.stderr)),
+            reason=f"Verification preparation timed out after {spec.timeout_seconds}s.",
+            failure_kind="environment",
+            timed_out=True,
+        )
+    except OSError as exc:
+        return VerificationStageResult(
+            stage_id=spec.preparation_id,
+            status="failed",
+            argv=spec.argv,
+            cwd=spec.cwd,
+            timeout_seconds=spec.timeout_seconds,
+            exit_code=None,
+            duration_seconds=time.monotonic() - started,
+            stdout="",
+            stderr=_truncate_output(str(exc)),
+            reason="Verification preparation could not start.",
+            failure_kind="environment",
+        )
+
+    stdout = _truncate_output(completed.stdout)
+    stderr = _truncate_output(completed.stderr)
+    if completed.returncode != 0:
+        return VerificationStageResult(
+            stage_id=spec.preparation_id,
+            status="failed",
+            argv=spec.argv,
+            cwd=spec.cwd,
+            timeout_seconds=spec.timeout_seconds,
+            exit_code=completed.returncode,
+            duration_seconds=time.monotonic() - started,
+            stdout=stdout,
+            stderr=stderr,
+            reason=f"Verification preparation exited with code {completed.returncode}.",
+            failure_kind=_dependency_setup_failure_kind(stdout=stdout, stderr=stderr),
+        )
+    try:
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_path.write_text(
+            json.dumps({"fingerprint": fingerprint}, ensure_ascii=True, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        return _preparation_failure(
+            spec,
+            reason="Verification preparation succeeded but its success marker could not be written.",
+            stderr=str(exc),
+        )
+    return VerificationStageResult(
+        stage_id=spec.preparation_id,
+        status="passed",
+        argv=spec.argv,
+        cwd=spec.cwd,
+        timeout_seconds=spec.timeout_seconds,
+        exit_code=0,
+        duration_seconds=time.monotonic() - started,
+        stdout=stdout,
+        stderr=stderr,
+        reason="Verification preparation completed successfully.",
+    )
+
+
+def _preparation_failure(
+    spec: VerificationPreparationSpec,
+    *,
+    reason: str,
+    stderr: str = "",
+) -> VerificationStageResult:
+    return VerificationStageResult(
+        stage_id=spec.preparation_id,
+        status="failed",
+        argv=spec.argv,
+        cwd=spec.cwd,
+        timeout_seconds=spec.timeout_seconds,
+        exit_code=None,
+        duration_seconds=0.0,
+        stdout="",
+        stderr=_truncate_output(stderr),
+        reason=reason,
+        failure_kind="environment",
+    )
+
+
+def _preparation_fingerprint(*, target_root: Path, spec: VerificationPreparationSpec) -> str:
+    digest = hashlib.sha256()
+    for relative_path in spec.fingerprint_paths:
+        path = (target_root / relative_path).resolve()
+        try:
+            path.relative_to(target_root)
+            payload = path.read_bytes()
+        except (OSError, ValueError):
+            return ""
+        digest.update(relative_path.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return f"sha256:{digest.hexdigest()}"
+
+
+def _preparation_marker_matches(path: Path, *, fingerprint: str) -> bool:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("fingerprint") == fingerprint
+
+
+def _command_failure_kind(*, stdout: str, stderr: str) -> str:
+    combined = f"{stdout}\n{stderr}".casefold()
+    missing_command_markers = (
+        "is not recognized as an internal or external command",
+        "command not found",
+        "could not determine executable to run",
+    )
+    return "environment" if any(marker in combined for marker in missing_command_markers) else "implementation"
+
+
+def _dependency_setup_failure_kind(*, stdout: str, stderr: str) -> str:
+    combined = f"{stdout}\n{stderr}".casefold()
+    environment_markers = (
+        "enotfound",
+        "eai_again",
+        "econnreset",
+        "etimedout",
+        "unable to get local issuer certificate",
+        "network request to",
+        "proxy",
+    )
+    if any(marker in combined for marker in environment_markers):
+        return "environment"
+    return _command_failure_kind(stdout=stdout, stderr=stderr)
 
 
 def _has_compiled_java_output(target_path: Path) -> bool:

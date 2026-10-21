@@ -85,6 +85,7 @@ class DeveloperToolLoopExecutor:
         target_path: Path,
         repair_feedback: dict[str, object] | None = None,
         repair_iteration: int = 0,
+        session_iteration: int | None = None,
         repair_scope: str = "implementation",
         expected_dirty_paths: list[str] | None = None,
         on_progress: Callable[[dict[str, object], str, str], None] | None = None,
@@ -92,7 +93,8 @@ class DeveloperToolLoopExecutor:
         normalized_scope = re.sub(r"[^a-z0-9_]+", "_", repair_scope.strip().lower()).strip("_")
         normalized_scope = normalized_scope or "implementation"
         mode = f"{normalized_scope}_repair" if repair_feedback else "act"
-        session_name = f"{mode}_v{repair_iteration}" if repair_feedback else "act_v1"
+        session_ordinal = repair_iteration if session_iteration is None else max(0, session_iteration)
+        session_name = f"{mode}_v{session_ordinal}" if repair_feedback else "act_v1"
         session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
         session_dir.mkdir(parents=True, exist_ok=True)
         manifest_file = session_dir / "manifest.json"
@@ -891,6 +893,43 @@ def repair_scope_mismatch_retry_allowed(state: dict[str, object]) -> bool:
             )
         )
     return False
+
+
+def developer_transport_retry_allowed(state: dict[str, object]) -> bool:
+    """Cho resume tool-loop sau lỗi transport LLM, kể cả state cũ chưa có mã riêng."""
+
+    if str(state.get("status") or "") != "blocked":
+        return False
+    error = _dict_value(state.get("last_error"))
+    error_code = str(error.get("error_code") or "")
+    message = str(error.get("message") or "")
+    if error_code != "llm_transport_failed" and not (
+        error_code == "requirement_refiner_failed"
+        and message.startswith("LLM request failed:")
+    ):
+        return False
+    execution = _dict_value(state.get("developer_execution"))
+    if execution.get("executor") != "tool_loop" or execution.get("status") not in {"blocked", "paused"}:
+        return False
+    mode = str(execution.get("mode") or "")
+    artifacts = _dict_value(state.get("latest_artifacts"))
+    required_by_mode = {
+        "developer_act": ("developer_work_packet",),
+        "implementation_repair": (
+            "developer_work_packet",
+            "implementation_repair_feedback",
+            "developer_repair_execution_manifest",
+            "developer_repair_execution_journal",
+        ),
+        "qa_repair": (
+            "developer_work_packet",
+            "qa_repair_feedback",
+            "developer_qa_repair_execution_manifest",
+            "developer_qa_repair_execution_journal",
+        ),
+    }
+    required = required_by_mode.get(mode)
+    return bool(required) and all(bool(artifacts.get(key)) for key in required)
 
 
 def _build_manifest(

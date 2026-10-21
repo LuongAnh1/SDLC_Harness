@@ -111,6 +111,48 @@ class CaptureDeveloperLlm:
         )
 
 
+class PartialSignaturePatchLlm:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, *, system: str, prompt: str) -> str:
+        del system, prompt
+        method_name = "requestDeletion" if self.calls == 0 else "showConfirmation"
+        parameters = (
+            [{"name": "heritageId", "type": "string", "optional": False, "rest": False}]
+            if method_name == "requestDeletion"
+            else []
+        )
+        self.calls += 1
+        return json.dumps(
+            {
+                "summary": "Add one validated signature patch.",
+                "repo_evidence": [],
+                "implementation_steps": [],
+                "proposed_files": [],
+                "design_mappings": [],
+                "implementation_signature_contract": {
+                    "version": "implementation_signature_contract_v1",
+                    "entries": [
+                        {
+                            "design_element_id": f"method:DeleteCulturalHeritageBoundary.{method_name}",
+                            "symbol_kind": "method",
+                            "owner_kind": "class",
+                            "qualified_name": f"DeleteCulturalHeritageBoundary.{method_name}",
+                            "parameters": parameters,
+                            "return_type": "void",
+                            "type_parameters": [],
+                            "async": False,
+                        }
+                    ],
+                },
+                "test_intents": [],
+                "assumptions": [],
+                "open_questions": [],
+            }
+        )
+
+
 class SequencedImplementationPlanValidator:
     def __init__(self, ok_by_call: list[bool]):
         self.ok_by_call = ok_by_call
@@ -677,6 +719,36 @@ class PhaseThreeTest(unittest.TestCase):
             "implementation_signature_contract_v1",
         )
         self.assertTrue(all("command" not in item for item in revalidated_plan["test_intents"]))
+
+    def test_profiled_plan_repair_merges_partial_signature_patch(self) -> None:
+        self._install_profile_manifest()
+        settings = self._settings(SDLC_PROJECT_PROFILE="typescript_fullstack_v1")
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
+        designed = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+        workflow = PhaseThreeWorkflow(settings)
+        developer_llm = PartialSignaturePatchLlm()
+        workflow.developer = DeveloperPlanAgent(developer_llm)
+        workflow.validator = SequencedImplementationPlanValidator([False, True])
+
+        response = workflow.approve_design_checkpoint(run_id=str(designed["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_implementation_plan_review")
+        self.assertEqual(developer_llm.calls, 2)
+        structured = json.loads(
+            (self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        design_ids = {
+            str(entry["design_element_id"])
+            for entry in structured["implementation_signature_contract"]["entries"]
+        }
+        self.assertIn("method:DeleteCulturalHeritageBoundary.requestDeletion", design_ids)
+        self.assertIn("method:DeleteCulturalHeritageBoundary.showConfirmation", design_ids)
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()
@@ -1470,6 +1542,30 @@ Thanks."""
         self.assertEqual(state["allowed_next_actions"], ["get_status", "cancel_run"])
         self.assertEqual(state["last_error"]["error_code"], "implementation_plan_developer_failed")
         self.assertEqual(state["last_error"]["run_id"], approved["run_id"])
+
+    def test_component_routing_failure_returns_run_to_design_revalidation(self) -> None:
+        approved = self._create_phase2_run()
+        workflow = PhaseThreeWorkflow(self.settings)
+        state = workflow.store.read_state(str(approved["run_id"]))
+
+        workflow._mark_phase3_failed(
+            state,
+            run_id=str(approved["run_id"]),
+            error=HarnessError(
+                "implementation_target_unclassified",
+                "CulturalHeritage has no component.",
+            ),
+        )
+
+        recovered = workflow.store.read_state(str(approved["run_id"]))
+        self.assertEqual(recovered["current_phase"], "design_review")
+        self.assertEqual(recovered["status"], "blocked")
+        self.assertIsNone(recovered["pending_checkpoint"])
+        self.assertEqual(
+            recovered["allowed_next_actions"],
+            ["revalidate_design", "get_status", "request_change", "cancel_run"],
+        )
+        self.assertEqual(recovered["last_error"]["error_code"], "implementation_target_unclassified")
 
     def test_implementation_plan_repair_loop_passes_after_one_repair(self) -> None:
         approved = self._create_phase2_run()

@@ -62,6 +62,63 @@ class VerificationStageSpec:
         }
 
 
+@dataclass(frozen=True)
+class VerificationPreparationSpec:
+    """Bước chuẩn bị cố định, tách khỏi ordered stage contract của plan."""
+
+    preparation_id: str
+    argv: tuple[str, ...]
+    cwd: str
+    inherited_env_keys: tuple[str, ...]
+    fixed_env: tuple[tuple[str, str], ...]
+    timeout_seconds: int
+    trigger_path: str
+    fingerprint_paths: tuple[str, ...]
+    success_marker_path: str
+
+    def evidence(self) -> dict[str, object]:
+        return {
+            "preparation_id": self.preparation_id,
+            "argv": list(self.argv),
+            "cwd": self.cwd,
+            "timeout_seconds": self.timeout_seconds,
+            "trigger_path": self.trigger_path,
+            "fingerprint_paths": list(self.fingerprint_paths),
+            "success_marker_path": self.success_marker_path,
+        }
+
+
+_TYPESCRIPT_FULLSTACK_V1_PREPARATIONS = (
+    VerificationPreparationSpec(
+        preparation_id="dependency_setup",
+        argv=("npm", "ci"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=300,
+        trigger_path="package-lock.json",
+        fingerprint_paths=("package-lock.json",),
+        success_marker_path="node_modules/.sdlc-harness-dependency-setup.json",
+    ),
+    VerificationPreparationSpec(
+        preparation_id="generated_source_setup",
+        argv=("npm", "run", "db:generate"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=120,
+        trigger_path="packages/db/prisma/schema.prisma",
+        fingerprint_paths=(
+            "package-lock.json",
+            "packages/db/package.json",
+            "packages/db/prisma/schema.prisma",
+            "packages/db/prisma7.config.ts",
+        ),
+        success_marker_path="node_modules/.sdlc-harness-generated-source-setup.json",
+    ),
+)
+
+
 _TYPESCRIPT_FULLSTACK_V1_SPECS = (
     VerificationStageSpec(
         stage_id="typecheck",
@@ -90,6 +147,37 @@ _TYPESCRIPT_FULLSTACK_V1_SPECS = (
 _STAGE_SPECS_BY_PROJECT = {
     "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
 }
+
+_PREPARATION_SPECS_BY_PROJECT = {
+    "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_PREPARATIONS,
+}
+
+
+def resolve_verification_preparation_specs(
+    policy: VerificationStagePolicy,
+    *,
+    run_id: str | None = None,
+) -> tuple[VerificationPreparationSpec, ...]:
+    """Resolve ordered preparation đã review, không nhận argv từ LLM hay work packet."""
+
+    if policy.policy_version != VERIFICATION_STAGE_POLICY_VERSION:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            f"Unsupported verification stage policy version: {policy.policy_version}",
+            run_id=run_id,
+        )
+    return _PREPARATION_SPECS_BY_PROJECT.get(policy.project_profile_id, ())
+
+
+def resolve_verification_preparation_spec(
+    policy: VerificationStagePolicy,
+    *,
+    run_id: str | None = None,
+) -> VerificationPreparationSpec | None:
+    """Giữ API tương thích cho caller cũ cần dependency preparation đầu tiên."""
+
+    specs = resolve_verification_preparation_specs(policy, run_id=run_id)
+    return specs[0] if specs else None
 
 
 def resolve_verification_stage_specs(

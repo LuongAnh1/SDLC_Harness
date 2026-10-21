@@ -764,6 +764,7 @@ def _test_report_markdown(report: dict[str, object]) -> str:
     planned_stage_ids = report.get("planned_stage_ids")
     executed_stage_ids = report.get("executed_stage_ids")
     stage_results = report.get("stage_results")
+    preparation_results = report.get("preparation_results")
     lines = [
         f"# Test Report {report.get('artifact_version', 'V1')}",
         "",
@@ -807,10 +808,43 @@ def _test_report_markdown(report: dict[str, object]) -> str:
             f"- Exit code: `{report.get('exit_code', '')}`",
             f"- Duration: `{report.get('duration_seconds', '')}` seconds",
             f"- Reason: {report.get('reason', '')}",
+            f"- Failure kind: `{report.get('failure_kind', '')}`",
             f"- Discovered test entrypoints: `{len(report.get('discovered_test_entrypoints') or [])}`",
             f"- Executed test entrypoints: `{len(report.get('executed_test_entrypoints') or [])}`",
         ]
     )
+    if isinstance(preparation_results, list) and preparation_results:
+        lines.extend(["", "## Verification Preparation", ""])
+        for item in preparation_results:
+            if not isinstance(item, dict):
+                continue
+            lines.extend(
+                [
+                    f"### {item.get('stage_id', '')}",
+                    "",
+                    f"- Status: `{item.get('status', '')}`",
+                    f"- Failure kind: `{item.get('failure_kind', '')}`",
+                    f"- Argv: `{json.dumps(item.get('argv') or [], ensure_ascii=False)}`",
+                    f"- Cwd: `{item.get('cwd', '')}`",
+                    f"- Timeout: `{item.get('timeout_seconds', '')}` seconds",
+                    f"- Exit code: `{item.get('exit_code', '')}`",
+                    f"- Duration: `{item.get('duration_seconds', '')}` seconds",
+                    f"- Reason: {item.get('reason', '')}",
+                    "",
+                    "#### Stdout",
+                    "",
+                    "```text",
+                    str(item.get("stdout") or "").rstrip(),
+                    "```",
+                    "",
+                    "#### Stderr",
+                    "",
+                    "```text",
+                    str(item.get("stderr") or "").rstrip(),
+                    "```",
+                    "",
+                ]
+            )
     if isinstance(stage_results, list) and stage_results:
         lines.extend(
             [
@@ -835,6 +869,7 @@ def _test_report_markdown(report: dict[str, object]) -> str:
                     f"- Exit code: `{item.get('exit_code', '')}`",
                     f"- Duration: `{item.get('duration_seconds', '')}` seconds",
                     f"- Reason: {item.get('reason', '')}",
+                    f"- Failure kind: `{item.get('failure_kind', '')}`",
                     f"- Selected test files: `{json.dumps(item.get('selected_test_files') or [], ensure_ascii=False)}`",
                     f"- Verified test files: `{json.dumps(item.get('verified_test_files') or [], ensure_ascii=False)}`",
                     "",

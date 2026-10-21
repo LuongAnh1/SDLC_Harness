@@ -42,6 +42,14 @@ ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "get_status",
 ]
 LEGACY_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
+DESIGN_ROUTING_ERROR_CODES = frozenset(
+    {
+        "implementation_target_unclassified",
+        "implementation_target_conflict",
+        "implementation_target_ambiguous",
+        "implementation_target_component_invalid",
+    }
+)
 
 
 class PhaseThreeWorkflow:
@@ -726,6 +734,24 @@ class PhaseThreeWorkflow:
 
     def _mark_phase3_failed(self, state: dict[str, object], *, run_id: str, error: HarnessError) -> None:
         """Ghi rõ lỗi Phase 3 để run không kẹt với checkpoint design cũ."""
+
+        if error.error_code in DESIGN_ROUTING_ERROR_CODES:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_review",
+                    "status": "blocked",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["revalidate_design", "get_status", "request_change", "cancel_run"],
+                    "last_error": HarnessError(error.error_code, error.message, run_id=run_id).to_response(),
+                    "summary_for_user": (
+                        "Design chưa đủ thông tin định tuyến component để lập implementation plan; "
+                        "cần revalidate design trước khi thử lại Phase 3."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return
 
         state.update(
             {
