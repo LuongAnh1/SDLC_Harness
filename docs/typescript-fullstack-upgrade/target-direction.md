@@ -4,9 +4,9 @@
 > selection fail-closed; A1.2b đã thêm snapshot theo run và downstream settings
 > binding; A1.2c đã thêm target manifest preflight cùng workspace binding
 > fail-closed; A1.2d đã hard-retire run Java thiếu snapshot. Profile rỗng chỉ
-> còn phục vụ read/audit/sync-existing/cleanup. A2 trừ A2.2b, A3.1-A3.4b và
-> target bootstrap local A4.1a đã hoàn tất; full-stack infra, remote/cutover
-> và các behavior Chặng B dưới đây vẫn chưa hoàn tất.
+> còn phục vụ read/audit/sync-existing/cleanup. A2, A3.1-A3.4b, target bootstrap
+> local A4.1a, A4.1b.1 web/API và A4.1b.2 Prisma/PostgreSQL đã hoàn tất;
+> Playwright/CI, remote/cutover và các behavior Chặng B vẫn chưa hoàn tất.
 
 ## Nguyên Tắc
 

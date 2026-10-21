@@ -86,6 +86,7 @@ class ProfileRegistryTests(unittest.TestCase):
         )
         self.assertIn(".sdlc/target-profile.json", project.required_paths)
         self.assertIn("package-lock.json", project.protected_paths)
+        self.assertIn("packages/db/prisma7.config.ts", project.protected_paths)
 
     def test_profiles_and_nested_collections_are_immutable(self) -> None:
         roots = ["apps/web/src"]

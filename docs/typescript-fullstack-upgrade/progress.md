@@ -761,6 +761,54 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Chưa triển khai Prisma/PostgreSQL/Compose lifecycle, Playwright, CI, remote,
   config cutover hoặc live workflow. A4.1b tổng vẫn mở cho A4.1b.2/A4.1b.3.
 
+## 2026-10-21 - Kế Hoạch A4.1b.2 Prisma/PostgreSQL Skeleton
+
+- Baseline Harness `db378f4`, target local `73860a6`; cả hai worktree sạch trước
+  khi triển khai. Docker Desktop engine `29.9.1` và Compose `v5.6.0` đã sẵn sàng.
+- Dựng database workspace bằng Prisma `7.10.1`, PostgreSQL image
+  `postgres:17.11-alpine3.24`, driver adapter `pg` và generated client nằm ngoài
+  git. `packages/db/prisma7.config.ts` là protected path mới của profile/manifest.
+- Schema bootstrap chỉ có `SystemMetadata` để chứng minh migration/query thật.
+  Initial migration tạo bảng; seed upsert `bootstrap_version=1` để chạy lặp không
+  sinh bản ghi trùng.
+- Compose không khóa `container_name` hay project name; dùng named volume,
+  healthcheck và host port mặc định `54329`. Controlled smoke dùng project riêng
+  `sdlc-a41b2-smoke`, migrate từ volume rỗng, seed hai lần, kiểm chính xác một
+  bootstrap row rồi luôn dọn project/volume.
+- Giữ `typecheck -> unit` là active Verification Runner suite. Không nối API
+  health vào database, không mở B3 database stages, không đổi Harness HTTP API,
+  không tạo remote/push/cutover hay chạy live SDLC workflow.
+- Acceptance dự kiến: npm install/lockfile reproducible, Prisma generate/validate,
+  target typecheck/unit/web build, controlled live DB smoke, manifest preflight,
+  targeted và full Harness regression, `compileall` cùng `git diff --check` pass.
+
+## 2026-10-21 - A4.1b.2 Prisma/PostgreSQL Skeleton
+
+- Target commit `f2cce01` thêm Prisma `7.10.1`, adapter PostgreSQL, schema trung lập
+  `SystemMetadata`, initial migration, seed upsert `bootstrap_version=1`, lazy
+  client, DB health query và smoke assertion. Generated client nằm ngoài git;
+  `npm ci` tự generate qua postinstall và audit báo `0 vulnerabilities`.
+- Compose dùng image `postgres:17.11-alpine3.24`, named volume, healthcheck, không
+  khóa container/project name. Port dự kiến `55432` nằm trong dải Windows reserved
+  `55338-55437`, nên default đã đổi đồng bộ sang `54329` thay vì chỉ override lúc
+  test.
+- Controlled smoke project `sdlc-a41b2-smoke` pass: container healthy, migration
+  áp dụng từ volume rỗng, seed chạy hai lần, query trả đúng một row
+  `bootstrap_version=1`; khối cleanup đã xóa container, network và volume.
+- Target verification sau clean install: Prisma validate pass; typecheck pass;
+  Vitest `6 files, 10 tests` pass; Vite build `18 modules` pass. Dependency tree
+  xác nhận toàn bộ Prisma/pg/dotenv/tsx dùng đúng exact versions đã pin.
+- Harness profile và target manifest cùng bảo vệ `packages/db/prisma7.config.ts`;
+  manifest preflight pass với digest
+  `sha256:9ca5e0628f55ca155c79881897478f6dfa06c12084ff7b31a8520464d0ac3c8f`.
+  Targeted profile/manifest/planning/runner regression `44 passed`; full parallel
+  regression `550 passed, 1 skipped in 81.03s`; `compileall`, Compose config và
+  `git diff --check` pass. Skip duy nhất vẫn là ca symlink Windows thiếu quyền đã
+  biết.
+- Active Verification Runner vẫn là `typecheck -> unit`; chưa nối API `/health`
+  vào DB, chưa bật B3 database stages, chưa tạo remote/push/cutover hoặc chạy live
+  SDLC workflow. A4.1b tổng vẫn mở cho A4.1b.3 Playwright/CI.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text

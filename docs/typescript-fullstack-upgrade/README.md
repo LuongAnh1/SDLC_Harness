@@ -5,8 +5,9 @@ mốc HTTP API-only và live E2E ngày 2026-10-19. Audit/Gate 0 đã hoàn tất
 đã thêm contract/registry `typescript_fullstack_v1` thuần. A1.2a-A1.2d đã thêm
 selector config, snapshot profile theo run, downstream settings binding, target
 manifest preflight, workspace binding fail-closed và retirement guard cho run
-Java cũ. Profile rỗng không còn được mở run mới; target TypeScript local tối thiểu
-đã được bootstrap cho contract Chặng A nhưng chưa có remote hoặc cutover.
+Java cũ. Profile rỗng không còn được mở run mới; target TypeScript local đã có
+web/API/contracts và Prisma/PostgreSQL/Compose skeleton chạy thật. Playwright/CI,
+remote và cutover vẫn chưa triển khai.
 
 ## Mục Tiêu
 

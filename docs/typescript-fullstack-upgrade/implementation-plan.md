@@ -193,7 +193,19 @@ tất và không tự cho phép cutover.
       Fastify `GET /health`, shared runtime-validated contract và sáu unit tests.
     - Manifest/profile không đổi; `typecheck -> unit` vẫn là active suite. Full
       Harness regression `550 passed, 1 skipped`.
-  - [ ] A4.1b.2: dựng Prisma/PostgreSQL cùng Compose lifecycle đã review.
+  - [x] A4.1b.2: dựng Prisma/PostgreSQL cùng Compose lifecycle đã review.
+    - Dùng model hạ tầng trung lập `SystemMetadata`, migration đầu tiên và seed
+      idempotent; không đưa business schema giả vào bootstrap.
+    - Pin Prisma/PostgreSQL dependency và image chính xác; Prisma config là
+      protected path, generated client không commit.
+    - Compose dùng project/volume cô lập, healthcheck và host port mặc định
+      `54329`; live smoke phải migrate từ database rỗng, seed hai lần, kiểm đúng
+      một bootstrap row và luôn `down --volumes` sau khi chạy.
+    - Giữ active verification suite ở `typecheck -> unit`; database lifecycle
+      chưa trở thành B3 verification stage và API `/health` chưa phụ thuộc DB.
+    - Hoàn tất: 2026-10-21. Prisma validate, target typecheck/unit/build, live
+      migrate + seed hai lần + query và cleanup đều pass; full Harness regression
+      `550 passed, 1 skipped`.
   - [ ] A4.1b.3: dựng Playwright và CI trên skeleton đã khóa dependency/config.
 - [ ] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
   kiểm tra quyền fetch/push trước controlled smoke.

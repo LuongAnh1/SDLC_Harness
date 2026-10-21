@@ -55,6 +55,7 @@ _TYPESCRIPT_FULLSTACK = ProjectProfile(
         "packages/contracts/package.json",
         "packages/contracts/tsconfig.json",
         "packages/db/package.json",
+        "packages/db/prisma7.config.ts",
         "packages/db/tsconfig.json",
     ),
     required_paths=(
