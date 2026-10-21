@@ -207,6 +207,12 @@ tất và không tự cho phép cutover.
       migrate + seed hai lần + query và cleanup đều pass; full Harness regression
       `550 passed, 1 skipped`.
   - [ ] A4.1b.3: dựng Playwright và CI trên skeleton đã khóa dependency/config.
+    - [x] A4.1b.3a: pin Playwright/Chromium, dựng local web/API lifecycle, một
+      browser smoke và JSON report; chưa kích hoạt `browser_e2e` trong Harness.
+      - Hoàn tất: 2026-10-21. Chromium smoke xác minh React -> Fastify health,
+        JSON report đúng spec/project/status và hai service port được giải phóng.
+    - [ ] A4.1b.3b: thêm CI workflow cùng failure artifact trên nền local smoke
+      đã ổn định.
 - [ ] Tạo canonical remote `LuongAnh1/SDLC_Target_TypeScript`, base `main`, rồi
   kiểm tra quyền fetch/push trước controlled smoke.
 - [ ] Khóa npm workspace, exact toolchain/dependency versions, lockfile và

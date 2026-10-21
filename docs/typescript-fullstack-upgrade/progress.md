@@ -809,6 +809,50 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
   vào DB, chưa bật B3 database stages, chưa tạo remote/push/cutover hoặc chạy live
   SDLC workflow. A4.1b tổng vẫn mở cho A4.1b.3 Playwright/CI.
 
+## 2026-10-21 - Kế Hoạch A4.1b.3a Local Playwright Skeleton
+
+- Baseline Harness `e4c5378`, target local `f2cce01`; cả hai worktree sạch trước
+  khi triển khai.
+- Pin exact `@playwright/test` `1.64.1`, chỉ cài/chạy Chromium. Browser binary ở
+  cache máy; report, trace và screenshot runtime không commit.
+- `npm run test:e2e` build web trước, sau đó Playwright tự sở hữu Fastify tại
+  `127.0.0.1:3001` và Vite production preview tại `127.0.0.1:4173`. Không reuse
+  server cũ để tránh test nhầm process; cả hai process phải được dọn sau run.
+- Browser smoke xác minh heading, HTTP `/health` status/payload và UI chuyển sang
+  `API: ok`. Playwright xuất line report cùng JSON report machine-readable; cấu
+  hình và spec đều nằm trong TypeScript typecheck.
+- Không đổi profile/manifest vì `playwright.config.ts` đã protected và
+  `tests/e2e` đã là editable root. Không thêm CI, remote/push, DB E2E, B3/B4 report
+  contract hoặc active `browser_e2e` stage trong lát này.
+- Acceptance dự kiến: clean npm install, Chromium install, E2E/report/lifecycle,
+  target regression, manifest preflight, targeted/full Harness regression,
+  `compileall` và `git diff --check` đều pass.
+
+## 2026-10-21 - A4.1b.3a Local Playwright Skeleton
+
+- Target commit `23edb0d` pin exact `@playwright/test` `1.64.1` cùng transitive
+  `playwright/playwright-core` đồng version. `npm ci` cài sạch 245 package, audit
+  250 package và báo `0 vulnerabilities`; Chromium/FFmpeg/headless shell được cài
+  trong cache người dùng, không nằm trong git.
+- Thêm production preview script và Playwright config một Chromium worker. Config
+  build web trước test, tự sở hữu Fastify `3001` cùng Vite preview `4173`, không
+  reuse server cũ, xuất line + JSON report và chỉ giữ trace/screenshot khi lỗi.
+- Browser smoke `1 passed in 7.8s`: xác minh heading, `/health` trả HTTP 200 với
+  `{status: "ok"}` và UI hiển thị `API: ok`. JSON report ghi đúng
+  `health.spec.ts`, title, project `chromium`, status `passed`, không có error;
+  hai port `3001/4173` không còn listener sau run.
+- Target regression pass: Prisma validate, typecheck, Vitest `6 files, 10 tests`,
+  Vite build `18 modules`; DB regression tiếp tục migrate từ volume rỗng, seed
+  hai lần, query đúng một bootstrap row và cleanup toàn bộ Compose project.
+- Manifest preflight giữ nguyên digest
+  `sha256:9ca5e0628f55ca155c79881897478f6dfa06c12084ff7b31a8520464d0ac3c8f`;
+  targeted Harness regression `44 passed`, full parallel regression
+  `550 passed, 1 skipped in 98.62s`, `compileall` pass. Skip duy nhất vẫn là ca
+  symlink Windows thiếu quyền đã biết.
+- Không đổi Harness profile/runtime, active suite vẫn là `typecheck -> unit`.
+  Chưa thêm CI, remote/push, DB browser flow hay B3/B4 evidence contract;
+  A4.1b.3 tổng vẫn mở cho A4.1b.3b.
+
 ## Mẫu Ghi Cho Các Lần Sau
 
 ```text
