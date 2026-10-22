@@ -42,7 +42,9 @@ checkpoint SDLC.
 ## 4. Roadmap Và Dependency
 
 - [x] L1-L7 đủ nhỏ để triển khai/test/cutover độc lập.
-- [x] Lát đầu tiên giữ behavior parity và không thêm tool mới.
+- [x] Tại lần review ban đầu, lát đầu tiên được đặt là behavior parity/no-new-tool;
+  quyết định này đã được phụ lục cuối tài liệu thay thế bằng L1.1 Requirement
+  scenario/surface contract.
 - [x] Dependency B1/B2/B3/B4/B5 được ghi rõ, không tích chéo checklist.
 - [x] Java runtime cleanup vẫn thuộc TypeScript Chặng A.
 - [x] Phase 6 dynamic context chỉ được tham chiếu, không lén mở scope.
@@ -99,3 +101,22 @@ L1.1, không xác nhận kế hoạch chi tiết L1.1 đã tồn tại và tại
 không thay đổi ưu tiên: repo quay lại hoàn tất A4 Java runtime-only cleanup.
 A4 và Chặng A sau đó đã hoàn tất tại commit `80ee0f9`; kết luận Gate 0 vẫn
 không tự xếp lịch L1.1.
+
+## Phụ Lục Sau Gate 0 — Điều Chỉnh 2026-10-22
+
+Sau khi thảo luận sâu hơn về brownfield full-stack và traceability, roadmap đã
+được sửa theo hướng upstream-first. Thay đổi này không phủ nhận audit baseline
+của Gate 0, nhưng thay thế thứ tự L1-L6 và định nghĩa “lát đầu tiên” cũ:
+
+- không bọc Developer hiện hành trước;
+- L1.1 mới là Requirement scenario/surface contract;
+- repo discovery read-only phải có trước repo-aware Design;
+- canonical Design/Trace chuyển từ class/sequence-centric sang typed vertical
+  graph; class và sequence vẫn là projection khi phù hợp;
+- Validator deterministic kiểm toàn graph, semantic reviewer chỉ đọc bounded
+  subgraph;
+- Plan/Developer và QA được nâng cấp sau khi contract Requirement/Design/Trace ổn định.
+
+Chủ dự án đã yêu cầu phản ánh quyết định này vào tài liệu. Đây vẫn là docs-only:
+không có runtime slice nào được coi là hoàn tất và kế hoạch triển khai chi tiết
+L1.1 vẫn phải được review riêng trước khi sửa code.

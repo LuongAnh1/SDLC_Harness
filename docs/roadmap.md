@@ -225,12 +225,19 @@ Repo có roadmap độc lập tại
 nâng cấp quyền/tool/completion/failure routing theo từng vai trò Requirement,
 Designer, Planner/Developer, QA và Validator.
 
+Roadmap đã được điều chỉnh theo thứ tự upstream-first: Requirement scenario/
+surface -> repo discovery read-only -> repo-aware Design -> vertical trace
+Validator -> Plan/Developer -> QA. Vertical graph nối từng scenario qua các lớp
+UI/API/rule/data tới code và test thay vì chỉ nối Requirement -> class/sequence ->
+code symbol.
+
 Roadmap này không phải Chặng C của TypeScript full-stack và không thay thế Phase
 5/6. TypeScript full-stack là acceptance target hiện tại; dependency được nối rõ
 với B1 Design Bundle, B2 Component-aware Plan, B3 Multi-stage Verification, B4
 Browser QA và B5 Cross-layer Trace. Gate 0 của roadmap agent-loop đã được duyệt
 để ghi nhận hướng và boundary. Roadmap vẫn đang park; Chặng A hoàn
-tất không tự động xếp lịch hoặc tạo kế hoạch triển khai chi tiết cho L1.1.
+tất không tự động xếp lịch hoặc tạo kế hoạch triển khai chi tiết cho L1.1
+Requirement scenario/surface contract.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

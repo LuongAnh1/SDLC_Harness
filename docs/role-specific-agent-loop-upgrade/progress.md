@@ -75,11 +75,34 @@ role-specific agent loops. Mốc docs không được dùng để suy ra runtime
 - Trạng thái roadmap role-specific agent loop không tự thay đổi theo mốc này:
   Gate 0 đã duyệt, roadmap vẫn park và L1.1 chưa có kế hoạch chi tiết.
 
+## 2026-10-22 — Điều Chỉnh Upstream-first Và Vertical Graph
+
+- Chủ dự án quyết định không nâng Developer tool-loop trước; Developer hiện hành
+  được giữ làm baseline trong khi contract thượng nguồn được làm rõ.
+- Rà lại Phase 2 và xác nhận Designer hiện nhận requirement cùng component-routing
+  directive từ profile, nhưng chưa khảo sát target repo/CodeGraph/schema/route để
+  phân biệt AS-IS với TO-BE.
+- Đổi roadmap từ thứ tự shared-core/Developer-first sang Requirement scenario và
+  surface -> frozen workspace/repo discovery -> repo-aware Designer -> vertical
+  trace Validator -> Plan/Developer -> QA.
+- Bổ sung tài liệu [Vertical-slice Trace Graph](vertical-slice-trace-graph.md):
+  UI/API/rule/data là các cột trong Design/Code, không phải phase mới; mỗi
+  scenario là một directed subgraph có thể rẽ nhánh.
+- Chốt canonical graph do Python kiểm toàn cục, còn LLM chỉ nhận bounded subgraph
+  theo scenario/finding. Trace graph liên kết CodeGraph bằng anchors thay vì sao
+  chép toàn bộ call graph.
+- Bổ sung contract định hướng cho scenario/surface, repo landscape, typed design
+  graph, vertical trace graph và trạng thái `reuse|modify|add|no_change`.
+- Đây là thay đổi docs-only; không có runtime code, prompt, API hoặc config nào
+  được triển khai bởi lần cập nhật này.
+
 ## Trạng Thái Tiếp Theo
 
 - Gate 0 đã duyệt; chưa có runtime slice L1-L7 nào được đánh dấu hoàn tất.
-- Chặng A đã hoàn tất; tài liệu này không tự chọn công việc runtime tiếp theo.
-- Chỉ lập kế hoạch chi tiết L1.1 khi chủ dự án chủ động đưa roadmap này trở lại lịch.
+- Chặng A đã hoàn tất; thứ tự roadmap mới đã được ghi nhận nhưng không tự kích
+  hoạt runtime implementation.
+- Khi chủ dự án đưa roadmap trở lại lịch, phần đầu tiên cần lập kế hoạch chi tiết
+  là L1.1 Requirement scenario/surface contract, không phải bọc Developer loop.
 
 ## Mẫu Ghi Cho Các Lần Sau
 

@@ -1,6 +1,6 @@
 # Role-specific Agent Loop Upgrade
 
-Trạng thái: **Gate 0 đã duyệt — roadmap đã note, chưa xếp lịch triển khai**
+Trạng thái: **Gate 0 đã duyệt — roadmap đã điều chỉnh theo hướng upstream-first, chưa triển khai runtime**
 Ngày mở tài liệu: **2026-10-22**
 
 ## Mục Tiêu
@@ -41,21 +41,49 @@ không biến mọi vai trò thành một coding agent tổng quát.
 - Validator luôn read-only và độc lập với producer mà nó đánh giá.
 - Verification Runner, CodeGraph, AST extractor và source adapters là service/tool
   do Harness kiểm soát, không phải agent độc lập.
+- Repo Discovery cũng là Harness-owned read-only service/artifact step, không tạo
+  thêm một agent có quyền tự quyết workflow.
 - Lỗi transport/môi trường phải pause/resume và không tiêu hao repair iteration.
 - Contract mới được version theo hướng additive; run lịch sử vẫn đọc/audit được.
 - DeepSeek/OpenAI-compatible client hiện tại tiếp tục là runtime LLM; roadmap này
   không mở một generic provider abstraction mới.
+- Nâng cấp mới đi từ Requirement -> repo discovery -> Design -> Validator ->
+  Plan/Developer -> QA; Developer tool-loop hiện tại được giữ làm baseline chứ
+  không còn là điểm bắt đầu của roadmap.
+- Traceability đích là vertical-slice graph nối scenario qua UI, API, rule, data,
+  code và test. UI/API/DB là các lớp trong design/code, không phải phase mới.
 
 ## Tài Liệu
 
-- [Current Flow And Gap Audit](current-flow-and-gap-audit.md)
-- [Target Architecture](target-architecture.md)
-- [Role Capability Contracts](role-capability-contracts.md)
-- [Workflow State And Artifacts](workflow-state-and-artifacts.md)
-- [Implementation Plan](implementation-plan.md)
-- [Test And Evaluation Strategy](test-and-evaluation-strategy.md)
-- [Gate 0 Review](gate-0-review.md)
-- [Progress And Execution Log](progress.md)
+- [Current Flow And Gap Audit](current-flow-and-gap-audit.md): mô tả cơ chế
+  hiện tại của Requirement, Designer, Planner/Developer, Verification Runner,
+  QA và Validator; chỉ ra điểm mạnh cùng khoảng trống cần tool-loop giải
+  quyết.
+- [Target Architecture](target-architecture.md): định nghĩa kiến trúc role-loop
+  dùng chung, ranh giới sở hữu giữa Agent và Harness, canonical loop, contract
+  nội bộ, quy tắc an toàn và failure routing.
+- [Vertical-slice Trace Graph](vertical-slice-trace-graph.md): giải thích bằng
+  ngôn ngữ đơn giản cách đồ thị mới nối Requirement -> UI -> API -> Rule -> DB ->
+  response -> test, cách biểu diễn nhánh scenario và cách tránh nạp cả graph vào
+  một prompt.
+- [Role Capability Contracts](role-capability-contracts.md): liệt kê input, nhóm
+  tool được phép, write boundary, completion gate và handoff của từng role;
+  đây là tài liệu chính để tra Agent nào được làm gì.
+- [Workflow State And Artifacts](workflow-state-and-artifacts.md): mô tả vòng đời
+  session, manifest/journal, idempotency, pause/resume, budget, handoff state và
+  cách lưu evidence mà không lưu chain-of-thought.
+- [Implementation Plan](implementation-plan.md): roadmap Gate 0 và L1-L7, thứ tự
+  triển khai, dependency với TypeScript full-stack, cùng ranh giới cutover/
+  rollback của từng role.
+- [Test And Evaluation Strategy](test-and-evaluation-strategy.md): quy định test
+  pyramid, scenario bắt buộc theo role, security/adversarial tests, metrics so sánh
+  baseline và controlled live acceptance.
+- [Gate 0 Review](gate-0-review.md): lưu checklist review tài liệu, finding đã
+  điều chỉnh, evidence đối chiếu và phạm vi phê duyệt Gate 0; approval này
+  không tự xếp lịch L1.1.
+- [Progress And Execution Log](progress.md): nhật ký các quyết định, lần
+  review, mốc hoàn thành và trạng thái thực tế của roadmap qua từng lần
+  triển khai.
 
 ## Ranh Giới Với Roadmap TypeScript Full-stack
 
@@ -64,7 +92,7 @@ Roadmap này không thay thế công việc Chặng A/B:
 - Java runtime cleanup vẫn thuộc Chặng A.
 - Designer loop cung cấp nền cho B1 System Design Bundle.
 - Planner/Developer loop cung cấp nền cho B2 Component-aware Plan.
-- Shared tool contract sử dụng stage registry của B3 Multi-stage Verification.
+- L5/L6 verification tools sử dụng stage registry của B3 Multi-stage Verification.
 - QA loop là điều kiện trước B4 Browser QA And Repair.
 - Validator evidence upgrade cung cấp nền cho B5 Cross-layer Trace.
 
@@ -72,8 +100,9 @@ Hai roadmap có thể được triển khai theo dependency, nhưng checklist v�
 không được tích thay cho nhau.
 
 **A4 Java runtime-only cleanup** và Chặng A của roadmap TypeScript full-stack đã
-hoàn tất. Gate 0 của roadmap này chỉ chốt hướng tài liệu; roadmap vẫn
-park và chưa có kế hoạch triển khai chi tiết cho L1.1.
+hoàn tất. Sau khi rà lại hướng full-stack/brownfield, roadmap role-loop được đổi
+sang thứ tự upstream-first. Việc cập nhật tài liệu này không có nghĩa runtime
+L1-L7 đã được triển khai.
 
 ## Docs-first Gate
 

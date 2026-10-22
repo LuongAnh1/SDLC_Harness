@@ -16,6 +16,22 @@ Baseline: nhánh `main`, sau default TypeScript/tool-loop cutover.
 Việc một class có tên `Agent` hoặc workflow có vòng `for` không tự động biến nó
 thành model-tool loop.
 
+## Mô Hình Trace Hiện Tại
+
+Cách trace hiện tại có thể hiểu đơn giản:
+
+~~~text
+Requirement nodes
+-> Design nodes, chủ yếu class và sequence
+-> Code nodes/symbols
+~~~
+
+Mô hình này đã kiểm được requirement có xuất hiện trong design và class/signature
+thiết kế có bằng chứng trong code hay không. Tuy nhiên nó chưa mô tả đầy đủ một
+vertical feature đi qua UI interaction, API contract, business rule, data
+operation, response state và test evidence. Vì vậy “class đã có trong code” chưa
+đủ chứng minh người dùng thực hiện được scenario từ đầu đến cuối.
+
 ## Evidence Map
 
 | Khu vực | Runtime source chính | Regression evidence chính |
@@ -71,6 +87,12 @@ chạy deterministic preflight, traceability checks và semantic review/consensu
 Nếu có blocker, workflow gọi `DesignerAgent.update_design` và validate lại trong
 giới hạn; repeated blocker và oscillation được phát hiện.
 
+Đầu vào hiện tại của Designer chủ yếu là requirement packet, formal use case,
+canonical requirement, analysis do chính Designer tạo và component-routing
+directive từ project profile. Directive này chỉ hướng dẫn stereotype/root như
+web, API, contracts hoặc database; nó không phải bằng chứng rằng component,
+route, schema hay symbol đó thực sự tồn tại trong target repo.
+
 Điểm mạnh:
 
 - producer và Validator tách biệt;
@@ -82,6 +104,8 @@ Khoảng trống:
 
 - Designer chỉ thấy context Harness đưa sẵn;
 - không tự tra CodeGraph, repo topology, API/data contract hiện hữu;
+- chưa có frozen repo snapshot/repo-landscape để phân biệt AS-IS với TO-BE;
+- chưa kết luận rõ mỗi phần tử là `reuse|modify|add|no_change`;
 - repair chủ yếu sinh lại artifact hoàn chỉnh thay vì design delta có phạm vi;
 - không tự chạy design check giữa các bước suy luận;
 - thiết kế greenfield hợp lý hơn brownfield vì evidence repo còn thụ động.
@@ -212,3 +236,16 @@ read-only, giữ deterministic checks làm hard gate.
    environment defect và approved-upstream defect.
 5. Observability hiện theo workflow/artifact, chưa thể hiện rõ agent observation,
    tool decision, evidence và lý do complete/escalate.
+6. Requirement chưa biểu diễn rõ scenario cùng trạng thái UI/API/rule/data
+   `required|not_applicable|clarification_required`.
+7. Design source vẫn nghiêng về class/sequence thay vì typed graph có thể render
+   projection phù hợp theo từng use case.
+8. Trace chưa biểu diễn nhánh end-to-end và chưa có partition để LLM chỉ đọc
+   bounded subgraph trong khi Python kiểm coverage toàn cục.
+
+## Hướng Khắc Phục Đã Chốt
+
+Không mở rộng Developer loop trước. Roadmap mới đi theo thứ tự Requirement
+scenario/surface -> read-only repo discovery -> repo-aware Designer -> vertical
+trace Validator -> Plan/Developer -> QA. Chi tiết mô hình graph nằm tại
+[Vertical-slice Trace Graph](vertical-slice-trace-graph.md).

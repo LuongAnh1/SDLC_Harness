@@ -14,6 +14,8 @@ Kiểm chứng ba nhóm thuộc tính độc lập:
 ### Contract Và Unit
 
 - parse/validate mọi schema session, policy, call/result, completion/failure;
+- parse/validate scenario/surface, repo-landscape, design-graph và trace-graph schema;
+- stable node/edge ID, graph delta merge, partition và dangling/orphan detection;
 - tool allowlist, typed arguments, bounded output và secret/path sanitization;
 - hash precondition, stable call ID, duplicate mutation và ambiguous result;
 - completion gate theo role;
@@ -45,6 +47,8 @@ Dùng scripted fake LLM trả chuỗi action có chủ ý:
 
 ### Requirement
 
+- use case được tách thành main/alternative/error scenarios có stable ID;
+- UI/API/rule/data thiếu trạng thái bị reject; `not_applicable` thiếu reason bị reject;
 - tìm thấy evidence và không hỏi clarification thừa;
 - evidence thiếu tạo câu hỏi có affected IDs;
 - hai nguồn mâu thuẫn tạo human decision;
@@ -53,7 +57,12 @@ Dùng scripted fake LLM trả chuỗi action có chủ ý:
 
 ### Designer
 
+- cùng frozen repo snapshot tạo cùng AS-IS anchors;
 - brownfield lookup tìm đúng component/API hiện hữu;
+- existing component được đánh dấu `reuse|modify`, không bị phát minh thành component mới;
+- backend-only scenario cho phép UI `not_applicable`; full-stack scenario bị
+  chặn nếu thiếu UI/API/data design bắt buộc;
+- typed design graph render projection class/sequence/API/data nhất quán;
 - delta sửa đúng blocker và giữ mapping đã pass;
 - design dẫn chiếu symbol không tồn tại bị preflight chặn;
 - repeated fingerprint và oscillation dừng đúng;
@@ -80,6 +89,12 @@ Dùng scripted fake LLM trả chuỗi action có chủ ý:
 ### Validator
 
 - write call luôn bị policy từ chối;
+- deterministic global scan phát hiện orphan, dangling edge, missing required
+  surface và stale evidence;
+- phase-aware gate chấp nhận planned work ở Design/Plan nhưng yêu cầu code anchor
+  ở Implementation và execution evidence ở QA/final;
+- semantic review chỉ nhận đúng bounded scenario/finding subgraph;
+- trace graph liên kết CodeGraph bằng anchor mà không sao chép call graph;
 - deterministic finding không bị semantic reviewer hạ cấp;
 - semantic minority thành disputed observation;
 - thiếu quorum thành inconclusive;
@@ -117,15 +132,22 @@ database, unit/integration/acceptance evidence. Luồng tối thiểu:
 
 ```text
 Jira/source
--> Requirement evidence loop + human checkpoint
--> Designer repo-aware loop + design checkpoint
--> Planner execution units + plan checkpoint
+-> Requirement scenario/surface loop + human checkpoint
+-> frozen workspace + repo discovery
+-> Designer AS-IS/GAP/TO-BE loop + vertical design graph checkpoint
+-> vertical trace validation
+-> component-aware Planner execution units + plan checkpoint
 -> Developer inspect/edit/verify loop
 -> Code Trace read-only Validator
 -> QA investigate/run/classify loop
--> cross-layer quality report
+-> vertical-slice quality report
 -> Draft PR + Jira/Confluence sync
 ```
+
+Vertical feature bắt buộc có ít nhất một success branch và một alternative/error
+branch. Acceptance phải chứng minh đường trace từ scenario qua các surface
+`required` tới code và test execution evidence; không chỉ chứng minh file/class
+tồn tại.
 
 Merge vẫn do human. Live run phải ghi run ID, commit/PR references, stage evidence,
 metrics, failure/recovery nếu có và xác nhận không lộ secret/private path.

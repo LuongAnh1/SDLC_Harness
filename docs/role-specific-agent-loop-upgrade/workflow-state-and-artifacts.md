@@ -40,6 +40,10 @@ policy khác. Thay đổi một trong các authority input phải mở session v
 | `role_completion_v1.json` | covered units, evidence, unresolved items, outcome | Role đề xuất, Harness xác nhận |
 | `role_failure_classification_v1.json` | failure owner, severity, repairability, route | Role/Validator đề xuất, workflow xác nhận |
 | Role delta artifact | requirement/design/test/code mutation đề xuất hoặc đã apply | Domain writer/workflow |
+| `requirement_scenario_model_v1.json` | scenario, acceptance criteria, required surfaces và provenance | Requirement workflow |
+| `repo_landscape_v1.json` | frozen snapshot, observed stack/topology và code/schema/test anchors | Repo Discovery |
+| `vertical_design_graph_v1.json` | typed UI/API/rule/data nodes, interactions và disposition | Designer đề xuất, Harness apply |
+| `vertical_trace_graph_v1.json` | Requirement -> Design -> Implementation -> Verification edges | Harness/Validator |
 
 Tên file vật lý phải thêm role, scope và version để không va chạm giữa các phase,
 ví dụ `qa_loop_session_v1.json`; bảng trên mô tả schema family chứ không bắt buộc
@@ -59,6 +63,32 @@ Journal là audit record có cấu trúc, không phải raw chain-of-thought. M�
 Không persist reasoning bí mật, secret, raw environment hoặc log không giới hạn.
 Transcript gửi lại model được dựng từ manifest, completed journal entries và
 bounded working context; resume không chỉ dựa vào filesystem hiện tại.
+
+## Graph Partition Và Context
+
+Canonical graph được lưu như artifact của run, nhưng role không nhận toàn bộ graph
+trong mỗi lượt. Mỗi node/edge có stable ID, artifact version và partition keys
+tối thiểu theo use case, scenario và component.
+
+- Requirement làm việc với requirement/scenario partition.
+- Designer nhận scenario cùng bounded AS-IS neighborhood liên quan.
+- Planner/Developer nhận execution-unit subgraph.
+- QA nhận scenario/test subgraph.
+- Validator deterministic được phép quét toàn graph; semantic review nhận bounded
+  subgraph quanh finding.
+
+Role chỉ đề xuất graph delta. Harness kiểm schema, stable ID, edge endpoint,
+authority và precondition hash trước khi merge. Sau merge, global checks chạy lại
+để phát hiện orphan, dangling edge, thiếu required surface và stale evidence.
+
+Coverage policy đi theo phase/version: design graph có thể trỏ tới planned work;
+implementation graph mới phải thay planned work bằng code anchors; final/QA graph
+mới phải có execution evidence. Không dùng một completion rule cuối luồng để
+chặn artifact hợp lệ của phase sớm.
+
+Trace graph không chứa bản sao toàn bộ mã nguồn hoặc CodeGraph. Implementation
+node chỉ giữ sanitized repository-relative file/symbol anchor, snapshot hash và
+evidence reference.
 
 ## Idempotency Và Ambiguous Result
 
@@ -100,6 +130,15 @@ Designer requirement_gap
 -> stop design repair
 -> requirement checkpoint reopen request
 -> human approval before a new design input version
+```
+
+```text
+Vertical trace missing required surface
+-> finding binds scenario + missing layer
+-> route Requirement nếu surface còn mơ hồ
+-> route Designer nếu thiếu design
+-> route Planner/Developer nếu thiếu implementation
+-> route QA nếu thiếu test/evidence
 ```
 
 ```text

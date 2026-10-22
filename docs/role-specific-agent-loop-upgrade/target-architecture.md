@@ -20,6 +20,26 @@ Role Loop Executor chỉ sở hữu cơ chế lặp: transcript, action/result, 
 pause/resume và completion proposal. Phase workflow vẫn sở hữu thứ tự nghiệp vụ,
 artifact version, checkpoint và route sang role khác.
 
+## Luồng Nâng Cấp Upstream-first
+
+Kiến trúc đích không bắt đầu bằng việc bọc lại Developer. Nó đi từ thông tin
+thượng nguồn xuống:
+
+~~~text
+Requirement làm rõ scenario và surface
+-> Harness khóa snapshot/workspace cho run
+-> Repo Discovery mô tả AS-IS
+-> Designer so sánh AS-IS với requirement để tạo TO-BE
+-> Validator kiểm vertical trace và design
+-> Planner chia execution unit
+-> Developer sửa và verify
+-> QA chứng minh từng scenario
+~~~
+
+Developer tool-loop hiện tại tiếp tục là baseline trong thời gian L1-L4 được xây.
+Shared loop mechanics được trích ra khi role đầu tiên thực sự cần, tránh tạo một
+abstraction lớn dựa riêng trên hành vi coding rồi ép Requirement/Designer dùng theo.
+
 ## Ranh Giới Sở Hữu
 
 ### Harness
@@ -68,6 +88,82 @@ load immutable inputs
 Không cho model gửi raw shell command. Verification được gọi bằng stage ID từ
 profile registry. Source/repo reads phải trả bounded content cùng provenance.
 
+## Mô Hình Vertical-slice Trace Graph
+
+Graph mới không thay bốn tầng Requirement, Design, Code và Verification. Nó làm
+rõ các lớp UI/API/rule/data nằm trong Design và Code:
+
+| Tầng | Nội dung điển hình |
+| --- | --- |
+| Requirement | Use case, scenario, acceptance criterion, required surfaces |
+| Design | UI interaction/state, API contract, rule/service, data operation |
+| Code | Component/function, route/schema, service/class, model/query/migration |
+| Verification | Unit, integration, acceptance/browser test và execution evidence |
+
+Một scenario có thể tạo graph có hướng và rẽ nhánh:
+
+~~~text
+scenario
+-> UI action
+-> API
+-> rule
+-> data
+-> response
+-> UI state
+-> tests/evidence
+~~~
+
+Nhánh cancel, forbidden, not-found hay persistence failure dùng chung các node ổn
+định nếu phù hợp nhưng có acceptance/test edge riêng. Xem
+[Vertical-slice Trace Graph](vertical-slice-trace-graph.md) để có ví dụ eTour đầy đủ.
+
+### Design Source Và Projection
+
+Canonical design là typed graph. PlantUML class/sequence, component view, API/data
+contract và state view là các projection được render từ graph theo use case.
+Không bắt buộc mọi use case có mọi projection. Surface/view vắng mặt phải có trạng
+thái `not_applicable` và lý do; nếu chưa quyết định được thì chuyển thành
+`clarification_required`.
+
+Class vẫn là một design/code symbol hợp lệ. Điểm thay đổi là Validator không chỉ
+nối class design tới class code, mà còn có thể nối interaction UI, route API,
+business rule, data operation và test evidence.
+
+### Repo-aware Design
+
+Sau Requirement approval, Harness cấp snapshot read-only và artifact
+`repo_landscape_v1`. Designer dùng repo/CodeGraph/schema/route/test tools để làm:
+
+~~~text
+AS-IS -> GAP -> TO-BE
+~~~
+
+Mỗi design element kết luận `reuse|modify|add|no_change` và trỏ tới repo evidence
+khi có. Requirement nói hành vi/surface nào cần có; Designer mới quyết định file,
+symbol hay contract nào thực sự bị tác động.
+
+Read-only là capability của Requirement/Designer. Base snapshot identity được
+đóng băng để evidence ổn định; tới Developer, Harness mới cấp write scope và phát
+hành graph/evidence version mới theo current hashes.
+
+### Graph Lớn Nhưng Context Phải Nhỏ
+
+- Canonical graph được Python lưu và kiểm deterministic trên toàn cục.
+- Graph được partition theo use case, scenario, component và artifact version.
+- Mỗi lượt LLM chỉ nhận bounded subgraph quanh task/finding hiện tại.
+- Role đề xuất delta nhỏ; Harness validate rồi merge.
+- Sau merge, global checks phát hiện orphan, dangling edge, thiếu required surface
+  và evidence hết hiệu lực.
+
+Trace graph chỉ giữ file/symbol anchors và quan hệ requirement coverage. CodeGraph
+giữ quan hệ gọi/phụ thuộc của code. Hai graph liên kết qua anchors, không sao chép
+lẫn nhau.
+
+Coverage gate phải phase-aware: Phase 1 yêu cầu scenario/surface, Phase 2 yêu cầu
+Requirement -> Design, Phase 3 cho phép planned implementation units, Phase 4 yêu
+cầu code anchors, và QA/final gate mới yêu cầu execution evidence. Artifact của
+phase tương lai chưa tồn tại không được báo lỗi như một blocker hiện tại.
+
 ## Shared Internal Contracts
 
 Các tên dưới đây là contract định hướng; schema chi tiết chỉ được phát hành ở
@@ -84,6 +180,17 @@ lát L1 và phải versioned:
   units, evidence refs, unresolved items và requested next owner.
 - `role_failure_classification_v1`: owner `role|product|upstream|environment|human`,
   repairability, severity và routing recommendation.
+
+Các artifact domain mới đi cùng contract role-loop:
+
+- `requirement_scenario_model_v1`: scenario, acceptance criteria và trạng thái
+  surface `required|not_applicable|clarification_required`.
+- `repo_landscape_v1`: snapshot, observed stack/topology, component, route,
+  schema/test anchors và uncertainty.
+- `vertical_design_graph_v1`: typed design nodes/edges cùng disposition
+  `reuse|modify|add|no_change`.
+- `vertical_trace_graph_v1`: liên kết Requirement -> Design -> Implementation ->
+  Verification và partition metadata.
 
 Các contract này là nội bộ. HTTP API hiện hành không đổi trong Gate 0/L1. Nếu cần
 expose status sau này, chỉ thêm field sanitized vào response hiện có.

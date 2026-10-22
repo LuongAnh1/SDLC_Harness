@@ -21,8 +21,8 @@ sang adapter code-reviewed; mọi kết quả đều có evidence reference.
 | --- | --- | --- | --- | --- | --- | --- |
 | Đọc approved artifacts | Có | Có | Có | Có | Có | Có |
 | Đọc source Jira/docs | Có | Chỉ evidence đã duyệt | Không | Không | Không | Có, read-only |
-| Đọc/search repo | Theo policy | Có | Có | Có | Có | Có |
-| Query CodeGraph/AST | Read-only | Read-only | Read-only | Read-only | Read-only | Read-only |
+| Đọc/search repo | Không mặc định; chỉ technical evidence đã cấp | Có, read-only | Có | Có | Có | Có |
+| Query CodeGraph/AST | Không mặc định | Read-only | Read-only | Read-only | Read-only | Read-only |
 | Sửa requirement/design | Đề xuất requirement delta | Đề xuất design delta | Không | Không | Không | Không |
 | Sửa production code | Không | Không | Không | Exact approved paths | Không | Không |
 | Sửa test | Không | Không | Chỉ lập kế hoạch | Approved developer tests | QA-owned tests | Không |
@@ -38,10 +38,17 @@ sang adapter code-reviewed; mọi kết quả đều có evidence reference.
 - requirement model/version hiện tại nếu là clarification/revision;
 - existing decisions, answers và evidence ledger.
 
+Requirement sở hữu hành vi cần có, không sở hữu quyết định file/symbol sẽ sửa.
+Mỗi scenario phải ghi trạng thái của UI, API, business rule và data là
+`required|not_applicable|clarification_required`. Trạng thái `required` nói
+lớp đó phải được đáp ứng, không có nghĩa chắc chắn phải tạo hoặc sửa code: kết
+luận `reuse|modify|add|no_change` thuộc Designer sau repo discovery.
+
 ### Tool Nhóm
 
 - `source.list`, `source.search`, `source.read`;
-- `repo.search_readonly`, `codegraph.query_readonly` khi source policy cho phép;
+- `technical_evidence.read` khi workflow đã cấp approved evidence; Requirement
+  không tự khảo sát repo để chọn kiến trúc/file;
 - `evidence.record_reference`;
 - `requirement.propose_delta`;
 - `requirement.run_validation`;
@@ -72,7 +79,8 @@ trước khi artifact writer phát hành version mới.
 ### Input
 
 - approved Requirement Model và evidence refs;
-- project profile/topology;
+- frozen workspace snapshot và `repo_landscape_v1`;
+- project profile/topology expectation;
 - current design graph/artifact khi repair;
 - bounded repo/CodeGraph access;
 - Validator findings của đúng design version.
@@ -86,6 +94,11 @@ trước khi artifact writer phát hành version mới.
 - `design.render_candidate`;
 - `design.run_preflight`.
 
+Designer phải dùng các tool read-only để thực hiện `AS-IS -> GAP -> TO-BE`.
+Mỗi design element đề xuất disposition `reuse|modify|add|no_change` và repo
+evidence khi có. Canonical output là typed design graph; class, sequence,
+component, API, data và state view là projection theo use case.
+
 ### Write Boundary
 
 Designer chỉ đề xuất structured design delta. Harness apply delta vào candidate,
@@ -95,7 +108,8 @@ ghi target repo hoặc sửa requirement.
 ### Completion Gate
 
 - canonical requirement coverage đủ theo policy;
-- component, API, data và sequence references không dangling;
+- mọi surface `required` có design node hoặc quyết định reuse/no-change có evidence;
+- component, UI, API, rule, data và interaction references không dangling;
 - deterministic preflight pass;
 - unresolved tradeoff được ghi assumption hoặc human decision;
 - repair delta nêu rõ finding nào được giải quyết và evidence nào giữ nguyên.
@@ -111,10 +125,10 @@ ghi target repo hoặc sửa requirement.
 
 ### Planner
 
-Planner chỉ đọc approved requirement/design/repo evidence và đề xuất structured
+Planner chỉ đọc approved requirement/vertical design graph/repo evidence và đề xuất structured
 implementation plan. Nó không sửa repo và chỉ tham chiếu verification stage ID.
 Plan completion yêu cầu work item có dependency, component, exact path policy,
-requirement/design mapping, signature contract và test intent.
+scenario/requirement/design-node mapping, signature contract và test intent.
 
 ### Developer
 
@@ -134,6 +148,8 @@ Developer chỉ được complete một unit khi:
 
 - tất cả path của unit có trạng thái rõ;
 - requirement/design mapping của unit có evidence;
+- trace delta của unit nêu design node nào sẽ được hiện thực và test intent nào
+  phải được chứng minh;
 - required verification stage cho unit đã pass trên current hashes;
 - diff không chứa out-of-scope path;
 - unresolved item được handoff, không bị ẩn trong summary.
@@ -147,6 +163,7 @@ hash; conflict yêu cầu re-observe trước mutation tiếp theo.
 ### Input
 
 - approved acceptance criteria và requirement IDs;
+- approved scenario/vertical trace partitions;
 - current implementation/code-trace evidence;
 - QA policy và tập QA-owned paths của run;
 - verification stage catalog;
@@ -208,6 +225,11 @@ Registry của Validator không chứa write/apply/execute-arbitrary tools. Quer
 được mở rộng trong snapshot hiện hành; không fetch context mới rồi âm thầm thay
 đổi approved requirement.
 
+Validator đọc canonical graph theo partition. Deterministic code có thể kiểm toàn
+graph; semantic reviewer chỉ nhận bounded subgraph theo use case, scenario hoặc
+finding. CodeGraph cung cấp call/dependency evidence, còn trace graph chỉ giữ
+anchor và quan hệ coverage; Validator không sao chép toàn bộ CodeGraph.
+
 ### Completion Gate
 
 - mỗi blocker trỏ tới canonical claim, evidence và owner sửa;
@@ -215,3 +237,7 @@ Registry của Validator không chứa write/apply/execute-arbitrary tools. Quer
 - semantic finding không đủ quorum trở thành disputed observation;
 - thiếu valid trials/budget tạo `inconclusive`, không tạo repair feedback;
 - kết quả nêu rõ `pass|fail|inconclusive` và next owner.
+- mọi required scenario/surface có đường trace tới artifact mà phase hiện hành
+  yêu cầu, hoặc có finding chỉ rõ owner chịu trách nhiệm; không đòi code/test
+  trước phase tạo chúng;
+- view/surface vắng mặt chỉ hợp lệ khi có `not_applicable` và reason được duyệt.

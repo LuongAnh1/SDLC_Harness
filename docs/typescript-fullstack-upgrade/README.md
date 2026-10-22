@@ -62,7 +62,8 @@ legacy chỉ còn đường rollback/audit có giới hạn trước lát cleanu
   ngân sách và guardrail cho việc giảm thời gian regression suite.
 - [Role-specific Agent Loop Upgrade](../role-specific-agent-loop-upgrade/README.md):
   roadmap độc lập cho capability/tool loop của Requirement, Designer,
-  Planner/Developer, QA và Validator; tài liệu này chỉ giữ dependency với B1-B5.
+  Planner/Developer, QA và Validator. Roadmap đi theo thứ tự upstream-first và
+  dùng vertical-slice trace graph; tài liệu này chỉ giữ dependency với B1-B5.
 
 ## Docs-first Gate
 
