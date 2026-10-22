@@ -27,24 +27,19 @@ def developer_generation_context(work_packet: dict[str, object]) -> dict[str, ob
 
     schema_version = str(work_packet.get("schema_version") or "")
     if not is_profiled_work_packet_schema(schema_version):
-        return {
-            "mode": "legacy_java_v1",
-            "profiled": False,
-            "language_name": "Java",
-            "example_path": _example_path(allowed_paths),
-            "rules": [
-                "Preserve the Java package and build conventions found in current_files.",
-                "Only return complete files listed in output_contract.allowed_paths.",
-            ],
-            "implementation_signature_contract": {},
-            "signatures_by_file": {},
-        }
+        raise _profile_error(
+            "Developer execution requires a profiled DeveloperWorkPacket; legacy batch packets are retired."
+        )
 
     output_contract = _dict_value(work_packet.get("output_contract"))
     path_policy = _dict_value(output_contract.get("path_policy"))
+    if not path_policy and schema_version != PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+        path_policy = _dict_value(work_packet.get("planning_profile"))
     project_profile_id = str(path_policy.get("project_profile_id") or "").strip()
     language_profile_id = str(path_policy.get("language_profile_id") or "").strip()
-    policy_version = str(path_policy.get("planning_policy_version") or "").strip()
+    policy_version = str(
+        path_policy.get("planning_policy_version") or path_policy.get("policy_version") or ""
+    ).strip()
     if not project_profile_id or not language_profile_id or not policy_version:
         raise _profile_error("Profiled DeveloperWorkPacket has incomplete editable path policy metadata.")
 
@@ -109,7 +104,7 @@ def developer_prompt_context(work_packet: dict[str, object]) -> dict[str, object
 
 
 def developer_path_is_test(path: str) -> bool:
-    """Nhận diện test path cho cả layout Java lịch sử và profile TypeScript."""
+    """Nhận diện test path trong các component TypeScript đã profile hóa."""
 
     normalized = "/" + path.strip().replace("\\", "/").casefold().lstrip("/")
     name = PurePosixPath(normalized).name
@@ -119,7 +114,6 @@ def developer_path_is_test(path: str) -> bool:
         or normalized.startswith("/tests/")
         or "/__tests__/" in normalized
         or name.startswith("test_")
-        or name.endswith("test.java")
         or ".test." in name
         or ".spec." in name
     )

@@ -60,60 +60,6 @@ def _graphs():
     return class_graph, sequence_graph
 
 
-def test_sequence_mapping_uses_message_semantics_without_pseudo_symbols():
-    class_graph, sequence_graph = _graphs()
-    mappings = _design_mappings(class_graph=class_graph, sequence_graph=sequence_graph, target_files=[])
-    sequence = [item for item in mappings if item["design_element_type"] == "sequence_message"]
-
-    assert sequence[0]["planned_code_target"].endswith("InsertCulturalHeritageController.java#activateInsertion")
-    assert sequence[0]["trace_policy"] == "direct_symbol"
-    assert sequence[1]["planned_code_target"].endswith("IdempotencyGuard.java")
-    assert "#false" not in sequence[1]["planned_code_target"]
-    assert sequence[1]["trace_policy"] == "return_behavior"
-    assert sequence[2]["planned_code_target"].endswith("ETourPort.java")
-    assert "#ConnectionException" not in sequence[2]["planned_code_target"]
-    assert sequence[2]["trace_policy"] == "exception_path"
-    assert sequence[3]["planned_code_target"].endswith("InsertionFormView.java")
-    assert sequence[3]["trace_policy"] == "boundary_interaction"
-
-
-def test_canonical_files_include_step_tests_and_mapping_files(tmp_path: Path):
-    class_graph, sequence_graph = _graphs()
-    mappings = _design_mappings(class_graph=class_graph, sequence_graph=sequence_graph, target_files=[])
-    test_path = "src/test/java/com/sdlc/etour/heritage/InsertFlowTest.java"
-    steps = [{"order": 1, "title": "Test flow", "files": [test_path], "design_refs": []}]
-    proposed = _canonical_proposed_files(proposed_files=[], implementation_steps=steps, mappings=mappings)
-    paths = {item["path"] for item in proposed}
-    assert test_path in paths
-    assert "src/main/java/com/sdlc/etour/heritage/InsertCulturalHeritageController.java" in paths
-    proposed = _ensure_executable_test_files(proposed_files=proposed, mappings=mappings)
-    paths = {item["path"] for item in proposed}
-    assert "src/test/java/com/sdlc/etour/heritage/InsertCulturalHeritageFlowTest.java" in paths
-
-    packet = build_developer_work_packet(
-        run_id="run_test",
-        source_ref="dataset_use_case:eTour:UC2",
-        issue_key="SDLC-2",
-        structured_plan={
-            "version": "implementation_plan_structured_v1",
-            "target_repository": {},
-            "implementation_steps": steps,
-            "proposed_files": proposed,
-            "design_mappings": mappings,
-            "verification_stage_ids": [],
-            "test_intents": [{"command": "powershell -File scripts/test.ps1"}],
-        },
-        target_repo_path=tmp_path,
-        run_workspace={},
-        approved_plan_refs={},
-    )
-    assert test_path in packet["output_contract"]["allowed_paths"]
-    assert packet["version"] == "developer_work_packet_v1"
-    assert packet["schema_version"] == "developer_work_packet_legacy_v1"
-    assert packet["verification_stage_ids"] == []
-    assert packet["test_intents"] == [{"command": "powershell -File scripts/test.ps1"}]
-
-
 def test_profiled_work_packet_uses_v2_and_revalidates_execution_contract(tmp_path: Path):
     project = get_project_profile("typescript_fullstack_v1")
     planning_policy = build_planning_path_policy(
@@ -419,6 +365,12 @@ class _RepairLlm:
 
 def test_repair_preserves_candidate_and_moves_review_to_history():
     class_graph, sequence_graph = _graphs()
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
     base = DeveloperPlanAgent().plan(
         run_id="run_test",
         source_ref="source",
@@ -433,7 +385,8 @@ def test_repair_preserves_candidate_and_moves_review_to_history():
         target_base_branch="main",
         planned_branch="branch",
         target_files=[],
-        test_command="test",
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
     )
     repaired = DeveloperPlanAgent(_RepairLlm()).repair_plan(
         previous_draft=base,
@@ -453,7 +406,8 @@ def test_repair_preserves_candidate_and_moves_review_to_history():
         target_base_branch="main",
         planned_branch="branch",
         target_files=[],
-        test_command="test",
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
     )
     assert repaired.structured["design_mappings"] == base.structured["design_mappings"]
     assert repaired.structured["repair_history"][0]["feedback"] == "fix"

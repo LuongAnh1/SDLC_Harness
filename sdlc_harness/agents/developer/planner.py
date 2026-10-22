@@ -23,9 +23,7 @@ from ...profiles import (
     PlanningPathPolicy,
     VerificationStagePolicy,
     build_implementation_signature_contract,
-    build_verification_stage_policy,
     get_language_profile,
-    get_project_profile,
     resolve_language_prompt_directive,
 )
 
@@ -67,9 +65,9 @@ class DeveloperPlanAgent:
         repair_feedback: str,
         previous_review: dict[str, object],
         canonical_requirement: RequirementModelV2 | None,
-        planning_policy: PlanningPathPolicy | None,
+        planning_policy: PlanningPathPolicy,
         prompt_directive: LanguagePromptDirective | None,
-        verification_policy: VerificationStagePolicy | None,
+        verification_policy: VerificationStagePolicy,
     ) -> dict[str, object]:
         """Nhờ Developer LLM đọc context repo và viết plan giàu ngữ cảnh hơn."""
 
@@ -148,6 +146,7 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )
+        assert planning_policy is not None
         repo_context = repo_context or {}
         mappings = _design_mappings(
             class_graph=class_graph,
@@ -244,11 +243,7 @@ class DeveloperPlanAgent:
             else None
         )
         structured = {
-            "version": (
-                PROFILED_IMPLEMENTATION_PLAN_VERSION
-                if verification_policy
-                else "implementation_plan_structured_v1"
-            ),
+            "version": PROFILED_IMPLEMENTATION_PLAN_VERSION,
             "planning_mode": (
                 "llm_developer_with_codegraph_context_v1"
                 if self.llm_client and not llm_parse_error
@@ -268,14 +263,8 @@ class DeveloperPlanAgent:
                 "workspace_ref": workspace_ref,
                 "base_sha": base_sha,
             },
-            "planning_profile": planning_policy.metadata() if planning_policy else {
-                "project_profile_id": "legacy_java_v1",
-                "language_profile_id": "java_legacy_v1",
-                "policy_version": "legacy_java_planning_v1",
-            },
-            "verification_stage_ids": (
-                list(verification_policy.stage_ids) if verification_policy else []
-            ),
+            "planning_profile": planning_policy.metadata(),
+            "verification_stage_ids": list(verification_policy.stage_ids),
             "inputs": {
                 "requirement_design_trace_version": requirement_design_trace.get("version", ""),
                 "class_graph_version": class_graph.get("version", ""),
@@ -364,6 +353,7 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )
+        assert planning_policy is not None
         previous = dict(previous_draft.structured)
         previous_mappings = _dict_items(previous.get("design_mappings"))
         previous_tests = _dict_items(previous.get("test_intents"))
@@ -530,9 +520,9 @@ def _developer_plan_prompt(
     repair_feedback: str,
     previous_review: dict[str, object],
     canonical_requirement: RequirementModelV2 | None,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
     prompt_directive: LanguagePromptDirective | None,
-    verification_policy: VerificationStagePolicy | None = None,
+    verification_policy: VerificationStagePolicy,
 ) -> str:
     canonical_section = (
         "Canonical Requirement V2 (source of truth; use stable IDs exactly):\n"
@@ -575,11 +565,11 @@ def _developer_plan_prompt(
             **planning_policy.prompt_context(),
             "language_prompt": prompt_directive.developer_plan_context(),
         }
-    else:
-        source_example = "src/main/java/com/sdlc/ExampleService.java"
-        test_example = "src/test/java/com/sdlc/ExampleServiceTest.java"
-        path_rules = "Proposed files must stay under src/main/java or src/test/java and end in .java."
-        planning_context = {"policy_version": "legacy_java_planning_v1"}
+    else:  # Defensive only; public planning entry points reject missing policy first.
+        raise HarnessError(
+            "planning_profile_policy_invalid",
+            "Developer planning requires an immutable planning policy.",
+        )
     if verification_policy:
         if test_command.strip():
             raise HarnessError(
@@ -648,26 +638,11 @@ def _developer_plan_prompt(
             "Use qualified Owner.method names and do not include source_path or contract_id; "
             "the harness binds those deterministically."
         )
-    else:
-        test_intent_schema = json.dumps(
-            [
-                {
-                    "scope": "unit_or_service",
-                    "intent": "specific behavior to verify",
-                    "command": test_command,
-                }
-            ],
-            ensure_ascii=False,
+    else:  # Defensive only; public planning entry points reject missing policy first.
+        raise HarnessError(
+            "planning_profile_policy_invalid",
+            "Developer planning requires an immutable verification policy.",
         )
-        verification_rules = "Legacy compatibility: preserve the supplied test command."
-        verification_context = json.dumps(
-            {"policy_version": "legacy_command_compatibility_v1"},
-            ensure_ascii=False,
-            indent=2,
-        )
-        verification_run_context = f"- legacy_test_command: {test_command}"
-        signature_contract_field = ""
-        signature_rules = "Legacy compatibility does not use an implementation signature contract."
     return f"""Developer Implementation Plan v1
 
 You are creating the Phase 3 implementation plan checkpoint for a TraceDev-style SDLC workflow.
@@ -864,18 +839,15 @@ def _resolve_verification_policy(
     *,
     planning_policy: PlanningPathPolicy | None,
     verification_policy: VerificationStagePolicy | None,
-) -> VerificationStagePolicy | None:
-    """Giữ direct-call compatibility nhưng không cho profiled plan rơi về command."""
+) -> VerificationStagePolicy:
+    """Bắt buộc Phase 3 dùng policy đã resolve từ immutable run snapshot."""
 
-    if planning_policy and verification_policy is None:
-        verification_policy = build_verification_stage_policy(
-            project=get_project_profile(planning_policy.project_profile_id)
+    if planning_policy is None or verification_policy is None:
+        raise HarnessError(
+            "planning_profile_policy_invalid",
+            "Developer planning requires immutable planning and verification policies.",
         )
-    if (
-        planning_policy
-        and verification_policy
-        and verification_policy.project_profile_id != planning_policy.project_profile_id
-    ):
+    if verification_policy.project_profile_id != planning_policy.project_profile_id:
         raise HarnessError(
             "verification_stage_policy_mismatch",
             "Verification stages do not belong to the planning project profile.",

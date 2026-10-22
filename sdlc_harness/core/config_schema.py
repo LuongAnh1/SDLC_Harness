@@ -9,7 +9,7 @@ from .errors import HarnessError
 
 
 MASKED_SECRET_VALUE = "********"
-_PROJECT_PROFILE_OPTIONS = ("", *list_project_profile_ids())
+_PROJECT_PROFILE_OPTIONS = list_project_profile_ids()
 
 
 def _field(
@@ -80,7 +80,6 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
         "label": "Developer & Validation",
         "description": "Giới hạn action, repair và semantic validation.",
         "fields": (
-            _field("SDLC_DEVELOPER_EXECUTION_MODE", "Developer mode", "enum", "tool_loop", "Cơ chế Developer sinh và sửa code.", options=("legacy", "tool_loop")),
             _field("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM", "Actions per item", "integer", 24, "Số action tối đa cho mỗi work item.", minimum=1),
             _field("SDLC_DEVELOPER_MAX_ACTION_RETRIES", "Action retries", "integer", 2, "Số lần thử lại action lỗi hoặc bị cắt.", minimum=0),
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 2, "Số vòng Designer sửa design.", minimum=0),
@@ -103,7 +102,7 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Project profile",
                 "enum",
                 "typescript_fullstack_v1",
-                "Profile mặc định cho run mới; để trống chỉ giữ các thao tác lịch sử trên run legacy đã retire.",
+                "Profile bắt buộc cho run mới; TypeScript full-stack là target hiện tại.",
                 options=_PROJECT_PROFILE_OPTIONS,
             ),
             _field("SDLC_TARGET_REPO_PATH", "Repository path", "path", "../SDLC_Target_TypeScript", "Đường dẫn repository nhận code."),

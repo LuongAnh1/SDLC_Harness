@@ -60,7 +60,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "deepseek",
                 "SDLC_LLM_API_KEY": "test-only",
-                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
                 "SDLC_DEVELOPER_MAX_ACTION_RETRIES": "0",
             },
         )
@@ -71,6 +70,12 @@ class DeveloperToolLoopTest(unittest.TestCase):
     def work_packet(self) -> dict[str, object]:
         paths = ["src/Main.java", "src/MainTest.java"]
         return {
+            "schema_version": "developer_work_packet_profiled_v1",
+            "planning_profile": {
+                "project_profile_id": "typescript_fullstack_v1",
+                "language_profile_id": "typescript_v1",
+                "policy_version": "planning_path_policy_v1",
+            },
             "issue_key": "SDLC-2",
             "approved_plan": {"summary": "Implement and test one behavior."},
             "effective_design_contract": {"classes": ["Main"]},
@@ -225,7 +230,6 @@ class DeveloperToolLoopTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "deepseek",
                 "SDLC_LLM_API_KEY": "test-only",
-                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
                 "SDLC_DEVELOPER_MAX_ACTION_RETRIES": "1",
             },
         )

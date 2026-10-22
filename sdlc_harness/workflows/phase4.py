@@ -30,12 +30,8 @@ import json
 from pathlib import Path
 import re
 import subprocess
-from uuid import uuid4
 
 from ..agents.developer import (
-    DeveloperActAgent,
-    DeveloperActLlmError,
-    DeveloperActResult,
     DeveloperExecutionError,
     DeveloperExecutionResult,
     DeveloperToolLoopExecutor,
@@ -43,7 +39,6 @@ from ..agents.developer import (
     developer_transport_retry_allowed,
     repair_scope_mismatch_retry_allowed,
     refresh_developer_work_packet,
-    validate_developer_work_packet_path_policy,
 )
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
@@ -51,8 +46,6 @@ from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
-    write_phase4_developer_llm_metadata,
-    write_phase4_developer_raw_response,
     write_phase4_developer_work_packet,
     write_phase4_effective_design_contract,
     write_phase4_github_code_review,
@@ -158,7 +151,6 @@ class PhaseFourWorkflow:
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
-        self.developer = DeveloperActAgent(self.llm_client)
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
             store=self.store,
@@ -578,8 +570,6 @@ class PhaseFourWorkflow:
             if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
                 return self._continue_implementation_repair(state=state, run_id=run_id)
             return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "blocked" and self._legacy_developer_retry_allowed(state):
-            return self._continue_developer_act(state=state, run_id=run_id)
         if status == "blocked" and self._qa_generation_retry_allowed(state):
             return self._continue_qa_test(state=state, run_id=run_id)
         if status == "blocked" and repair_scope_mismatch_retry_allowed(state):
@@ -594,11 +584,6 @@ class PhaseFourWorkflow:
             if execution.get("mode") == "implementation_repair":
                 return self._continue_implementation_repair(state=state, run_id=run_id)
             return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "blocked" and self._legacy_verification_repair_allowed(state):
-            prepared = self._prepare_legacy_verification_repair(state=state, run_id=run_id)
-            if str(prepared.get("status")) == "implementation_repair_needed":
-                return self._continue_implementation_repair(state=prepared, run_id=run_id)
-            return self._status_response(prepared, created_new_run=False)
         if status == "implementation_written":
             return self._continue_verification(state=state, run_id=run_id)
         if status == "implementation_tested":
@@ -1060,25 +1045,9 @@ class PhaseFourWorkflow:
             return self._revalidate_current_implementation(state=state, run_id=run_id)
 
     def _continue_developer_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
-        """Chạy Developer act bằng executor đã chọn cho execution session hiện tại."""
+        """Chạy hoặc resume Developer tool-loop cho execution session hiện tại."""
 
-        if self._developer_executor_mode(state) == "tool_loop":
-            return self._continue_developer_tool_loop_act(state=state, run_id=run_id)
-        return self._continue_developer_batch(state=state, run_id=run_id)
-
-    def _developer_executor_mode(self, state: dict[str, object]) -> str:
-        """Giữ executor đã bind cho session dở dang, nếu không thì đọc config."""
-
-        execution = _dict_value(state.get("developer_execution"))
-        bound_executor = str(execution.get("executor") or "")
-        execution_status = str(execution.get("status") or "")
-        if bound_executor in {"legacy", "tool_loop"} and execution_status in {
-            "executing",
-            "paused",
-            "blocked",
-        }:
-            return bound_executor
-        return str(self.settings.developer_execution_mode)
+        return self._continue_developer_tool_loop_act(state=state, run_id=run_id)
 
     @staticmethod
     def _tool_loop_session_active(state: dict[str, object], *, mode: str) -> bool:
@@ -1379,94 +1348,6 @@ class PhaseFourWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
-
-
-    def _continue_developer_batch(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
-        """Chạy Slice 4.2: Developer.act sinh và apply code vào target repo."""
-
-        artifact_paths = _string_dict(state.get("latest_artifacts"))
-        latest_artifacts = dict(artifact_paths)
-        try:
-            packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
-            work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-            planning_policy = _planning_policy_for_state(state, run_id=run_id)
-            target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet, allow_dirty=False)
-            branch = target_info.current_branch
-            result = self.developer.act(work_packet=work_packet)
-            latest_artifacts = self._persist_developer_llm_artifacts(
-                run_id=run_id,
-                latest_artifacts=latest_artifacts,
-                action="act",
-                version=1,
-                value=result,
-            )
-            applied_files = _apply_developer_changes(
-                result=result,
-                work_packet=work_packet,
-                target_path=target_info.path,
-                run_id=run_id,
-                planning_policy=planning_policy,
-            )
-            report = {
-                "run_id": run_id,
-                "source_ref": state.get("source_ref"),
-                "issue_key": work_packet.get("issue_key"),
-                "target_repo": str(target_info.path),
-                "branch": branch,
-                "summary": result.summary,
-                "files": applied_files,
-                "execution_mode": "batch",
-            }
-            report_path = write_phase4_code_change_report(
-                store=self.store,
-                run_id=run_id,
-                report=report,
-                version=1,
-            )
-        except HarnessError as exc:
-            latest_artifacts = self._persist_developer_llm_artifacts(
-                run_id=run_id,
-                latest_artifacts=latest_artifacts,
-                action="act",
-                version=1,
-                value=exc,
-            )
-            state.update(
-                {
-                    "updated_at": utc_now_iso(),
-                    "current_phase": "implementation_writing",
-                    "status": "blocked",
-                    "latest_artifacts": latest_artifacts,
-                    "pending_checkpoint": None,
-                    "allowed_next_actions": ["get_status", "cancel_run"],
-                    "last_error": exc.to_response(),
-                    "summary_for_user": f"Phase 4 bị chặn khi Developer.act sinh/apply code: {exc.message}",
-                }
-            )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
-        latest_artifacts = {
-            **latest_artifacts,
-            "code_change_report": report_path,
-        }
-        state.update(
-            {
-                "updated_at": utc_now_iso(),
-                "current_phase": "implementation_writing",
-                "status": "implementation_written",
-                "latest_artifacts": latest_artifacts,
-                "pending_checkpoint": None,
-                "allowed_next_actions": ALLOWED_IMPLEMENTATION_WRITTEN_ACTIONS,
-                "last_error": None,
-                "summary_for_user": (
-                    f"Developer.act đã apply {len(applied_files)} file cho run {run_id} trên branch `{branch}`. "
-                    "Slice 4.2 chưa chạy test, chưa commit và chưa mở PR."
-                ),
-            }
-        )
-        self.store.write_state(state)
-        return self._status_response(state, created_new_run=False)
-
     def _continue_verification(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.3: Verification Runner compile/unit test target repo."""
 
@@ -1558,51 +1439,6 @@ class PhaseFourWorkflow:
             )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
-
-    def _prepare_legacy_verification_repair(
-        self,
-        *,
-        state: dict[str, object],
-        run_id: str,
-    ) -> dict[str, object]:
-        """Migrate a pre-repair-loop test failure into the current repair contract."""
-
-        artifact_paths = _string_dict(state.get("latest_artifacts"))
-        packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
-        report_path = _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
-        work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
-        target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
-        report_text = self._existing_artifact_path(report_path, run_id=run_id).read_text(
-            encoding="utf-8",
-            errors="replace",
-        )
-        result = _verification_result_from_markdown(report_text, cwd=str(target_info.path))
-        artifact_version = _phase4_artifact_version(report_path, prefix="test_report_", default=1)
-        quality_reports = {
-            **_dict_value(state.get("quality_reports")),
-            "verification": _verification_quality_report(
-                result=result,
-                report_path=report_path,
-                attempt=_verification_attempt_count(self.store, run_id),
-                repair_iteration=_int_value(state.get("implementation_repair_iterations")),
-            ),
-        }
-        self._apply_verification_failure_state(
-            state=state,
-            run_id=run_id,
-            work_packet=work_packet,
-            target_repo=str(target_info.path),
-            branch=target_info.current_branch,
-            result=result,
-            report_path=report_path,
-            artifact_version=artifact_version,
-            repair_iteration=_int_value(state.get("implementation_repair_iterations")),
-            current_phase="implementation_testing",
-            latest_artifacts=artifact_paths,
-            quality_reports=quality_reports,
-        )
-        self.store.write_state(state)
-        return state
 
     def _apply_verification_failure_state(
         self,
@@ -1935,11 +1771,7 @@ class PhaseFourWorkflow:
         latest_artifacts = dict(artifact_paths)
         previous_qa_iterations = _int_value(state.get("qa_repair_iterations"))
         repair_iteration = previous_qa_iterations + 1
-        execution_mode = self._developer_executor_mode(state)
-        resume_tool_loop = (
-            execution_mode == "tool_loop"
-            and self._tool_loop_session_active(state, mode="qa_repair")
-        )
+        resume_tool_loop = self._tool_loop_session_active(state, mode="qa_repair")
         bound_execution = _dict_value(state.get("developer_execution"))
         artifact_version = (
             _int_value(bound_execution.get("artifact_version"))
@@ -1984,58 +1816,32 @@ class PhaseFourWorkflow:
                 **latest_artifacts,
                 "developer_work_packet": refreshed_packet_path,
             }
-            if execution_mode == "tool_loop":
-                expected_dirty_paths = sorted(
-                    _qa_repair_dirty_paths(
-                        store=self.store,
-                        artifact_paths=artifact_paths,
-                        qa_policy=_qa_policy_for_state(state, run_id=run_id),
-                        run_id=run_id,
-                    )
-                )
-                result = self._execute_developer_tool_loop(
-                    state=state,
+            expected_dirty_paths = sorted(
+                _qa_repair_dirty_paths(
+                    store=self.store,
+                    artifact_paths=artifact_paths,
+                    qa_policy=_qa_policy_for_state(state, run_id=run_id),
                     run_id=run_id,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    latest_artifacts=latest_artifacts,
-                    mode="qa_repair",
-                    current_phase="qa_repair",
-                    repair_iteration=repair_iteration,
-                    artifact_version=artifact_version,
-                    manifest_key="developer_qa_repair_execution_manifest",
-                    journal_key="developer_qa_repair_execution_journal",
-                    repair_feedback=qa_feedback,
-                    repair_scope="qa",
-                    expected_dirty_paths=expected_dirty_paths,
                 )
-                applied_files = result.files
-            else:
-                result = self.developer.repair(
-                    work_packet=work_packet,
-                    repair_feedback=qa_feedback,
-                    repair_iteration=repair_iteration,
-                )
-                latest_artifacts = self._persist_developer_llm_artifacts(
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    action="qa_repair",
-                    version=artifact_version,
-                    value=result,
-                )
-                applied_files = _apply_developer_changes(
-                    result=result,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    run_id=run_id,
-                    planning_policy=planning_policy,
-                )
-            developer_summary = result.summary
-            developer_raw_response = (
-                None
-                if execution_mode == "tool_loop"
-                else latest_artifacts.get("developer_repair_raw_response")
             )
+            result = self._execute_developer_tool_loop(
+                state=state,
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                latest_artifacts=latest_artifacts,
+                mode="qa_repair",
+                current_phase="qa_repair",
+                repair_iteration=repair_iteration,
+                artifact_version=artifact_version,
+                manifest_key="developer_qa_repair_execution_manifest",
+                journal_key="developer_qa_repair_execution_journal",
+                repair_feedback=qa_feedback,
+                repair_scope="qa",
+                expected_dirty_paths=expected_dirty_paths,
+            )
+            applied_files = result.files
+            developer_summary = result.summary
             change_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -2047,17 +1853,10 @@ class PhaseFourWorkflow:
                 "repair_iteration": repair_iteration,
                 "repair_feedback": feedback_path,
                 "developer_work_packet": refreshed_packet_path,
-                "developer_raw_response": developer_raw_response,
                 "repair_source": "qa_acceptance",
-                **(
-                    {
-                        "execution_mode": "tool_loop",
-                        "developer_execution_manifest": result.manifest_path,
-                        "developer_execution_journal": result.journal_path,
-                    }
-                    if execution_mode == "tool_loop"
-                    else {}
-                ),
+                "execution_mode": "tool_loop",
+                "developer_execution_manifest": result.manifest_path,
+                "developer_execution_journal": result.journal_path,
             }
             change_report_path = write_phase4_code_change_report(
                 store=self.store,
@@ -2124,13 +1923,6 @@ class PhaseFourWorkflow:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
         except HarnessError as exc:
-            latest_artifacts = self._persist_developer_llm_artifacts(
-                run_id=run_id,
-                latest_artifacts=latest_artifacts,
-                action="qa_repair",
-                version=artifact_version,
-                value=exc,
-            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -2643,41 +2435,6 @@ class PhaseFourWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
-    def _persist_developer_llm_artifacts(
-        self,
-        *,
-        run_id: str,
-        latest_artifacts: dict[str, str],
-        action: str,
-        version: int,
-        value: DeveloperActResult | DeveloperActLlmError | HarnessError,
-    ) -> dict[str, str]:
-        """Giữ raw output và metadata kể cả khi Developer JSON parse thất bại."""
-
-        if not isinstance(value, (DeveloperActResult, DeveloperActLlmError)):
-            return latest_artifacts
-        result = dict(latest_artifacts)
-        artifact_prefix = "developer_act" if action == "act" else "developer_repair"
-        raw_response = getattr(value, "raw_response", "")
-        if raw_response:
-            result[f"{artifact_prefix}_raw_response"] = write_phase4_developer_raw_response(
-                store=self.store,
-                run_id=run_id,
-                action=action,
-                raw_response=raw_response,
-                version=version,
-            )
-        metadata = getattr(value, "llm_metadata", None)
-        if isinstance(metadata, dict) and metadata:
-            result[f"{artifact_prefix}_llm_metadata"] = write_phase4_developer_llm_metadata(
-                store=self.store,
-                run_id=run_id,
-                action=action,
-                metadata=metadata,
-                version=version,
-            )
-        return result
-
     def _block_qa_error(
         self,
         *,
@@ -3036,11 +2793,7 @@ class PhaseFourWorkflow:
 
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
-        execution_mode = self._developer_executor_mode(state)
-        resume_tool_loop = (
-            execution_mode == "tool_loop"
-            and self._tool_loop_session_active(state, mode="implementation_repair")
-        )
+        resume_tool_loop = self._tool_loop_session_active(state, mode="implementation_repair")
         bound_execution = _dict_value(state.get("developer_execution"))
         artifact_version = (
             _int_value(bound_execution.get("artifact_version"))
@@ -3120,51 +2873,25 @@ class PhaseFourWorkflow:
                 **artifact_paths,
                 "developer_work_packet": refreshed_packet_path,
             }
-            if execution_mode == "tool_loop":
-                state["implementation_repair_total_iterations"] = total_repair_iterations
-                result = self._execute_developer_tool_loop(
-                    state=state,
-                    run_id=run_id,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    latest_artifacts=latest_artifacts,
-                    mode="implementation_repair",
-                    current_phase="implementation_repair",
-                    repair_iteration=repair_iteration,
-                    session_iteration=session_iteration,
-                    artifact_version=artifact_version,
-                    manifest_key="developer_repair_execution_manifest",
-                    journal_key="developer_repair_execution_journal",
-                    repair_feedback=repair_feedback,
-                    repair_scope="implementation",
-                )
-                applied_files = result.files
-            else:
-                result = self.developer.repair(
-                    work_packet=work_packet,
-                    repair_feedback=repair_feedback,
-                    repair_iteration=repair_iteration,
-                )
-                latest_artifacts = self._persist_developer_llm_artifacts(
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    action="repair",
-                    version=artifact_version,
-                    value=result,
-                )
-                applied_files = _apply_developer_changes(
-                    result=result,
-                    work_packet=work_packet,
-                    target_path=target_info.path,
-                    run_id=run_id,
-                    planning_policy=planning_policy,
-                )
-            developer_summary = result.summary
-            developer_raw_response = (
-                None
-                if execution_mode == "tool_loop"
-                else latest_artifacts.get("developer_repair_raw_response")
+            state["implementation_repair_total_iterations"] = total_repair_iterations
+            result = self._execute_developer_tool_loop(
+                state=state,
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                latest_artifacts=latest_artifacts,
+                mode="implementation_repair",
+                current_phase="implementation_repair",
+                repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
+                artifact_version=artifact_version,
+                manifest_key="developer_repair_execution_manifest",
+                journal_key="developer_repair_execution_journal",
+                repair_feedback=repair_feedback,
+                repair_scope="implementation",
             )
+            applied_files = result.files
+            developer_summary = result.summary
             change_report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -3176,16 +2903,9 @@ class PhaseFourWorkflow:
                 "repair_iteration": repair_iteration,
                 "repair_feedback": feedback_path,
                 "developer_work_packet": refreshed_packet_path,
-                "developer_raw_response": developer_raw_response,
-                **(
-                    {
-                        "execution_mode": "tool_loop",
-                        "developer_execution_manifest": result.manifest_path,
-                        "developer_execution_journal": result.journal_path,
-                    }
-                    if execution_mode == "tool_loop"
-                    else {}
-                ),
+                "execution_mode": "tool_loop",
+                "developer_execution_manifest": result.manifest_path,
+                "developer_execution_journal": result.journal_path,
             }
             change_report_path = write_phase4_code_change_report(
                 store=self.store,
@@ -3251,13 +2971,6 @@ class PhaseFourWorkflow:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
         except HarnessError as exc:
-            latest_artifacts = self._persist_developer_llm_artifacts(
-                run_id=run_id,
-                latest_artifacts=latest_artifacts,
-                action="repair",
-                version=artifact_version,
-                value=exc,
-            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -3282,34 +2995,24 @@ class PhaseFourWorkflow:
                 f"Unexpected Developer executor failure ({type(exc).__name__}): {exc}",
                 run_id=run_id,
             )
-            tool_loop_session = execution_mode == "tool_loop"
             recovery_state: dict[str, object] = {
                 "updated_at": utc_now_iso(),
                 "current_phase": "implementation_repair",
-                "status": "implementation_paused" if tool_loop_session else "blocked",
+                "status": "implementation_paused",
                 "latest_artifacts": latest_artifacts,
                 "pending_checkpoint": None,
-                "allowed_next_actions": (
-                    ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS
-                    if tool_loop_session
-                    else ["get_status", "cancel_run"]
-                ),
+                "allowed_next_actions": ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS,
                 "last_error": error.to_response(),
-                "summary_for_user": (
-                    f"Developer repair đã tạm dừng an toàn cho run {run_id} vì lỗi executor nội bộ."
-                    if tool_loop_session
-                    else f"Developer repair legacy bị chặn cho run {run_id} vì lỗi executor nội bộ."
-                ),
+                "summary_for_user": f"Developer repair đã tạm dừng an toàn cho run {run_id} vì lỗi executor nội bộ.",
             }
-            if tool_loop_session:
-                recovery_state["developer_execution"] = self._developer_execution_state(
-                    state,
-                    executor="tool_loop",
-                    mode="implementation_repair",
-                    repair_iteration=locals().get("repair_iteration", 0),
-                    artifact_version=artifact_version,
-                    status="paused",
-                )
+            recovery_state["developer_execution"] = self._developer_execution_state(
+                state,
+                executor="tool_loop",
+                mode="implementation_repair",
+                repair_iteration=locals().get("repair_iteration", 0),
+                artifact_version=artifact_version,
+                status="paused",
+            )
             state.update(recovery_state)
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
@@ -3681,16 +3384,16 @@ class PhaseFourWorkflow:
             path=target_path,
             remote=workspace.remote,
             current_branch=workspace.branch,
-            source_files=_target_source_files(target_path),
+            source_files=_target_source_files(
+                target_path,
+                state=self.store.read_state(run_id),
+                run_id=run_id,
+            ),
         )
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
-        if self._legacy_developer_retry_allowed(state) and "continue_run" not in allowed_next_actions:
-            allowed_next_actions.insert(0, "continue_run")
         if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
-            allowed_next_actions.insert(0, "continue_run")
-        if self._legacy_verification_repair_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
@@ -3728,19 +3431,6 @@ class PhaseFourWorkflow:
             "developer_execution": state.get("developer_execution", {}),
         }
 
-    def _legacy_developer_retry_allowed(self, state: dict[str, object]) -> bool:
-        """Expose one safe migration path for pre-tool-loop Developer truncation failures."""
-
-        if self.settings.developer_execution_mode != "tool_loop" or str(state.get("status") or "") != "blocked":
-            return False
-        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
-        artifacts = _string_dict(state.get("latest_artifacts"))
-        return (
-            error_code == "developer_act_failed"
-            and bool(artifacts.get("developer_work_packet"))
-            and not bool(artifacts.get("code_change_report"))
-        )
-
     @staticmethod
     def _qa_generation_retry_allowed(state: dict[str, object]) -> bool:
         """Retry malformed QA generation without rerunning Developer or Validator."""
@@ -3759,25 +3449,6 @@ class PhaseFourWorkflow:
             and message.startswith("Unsafe or unsupported Developer.act path:")
             and bool(_dict_value(state.get("profile_snapshot")))
         )
-
-    @staticmethod
-    def _legacy_verification_repair_allowed(state: dict[str, object]) -> bool:
-        """Expose continue-run for test failures created before verification repair existed."""
-
-        if str(state.get("status") or "") != "blocked":
-            return False
-        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
-        artifacts = _string_dict(state.get("latest_artifacts"))
-        quality_reports = _dict_value(state.get("quality_reports"))
-        return (
-            error_code == "test_failed"
-            and bool(artifacts.get("developer_work_packet"))
-            and bool(artifacts.get("code_change_report"))
-            and bool(artifacts.get("test_report"))
-            and not bool(artifacts.get("implementation_repair_feedback"))
-            and not bool(quality_reports.get("verification"))
-        )
-
 
 class _TargetRepoInfo:
     def __init__(self, *, path: Path, remote: str, current_branch: str, source_files: list[str]):
@@ -3872,7 +3543,7 @@ def _qa_review_context(
     target_repo: str,
     branch: str,
     work_packet: dict[str, object],
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> dict[str, object]:
     """Đóng gói context QA ngắn, có metadata truncation để tránh prompt quá dài."""
 
@@ -4004,7 +3675,7 @@ def _qa_code_under_test(
     target_repo: Path,
     work_packet: dict[str, object],
     run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> dict[str, object]:
     """Lay source/test code hien tai tu target repo, khong dung snapshot cu trong packet."""
 
@@ -4069,7 +3740,7 @@ def _qa_code_paths(
     *,
     work_packet: dict[str, object],
     run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[str]:
     paths: list[str] = []
     seen: set[str] = set()
@@ -4098,8 +3769,7 @@ def _qa_code_paths(
 def _qa_code_role(rel_path: str) -> str:
     return (
         "test"
-        if rel_path.startswith("src/test/java/")
-        or rel_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        if rel_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
         else "production"
     )
 
@@ -4133,7 +3803,7 @@ def _apply_qa_generated_tests(
     generated: QaGeneratedTestSuite,
     target_path: Path,
     run_id: str,
-    qa_policy: QaTestPolicy | None = None,
+    qa_policy: QaTestPolicy,
     prior_qa_paths: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Apply QA-generated files trong path policy của run."""
@@ -4164,7 +3834,7 @@ def _apply_qa_generated_tests(
                 f"QA-generated test path escapes target repo: {rel_path}",
                 run_id=run_id,
             ) from exc
-        if qa_policy is not None and target_file.exists() and rel_path not in prior_paths:
+        if target_file.exists() and rel_path not in prior_paths:
             raise HarnessError(
                 "qa_test_existing_file_conflict",
                 f"QA cannot overwrite a test file it does not own for this run: {rel_path}",
@@ -4195,22 +3865,13 @@ def _normalize_qa_test_path(
     raw_path: str,
     *,
     run_id: str,
-    qa_policy: QaTestPolicy | None = None,
+    qa_policy: QaTestPolicy,
 ) -> str:
-    if qa_policy is not None:
-        rel_path = qa_policy.normalize_test_path(raw_path)
-        if not rel_path:
-            raise HarnessError(
-                "qa_test_out_of_scope",
-                f"QA-generated test is outside the profiled Vitest policy: {raw_path}",
-                run_id=run_id,
-            )
-        return rel_path
-    rel_path = _normalize_code_path(raw_path, run_id=run_id)
-    if not rel_path.startswith("src/test/java/") or not rel_path.endswith(".java"):
+    rel_path = qa_policy.normalize_test_path(raw_path)
+    if not rel_path:
         raise HarnessError(
             "qa_test_out_of_scope",
-            f"QA-generated tests can only write Java tests under src/test/java/: {raw_path}",
+            f"QA-generated test is outside the immutable project policy: {raw_path}",
             run_id=run_id,
         )
     return rel_path
@@ -4220,55 +3881,26 @@ def _qa_repair_dirty_paths(
     *,
     store: RuntimeStore,
     artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
     run_id: str,
 ) -> set[str]:
     """Đọc tập QA-owned path làm dirty baseline, không mở rộng quyền ghi Developer."""
 
-    if qa_policy is not None:
-        return _previous_qa_owned_paths(
-            store=store,
-            artifact_paths=artifact_paths,
-            qa_policy=qa_policy,
-            run_id=run_id,
-        )
-    artifact_ref = str(artifact_paths.get("qa_generated_tests") or "")
-    if not artifact_ref:
-        return set()
-    artifact_path = Path(artifact_ref)
-    if not artifact_path.is_absolute():
-        artifact_path = store.repo_root / artifact_path
-    payload = _read_json_artifact(artifact_path, run_id=run_id)
-    owned: set[str] = set()
-    for item in _dict_items(payload.get("test_files")):
-        raw_path = str(item.get("path") or "").strip().replace("\\", "/")
-        path = raw_path.lstrip("/")
-        if (
-            not path
-            or raw_path.startswith("/")
-            or Path(raw_path).is_absolute()
-            or path == ".."
-            or path.startswith("../")
-            or "/../" in path
-        ):
-            raise HarnessError(
-                "qa_test_policy_invalid",
-                "Prior QA-generated test artifact contains an unsafe path.",
-                run_id=run_id,
-            )
-        owned.add(path)
-    return owned
+    return _previous_qa_owned_paths(
+        store=store,
+        artifact_paths=artifact_paths,
+        qa_policy=qa_policy,
+        run_id=run_id,
+    )
 
 
 def _previous_qa_owned_paths(
     *,
     store: RuntimeStore,
     artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
     run_id: str,
 ) -> set[str]:
-    if qa_policy is None:
-        return set()
     artifact_ref = str(artifact_paths.get("qa_generated_tests") or "")
     if not artifact_ref:
         return set()
@@ -4305,14 +3937,14 @@ def _qa_result_from_generated_execution(
     execution_path: str,
     generated_path: str,
     applied_tests: list[dict[str, object]],
-    qa_policy: QaTestPolicy | None = None,
+    qa_policy: QaTestPolicy,
 ) -> QaTestResult:
     status = _qa_status_from_verification(str(getattr(execution, "status", "")))
     reason = str(getattr(execution, "reason", "") or "")
     expected_test_files = tuple(str(item.get("path") or "") for item in applied_tests)
     selected_test_files = tuple(getattr(execution, "selected_test_files", ()) or ())
     verified_test_files = tuple(getattr(execution, "verified_test_files", ()) or ())
-    if qa_policy is not None and (
+    if (
         selected_test_files != expected_test_files
         or verified_test_files != expected_test_files
     ):
@@ -4446,7 +4078,7 @@ def _code_review_publication_paths(
     work_packet: dict[str, object],
     qa_generated: dict[str, object],
     run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[str]:
     """Lập manifest file từ evidence của Developer, QA và Verification Runner."""
 
@@ -4602,195 +4234,6 @@ def _required_phase4_artifact(artifact_paths: dict[str, str], key: str, *, run_i
     return value
 
 
-def _apply_developer_changes(
-    *,
-    result: DeveloperActResult,
-    work_packet: dict[str, object],
-    target_path: Path,
-    run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[dict[str, object]]:
-    """Validate a complete Developer batch, then apply it with rollback on failure."""
-
-    allowed_paths = set(
-        validate_developer_work_packet_path_policy(
-            work_packet,
-            planning_policy=planning_policy,
-            run_id=run_id,
-        )
-    )
-
-    requirement_contract = _dict_value(work_packet.get("requirement_contract"))
-    v2 = requirement_contract.get("version") == "v2"
-    assigned_by_file = _requirement_ids_by_file(work_packet) if v2 else {}
-    canonical_ids = {
-        str(item.get("id") or "").strip()
-        for item in _dict_items(work_packet.get("canonical_requirements"))
-        if str(item.get("id") or "").strip()
-    }
-    design_by_file = _dict_value(work_packet.get("design_mappings_by_file"))
-    root = target_path.resolve()
-    prepared: list[dict[str, object]] = []
-    seen_paths: set[str] = set()
-
-    for item in result.files:
-        rel_path = _normalize_code_path(
-            str(item.get("path") or ""),
-            run_id=run_id,
-            planning_policy=planning_policy,
-        )
-        if rel_path in seen_paths:
-            raise HarnessError(
-                "developer_act_duplicate_path",
-                f"Developer.act returned the same file more than once: {rel_path}",
-                run_id=run_id,
-            )
-        seen_paths.add(rel_path)
-        if rel_path not in allowed_paths:
-            raise HarnessError(
-                "developer_act_out_of_scope",
-                f"Developer.act tried to modify a file outside allowed_paths: {rel_path}",
-                run_id=run_id,
-            )
-
-        returned_requirement_ids = _string_items(item.get("covered_requirement_ids"))
-        if v2:
-            invalid = set(returned_requirement_ids) - assigned_by_file.get(rel_path, set())
-            invented = set(returned_requirement_ids) - canonical_ids
-            if invalid or invented:
-                raise HarnessError(
-                    "developer_act_requirement_coverage_invalid",
-                    (
-                        f"Developer.act returned stable requirement IDs outside the approved coverage for {rel_path}: "
-                        f"{sorted(invalid | invented)}"
-                    ),
-                    run_id=run_id,
-                )
-
-        target_file = (root / rel_path).resolve()
-        try:
-            target_file.relative_to(root)
-        except ValueError as exc:
-            raise HarnessError(
-                "developer_act_unsafe_path",
-                f"Developer.act path escapes target repo: {rel_path}",
-                run_id=run_id,
-            ) from exc
-
-        content_value = item.get("content")
-        if not isinstance(content_value, str) or not content_value.strip():
-            raise HarnessError(
-                "developer_act_failed",
-                f"Developer.act returned empty or invalid content for {rel_path}.",
-                run_id=run_id,
-            )
-        final_bytes = (content_value.rstrip() + "\n").encode("utf-8")
-        previous_bytes = target_file.read_bytes() if target_file.is_file() else None
-        if previous_bytes == final_bytes:
-            continue
-
-        design_ids: list[str] = []
-        for mapping in _dict_items(design_by_file.get(rel_path)):
-            design_id = str(mapping.get("design_element_id") or "").strip()
-            if design_id and design_id not in design_ids:
-                design_ids.append(design_id)
-        approved_requirement_ids = sorted(assigned_by_file.get(rel_path, set())) if v2 else returned_requirement_ids
-        temp_file = target_file.with_name(f".{target_file.name}.sdlc-{uuid4().hex}.tmp")
-        prepared.append(
-            {
-                "path": rel_path,
-                "target": target_file,
-                "temp": temp_file,
-                "previous": previous_bytes,
-                "content": final_bytes,
-                "reason": str(item.get("reason") or "Developer batch changed this file.").strip(),
-                "covered_design_elements": design_ids,
-                "covered_requirement_ids": approved_requirement_ids,
-            }
-        )
-
-    if not prepared:
-        raise HarnessError("developer_act_failed", "Developer.act did not return any effective file change.")
-
-    try:
-        for change in prepared:
-            target_file = change["target"]
-            temp_file = change["temp"]
-            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
-            target_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_file.write_bytes(change["content"])
-        for change in prepared:
-            temp_file = change["temp"]
-            target_file = change["target"]
-            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
-            temp_file.replace(target_file)
-    except OSError as exc:
-        rollback_errors: list[str] = []
-        for change in prepared:
-            target_file = change["target"]
-            temp_file = change["temp"]
-            previous = change["previous"]
-            assert isinstance(target_file, Path) and isinstance(temp_file, Path)
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-                if previous is None:
-                    if target_file.exists():
-                        target_file.unlink()
-                else:
-                    rollback_file = target_file.with_name(f".{target_file.name}.rollback-{uuid4().hex}.tmp")
-                    rollback_file.write_bytes(previous)
-                    rollback_file.replace(target_file)
-            except OSError:
-                rollback_errors.append(str(change["path"]))
-        detail = f" Rollback failed for: {rollback_errors}." if rollback_errors else ""
-        raise HarnessError(
-            "developer_act_apply_failed",
-            f"Failed to apply Developer batch atomically: {exc}.{detail}",
-            run_id=run_id,
-        ) from exc
-    finally:
-        for change in prepared:
-            temp_file = change["temp"]
-            if isinstance(temp_file, Path) and temp_file.exists():
-                try:
-                    temp_file.unlink()
-                except OSError:
-                    pass
-
-    return [
-        {
-            "path": str(change["path"]),
-            "operation": "update" if change["previous"] is not None else "create",
-            "reason": str(change["reason"]),
-            "covered_design_elements": change["covered_design_elements"],
-            "covered_requirement_ids": change["covered_requirement_ids"],
-            "before_sha256": (
-                hashlib.sha256(change["previous"]).hexdigest()
-                if isinstance(change["previous"], bytes)
-                else ""
-            ),
-            "after_sha256": hashlib.sha256(change["content"]).hexdigest(),
-        }
-        for change in prepared
-    ]
-
-
-
-
-def _requirement_ids_by_file(work_packet: dict[str, object]) -> dict[str, set[str]]:
-    grouped = _dict_value(work_packet.get("requirement_coverage_by_file"))
-    result: dict[str, set[str]] = {}
-    for raw_path, raw_items in grouped.items():
-        path = _normalize_code_path(str(raw_path), run_id="")
-        result[path] = {
-            str(item.get("requirement_id") or "").strip()
-            for item in _dict_items(raw_items)
-            if str(item.get("requirement_id") or "").strip()
-        }
-    return result
-
-
 def _require_exact_v2_coverage(
     *,
     canonical_requirements: list[dict[str, object]],
@@ -4866,7 +4309,7 @@ def _allowed_paths(
     work_packet: dict[str, object],
     *,
     run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[str]:
     output_contract = _dict_value(work_packet.get("output_contract"))
     values = output_contract.get("allowed_paths")
@@ -4887,7 +4330,7 @@ def _normalize_code_path(
     raw_path: str,
     *,
     run_id: str,
-    planning_policy: PlanningPathPolicy | None = None,
+    planning_policy: PlanningPathPolicy,
 ) -> str:
     path = raw_path.strip()
     invalid_shape = (
@@ -4903,11 +4346,7 @@ def _normalize_code_path(
         or any(part in {"", ".", ".."} for part in path.split("/"))
         or (len(path) >= 2 and path[1] == ":" and path[0].isalpha())
     )
-    supported = (
-        planning_policy.normalize_editable_path(path) == path
-        if planning_policy is not None and not invalid_shape
-        else path.startswith(("src/main/java/", "src/test/java/"))
-    )
+    supported = not invalid_shape and planning_policy.normalize_editable_path(path) == path
     if invalid_shape or not supported:
         raise HarnessError(
             "developer_act_unsafe_path",
@@ -4921,52 +4360,68 @@ def _planning_policy_for_state(
     state: dict[str, object],
     *,
     run_id: str,
-) -> PlanningPathPolicy | None:
+) -> PlanningPathPolicy:
     """Resolve editable-path policy chỉ từ run snapshot bất biến."""
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
-    return (
-        planning_path_policy_from_snapshot(snapshot, run_id=run_id)
-        if snapshot
-        else None
-    )
+    if snapshot is None:
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 4 artifact generation requires an immutable project profile snapshot.",
+            run_id=run_id,
+        )
+    return planning_path_policy_from_snapshot(snapshot, run_id=run_id)
 
 
 def _verification_policy_for_state(
     state: dict[str, object],
     *,
     run_id: str,
-) -> VerificationStagePolicy | None:
+) -> VerificationStagePolicy:
     """Resolve executable stage identity chỉ từ run snapshot bất biến."""
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
-    return (
-        verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
-        if snapshot
-        else None
-    )
+    if snapshot is None:
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 4 verification requires an immutable project profile snapshot.",
+            run_id=run_id,
+        )
+    return verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
 
 
 def _qa_policy_for_state(
     state: dict[str, object],
     *,
     run_id: str,
-) -> QaTestPolicy | None:
+) -> QaTestPolicy:
     """Resolve QA test policy chỉ từ run snapshot bất biến."""
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
-    return qa_test_policy_from_snapshot(snapshot, run_id=run_id) if snapshot else None
+    if snapshot is None:
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 4 QA requires an immutable project profile snapshot.",
+            run_id=run_id,
+        )
+    return qa_test_policy_from_snapshot(snapshot, run_id=run_id)
 
 
 def _code_trace_policy_for_state(
     state: dict[str, object],
     *,
     run_id: str,
-) -> CodeTracePolicy | None:
+) -> CodeTracePolicy:
     """Resolve discovery/AST policy của Code Trace chỉ từ immutable run snapshot."""
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
-    return code_trace_policy_from_snapshot(snapshot, run_id=run_id) if snapshot else None
+    if snapshot is None:
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 4 Code Trace requires an immutable project profile snapshot.",
+            run_id=run_id,
+        )
+    return code_trace_policy_from_snapshot(snapshot, run_id=run_id)
 
 
 def _string_items(value: object) -> list[str]:
@@ -5330,55 +4785,6 @@ def _verification_repair_objective(result: VerificationResult) -> dict[str, obje
 def _stable_repair_id(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "repair:" + hashlib.sha256(payload).hexdigest()[:20]
-
-
-def _verification_result_from_markdown(markdown: str, *, cwd: str) -> VerificationResult:
-    """Recover the structured fields needed to migrate a legacy failed test report."""
-
-    status = _markdown_backtick_value(markdown, "Status") or "failed"
-    command = _markdown_backtick_value(markdown, "Command")
-    exit_code_text = _markdown_backtick_value(markdown, "Exit code")
-    try:
-        exit_code = int(exit_code_text) if exit_code_text else None
-    except ValueError:
-        exit_code = None
-    duration_text = _markdown_backtick_value(markdown, "Duration").split(" ", 1)[0]
-    try:
-        duration_seconds = float(duration_text) if duration_text else 0.0
-    except ValueError:
-        duration_seconds = 0.0
-    reason_match = re.search(r"(?m)^- Reason:\s*(.*)$", markdown)
-    reason = reason_match.group(1).strip() if reason_match else "Legacy Verification Runner failure."
-    return VerificationResult(
-        status=status,
-        command=command,
-        cwd=cwd,
-        exit_code=exit_code,
-        duration_seconds=duration_seconds,
-        stdout=_markdown_code_section(markdown, "Stdout"),
-        stderr=_markdown_code_section(markdown, "Stderr"),
-        reason=reason,
-        timed_out="timed out" in reason.casefold(),
-    )
-
-
-def _markdown_backtick_value(markdown: str, label: str) -> str:
-    match = re.search(rf"(?m)^- {re.escape(label)}:\s*`([^`]*)`", markdown)
-    return match.group(1).strip() if match else ""
-
-
-def _markdown_code_section(markdown: str, heading: str) -> str:
-    match = re.search(
-        rf"(?ms)^## {re.escape(heading)}\s*\n\s*```text\s*\n(.*?)\n```",
-        markdown,
-    )
-    return match.group(1).rstrip() if match else ""
-
-
-def _phase4_artifact_version(path: str, *, prefix: str, default: int) -> int:
-    name = Path(path).name
-    match = re.match(rf"{re.escape(prefix)}v(\d+)", name)
-    return int(match.group(1)) if match else default
 
 
 def _implementation_repair_feedback(

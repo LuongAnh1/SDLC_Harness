@@ -11,6 +11,31 @@ from sdlc_harness.agents.validator.code_contract import (
     prepare_semantic_trial,
 )
 from sdlc_harness.agents.validator.code_trace import CodeTraceValidator
+from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
+from sdlc_harness.profiles import (
+    build_code_trace_policy,
+    build_planning_path_policy,
+    get_language_profile,
+    get_project_profile,
+)
+
+
+class StaticTypeScriptExtractor:
+    def extract(self, *, source_paths, policy, **_kwargs):
+        return TypeScriptAstEvidence(
+            extractor_id=policy.symbol_extractor_id,
+            profile=policy.metadata(),
+            files=tuple(
+                {
+                    "path": path,
+                    "symbols": [
+                        {"kind": "class", "name": "Sample", "qualified_name": "Sample"},
+                        {"kind": "method", "name": "run", "qualified_name": "Sample.run"},
+                    ],
+                }
+                for path in source_paths
+            ),
+        )
 
 
 class SequenceCodeTraceLlm:
@@ -94,6 +119,41 @@ class CodeValidationConsensusTest(unittest.TestCase):
             },
             "proposed_files": [{"path": "src/test/java/SampleTest.java"}],
         }
+        profiled_source = "apps/api/src/Sample.ts"
+        profiled_test = "apps/api/src/Sample.test.ts"
+        (self.target / profiled_source).parent.mkdir(parents=True, exist_ok=True)
+        (self.target / profiled_source).write_text("export class Sample { run(): void {} }\n", encoding="utf-8")
+        (self.target / profiled_test).write_text("import { it } from 'vitest';\nit('runs', () => {});\n", encoding="utf-8")
+        self.profiled_packet = {
+            **self.packet,
+            "schema_version": "developer_work_packet_profiled_v1",
+            "requirement_coverage": [
+                {
+                    **self.packet["requirement_coverage"][0],
+                    "planned_code_targets": [f"{profiled_source}#run"],
+                }
+            ],
+            "design_mappings_by_file": {
+                profiled_source: [
+                    {
+                        "design_element_id": "method:Sample.run",
+                        "design_element_type": "method",
+                        "design_element_name": "run",
+                        "planned_code_target": f"{profiled_source}#run",
+                    }
+                ]
+            },
+            "proposed_files": [{"path": profiled_test}],
+        }
+        project = get_project_profile("typescript_fullstack_v1")
+        planning = build_planning_path_policy(
+            project=project,
+            language=get_language_profile(project.language_profile_id),
+        )
+        self.code_trace_policy = build_code_trace_policy(
+            planning_policy=planning,
+            symbol_extractor_id="typescript_compiler_ast_v1",
+        )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -101,9 +161,15 @@ class CodeValidationConsensusTest(unittest.TestCase):
     def test_two_matching_clean_trials_pass_without_third_call(self) -> None:
         llm = SequenceCodeTraceLlm([_review(), _review(), _review(_finding())])
 
-        result = CodeTraceValidator(llm, validation_trials=3, llm_call_budget=6).validate(
+        result = CodeTraceValidator(
+            llm,
+            validation_trials=3,
+            llm_call_budget=6,
+            symbol_extractor=StaticTypeScriptExtractor(),
+        ).validate(
             target_path=self.target,
-            work_packet=self.packet,
+            work_packet=self.profiled_packet,
+            code_trace_policy=self.code_trace_policy,
         )
 
         self.assertTrue(result.ok)
@@ -114,9 +180,15 @@ class CodeValidationConsensusTest(unittest.TestCase):
     def test_disagreement_runs_third_trial_and_keeps_only_quorum_finding(self) -> None:
         llm = SequenceCodeTraceLlm([_review(_finding()), _review(), _review(_finding())])
 
-        result = CodeTraceValidator(llm, validation_trials=3, llm_call_budget=6).validate(
+        result = CodeTraceValidator(
+            llm,
+            validation_trials=3,
+            llm_call_budget=6,
+            symbol_extractor=StaticTypeScriptExtractor(),
+        ).validate(
             target_path=self.target,
-            work_packet=self.packet,
+            work_packet=self.profiled_packet,
+            code_trace_policy=self.code_trace_policy,
         )
 
         self.assertFalse(result.ok)
@@ -127,9 +199,15 @@ class CodeValidationConsensusTest(unittest.TestCase):
     def test_call_budget_exhaustion_is_inconclusive_without_repair_blocker(self) -> None:
         llm = InvalidCodeTraceLlm()
 
-        result = CodeTraceValidator(llm, validation_trials=3, llm_call_budget=6).validate(
+        result = CodeTraceValidator(
+            llm,
+            validation_trials=3,
+            llm_call_budget=6,
+            symbol_extractor=StaticTypeScriptExtractor(),
+        ).validate(
             target_path=self.target,
-            work_packet=self.packet,
+            work_packet=self.profiled_packet,
+            code_trace_policy=self.code_trace_policy,
         )
 
         self.assertFalse(result.ok)

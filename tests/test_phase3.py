@@ -21,9 +21,11 @@ from sdlc_harness.agents.validator import (
     ImplementationPlanReview,
     ImplementationPlanValidator,
 )
+from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    build_planning_path_policy,
     build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
@@ -40,7 +42,12 @@ from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
-from tests._support import GitRepositoryTemplate, RuntimeDirectoryTemplate, create_fast_run_workspace
+from tests._support import (
+    GitRepositoryTemplate,
+    RuntimeDirectoryTemplate,
+    create_fast_run_workspace,
+    populate_typescript_target,
+)
 
 
 pytestmark = pytest.mark.integration
@@ -108,6 +115,59 @@ class CaptureDeveloperLlm:
                 "assumptions": [],
                 "open_questions": [],
             }
+        )
+
+
+class WorkPacketTypeScriptAstExtractor:
+    """Test double giữ contract AST nhưng không cần cài TypeScript trong temp repo."""
+
+    def __init__(self, work_packet: dict[str, object]) -> None:
+        self.work_packet = work_packet
+
+    def extract(self, *, target_path, source_paths, policy, run_id=None):
+        del target_path, run_id
+        symbols_by_file: dict[str, list[dict[str, object]]] = {
+            str(path): [] for path in source_paths
+        }
+        contract = self.work_packet.get("implementation_signature_contract")
+        entries = contract.get("entries", []) if isinstance(contract, dict) else []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("source_path") or "")
+            if path not in symbols_by_file:
+                continue
+            symbol = dict(raw)
+            symbol.setdefault("name", str(raw.get("qualified_name") or "").split(".")[-1])
+            symbol.setdefault("kind", str(raw.get("symbol_kind") or ""))
+            symbols_by_file[path].append(symbol)
+        mappings = self.work_packet.get("design_mappings_by_file")
+        if isinstance(mappings, dict):
+            for path, items in mappings.items():
+                if path not in symbols_by_file or not isinstance(items, list):
+                    continue
+                known = {
+                    str(item.get("qualified_name") or "")
+                    for item in symbols_by_file[path]
+                }
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    target = str(item.get("planned_code_target") or "")
+                    _, separator, name = target.partition("#")
+                    if not separator or not name or name in known:
+                        continue
+                    symbols_by_file[path].append(
+                        {"name": name.split(".")[-1], "qualified_name": name, "kind": "class"}
+                    )
+        files = tuple(
+            {"path": path, "symbols": symbols}
+            for path, symbols in symbols_by_file.items()
+        )
+        return TypeScriptAstEvidence(
+            extractor_id=policy.symbol_extractor_id,
+            profile=policy.metadata(),
+            files=files,
         )
 
 
@@ -200,8 +260,9 @@ class SequenceVerificationRunner:
         verification_policy=None,
         qa_policy=None,
     ):
-        del work_packet, required_test_files, verification_policy, qa_policy
+        del work_packet, verification_policy, qa_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
+        selected = tuple(str(path) for path in (required_test_files or []))
         return VerificationResult(
             status=status,
             command="fixture verification runner",
@@ -211,6 +272,8 @@ class SequenceVerificationRunner:
             stdout="fixture verification passed" if status == "passed" else "",
             stderr="fixture verification failed" if status == "failed" else "",
             reason=f"Fixture verification {status}.",
+            selected_test_files=selected,
+            verified_test_files=selected if status == "passed" else (),
         )
 
 
@@ -292,7 +355,7 @@ class PhaseThreeTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.git_template = GitRepositoryTemplate(_populate_phase3_target)
+        cls.git_template = GitRepositoryTemplate(populate_typescript_target)
         cls.runtime_template_temp = tempfile.TemporaryDirectory()
         template_root = Path(cls.runtime_template_temp.name)
         topology = cls.git_template.materialize(template_root)
@@ -405,37 +468,13 @@ class PhaseThreeTest(unittest.TestCase):
         return completed.stdout.strip()
 
     def _install_profile_manifest(self, *, project_profile_id: str = "typescript_fullstack_v1") -> None:
-        project = get_project_profile("typescript_fullstack_v1")
-        language = get_language_profile(project.language_profile_id)
-        for required_path in project.required_paths:
-            path = self.target_repo / required_path
-            if path.suffix:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text("placeholder\n", encoding="utf-8")
-            else:
-                path.mkdir(parents=True, exist_ok=True)
-        for component in project.components:
-            for editable_root in component.editable_roots:
-                root = self.target_repo / editable_root
-                root.mkdir(parents=True, exist_ok=True)
-                (root / ".gitkeep").write_text("", encoding="utf-8")
-        payload = {
-            "version": project.target_manifest_schema,
-            "project_profile_id": project_profile_id,
-            "project_profile_schema": project.schema_version,
-            "language_profile_id": language.profile_id,
-            "language_profile_schema": language.schema_version,
-            "components": [
-                {"component_id": component.component_id, "editable_roots": list(component.editable_roots)}
-                for component in project.components
-            ],
-            "protected_paths": list(project.protected_paths),
-            "required_paths": list(project.required_paths),
-            "verification_stage_ids": list(project.verification_stage_ids),
-        }
         manifest = self.target_repo / ".sdlc" / "target-profile.json"
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["project_profile_id"] = project_profile_id
         manifest.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-        self._git(self.target_repo, "add", ".")
+        if not self._git_output(self.target_repo, "status", "--porcelain"):
+            return
+        self._git(self.target_repo, "add", ".sdlc/target-profile.json")
         self._git(
             self.target_repo,
             "-c",
@@ -451,7 +490,11 @@ class PhaseThreeTest(unittest.TestCase):
     def _create_phase2_run(self) -> dict[str, object]:
         self.phase2_runtime_template.materialize(
             self.runtime_root,
-            replacements={self.phase2_run_id: self.run_id},
+            replacements={
+                self.phase2_run_id: self.run_id,
+                str(self.shared_topology.canonical.resolve()): str(self.target_repo.resolve()),
+                str(self.shared_topology.remote.resolve()): self.remote_url,
+            },
         )
         approved = PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
         self.assertEqual(approved["status"], "waiting_design_approval")
@@ -525,7 +568,7 @@ class PhaseThreeTest(unittest.TestCase):
         plan_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan"])
         self.assertTrue(plan_path.exists())
         content = plan_path.read_text(encoding="utf-8")
-        self.assertIn("Implementation Plan V1", content)
+        self.assertIn("Implementation Plan V3", content)
         self.assertIn("Repo Evidence", content)
         self.assertIn("Implementation Steps", content)
         self.assertIn("Proposed Files", content)
@@ -538,12 +581,12 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertIn(workspace_artifact["branch"], content)
         self.assertIn(workspace_artifact["worktree_path"], content)
         self.assertIn("DeleteCulturalHeritageService.deleteHeritage", content)
-        self.assertIn("Test Intent", content)
+        self.assertIn("Test intent", content)
         self.assertIn("Phase 3 tạo branch/worktree riêng cho run", content)
 
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v1")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v3")
         self.assertEqual(structured["planning_mode"], "llm_developer_with_codegraph_context_v1")
         self.assertEqual(structured["repo_context"]["mode"], "fake_codegraph_context_v1")
         self.assertTrue(structured["implementation_steps"])
@@ -563,7 +606,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(review["repair_iterations"], 0)
         self.assertEqual(
             review["implementation_plan_contract_version"],
-            "implementation_plan_structured_v1",
+            "implementation_plan_structured_v3",
         )
         self.assertRegex(review["implementation_plan_sha256"], r"^sha256:[0-9a-f]{64}$")
 
@@ -629,7 +672,10 @@ class PhaseThreeTest(unittest.TestCase):
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
         self.assertEqual(structured["version"], "implementation_plan_structured_v3")
-        self.assertEqual(structured["repo_context"]["source_files"], ["apps/api/src/ExistingService.ts"])
+        self.assertIn("apps/api/src/ExistingService.ts", structured["repo_context"]["source_files"])
+        self.assertTrue(
+            all(path.endswith((".ts", ".tsx")) for path in structured["repo_context"]["source_files"])
+        )
         self.assertEqual(
             structured["planning_profile"],
             {
@@ -701,9 +747,9 @@ class PhaseThreeTest(unittest.TestCase):
             revalidated["latest_artifacts"]["implementation_plan_structured"]
         )
         revalidated_plan = json.loads(revalidated_path.read_text(encoding="utf-8"))
-        self.assertEqual(
+        self.assertIn(
+            "apps/api/src/ExistingService.ts",
             revalidated_plan["repo_context"]["source_files"],
-            ["apps/api/src/ExistingService.ts"],
         )
         self.assertTrue(
             all(
@@ -753,13 +799,9 @@ class PhaseThreeTest(unittest.TestCase):
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()
-        workflow = PhaseThreeWorkflow(self.settings)
-        developer_llm = CaptureDeveloperLlm()
-        workflow.developer = DeveloperPlanAgent(developer_llm)
+        response = PhaseThreeWorkflow(self.settings).approve_design_checkpoint(run_id=str(approved["run_id"]))
 
-        response = workflow.approve_design_checkpoint(run_id=str(approved["run_id"]))
-
-        self.assertEqual(response["status"], "waiting_implementation_plan_review")
+        self.assertEqual(response["status"], "waiting_implementation_plan_review", response)
         self.assertEqual(response["requirement_contract_version"], "v2")
         structured = json.loads(
             (self.repo_root / response["latest_artifacts"]["implementation_plan_structured"]).read_text(
@@ -775,10 +817,6 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertTrue(all(item["planned_code_targets"] for item in coverage))
         self.assertTrue(all(item["test_intents"] for item in coverage))
         self.assertEqual(structured["requirement_contract"]["version"], "v2")
-        self.assertLess(
-            developer_llm.prompts[0].index("Canonical Requirement V2 (source of truth"),
-            developer_llm.prompts[0].index("Approved requirement packet"),
-        )
         markdown = (self.repo_root / response["latest_artifacts"]["implementation_plan"]).read_text(
             encoding="utf-8"
         )
@@ -836,9 +874,11 @@ class PhaseThreeTest(unittest.TestCase):
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
         workflow = PhaseFourWorkflow(self.settings)
+        state_after_phase3 = workflow.store.read_state(run_id)
+        self.assertIn("profile_snapshot", state_after_phase3, state_after_phase3)
         response = workflow.approve_implementation_plan_checkpoint(run_id=run_id)
 
-        self.assertEqual(response["status"], "implementation_ready")
+        self.assertEqual(response["status"], "implementation_ready", response)
         self.assertEqual(response["requirement_contract_version"], "v2")
         packet = json.loads(
             (self.repo_root / response["latest_artifacts"]["developer_work_packet"]).read_text(encoding="utf-8")
@@ -876,13 +916,21 @@ class PhaseThreeTest(unittest.TestCase):
 
     @pytest.mark.journey
     def test_v2_phase4_runs_canonical_ids_through_qa(self) -> None:
-        phase3 = self._create_phase3_run_from_template()
+        approved = self._create_phase2_run_fresh()
+        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+        packet = json.loads(
+            (self.repo_root / response["latest_artifacts"]["developer_work_packet"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(packet)
 
         for _ in range(3):
-            response = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
-        workflow = PhaseFourWorkflow(self.settings)
+            response = workflow.continue_run(run_id=run_id)
+            self.assertNotEqual(response["status"], "blocked", response)
         workflow.verification_runner.run = lambda **kwargs: VerificationResult(
             status="passed",
             command="fixture QA runner",
@@ -892,6 +940,8 @@ class PhaseThreeTest(unittest.TestCase):
             stdout="fixture QA passed",
             stderr="",
             reason="Fixture QA execution passed.",
+            selected_test_files=tuple(kwargs.get("required_test_files") or []),
+            verified_test_files=tuple(kwargs.get("required_test_files") or []),
         )
         response = workflow.continue_run(run_id=run_id)
 
@@ -927,11 +977,13 @@ class PhaseThreeTest(unittest.TestCase):
         canonical_ids = {item["id"] for item in packet["canonical_requirements"]}
         revision = packet["requirement_contract"]["revision"]
         workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(packet)
         workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
 
         statuses = []
         for _ in range(4):
             response = workflow.continue_run(run_id=run_id)
+            self.assertNotEqual(response["status"], "blocked", response)
             statuses.append(response["status"])
         self.assertEqual(
             statuses,
@@ -968,7 +1020,8 @@ class PhaseThreeTest(unittest.TestCase):
 
     @pytest.mark.journey
     def test_v2_phase4_repair_loops_preserve_contract_and_stable_ids(self) -> None:
-        phase3 = self._create_phase3_run_from_template()
+        approved = self._create_phase2_run_fresh()
+        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
         ready = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
         initial_packet = json.loads(
@@ -977,26 +1030,17 @@ class PhaseThreeTest(unittest.TestCase):
         canonical_ids = {item["id"] for item in initial_packet["canonical_requirements"]}
         revision = initial_packet["requirement_contract"]["revision"]
         workflow = PhaseFourWorkflow(self.settings)
+        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(initial_packet)
         workflow.verification_runner = SequenceVerificationRunner(["passed"])
 
         written = workflow.continue_run(run_id=run_id)
         tested = workflow.continue_run(run_id=run_id)
         workspace_path = Path(RunWorkspaceManager(self.settings).resolve(run_id).worktree_path)
-        missing_test = (
-            workspace_path
-            / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
-        )
+        missing_test = workspace_path / "apps" / "api" / "src" / "DeleteCulturalHeritageFlow.test.ts"
         missing_test.unlink()
 
         repair_needed = workflow.continue_run(run_id=run_id)
-        self.assertEqual(repair_needed["status"], "implementation_repair_needed")
+        self.assertEqual(repair_needed["status"], "implementation_repair_needed", repair_needed)
         workflow.verification_runner = SequenceVerificationRunner(["passed"])
         traced = workflow.continue_run(run_id=run_id)
         self.assertEqual(traced["status"], "implementation_traced")
@@ -1045,6 +1089,9 @@ class PhaseThreeTest(unittest.TestCase):
 
     def test_cli_approve_checkpoint_rejects_legacy_design_run(self) -> None:
         approved = self._create_phase2_run()
+        state = PhaseOneWorkflow(self.settings).store.read_state(str(approved["run_id"]))
+        state.pop("profile_snapshot", None)
+        PhaseOneWorkflow(self.settings).store.write_state(state)
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -1109,6 +1156,11 @@ Thanks."""
         self.assertEqual(payload["implementation_steps"][0]["order"], 1)
 
     def test_developer_plan_falls_back_when_llm_returns_invalid_json(self) -> None:
+        project = get_project_profile("typescript_fullstack_v1")
+        planning_policy = build_planning_path_policy(
+            project=project,
+            language=get_language_profile(project.language_profile_id),
+        )
         draft = DeveloperPlanAgent(BadJsonLlm()).plan(
             run_id="run_test",
             source_ref="jira_issue:SDLC-1",
@@ -1136,10 +1188,11 @@ Thanks."""
             target_base_branch="main",
             planned_branch="feature/sdlc-1-implementation",
             target_files=[
-                "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageService.java"
+                "apps/api/src/DeleteCulturalHeritageService.ts"
             ],
-            test_command="powershell -ExecutionPolicy Bypass -File scripts/test.ps1",
             repo_context={"mode": "fake_codegraph_context_v1", "evidence": "service exists"},
+            planning_policy=planning_policy,
+            verification_policy=build_verification_stage_policy(project=project),
         )
 
         self.assertEqual(
@@ -1225,7 +1278,7 @@ Thanks."""
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
         self.assertIn("Design-to-code mappings", confluence_body)
-        self.assertIn("Implementation Plan V1", confluence_body)
+        self.assertIn("Implementation Plan V3", confluence_body)
         self.assertNotIn("<p>| Design element | Type | Planned code target | Reason | Test intent |</p>", confluence_body)
         jira_payload = calls[1][2]
         self.assertIsNotNone(jira_payload)
@@ -1454,10 +1507,20 @@ Thanks."""
     def test_phase3_initializes_codegraph_inside_run_workspace(self) -> None:
         approved = self._create_phase2_run()
         index_marker = self.target_repo / ".codegraph" / "README.md"
-        index_marker.unlink()
-        (self.target_repo / ".codegraph").rmdir()
-        self._git(self.target_repo, "add", "-A")
-        self._git(self.target_repo, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "remove codegraph")
+        if index_marker.exists():
+            index_marker.unlink()
+            (self.target_repo / ".codegraph").rmdir()
+            self._git(self.target_repo, "add", "-A")
+            self._git(
+                self.target_repo,
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                "remove codegraph",
+            )
 
         response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
 

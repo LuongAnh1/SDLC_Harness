@@ -14,16 +14,18 @@ def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, objec
     allowed_paths = _allowed_paths(work_packet)
     mappings_by_file = _dict_value(work_packet.get("design_mappings_by_file"))
     files: list[dict[str, object]] = []
+    if not bool(context.get("profiled")):
+        raise HarnessError(
+            "developer_profile_context_required",
+            "Fake Developer generation requires the immutable project profile context.",
+            run_id=str(work_packet.get("run_id") or "") or None,
+        )
     for path in allowed_paths:
-        if bool(context.get("profiled")):
-            content = _profiled_content(
-                path,
-                signatures=_dict_items(_dict_value(context.get("signatures_by_file")).get(path)),
-                mappings=_dict_items(mappings_by_file.get(path)),
-            )
-        else:
-            class_name = path.rsplit("/", 1)[-1].removesuffix(".java")
-            content = _legacy_test_content(class_name) if developer_path_is_test(path) else _legacy_source_content(class_name)
+        content = _profiled_content(
+            path,
+            signatures=_dict_items(_dict_value(context.get("signatures_by_file")).get(path)),
+            mappings=_dict_items(mappings_by_file.get(path)),
+        )
         files.append(
             {
                 "path": path,
@@ -194,30 +196,6 @@ describe("{suite}", () => {{
   }});
 }});
 '''
-
-
-def _legacy_source_content(class_name: str) -> str:
-    return f"""package com.sdlc.etour.heritage;
-
-public final class {class_name} {{
-    public boolean execute(String value) {{
-        return value != null && !value.isBlank();
-    }}
-}}
-""".strip()
-
-
-def _legacy_test_content(class_name: str) -> str:
-    return f"""package com.sdlc.etour.heritage;
-
-public final class {class_name} {{
-    public static void main(String[] args) {{
-        if (args == null) {{
-            throw new IllegalStateException("Expected arguments array");
-        }}
-    }}
-}}
-""".strip()
 
 
 def _allowed_paths(work_packet: dict[str, object]) -> list[str]:

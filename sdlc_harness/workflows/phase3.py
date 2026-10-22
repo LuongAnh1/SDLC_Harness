@@ -41,7 +41,6 @@ ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
-LEGACY_TEST_COMMAND = "powershell -ExecutionPolicy Bypass -File scripts/test.ps1"
 DESIGN_ROUTING_ERROR_CODES = frozenset(
     {
         "implementation_target_unclassified",
@@ -156,7 +155,7 @@ class PhaseThreeWorkflow:
             target_base_branch=self.settings.target_base_branch,
             planned_branch=workspace.branch,
             target_files=target_files,
-            test_command="" if verification_policy else LEGACY_TEST_COMMAND,
+            test_command="",
             repo_context=repo_context,
             workspace_mode=workspace.workspace_mode,
             workspace_ref=artifact_paths["run_workspace"],
@@ -270,7 +269,7 @@ class PhaseThreeWorkflow:
                 target_base_branch=self.settings.target_base_branch,
                 planned_branch=workspace.branch,
                 target_files=target_files,
-                test_command="" if verification_policy else LEGACY_TEST_COMMAND,
+                test_command="",
                 repo_context=repo_context,
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
@@ -419,7 +418,7 @@ class PhaseThreeWorkflow:
                 target_base_branch=self.settings.target_base_branch,
                 planned_branch=workspace.branch,
                 target_files=target_files,
-                test_command="" if verification_policy else LEGACY_TEST_COMMAND,
+                test_command="",
                 repo_context=repo_context,
                 workspace_mode=workspace.workspace_mode,
                 workspace_ref=artifact_paths["run_workspace"],
@@ -555,7 +554,7 @@ class PhaseThreeWorkflow:
                     target_base_branch=self.settings.target_base_branch,
                     planned_branch=workspace.branch,
                     target_files=target_files,
-                    test_command="" if verification_policy else LEGACY_TEST_COMMAND,
+                    test_command="",
                     repo_context=repo_context,
                     workspace_mode=workspace.workspace_mode,
                     workspace_ref=artifact_paths["run_workspace"],
@@ -794,31 +793,27 @@ def _target_source_files(
     run_id: str = "",
 ) -> list[str]:
     snapshot = read_profile_snapshot(state or {}, run_id=run_id or None)
-    if snapshot is not None:
-        return discover_profile_source_files(
-            target_path=target_path,
-            snapshot=snapshot,
-            run_id=run_id,
+    if snapshot is None:
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 3 artifact generation requires an immutable project profile snapshot.",
+            run_id=run_id or None,
         )
-
-    # Compatibility nội bộ cho direct workflow tests trong A2-A3. Public
-    # Application Service đã hard-retire mọi execution của run legacy.
-    files: list[str] = []
-    for base in ("src/main/java", "src/test/java"):
-        root = target_path / base
-        if not root.exists():
-            continue
-        for path in sorted(root.rglob("*.java")):
-            files.append(str(path.relative_to(target_path)).replace("\\", "/"))
-    return files
+    return discover_profile_source_files(
+        target_path=target_path,
+        snapshot=snapshot,
+        run_id=run_id,
+    )
 
 
 def _phase3_profile_context(*, state: dict[str, object], run_id: str):
     snapshot = read_profile_snapshot(state, run_id=run_id)
     if snapshot is None:
-        # Compatibility nội bộ cho direct workflow tests trong A2-A3. Public
-        # Application Service đã hard-retire execution của run legacy.
-        return None, None, None
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            "Phase 3 artifact generation requires an immutable project profile snapshot.",
+            run_id=run_id,
+        )
     return (
         planning_path_policy_from_snapshot(snapshot, run_id=run_id),
         prompt_directive_from_snapshot(snapshot, run_id=run_id),

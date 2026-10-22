@@ -245,17 +245,12 @@ def fake_completion(prompt: str) -> str:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan(prompt)
-    if "Developer Batch Repair v2" in prompt:
-        return fake_developer_repair(prompt)
-    if "Developer Batch Act v2" in prompt:
-        return fake_developer_act(prompt)
-    if "Developer Repair v1" in prompt:
-        return fake_developer_repair(prompt)
-    if "Developer Act v1" in prompt:
-        return fake_developer_act(prompt)
     if "Code Trace LLM Review v1" in prompt:
         return fake_code_trace_review(prompt)
-    if "QA Tester Generate Acceptance Tests v1" in prompt:
+    if (
+        "QA Tester Generate Acceptance Tests v1" in prompt
+        or "QA Tester Generate Profiled Acceptance Tests v1" in prompt
+    ):
         return fake_qa_generated_tests(prompt)
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()

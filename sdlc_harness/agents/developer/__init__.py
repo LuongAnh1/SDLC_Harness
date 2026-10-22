@@ -1,10 +1,9 @@
 ﻿"""Lập kế hoạch triển khai và thực thi thay đổi source trong Phase 3/4.
 
 Planner tạo implementation plan; work packet đóng băng ngữ cảnh được phép dùng;
-actor và tool-loop thực hiện hoặc sửa code trong workspace của run. Giới hạn
-đường dẫn, profile và verification vẫn do contract/workflow kiểm soát.
+tool-loop thực hiện hoặc sửa code trong workspace của run. Giới hạn đường dẫn,
+profile và verification vẫn do contract/workflow kiểm soát.
 """
-from .actor import DeveloperActAgent, DeveloperActLlmError, DeveloperActResult
 from .execution import (
     DeveloperExecutionError,
     DeveloperExecutionResult,
@@ -20,9 +19,6 @@ from .work_packet import (
 )
 
 __all__ = [
-    "DeveloperActAgent",
-    "DeveloperActLlmError",
-    "DeveloperActResult",
     "DeveloperExecutionError",
     "DeveloperExecutionResult",
     "DeveloperToolLoopExecutor",

@@ -1,20 +1,16 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
-from sdlc_harness.agents.developer.actor import (
-    DeveloperActAgent,
-    _developer_act_prompt,
-    _developer_repair_prompt,
-)
 from sdlc_harness.agents.developer.execution import _action_prompt, _build_manifest
+from sdlc_harness.agents.developer.fake_generation import fake_developer_files
 from sdlc_harness.agents.developer.profile_context import developer_generation_context
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import (
     fake_code_trace_review,
-    fake_developer_act,
     fake_qa_generated_tests,
 )
 from sdlc_harness.profiles import (
@@ -101,28 +97,6 @@ def _packet() -> dict[str, object]:
     }
 
 
-def test_profiled_batch_prompts_use_frozen_typescript_context_without_java() -> None:
-    packet = _packet()
-    prompts = (
-        _developer_act_prompt(packet),
-        _developer_repair_prompt(
-            work_packet=packet,
-            repair_feedback={"feedback_source": "verification"},
-            repair_iteration=1,
-        ),
-    )
-
-    for prompt in prompts:
-        lowered = prompt.lower()
-        assert "typescript_prompt_v1" in prompt
-        assert SOURCE_PATH in prompt
-        assert "HealthService.check" in prompt
-        assert all(
-            token not in lowered
-            for token in (".java", "src/main/java", "src/test/java", "maven", "gradle", "junit")
-        )
-
-
 def test_profiled_generation_context_rejects_signature_profile_drift() -> None:
     packet = _packet()
     signature = packet["implementation_signature_contract"]
@@ -139,18 +113,15 @@ def test_profiled_generation_context_rejects_signature_profile_drift() -> None:
     assert caught.value.error_code == "developer_prompt_profile_invalid"
 
 
-def test_deterministic_and_fake_llm_developer_generate_typescript() -> None:
+def test_fake_llm_developer_generates_typescript() -> None:
     packet = _packet()
-    direct = DeveloperActAgent(None).act(work_packet=packet)
-    fake = json.loads(fake_developer_act(_developer_act_prompt(packet)))
-
-    for files in (direct.files, fake["files"]):
-        assert {item["path"] for item in files} == {SOURCE_PATH, TEST_PATH}
-        combined = "\n".join(str(item["content"]) for item in files)
-        assert "export class HealthService" in combined
-        assert "async check(value: string): Promise<boolean>" in combined
-        assert "from \"vitest\"" in combined
-        assert "package com." not in combined
+    files = fake_developer_files(packet)
+    assert {item["path"] for item in files} == {SOURCE_PATH, TEST_PATH}
+    combined = "\n".join(str(item["content"]) for item in files)
+    assert "export class HealthService" in combined
+    assert "async check(value: string): Promise<boolean>" in combined
+    assert "from \"vitest\"" in combined
+    assert "package com." not in combined
 
 
 def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_path) -> None:

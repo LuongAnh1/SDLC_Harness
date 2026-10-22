@@ -84,7 +84,7 @@ class ConfigApiTests(unittest.TestCase):
         )
         self.assertEqual(profile_field["value"], "typescript_fullstack_v1")
         self.assertEqual(profile_field["source"], "default")
-        self.assertEqual(profile_field["options"], ["", "typescript_fullstack_v1"])
+        self.assertEqual(profile_field["options"], ["typescript_fullstack_v1"])
         path_field = next(
             field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_PATH"
         )

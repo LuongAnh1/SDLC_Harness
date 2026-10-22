@@ -25,7 +25,6 @@ from ...profiles import (
 from ...storage.runtime import utc_now_iso
 
 MAX_FILE_CONTENT_CHARS = 40000
-LEGACY_CODE_PATH_PREFIXES = ("src/main/java/", "src/test/java/")
 PROFILED_EDITABLE_PATH_POLICY_VERSION = "editable_path_policy_v1"
 
 
@@ -42,36 +41,24 @@ def build_developer_work_packet(
     requirement_contract: dict[str, object] | None = None,
     requirement_coverage: list[dict[str, object]] | None = None,
     effective_design_contract: dict[str, object] | None = None,
-    planning_policy: PlanningPathPolicy | None = None,
-    verification_policy: VerificationStagePolicy | None = None,
+    planning_policy: PlanningPathPolicy,
+    verification_policy: VerificationStagePolicy,
 ) -> dict[str, object]:
     """Tạo packet máy đọc được từ implementation plan đã duyệt."""
 
-    has_profiled_contract = bool(
-        planning_policy
-        or verification_policy
-        or _string_items(structured_plan.get("verification_stage_ids"))
+    contract_issues = profiled_plan_contract_issues(
+        structured_plan,
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+        allow_legacy=True,
     )
-    if has_profiled_contract:
-        if planning_policy is None or verification_policy is None:
-            raise HarnessError(
-                "implementation_plan_profile_invalid",
-                "Profiled implementation plan requires frozen planning and verification policies.",
-                run_id=run_id,
-            )
-        contract_issues = profiled_plan_contract_issues(
-            structured_plan,
-            planning_policy=planning_policy,
-            verification_policy=verification_policy,
-            allow_legacy=True,
+    if contract_issues:
+        raise HarnessError(
+            "implementation_plan_profile_invalid",
+            "Profiled implementation plan failed Phase 4 boundary validation: "
+            + "; ".join(contract_issues),
+            run_id=run_id,
         )
-        if contract_issues:
-            raise HarnessError(
-                "implementation_plan_profile_invalid",
-                "Profiled implementation plan failed Phase 4 boundary validation: "
-                + "; ".join(contract_issues),
-                run_id=run_id,
-            )
 
     design_mappings = [
         item
@@ -107,13 +94,9 @@ def build_developer_work_packet(
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
     required_fields = ["path", "content"]
-    current_profiled_contract = (
-        has_profiled_contract
-        and structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
-    )
+    current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
     legacy_profiled_contract = (
-        has_profiled_contract
-        and structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
+        structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
     )
     return {
         "version": "developer_work_packet_v2" if current_profiled_contract else "developer_work_packet_v1",
@@ -182,11 +165,7 @@ def build_developer_work_packet(
             "changed_files_only": True,
             "allowed_paths": allowed_paths,
             "required_fields": required_fields,
-            **(
-                {"path_policy": _profiled_path_policy_contract(planning_policy)}
-                if planning_policy is not None
-                else {}
-            ),
+            "path_policy": _profiled_path_policy_contract(planning_policy),
         },
         "constraints": [
             "Chỉ tạo/sửa file nằm trong output_contract.allowed_paths ở slice Developer.act V1.",
@@ -277,7 +256,7 @@ def _normalize_proposed_files(
     value: object,
     *,
     run_id: str,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[dict[str, object]]:
     files = _dict_items(value)
     if not files:
@@ -306,7 +285,7 @@ def _enrich_proposed_file(
     target_repo_path: Path,
     file_item: dict[str, object],
     run_id: str,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> dict[str, object]:
     rel_path = _clean_repo_path(
         str(file_item.get("path") or ""),
@@ -345,7 +324,7 @@ def _enrich_proposed_file(
 def _group_design_mappings_by_file(
     mappings: list[dict[str, object]],
     *,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> dict[str, list[dict[str, object]]]:
     grouped: dict[str, list[dict[str, object]]] = {}
     for item in mappings:
@@ -360,7 +339,7 @@ def _group_design_mappings_by_file(
 def _group_requirement_coverage_by_file(
     coverage: list[dict[str, object]],
     *,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> dict[str, list[dict[str, object]]]:
     """Project canonical V2 coverage to files without changing the approved rows."""
 
@@ -390,7 +369,7 @@ def _merge_mapping_targets_into_proposed_files(
     *,
     proposed_files: list[dict[str, object]],
     design_mappings: list[dict[str, object]],
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[dict[str, object]]:
     merged = list(proposed_files)
     seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
@@ -415,7 +394,7 @@ def _merge_step_targets_into_proposed_files(
     proposed_files: list[dict[str, object]],
     implementation_steps: list[dict[str, object]],
     run_id: str,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> list[dict[str, object]]:
     merged = list(proposed_files)
     seen = {str(item.get("path") or "").strip().replace("\\", "/") for item in merged}
@@ -443,7 +422,7 @@ def _merge_step_targets_into_proposed_files(
 def _target_file_from_mapping(
     target: str,
     *,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> str:
     file_path = target.split("#", 1)[0].strip().replace("\\", "/")
     if not file_path:
@@ -462,7 +441,7 @@ def _clean_repo_path(
     raw_path: str,
     *,
     run_id: str,
-    planning_policy: PlanningPathPolicy | None,
+    planning_policy: PlanningPathPolicy,
 ) -> str:
     normalized = raw_path.strip()
     invalid_shape = (
@@ -478,11 +457,7 @@ def _clean_repo_path(
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
         or (len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha())
     )
-    supported = (
-        planning_policy.normalize_editable_path(normalized) == normalized
-        if planning_policy is not None and not invalid_shape
-        else normalized.startswith(LEGACY_CODE_PATH_PREFIXES)
-    )
+    supported = not invalid_shape and planning_policy.normalize_editable_path(normalized) == normalized
     if invalid_shape or not supported:
         raise HarnessError(
             "developer_work_packet_unsafe_path",
@@ -502,16 +477,16 @@ def validate_developer_work_packet_path_policy(
 
     schema_version = str(packet.get("schema_version") or "")
     profiled = is_profiled_work_packet_schema(schema_version)
-    if profiled and planning_policy is None:
+    if planning_policy is None:
         raise HarnessError(
             "developer_work_packet_path_policy_missing",
-            "Profiled DeveloperWorkPacket requires the frozen editable path policy.",
+            "DeveloperWorkPacket refresh requires the frozen editable path policy.",
             run_id=run_id or None,
         )
-    if not profiled and planning_policy is not None:
+    if not profiled:
         raise HarnessError(
             "developer_work_packet_path_policy_mismatch",
-            "Profiled Phase 4 state cannot use a legacy DeveloperWorkPacket.",
+            "Phase 4 cannot use a legacy DeveloperWorkPacket.",
             run_id=run_id or None,
         )
 
@@ -524,7 +499,6 @@ def validate_developer_work_packet_path_policy(
             run_id=run_id or None,
         )
     if profiled:
-        assert planning_policy is not None
         expected = _profiled_path_policy_contract(planning_policy)
         actual = output_contract.get("path_policy")
         if actual != expected:

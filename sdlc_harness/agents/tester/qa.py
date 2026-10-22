@@ -2,9 +2,8 @@
 
 Agent nhận packet đã được workflow nén lại, sinh acceptance/system tests theo
 QA policy bất biến của run, để workflow apply test vào target repo và giao cho
-Verification Runner thực thi. Nhánh legacy vẫn giữ Java compatibility; profiled
-run hiện dùng TypeScript/Vitest mà không đưa command thực thi vào prompt hay
-output của LLM.
+Verification Runner thực thi. Run mới dùng TypeScript/Vitest và không đưa command
+thực thi vào prompt hay output của LLM; run Java lịch sử không đi qua lớp này.
 """
 
 from __future__ import annotations
@@ -130,6 +129,11 @@ class QaTesterAgent:
     ) -> QaGeneratedTestSuite:
         """Sinh acceptance/system tests bằng LLM hoặc deterministic fallback."""
 
+        if qa_policy is None:
+            raise HarnessError(
+                "qa_test_policy_invalid",
+                "QA generation requires the immutable run QA policy.",
+            )
         if not self.llm_client:
             generated = _deterministic_generated_tests(context, qa_policy=qa_policy)
             _require_v2_scenario_coverage(generated.scenarios, context=context)
@@ -138,7 +142,7 @@ class QaTesterAgent:
             "You are QA/Tester in a TraceDev-style SDLC harness. "
             "Return JSON only. Generate executable tests from the approved context."
         )
-        prompt = _qa_generation_prompt(context, qa_policy=qa_policy)
+        prompt = _profiled_qa_generation_prompt(context=context, qa_policy=qa_policy)
         for attempt in range(2):
             raw = self.llm_client.complete(system=system, prompt=prompt)
             try:
@@ -165,7 +169,7 @@ def _generated_suite_from_raw(
     *,
     raw: str,
     context: dict[str, object],
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> QaGeneratedTestSuite:
     """Parse and validate one complete QA response before any test file is applied."""
 
@@ -178,61 +182,10 @@ def _generated_suite_from_raw(
         raw_response=raw,
         generation_context=_dict_value(context.get("context_budget")),
         requirement_contract=_dict_value(context.get("requirement_contract")),
-        generation_profile=qa_policy.metadata() if qa_policy else {},
+        generation_profile=qa_policy.metadata(),
     )
     _require_v2_scenario_coverage(generated.scenarios, context=context)
     return generated
-
-
-def _qa_generation_prompt(
-    context: dict[str, object],
-    *,
-    qa_policy: QaTestPolicy | None,
-) -> str:
-    if qa_policy is not None:
-        return _profiled_qa_generation_prompt(context=context, qa_policy=qa_policy)
-    return f"""QA Tester Generate Acceptance Tests v1
-
-Generate executable acceptance/system tests for the approved use case. The
-packet intentionally follows a compact TraceDev-style tester input: accepted
-requirement/use case, current code under test, Verification Runner report, and
-Validator trace summary. Full design and implementation plan are references only
-in this slice.
-
-Return JSON only with this shape:
-{{
-  "summary": "short test-generation summary",
-  "test_files": [
-    {{
-      "path": "src/test/java/.../SomeAcceptanceTest.java",
-      "content": "complete Java test source code",
-      "scenarios": ["scenario covered by this file"]
-    }}
-  ],
-  "scenarios": [
-    {{
-      "name": "scenario name",
-      "expected_result": "observable acceptance result",
-      "test_file": "src/test/java/.../SomeAcceptanceTest.java",
-      "risk": "short risk or empty string",
-      "requirement_ids": ["PRE-1", "MF-1"]
-    }}
-  ],
-  "risks": ["short risk item"]
-}}
-
-Rules:
-- Generate at least one complete Java test file.
-- Every test path must be under src/test/java/ and end with .java.
-- Prefer the target repo's existing lightweight test style. If no framework is visible, write a plain Java class with a main method and throw IllegalStateException on failure.
-- Do not modify production files.
-- For Requirement V2, every scenario must list canonical stable requirement_ids and the scenario union must cover every canonical requirement exactly from the packet.
-- Do not request requirement/design changes in this slice; report them as risks.
-- Keep the JSON compact. Do not include markdown fences.
-
-QA Generation Packet:
-{json.dumps(context, ensure_ascii=False, indent=2)}
-""".strip()
 
 
 def _profiled_qa_generation_prompt(
@@ -283,9 +236,7 @@ QA Generation Packet:
 """.strip()
 
 
-def _profiled_repair_rule(qa_policy: QaTestPolicy | None) -> str:
-    if qa_policy is None:
-        return ""
+def _profiled_repair_rule(qa_policy: QaTestPolicy) -> str:
     return (
         "\nKeep every test file inside the supplied Vitest QA Test Policy, use TypeScript "
         "Vitest source, and do not return commands or Playwright specs."
@@ -297,7 +248,7 @@ def _qa_generation_repair_prompt(
     context: dict[str, object],
     invalid_output: str,
     validation_error: str,
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> str:
     canonical_ids = [
         str(item.get("id") or "").strip()
@@ -324,7 +275,7 @@ Previous response:
 def _parse_generated_tests_payload(
     raw: str,
     *,
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> dict[str, object]:
     try:
         parsed = parse_first_json_object(raw, expected_keys={"summary", "test_files", "scenarios"})
@@ -347,15 +298,14 @@ def _parse_generated_tests_payload(
             "QA/Tester LLM returned no scenarios.",
             raw_response=raw,
         )
-    if qa_policy is not None:
-        generated_paths = {str(item.get("path") or "") for item in test_files}
-        for scenario in scenarios:
-            test_file = str(scenario.get("test_file") or "").strip()
-            if not test_file or test_file not in generated_paths:
-                raise QaTesterLlmError(
-                    "Every profiled QA scenario must reference one exact generated test file.",
-                    raw_response=raw,
-                )
+    generated_paths = {str(item.get("path") or "") for item in test_files}
+    for scenario in scenarios:
+        test_file = str(scenario.get("test_file") or "").strip()
+        if not test_file or test_file not in generated_paths:
+            raise QaTesterLlmError(
+                "Every profiled QA scenario must reference one exact generated test file.",
+                raw_response=raw,
+            )
     return {
         "summary": str(parsed.get("summary") or "").strip(),
         "test_files": test_files,
@@ -368,7 +318,7 @@ def _normalized_test_files(
     value: object,
     *,
     raw_response: str,
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> list[dict[str, object]]:
     files = _dict_items(value)
     if not files:
@@ -396,7 +346,7 @@ def _normalized_test_files(
                 f"QA/Tester LLM returned empty content for test file: {path}",
                 raw_response=raw_response,
             )
-        if qa_policy is not None and not re.search(
+        if not re.search(
             r"\bfrom\s+['\"]vitest['\"]",
             content,
         ):
@@ -418,27 +368,12 @@ def _normalize_test_path(
     raw_path: str,
     *,
     raw_response: str,
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> str:
-    if qa_policy is not None:
-        path = qa_policy.normalize_test_path(raw_path)
-        if not path:
-            raise QaTesterLlmError(
-                f"QA/Tester LLM returned a path outside the profiled Vitest policy: {raw_path}",
-                raw_response=raw_response,
-            )
-        return path
-    path = raw_path.strip().replace("\\", "/").lstrip("/")
-    if (
-        not path
-        or path.startswith("../")
-        or "/../" in path
-        or path == ".."
-        or not path.startswith("src/test/java/")
-        or not path.endswith(".java")
-    ):
+    path = qa_policy.normalize_test_path(raw_path)
+    if not path:
         raise QaTesterLlmError(
-            f"QA/Tester LLM returned an unsafe or unsupported test path: {raw_path}",
+            f"QA/Tester LLM returned a path outside the profiled Vitest policy: {raw_path}",
             raw_response=raw_response,
         )
     return path
@@ -447,54 +382,9 @@ def _normalize_test_path(
 def _deterministic_generated_tests(
     context: dict[str, object],
     *,
-    qa_policy: QaTestPolicy | None,
+    qa_policy: QaTestPolicy,
 ) -> QaGeneratedTestSuite:
-    if qa_policy is not None:
-        return _deterministic_profiled_tests(context=context, qa_policy=qa_policy)
-    run_id = str(context.get("run_id") or "")
-    issue_key = str(context.get("issue_key") or "")
-    path = "src/test/java/com/sdlc/etour/heritage/DeleteCulturalHeritageQaAcceptanceTest.java"
-    content = """package com.sdlc.etour.heritage;
-
-public final class DeleteCulturalHeritageQaAcceptanceTest {
-    public static void main(String[] args) {
-        DeleteCulturalHeritageService service = new DeleteCulturalHeritageService();
-        if (!service.deleteHeritage("qa-heritage-1")) {
-            throw new IllegalStateException("Expected delete operation to succeed");
-        }
-        if (!service.isDeleted("qa-heritage-1")) {
-            throw new IllegalStateException("Expected deleted heritage to be observable");
-        }
-    }
-}
-"""
-    requirement_ids = [
-        str(item.get("id") or "").strip()
-        for item in _dict_items(context.get("canonical_requirements"))
-        if str(item.get("id") or "").strip()
-    ]
-    return QaGeneratedTestSuite(
-        summary=f"Fake QA generated acceptance tests for run {run_id} and {issue_key or 'source'}.",
-        test_files=[
-            {
-                "path": path,
-                "content": content.strip(),
-                "scenarios": ["Delete cultural heritage success path"],
-            }
-        ],
-        scenarios=[
-            {
-                "name": "Delete cultural heritage success path",
-                "expected_result": "Selected heritage is marked deleted after confirmation.",
-                "test_file": path,
-                "risk": "",
-                "requirement_ids": requirement_ids,
-            }
-        ],
-        risks=[],
-        generation_context=_dict_value(context.get("context_budget")),
-        requirement_contract=_dict_value(context.get("requirement_contract")),
-    )
+    return _deterministic_profiled_tests(context=context, qa_policy=qa_policy)
 
 
 def _deterministic_profiled_tests(

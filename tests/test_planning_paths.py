@@ -224,6 +224,7 @@ def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_path
         planned_branch="feature/profiled",
         target_files=[],
         planning_policy=policy,
+        verification_policy=verification_policy,
     )
 
     assert draft.structured["planning_profile"] == policy.metadata()

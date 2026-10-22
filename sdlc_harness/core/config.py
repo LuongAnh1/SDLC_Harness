@@ -31,7 +31,6 @@ class Settings:
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
     llm_context_window_tokens: int
-    developer_execution_mode: str
     developer_max_actions_per_item: int
     developer_max_action_retries: int
     requirement_contract_version: str
@@ -153,6 +152,11 @@ def resolve_config(
     if overrides:
         apply({name: value for name, value in overrides.items() if value is not None}, "override", allow_bootstrap=True)
 
+    # A4 cutover treats the retired blank profile value as the current default.
+    # Keep the reported source so operators can still see where the stale value lives.
+    if not values["SDLC_PROJECT_PROFILE"].strip():
+        values["SDLC_PROJECT_PROFILE"] = "typescript_fullstack_v1"
+
     # The implicit location follows runtime_root in tests and alternate local runtimes.
     if not locator_raw:
         values["SDLC_RUNTIME_CONFIG_FILE"] = config_label
@@ -181,13 +185,10 @@ def load_settings(
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
         sync_mode = "mock"
-    developer_execution_mode = merged.get("SDLC_DEVELOPER_EXECUTION_MODE", "tool_loop").strip().lower() or "tool_loop"
-    if developer_execution_mode not in {"legacy", "tool_loop"}:
-        developer_execution_mode = "tool_loop"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    project_profile_id = (
-        get_project_profile(project_profile_raw).profile_id if project_profile_raw else None
-    )
+    project_profile_id = get_project_profile(
+        project_profile_raw or "typescript_fullstack_v1"
+    ).profile_id
     target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_TypeScript")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
@@ -207,7 +208,6 @@ def load_settings(
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
-        developer_execution_mode=developer_execution_mode,
         developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),
         developer_max_action_retries=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"), default=2, minimum=0),
         requirement_contract_version="v2",

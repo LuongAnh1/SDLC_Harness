@@ -38,12 +38,23 @@ def require_run_command_allowed(
     """Chặn command sinh artifact trên run legacy tại application boundary."""
 
     snapshot = read_profile_snapshot(state, run_id=run_id)
-    if snapshot is not None or command_name in LEGACY_RETIRED_ALLOWED_COMMANDS:
+    if snapshot is None:
+        if command_name in LEGACY_RETIRED_ALLOWED_COMMANDS:
+            return
+        raise HarnessError(
+            "legacy_execution_profile_retired",
+            (
+                f"Run {run_id} uses the retired legacy_java_v1 execution profile; "
+                "only read, existing-artifact sync, and workspace cleanup remain available."
+            ),
+            run_id=run_id,
+        )
+    if not _has_retired_developer_executor(state) or command_name in LEGACY_RETIRED_ALLOWED_COMMANDS:
         return
     raise HarnessError(
-        "legacy_execution_profile_retired",
+        "legacy_developer_executor_retired",
         (
-            f"Run {run_id} uses the retired legacy_java_v1 execution profile; "
+            f"Run {run_id} has a Developer session bound to the retired legacy executor; "
             "only read, existing-artifact sync, and workspace cleanup remain available."
         ),
         run_id=run_id,
@@ -58,7 +69,7 @@ def public_allowed_actions(
 
     items = actions if isinstance(actions, (list, tuple)) else []
     normalized = [str(action) for action in items if action]
-    if not _is_legacy_projection(state):
+    if not _is_legacy_projection(state) and not _has_retired_developer_executor(state):
         return normalized
     return [action for action in normalized if action in LEGACY_RETIRED_VISIBLE_ACTIONS]
 
@@ -69,9 +80,14 @@ def public_run_summary(
 ) -> object:
     """Không để status legacy tiếp tục mời gọi action đã bị retire."""
 
-    if not _is_legacy_projection(state):
+    if not _is_legacy_projection(state) and not _has_retired_developer_executor(state):
         return state.get("summary_for_user") if summary is None else summary
     run_id = str(state.get("run_id") or "run này")
+    if _has_retired_developer_executor(state):
+        return (
+            f"Run {run_id} có Developer session dùng legacy executor đã retire; chỉ còn "
+            "read/audit, sync artifact đã tồn tại và workspace cleanup."
+        )
     return (
         f"Run {run_id} dùng legacy_java_v1 đã retire; chỉ còn read/audit, "
         "sync artifact đã tồn tại và workspace cleanup."
@@ -89,3 +105,8 @@ def _is_legacy_projection(state: Mapping[str, object]) -> bool:
         if classification in {"profiled", "invalid"}:
             return False
     return state.get(PROFILE_SNAPSHOT_STATE_KEY) is None
+
+
+def _has_retired_developer_executor(state: Mapping[str, object]) -> bool:
+    execution = state.get("developer_execution")
+    return isinstance(execution, Mapping) and execution.get("executor") == "legacy"

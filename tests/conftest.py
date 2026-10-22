@@ -26,10 +26,9 @@ JOURNEY_MODULES = {
 
 @pytest.fixture(autouse=True)
 def isolate_live_workflow_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Giữ fixture legacy ổn định trừ khi test chủ động kiểm profile mới."""
+    """Cố định test mặc định ở TypeScript profile, tách khỏi cấu hình máy thật."""
 
-    monkeypatch.setenv("SDLC_DEVELOPER_EXECUTION_MODE", "legacy")
-    monkeypatch.setenv("SDLC_PROJECT_PROFILE", "")
+    monkeypatch.setenv("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1")
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

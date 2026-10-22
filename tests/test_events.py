@@ -16,7 +16,7 @@ from sdlc_harness.llm import LlmClient
 from sdlc_harness.operations import OperationManager, OperationStore
 from sdlc_harness.storage import RUNTIME_README, RuntimeStore
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.verification import VerificationRunner
+from sdlc_harness.verification import VerificationResult, VerificationRunner
 
 
 class EventFixture(unittest.TestCase):
@@ -271,10 +271,22 @@ class RuntimeEventIntegrationTests(unittest.TestCase):
         settings = SimpleNamespace(llm_mode="fake", llm_model="fixture-model")
         with event_scope(runtime_root=self.runtime_root, command="test", run_id=run_id):
             LlmClient(settings).complete(system="private system", prompt="private prompt")  # type: ignore[arg-type]
-            VerificationRunner(timeout_seconds=5).run(
-                target_path=self.root,
-                work_packet={"test_intents": [{"command": "echo verification-ok"}]},
-            )
+            runner = VerificationRunner(timeout_seconds=5)
+            with patch.object(
+                runner,
+                "_run_internal",
+                return_value=VerificationResult(
+                    status="passed",
+                    command="npm run test:unit",
+                    cwd=str(self.root),
+                    exit_code=0,
+                    duration_seconds=0.01,
+                    stdout="verification-ok",
+                    stderr="",
+                    reason="Profiled verification passed.",
+                ),
+            ):
+                runner.run(target_path=self.root, work_packet={"schema_version": "profiled"})
         encoded = (self.runtime_root / "runs" / run_id / "events.jsonl").read_text(encoding="utf-8")
         self.assertIn("llm_call_started", encoded)
         self.assertIn("llm_call_completed", encoded)

@@ -423,17 +423,6 @@ class PhaseOneWorkflow:
         allowed_next_actions = [str(action) for action in state.get("allowed_next_actions", []) if action]
         last_error = state.get("last_error")
         latest_artifacts = state.get("latest_artifacts")
-        legacy_developer_retry = (
-            self.settings.developer_execution_mode == "tool_loop"
-            and str(state.get("status") or "") == "blocked"
-            and isinstance(last_error, dict)
-            and last_error.get("error_code") == "developer_act_failed"
-            and isinstance(latest_artifacts, dict)
-            and bool(latest_artifacts.get("developer_work_packet"))
-            and not bool(latest_artifacts.get("code_change_report"))
-        )
-        if legacy_developer_retry and "continue_run" not in allowed_next_actions:
-            allowed_next_actions.insert(0, "continue_run")
         legacy_verification_repair = (
             str(state.get("status") or "") == "blocked"
             and isinstance(last_error, dict)

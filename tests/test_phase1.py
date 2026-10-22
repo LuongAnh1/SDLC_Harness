@@ -276,7 +276,6 @@ class PhaseOneTest(unittest.TestCase):
 
         self.assertEqual(settings.llm_mode, "fake")
         self.assertEqual(settings.sync_mode, "mock")
-        self.assertEqual(settings.developer_execution_mode, "tool_loop")
         response = PhaseOneWorkflow(settings).start_or_get_run(
             dataset="eTour",
             use_case="UC1",
@@ -353,8 +352,8 @@ class PhaseOneTest(unittest.TestCase):
         )
         self.assertNotIn("target_remote", response["execution_profile"])
 
-    def test_active_legacy_run_is_not_backfilled_after_profile_config_changes(self) -> None:
-        legacy_settings = load_settings(
+    def test_blank_profile_starts_typescript_run_and_keeps_frozen_snapshot(self) -> None:
+        initial_settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
             overrides={
@@ -363,8 +362,8 @@ class PhaseOneTest(unittest.TestCase):
                 "SDLC_PROJECT_PROFILE": "",
             },
         )
-        legacy_workflow = PhaseOneWorkflow(legacy_settings)
-        first = legacy_workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        initial_workflow = PhaseOneWorkflow(initial_settings)
+        first = initial_workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
         profiled_settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
@@ -381,11 +380,15 @@ class PhaseOneTest(unittest.TestCase):
             use_case="UC1",
             requested_by="test",
         )
-        state = legacy_workflow.store.read_state(str(first["run_id"]))
+        state = initial_workflow.store.read_state(str(first["run_id"]))
 
         self.assertFalse(second["created_new_run"])
-        self.assertNotIn("profile_snapshot", state)
-        self.assertEqual(second["execution_profile"]["classification"], "legacy_java_v1")
+        self.assertEqual(state["profile_snapshot"]["project_profile_id"], "typescript_fullstack_v1")
+        self.assertEqual(
+            state["profile_snapshot"]["target_remote"],
+            "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git",
+        )
+        self.assertEqual(second["execution_profile"]["classification"], "profiled")
 
     def test_status_reports_invalid_snapshot_without_breaking_audit_read(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
@@ -901,14 +904,13 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(result["targets"][0]["status"], "synced")
         self.assertEqual(result["targets"][1]["status"], "failed")
 
-    def test_status_exposes_safe_retry_for_legacy_developer_truncation_in_tool_loop_mode(self) -> None:
+    def test_status_does_not_auto_migrate_legacy_developer_truncation(self) -> None:
         settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DEVELOPER_EXECUTION_MODE": "tool_loop",
             },
         )
         workflow = PhaseOneWorkflow(settings)
@@ -928,7 +930,7 @@ class PhaseOneTest(unittest.TestCase):
 
         response = workflow.get_status(run_id="run_legacy_developer_truncation")
 
-        self.assertEqual(response["allowed_next_actions"][0], "continue_run")
+        self.assertNotIn("continue_run", response["allowed_next_actions"])
         self.assertEqual(response["developer_execution"], {})
 
     def test_status_exposes_safe_retry_for_blocked_repair_selection_policy_drift(self) -> None:

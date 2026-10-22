@@ -312,8 +312,26 @@ tất và không tự cho phép cutover.
     full Harness regression `574 passed, 1 skipped` đều pass. Explicit
     `legacy`/profile rỗng vẫn được giữ cho rollback và audit run cũ đến lát xóa
     Java runtime riêng; PR #1 vẫn Draft, không đổi head hoặc approval state.
-- [ ] Xóa Java runtime-only behavior và migration flag; giữ historical
+- [x] Xóa Java runtime-only behavior và migration flag; giữ historical
   docs/evidence/read path có nhãn.
+  - A4.4a: xóa `SDLC_DEVELOPER_EXECUTION_MODE`, bỏ profile rỗng khỏi Config API
+    và khóa persisted session đã bind executor `legacy` trước mọi mutation.
+  - A4.4b: buộc Phase 3-4 dùng immutable profile policy; xóa Developer batch,
+    Java planning/QA/Code Trace/Verification runtime fallback.
+  - A4.4c: chuyển default test fixture/journey sang TypeScript/tool-loop; chỉ giữ
+    test read/audit/sync-existing/cleanup cho historical Java run.
+  - A4.4d: chạy targeted regression, fake/mock TypeScript journey, full parallel
+    hai lần, compileall và diff check trước khi đóng Chặng A.
+  - Không tự migrate artifact/session Java hoặc legacy batch; không sửa target
+    TypeScript và không chạy live Jira/DeepSeek/GitHub trong lát cleanup này.
+  - Hoàn tất: 2026-10-22. Run mới chỉ nhận immutable
+    `typescript_fullstack_v1` và Developer tool-loop; persisted legacy executor
+    fail closed. Developer batch cùng Java planning/QA/Code Trace/Verification
+    runtime fallback đã bị xóa, trong khi historical classification/read-only
+    lifecycle vẫn được giữ có nhãn.
+  - Fake/mock TypeScript journey pass; full parallel regression hai lần cùng
+    `559 passed, 1 skipped`. Skip duy nhất là symlink test bị Windows từ chối
+    quyền tạo symlink; `compileall` và `git diff --check` đều pass.
 
 Điều kiện hoàn tất Chặng A: một feature TypeScript đơn giản đi trọn Phase 1-4;
 profile/manifest/base-SHA được snapshot; có production `.ts` change và Vitest

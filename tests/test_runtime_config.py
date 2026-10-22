@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 from sdlc_harness.application.config_service import ConfigurationService
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.config_schema import config_field_index
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.core.runtime_config import RuntimeConfigStore
 
@@ -65,7 +66,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 encoding="utf-8",
             )
             from_dotenv = load_settings(root=self.root, runtime_root=self.runtime_root)
-            self.assertIsNone(from_dotenv.project_profile_id)
+            self.assertEqual(from_dotenv.project_profile_id, "typescript_fullstack_v1")
 
             RuntimeConfigStore(self.config_path).update(
                 {"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"}
@@ -80,7 +81,7 @@ class RuntimeConfigTests(unittest.TestCase):
                     runtime_root=self.runtime_root,
                     overrides={"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"},
                 )
-            self.assertIsNone(from_os.project_profile_id)
+            self.assertEqual(from_os.project_profile_id, "typescript_fullstack_v1")
             self.assertEqual(overridden.project_profile_id, "typescript_fullstack_v1")
 
     def test_cutover_defaults_select_typescript_target_and_tool_loop(self) -> None:
@@ -89,7 +90,7 @@ class RuntimeConfigTests(unittest.TestCase):
 
         target = (self.root.parent / "SDLC_Target_TypeScript").resolve()
         self.assertEqual(settings.project_profile_id, "typescript_fullstack_v1")
-        self.assertEqual(settings.developer_execution_mode, "tool_loop")
+        self.assertNotIn("SDLC_DEVELOPER_EXECUTION_MODE", config_field_index())
         self.assertEqual(settings.target_repo_path, target)
         self.assertEqual(
             settings.target_worktree_root,
@@ -170,7 +171,7 @@ class RuntimeConfigTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             profile = field_by_name(self.service.snapshot(), "SDLC_PROJECT_PROFILE")
             self.assertEqual(profile["value"], "typescript_fullstack_v1")
-            self.assertEqual(profile["options"], ["", "typescript_fullstack_v1"])
+            self.assertEqual(profile["options"], ["typescript_fullstack_v1"])
             self.assertFalse(profile["restart_required"])
 
             updated = self.service.update({"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"})

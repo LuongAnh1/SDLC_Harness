@@ -15,6 +15,118 @@ from typing import Callable
 PopulateRepository = Callable[[Path], None]
 
 
+def populate_typescript_target(target: Path) -> None:
+    """Dựng target TypeScript tối thiểu nhưng đủ manifest và verification contract."""
+
+    from sdlc_harness.profiles import get_language_profile, get_project_profile
+
+    project = get_project_profile("typescript_fullstack_v1")
+    language = get_language_profile(project.language_profile_id)
+    for component in project.components:
+        for editable_root in component.editable_roots:
+            root = target / editable_root
+            root.mkdir(parents=True, exist_ok=True)
+            (root / ".gitkeep").write_text("", encoding="utf-8")
+    for required_path in project.required_paths:
+        path = target / required_path
+        if path.suffix:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        else:
+            path.mkdir(parents=True, exist_ok=True)
+            (path / ".gitkeep").write_text("", encoding="utf-8")
+
+    package = {
+        "name": "sdlc-typescript-test-target",
+        "version": "1.0.0",
+        "private": True,
+        "scripts": {
+            "typecheck": "node -e \"process.exit(0)\"",
+            "test:unit": "node scripts/fake-vitest.cjs",
+        },
+    }
+    lock = {
+        "name": package["name"],
+        "version": package["version"],
+        "lockfileVersion": 3,
+        "requires": True,
+        "packages": {"": {"name": package["name"], "version": package["version"]}},
+    }
+    (target / "package.json").write_text(json.dumps(package, indent=2) + "\n", encoding="utf-8")
+    (target / "package-lock.json").write_text(json.dumps(lock, indent=2) + "\n", encoding="utf-8")
+    (target / "compose.yaml").write_text("services: {}\n", encoding="utf-8")
+    (target / "tsconfig.json").write_text("{}\n", encoding="utf-8")
+    (target / "tsconfig.base.json").write_text("{}\n", encoding="utf-8")
+    (target / "vitest.config.ts").write_text("export default {};\n", encoding="utf-8")
+    (target / "playwright.config.ts").write_text("export default {};\n", encoding="utf-8")
+    (target / ".github").mkdir(exist_ok=True)
+    (target / ".github/.gitkeep").write_text("", encoding="utf-8")
+    for relative in (
+        "apps/web/package.json",
+        "apps/web/tsconfig.json",
+        "apps/web/vite.config.ts",
+        "apps/api/package.json",
+        "apps/api/tsconfig.json",
+        "packages/contracts/package.json",
+        "packages/contracts/tsconfig.json",
+        "packages/db/package.json",
+        "packages/db/prisma7.config.ts",
+        "packages/db/tsconfig.json",
+    ):
+        path = target / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{}\n" if path.suffix == ".json" else "export default {};\n", encoding="utf-8")
+
+    source = target / "apps/api/src/CulturalHeritage.ts"
+    source.write_text("export class CulturalHeritage {}\n", encoding="utf-8")
+    service = target / "apps/api/src/DeleteCulturalHeritageService.ts"
+    service.write_text(
+        "export class DeleteCulturalHeritageService { deleteHeritage(id: string): void { void id; } }\n",
+        encoding="utf-8",
+    )
+    test = target / "apps/api/src/CulturalHeritage.test.ts"
+    test.write_text('import { describe, expect, it } from "vitest";\ndescribe("heritage", () => { it("works", () => expect(true).toBe(true)); });\n', encoding="utf-8")
+
+    scripts = target / "scripts"
+    scripts.mkdir(exist_ok=True)
+    (scripts / "fake-vitest.cjs").write_text(
+        """const fs = require("node:fs");
+const path = require("node:path");
+const output = process.argv.find((value) => value.startsWith("--outputFile="));
+const selected = process.argv.filter((value) => /\\.(test|spec)\\.tsx?$/.test(value));
+if (output) {
+  const file = output.slice("--outputFile=".length);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({
+    success: true,
+    testResults: selected.map((name) => ({
+      name: path.resolve(name),
+      assertionResults: [{ status: "passed" }],
+    })),
+  }));
+}
+""",
+        encoding="utf-8",
+    )
+
+    manifest = {
+        "version": project.target_manifest_schema,
+        "project_profile_id": project.profile_id,
+        "project_profile_schema": project.schema_version,
+        "language_profile_id": language.profile_id,
+        "language_profile_schema": language.schema_version,
+        "components": [
+            {"component_id": component.component_id, "editable_roots": list(component.editable_roots)}
+            for component in project.components
+        ],
+        "protected_paths": list(project.protected_paths),
+        "required_paths": list(project.required_paths),
+        "verification_stage_ids": list(project.verification_stage_ids),
+    }
+    manifest_path = target / ".sdlc/target-profile.json"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
 def git(cwd: Path, *args: str) -> str:
     completed = subprocess.run(
         ["git", *args],

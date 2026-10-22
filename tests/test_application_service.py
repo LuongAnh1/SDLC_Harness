@@ -233,7 +233,7 @@ class ApplicationServiceTests(unittest.TestCase):
             llm_call_budget=12,
         )
 
-    def test_start_requires_project_profile_before_workflow_dispatch(self) -> None:
+    def test_start_blank_profile_uses_typescript_default_before_dispatch(self) -> None:
         command = self.command(
             "start-or-get-run",
             {"dataset": "eTour", "use_case": "UC1", "requested_by": "owner"},
@@ -241,12 +241,12 @@ class ApplicationServiceTests(unittest.TestCase):
         )
 
         with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
-            with self.assertRaises(HarnessError) as context:
-                self.service.execute(command)
+            workflow_type.return_value.start_or_get_run.return_value = {"ok": True}
+            response = self.service.execute(command)
 
-        self.assertEqual(context.exception.error_code, "project_profile_required")
-        workflow_type.assert_not_called()
-        self.assertFalse((self.runtime_root / "runs").exists())
+        self.assertTrue(response["ok"])
+        settings = workflow_type.call_args.args[0]
+        self.assertEqual(settings.project_profile_id, "typescript_fullstack_v1")
 
     def test_start_rejects_active_legacy_run_for_same_source(self) -> None:
         source_ref = "dataset_use_case:eTour:UC1"

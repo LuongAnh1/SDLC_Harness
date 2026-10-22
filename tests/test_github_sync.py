@@ -24,7 +24,7 @@ from sdlc_harness.sync.github import (
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
-from tests._support import GitRepositoryTemplate, create_fast_run_workspace
+from tests._support import GitRepositoryTemplate, create_fast_run_workspace, populate_typescript_target
 
 
 pytestmark = pytest.mark.integration
@@ -37,15 +37,7 @@ def _populate_publisher_target(target: Path) -> None:
 
 
 def _populate_workflow_target(target: Path) -> None:
-    source = target / "src" / "main" / "java" / "example"
-    tests = target / "src" / "test" / "java" / "example"
-    scripts = target / "scripts"
-    source.mkdir(parents=True)
-    tests.mkdir(parents=True)
-    scripts.mkdir(parents=True)
-    (source / "Feature.java").write_text("final class Feature {}\n", encoding="utf-8")
-    (tests / "FeatureAcceptanceTest.java").write_text("final class FeatureAcceptanceTest {}\n", encoding="utf-8")
-    (scripts / "test.ps1").write_text("Write-Host pass\n", encoding="utf-8")
+    populate_typescript_target(target)
     (target / ".codegraph").mkdir()
 
 
@@ -390,9 +382,8 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(response["quality_reports"]["code_review_publication"]["pr_url"], "https://github.com/example/target/pull/7")
         self.assertEqual(len(publisher.calls), 1)
         publication_paths = publisher.calls[0]["publication_paths"]
-        self.assertIn("src/main/java/example/Feature.java", publication_paths)
-        self.assertIn("src/test/java/example/FeatureAcceptanceTest.java", publication_paths)
-        self.assertIn("scripts/test.ps1", publication_paths)
+        self.assertIn("apps/api/src/Feature.ts", publication_paths)
+        self.assertIn("apps/api/src/FeatureAcceptance.test.ts", publication_paths)
 
         repeated = workflow.continue_run(run_id=run_id)
 
@@ -531,6 +522,15 @@ class GitHubSyncTest(unittest.TestCase):
         )
         run_id = "run_20261015_150000_c0decafe"
         store = RuntimeStore(repo_root=settings.repo_root, runtime_root=runtime_root)
+        profile_snapshot = {
+            "version": "profile_snapshot_v1",
+            "project_profile_id": "typescript_fullstack_v1",
+            "project_profile_schema": "project_profile_v1",
+            "language_profile_id": "typescript_v1",
+            "language_profile_schema": "language_profile_v1",
+            "target_remote": str(remote.resolve()),
+            "target_base_branch": "main",
+        }
         store.write_state(
             {
                 "ok": True,
@@ -539,6 +539,7 @@ class GitHubSyncTest(unittest.TestCase):
                 "current_phase": "qa_testing",
                 "status": "qa_tested",
                 "latest_artifacts": {},
+                "profile_snapshot": profile_snapshot,
             }
         )
         manager = RunWorkspaceManager(settings)
@@ -549,13 +550,21 @@ class GitHubSyncTest(unittest.TestCase):
         )
         worktree = Path(workspace.worktree_path)
         (worktree / ".codegraph").mkdir(exist_ok=True)
-        (worktree / "src" / "main" / "java" / "example" / "Feature.java").write_text(
-            "final class Feature { int value; }\n",
+        source_path = worktree / "apps" / "api" / "src" / "Feature.ts"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text(
+            "export class Feature { value = 1; }\n",
             encoding="utf-8",
         )
         artifacts = store.run_dir(run_id) / "artifacts"
         artifacts.mkdir(parents=True, exist_ok=True)
         work_packet = {
+            "schema_version": "developer_work_packet_profiled_v1",
+            "planning_profile": {
+                "project_profile_id": "typescript_fullstack_v1",
+                "language_profile_id": "typescript_v1",
+                "policy_version": "planning_path_policy_v1",
+            },
             "issue_key": "SDLC-1",
             "target_repository": {
                 "local_path": str(worktree),
@@ -576,11 +585,22 @@ class GitHubSyncTest(unittest.TestCase):
                 "head_sha": workspace.head_sha,
                 "remote": workspace.remote,
             },
-            "verification_plan": [{"command": "powershell -File scripts/test.ps1"}],
-            "output_contract": {"allowed_paths": ["src/main/java/example/Feature.java"]},
+            "verification_stage_ids": ["typecheck", "unit"],
+            "test_intents": [{"stage_id": "unit"}],
+            "output_contract": {
+                "allowed_paths": ["apps/api/src/Feature.ts"],
+                "path_policy": {
+                    "version": "editable_path_policy_v1",
+                    "project_profile_id": "typescript_fullstack_v1",
+                    "language_profile_id": "typescript_v1",
+                    "planning_policy_version": "planning_path_policy_v1",
+                    "component_roots": {"api": ["apps/api/src"]},
+                    "protected_paths": [],
+                },
+            },
         }
         qa_generated = {
-            "test_files": [{"path": "src/test/java/example/FeatureAcceptanceTest.java"}],
+            "test_files": [{"path": "apps/api/src/FeatureAcceptance.test.ts"}],
             "scenarios": [{"name": "Approved behavior"}],
             "risks": [],
         }
@@ -608,6 +628,7 @@ class GitHubSyncTest(unittest.TestCase):
                 "current_phase": "qa_testing",
                 "status": "qa_tested",
                 "latest_artifacts": latest,
+                "profile_snapshot": profile_snapshot,
                 "quality_reports": {
                     "implementation_traceability": {
                         "ok": True,

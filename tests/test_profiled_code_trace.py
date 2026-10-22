@@ -182,7 +182,9 @@ def test_phase4_resolves_code_trace_policy_only_from_bound_snapshot(
 
     assert resolved is not None
     assert resolved.metadata() == code_trace_policy.metadata()
-    assert _code_trace_policy_for_state({}, run_id="run-legacy") is None
+    with pytest.raises(HarnessError, match="immutable project profile snapshot") as caught:
+        _code_trace_policy_for_state({}, run_id="run-legacy")
+    assert caught.value.error_code == "legacy_execution_profile_retired"
 
 
 def test_typescript_ast_bridge_uses_fixed_helper_and_validates_evidence(

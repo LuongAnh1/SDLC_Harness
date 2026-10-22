@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from ...core.errors import HarnessError
 from ...storage.runtime import RuntimeStore, utc_now_iso
-from .actor import DeveloperActAgent
+from .fake_generation import fake_developer_files
 from .profile_context import (
     developer_generation_context,
     developer_path_is_test,
@@ -327,17 +327,9 @@ class DeveloperToolLoopExecutor:
         repair_feedback: dict[str, object] | None,
         repair_iteration: int,
     ) -> None:
-        fake_developer = DeveloperActAgent(self.llm_client)
-        generated = (
-            fake_developer.repair(
-                work_packet=work_packet,
-                repair_feedback=repair_feedback,
-                repair_iteration=repair_iteration,
-            )
-            if repair_feedback
-            else fake_developer.act(work_packet=work_packet)
-        )
-        by_path = {str(item.get("path") or ""): item for item in generated.files}
+        del repair_iteration
+        generated_files = fake_developer_files(work_packet)
+        by_path = {str(item.get("path") or ""): item for item in generated_files}
         for item in _dict_items(manifest.get("items")):
             item_id = str(item.get("id") or "")
             entry = _journal_item(journal, item_id)
@@ -390,7 +382,7 @@ class DeveloperToolLoopExecutor:
                 item=item,
                 entry=entry,
                 target_path=target_path,
-                summary="; ".join(reasons) or generated.summary,
+                summary="; ".join(reasons) or "Deterministic fake Developer completed the execution unit.",
                 mutated_paths=mutated_paths,
                 no_change_required=bool(repair_feedback and not mutated_paths),
             )

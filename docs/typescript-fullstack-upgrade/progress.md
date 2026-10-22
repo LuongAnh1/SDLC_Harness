@@ -1188,6 +1188,52 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 - Đã đóng mục A4 target path/remote. Việc còn lại của Chặng A là xóa Java
   runtime-only behavior/migration flag trong một lát riêng.
 
+## 2026-10-22 - Kế Hoạch A4.4 Java Runtime Cleanup
+
+- Baseline Harness `a5357f6`; role-specific agent-loop roadmap chỉ được note và
+  park, không triển khai L1.1 trước khi hoàn tất Chặng A.
+- Xóa hai rollback switch của giai đoạn migration: Developer batch `legacy` và
+  project profile rỗng. Run mới chỉ dùng `typescript_fullstack_v1` cùng tool-loop.
+- Phase 3-4 bắt buộc resolve Planning/Verification/QA/Code Trace policy từ immutable
+  snapshot; xóa Java source/path/test-command, QA, text-search và `javac/java` fallback.
+- Run thiếu snapshot vẫn giữ classification `legacy_java_v1` và chỉ được read/audit,
+  sync artifact đã có, cleanup workspace. Persisted session bind executor `legacy`
+  fail closed, không tự đổi executor.
+- Chuyển default test fixture/journey sang TypeScript; không sửa hàng loạt fixture,
+  docs hoặc opaque test data chỉ vì còn chữ Java.
+- Acceptance: targeted config/profile/application/Phase 3-4 tests, fake/mock journey,
+  fast suite, full pytest-xdist hai lần, compileall và `git diff --check`.
+- Không sửa target repo, không gọi live LLM/tool sync/remote và không thay đổi Draft PR #1.
+
+## 2026-10-22 - A4.4 Java Runtime Cleanup
+
+- Xóa `SDLC_DEVELOPER_EXECUTION_MODE` khỏi schema/loader/example config; profile
+  rỗng nay canonicalize sang `typescript_fullstack_v1`. Persisted execution
+  session đã bind `legacy` bị retirement guard chặn trước mutation, không
+  được tự chuyển sang tool-loop.
+- Phase 3-4, Developer planning/work packet, QA, Code Trace và Verification Runner
+  nay bắt buộc dùng policy suy ra từ immutable profile snapshot. Xóa Developer
+  batch actor và các Java runtime fallback cho path, source discovery, QA generation,
+  text-search verification cùng `javac/java`.
+- Giữ historical Java classification và các thao tác read/audit, sync artifact
+  đã có, cleanup workspace. Không migrate artifact/session cũ; reference prompt,
+  docs và opaque mechanics fixture có chữ Java không bị xóa chỉ vì từ khóa.
+- Chuyển fixture và workflow test đang hoạt động sang target TypeScript có
+  manifest, planning/verification policy và tool-loop. Sửa GitHub publication
+  fixture để worktree giả cũng tuân đúng manifest contract.
+- Verification: các nhóm targeted core `168 passed`, QA/Phase 4 `73 passed`,
+  implementation contract/signature `33 passed`, tool-loop `21 passed`; fast suite
+  `298 passed, 1 skipped, 261 deselected`. Fake/mock TypeScript journey từ V2 qua
+  Code Review approval `1 passed`.
+- Full pytest-xdist sau cleanup cuối chạy hai lần liên tiếp:
+  `559 passed, 1 skipped in 97.66s` và `559 passed, 1 skipped in 113.73s`.
+  Skip duy nhất là symlink escape test do
+  Windows không cấp quyền tạo symlink; frontend smoke vẫn chạy. `compileall`
+  và `git diff --check` pass.
+- Không sửa `SDLC_Target_TypeScript`, không gọi DeepSeek/Jira/Confluence/GitHub
+  live và không thay đổi Draft PR #1. A4.4 và Chặng A đã đủ acceptance;
+  role-specific agent-loop roadmap vẫn được park cho công việc sau.
+
 ```text
 ## YYYY-MM-DD - <slice hoặc quyết định>
 

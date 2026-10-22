@@ -18,17 +18,19 @@ import pytest
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.developer import (
-    DeveloperActResult,
     DeveloperExecutionError,
     DeveloperExecutionResult,
     build_developer_work_packet,
 )
 from sdlc_harness.agents.tester import QaGeneratedTestSuite, QaTesterAgent
 from sdlc_harness.agents.validator import CodeTraceValidator
+from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    build_code_trace_policy,
     build_planning_path_policy,
+    build_qa_test_policy,
     build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
@@ -38,7 +40,6 @@ from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase4 import (
     PhaseFourWorkflow,
-    _apply_developer_changes,
     _code_review_pr_body,
     _verification_repair_feedback,
     _verification_attempt_count,
@@ -49,103 +50,11 @@ from tests._support import (
     GitRepositoryTemplate,
     RuntimeDirectoryTemplate,
     create_fast_run_workspace,
+    populate_typescript_target,
 )
 
 
 pytestmark = pytest.mark.integration
-
-
-def _populate_phase4_target(target: Path) -> None:
-    source_dir = target / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"
-    test_dir = target / "src" / "test" / "java" / "com" / "sdlc" / "etour" / "heritage"
-    source_dir.mkdir(parents=True)
-    test_dir.mkdir(parents=True)
-    (source_dir / "CulturalHeritage.java").write_text(
-        "package com.sdlc.etour.heritage;\npublic final class CulturalHeritage {}\n",
-        encoding="utf-8",
-    )
-    (source_dir / "DeleteCulturalHeritageService.java").write_text(
-        (
-            "package com.sdlc.etour.heritage;\n"
-            "public final class DeleteCulturalHeritageService {\n"
-            "  public void deleteHeritage(String id) {}\n"
-            "}\n"
-        ),
-        encoding="utf-8",
-    )
-    (test_dir / "CulturalHeritageTest.java").write_text(
-        "package com.sdlc.etour.heritage;\npublic final class CulturalHeritageTest {}\n",
-        encoding="utf-8",
-    )
-    (target / "scripts").mkdir()
-    (target / "scripts" / "test.ps1").write_text("Write-Host 'test placeholder'\n", encoding="utf-8")
-    (target / ".codegraph").mkdir()
-    (target / ".codegraph" / "README.md").write_text(
-        "test codegraph index placeholder\n",
-        encoding="utf-8",
-    )
-
-
-class OutOfScopeDeveloper:
-    def act(self, *, work_packet: dict[str, object]) -> DeveloperActResult:
-        return DeveloperActResult(
-            summary="bad output",
-            files=[
-                {
-                    "path": "src/main/java/com/sdlc/etour/heritage/Unexpected.java",
-                    "operation": "update",
-                    "content": "not allowed\n",
-                    "reason": "outside scope",
-                    "covered_design_elements": [],
-                }
-            ],
-        )
-
-
-class OutOfScopeRepairDeveloper:
-    def repair(
-        self,
-        *,
-        work_packet: dict[str, object],
-        repair_feedback: dict[str, object],
-        repair_iteration: int,
-    ) -> DeveloperActResult:
-        return DeveloperActResult(
-            summary="bad repair output",
-            files=[
-                {
-                    "path": "src/main/java/com/sdlc/etour/heritage/UnexpectedRepair.java",
-                    "operation": "update",
-                    "content": "not allowed\n",
-                    "reason": "outside repair scope",
-                    "covered_design_elements": [],
-                }
-            ],
-        )
-
-
-class CapturingOutOfScopeRepairDeveloper(OutOfScopeRepairDeveloper):
-    def __init__(self) -> None:
-        self.work_packet: dict[str, object] | None = None
-
-    def repair(
-        self,
-        *,
-        work_packet: dict[str, object],
-        repair_feedback: dict[str, object],
-        repair_iteration: int,
-    ) -> DeveloperActResult:
-        self.work_packet = work_packet
-        result = super().repair(
-            work_packet=work_packet,
-            repair_feedback=repair_feedback,
-            repair_iteration=repair_iteration,
-        )
-        return DeveloperActResult(
-            summary=result.summary,
-            files=result.files,
-            raw_response='{"summary":"raw repair response"}',
-        )
 
 
 class RejectingCodeTraceLlm:
@@ -236,14 +145,19 @@ class ProseWrappedCodeTraceLlm:
 
 class FailingQaTester:
     def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
-        del qa_policy
-        path = "src/test/java/com/sdlc/etour/heritage/FailingQaAcceptanceTest.java"
+        assert qa_policy is not None
+        path = "apps/api/src/FailingQaAcceptance.test.ts"
+        requirement_ids = [
+            str(item.get("id"))
+            for item in context.get("canonical_requirements", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
         return QaGeneratedTestSuite(
             summary="QA generated a failing acceptance test for workflow state coverage.",
             test_files=[
                 {
                     "path": path,
-                    "content": "package com.sdlc.etour.heritage;\npublic final class FailingQaAcceptanceTest {}\n",
+                    "content": 'import { describe, expect, it } from "vitest";\n',
                     "scenarios": ["Delete confirmation"],
                 }
             ],
@@ -253,10 +167,13 @@ class FailingQaTester:
                     "expected_result": "The runner should surface the QA acceptance failure.",
                     "test_file": path,
                     "risk": "User may delete without confirmation.",
+                    "requirement_ids": requirement_ids,
                 }
             ],
             risks=["Confirmation behavior is unclear."],
             generation_context={"section_count": 1, "chars_sent": 10, "chars_total": 10, "any_truncated": False},
+            requirement_contract=context.get("requirement_contract"),
+            generation_profile=qa_policy.metadata(),
         )
 
 
@@ -265,15 +182,20 @@ class RecordingQaTester:
         self.context: dict[str, object] = {}
 
     def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
-        del qa_policy
+        assert qa_policy is not None
         self.context = context
-        path = "src/test/java/com/sdlc/etour/heritage/RecordingQaAcceptanceTest.java"
+        path = "apps/api/src/RecordingQaAcceptance.test.ts"
+        requirement_ids = [
+            str(item.get("id"))
+            for item in context.get("canonical_requirements", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
         return QaGeneratedTestSuite(
             summary="Recording QA generated compact acceptance tests.",
             test_files=[
                 {
                     "path": path,
-                    "content": "package com.sdlc.etour.heritage;\npublic final class RecordingQaAcceptanceTest {}\n",
+                    "content": 'import { describe, expect, it } from "vitest";\n',
                     "scenarios": ["Compact QA packet"],
                 }
             ],
@@ -283,10 +205,13 @@ class RecordingQaTester:
                     "expected_result": "Packet includes accepted requirement, code, verification, and trace summary.",
                     "test_file": path,
                     "risk": "",
+                    "requirement_ids": requirement_ids,
                 }
             ],
             risks=[],
             generation_context=context.get("context_budget") if isinstance(context.get("context_budget"), dict) else {},
+            requirement_contract=context.get("requirement_contract"),
+            generation_profile=qa_policy.metadata(),
         )
 
 
@@ -302,8 +227,8 @@ class MissingRequirementQaLlm:
                 "summary": "incomplete coverage",
                 "test_files": [
                     {
-                        "path": "src/test/java/com/sdlc/etour/heritage/V2AcceptanceTest.java",
-                        "content": "package com.sdlc.etour.heritage; public final class V2AcceptanceTest {}",
+                        "path": "apps/api/src/V2Acceptance.test.ts",
+                        "content": 'import { describe, expect, it } from "vitest";',
                         "scenarios": ["one"],
                     }
                 ],
@@ -311,7 +236,7 @@ class MissingRequirementQaLlm:
                     {
                         "name": "one",
                         "expected_result": "one",
-                        "test_file": "src/test/java/com/sdlc/etour/heritage/V2AcceptanceTest.java",
+                        "test_file": "apps/api/src/V2Acceptance.test.ts",
                         "risk": "",
                         "requirement_ids": ["REQ-1"],
                     }
@@ -335,8 +260,9 @@ class SequenceVerificationRunner:
         verification_policy=None,
         qa_policy=None,
     ) -> VerificationResult:
-        del work_packet, required_test_files, verification_policy, qa_policy
+        del work_packet, verification_policy, qa_policy
         status = self.statuses.pop(0) if self.statuses else "passed"
+        selected = tuple(str(path) for path in (required_test_files or []))
         self.calls.append(status)
         reason_by_status = {
             "passed": "Test command completed successfully.",
@@ -352,6 +278,8 @@ class SequenceVerificationRunner:
             stdout="All tests passed" if status == "passed" else "",
             stderr="qa acceptance failed" if status == "failed" else "",
             reason=reason_by_status.get(status, "Unknown fake runner status."),
+            selected_test_files=selected,
+            verified_test_files=selected if status == "passed" else (),
         )
 
 
@@ -371,6 +299,58 @@ class EnvironmentFailureVerificationRunner:
         )
 
 
+class WorkPacketTypeScriptAstExtractor:
+    """Cung cấp AST evidence theo packet cho journey, không phụ thuộc npm install."""
+
+    def __init__(self, work_packet: dict[str, object]) -> None:
+        self.work_packet = work_packet
+
+    def extract(self, *, target_path, source_paths, policy, run_id=None):
+        del target_path, run_id
+        symbols_by_file: dict[str, list[dict[str, object]]] = {
+            str(path): [] for path in source_paths
+        }
+        contract = self.work_packet.get("implementation_signature_contract")
+        entries = contract.get("entries", []) if isinstance(contract, dict) else []
+        for raw in entries:
+            if not isinstance(raw, dict):
+                continue
+            path = str(raw.get("source_path") or "")
+            if path not in symbols_by_file:
+                continue
+            symbol = dict(raw)
+            symbol.setdefault("name", str(raw.get("qualified_name") or "").split(".")[-1])
+            symbol.setdefault("kind", str(raw.get("symbol_kind") or ""))
+            symbols_by_file[path].append(symbol)
+        mappings = self.work_packet.get("design_mappings_by_file")
+        if isinstance(mappings, dict):
+            for path, items in mappings.items():
+                if path not in symbols_by_file or not isinstance(items, list):
+                    continue
+                known = {
+                    str(item.get("qualified_name") or "")
+                    for item in symbols_by_file[path]
+                }
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    target = str(item.get("planned_code_target") or "")
+                    _, separator, name = target.partition("#")
+                    if not separator or not name or name in known:
+                        continue
+                    symbols_by_file[path].append(
+                        {"name": name.split(".")[-1], "qualified_name": name, "kind": "class"}
+                    )
+        return TypeScriptAstEvidence(
+            extractor_id=policy.symbol_extractor_id,
+            profile=policy.metadata(),
+            files=tuple(
+                {"path": path, "symbols": symbols}
+                for path, symbols in symbols_by_file.items()
+            ),
+        )
+
+
 class PhaseFourTest(unittest.TestCase):
     ISOLATED_REPOSITORY_TESTS = {
         "test_canonical_checkout_change_does_not_redirect_run_workspace",
@@ -381,7 +361,7 @@ class PhaseFourTest(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.git_template = GitRepositoryTemplate(_populate_phase4_target)
+        cls.git_template = GitRepositoryTemplate(populate_typescript_target)
         cls.runtime_template_temp = tempfile.TemporaryDirectory()
         template_root = Path(cls.runtime_template_temp.name)
         topology = cls.git_template.materialize(template_root)
@@ -393,7 +373,6 @@ class PhaseFourTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DEVELOPER_EXECUTION_MODE": "legacy",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -423,6 +402,11 @@ class PhaseFourTest(unittest.TestCase):
         ready = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=cls.phase3_run_id)
         cls.ready_runtime_template = RuntimeDirectoryTemplate(runtime_root)
         workflow = PhaseFourWorkflow(settings)
+        packet_ref = Path(str(ready["latest_artifacts"]["developer_work_packet"]))
+        if not packet_ref.is_absolute():
+            packet_ref = Path(__file__).resolve().parents[1] / packet_ref
+        packet = json.loads(packet_ref.read_text(encoding="utf-8"))
+        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(packet)
         written = workflow.continue_run(run_id=cls.phase3_run_id)
         cls.written_runtime_template = RuntimeDirectoryTemplate(runtime_root)
         cls.written_worktree_template = DirectoryOverlayTemplate(Path(workspace_payload["worktree_path"]))
@@ -436,7 +420,14 @@ class PhaseFourTest(unittest.TestCase):
             "implementation_tested",
             "implementation_traced",
         ]:
-            raise AssertionError("Phase 4 runtime templates did not reach the expected checkpoints.")
+            raise AssertionError(
+                "Phase 4 runtime templates did not reach the expected checkpoints: "
+                + json.dumps(
+                    [ready["status"], written["status"], tested["status"], traced],
+                    ensure_ascii=False,
+                    default=str,
+                )
+            )
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -481,9 +472,39 @@ class PhaseFourTest(unittest.TestCase):
         )
         creation_patch.start()
         self.addCleanup(creation_patch.stop)
+        ast_patch = patch.object(
+            TypeScriptAstExtractor,
+            "extract",
+            autospec=True,
+            side_effect=self._extract_typescript_ast_from_work_packet,
+        )
+        ast_patch.start()
+        self.addCleanup(ast_patch.stop)
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def _extract_typescript_ast_from_work_packet(
+        self,
+        extractor,
+        *,
+        target_path,
+        source_paths,
+        policy,
+        run_id=None,
+    ):
+        del extractor
+        state = PhaseOneWorkflow(self.settings).store.read_state(str(run_id))
+        packet_ref = Path(str(state["latest_artifacts"]["developer_work_packet"]))
+        if not packet_ref.is_absolute():
+            packet_ref = self.repo_root / packet_ref
+        packet = json.loads(packet_ref.read_text(encoding="utf-8"))
+        return WorkPacketTypeScriptAstExtractor(packet).extract(
+            target_path=target_path,
+            source_paths=source_paths,
+            policy=policy,
+            run_id=run_id,
+        )
 
     def test_verification_feedback_uses_current_diagnostic_and_keeps_validator_objective_as_lineage(self) -> None:
         objective = {
@@ -616,7 +637,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(_verification_attempt_count(workflow.store, "run_attempt_count"), 3)
 
     def test_continue_run_resumes_blocked_repair_selection_policy_drift(self) -> None:
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_repair_item_scope_mismatch"
         state = {
             "run_id": run_id,
@@ -644,7 +665,7 @@ class PhaseFourTest(unittest.TestCase):
         repair.assert_called_once_with(state=state, run_id=run_id)
 
     def test_resume_repair_uses_packet_bound_to_execution_artifact_version(self) -> None:
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_bound_repair_packet"
         current = workflow.store.write_json_artifact(
             run_id,
@@ -676,7 +697,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "developer_input_drift")
 
     def test_legacy_repair_state_uses_next_unused_session_ordinal(self) -> None:
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_next_repair_session"
         execution_root = workflow.store.run_dir(run_id) / "developer_execution"
         (execution_root / "implementation_repair_v1").mkdir(parents=True)
@@ -695,7 +716,6 @@ class PhaseFourTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
-            "SDLC_DEVELOPER_EXECUTION_MODE": "legacy",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -746,6 +766,7 @@ class PhaseFourTest(unittest.TestCase):
         )
         state = manager.store.read_state(self.run_id)
         create_fast_run_workspace(manager, run_id=self.run_id, state=state)
+        (worktree_path / ".codegraph").mkdir(exist_ok=True)
         if with_written_files:
             self.written_worktree_template.apply(worktree_path)
         return PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
@@ -766,6 +787,12 @@ class PhaseFourTest(unittest.TestCase):
         artifact = self.repo_root / str(run["latest_artifacts"]["run_workspace"])
         return Path(json.loads(artifact.read_text(encoding="utf-8"))["worktree_path"])
 
+    def _mark_run_as_historical_java(self, run_id: str) -> None:
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        state.pop("profile_snapshot", None)
+        store.write_state(state)
+
     def test_approve_implementation_plan_creates_developer_work_packet(self) -> None:
         phase3 = self._create_phase3_run()
 
@@ -773,7 +800,7 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertEqual(response["current_phase"], "implementation_preparing")
-        self.assertEqual(response["status"], "implementation_ready")
+        self.assertEqual(response["status"], "implementation_ready", response)
         self.assertIsNone(response["pending_checkpoint"])
         self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
         self.assertIn("developer_work_packet", response["latest_artifacts"])
@@ -783,7 +810,7 @@ class PhaseFourTest(unittest.TestCase):
 
         packet_path = self.repo_root / str(response["latest_artifacts"]["developer_work_packet"])
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        self.assertEqual(packet["version"], "developer_work_packet_v1")
+        self.assertEqual(packet["version"], "developer_work_packet_v2")
         self.assertEqual(packet["run_id"], phase3["run_id"])
         self.assertEqual(packet["approved_plan"]["implementation_plan"], phase3["latest_artifacts"]["implementation_plan"])
         self.assertTrue(packet["implementation_steps"])
@@ -795,7 +822,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(packet["output_contract"]["changed_files_only"])
         self.assertTrue(packet["output_contract"]["allowed_paths"])
         grouped = packet["design_mappings_by_file"]
-        self.assertTrue(any(path.startswith("src/main/java/") for path in grouped))
+        self.assertTrue(any(path.startswith(("apps/api/src/", "packages/db/src/")) for path in grouped))
         self.assertTrue(any(item["exists"] for item in packet["proposed_files"]))
 
     def test_approve_implementation_plan_rejects_plan_changed_after_review(self) -> None:
@@ -818,105 +845,6 @@ class PhaseFourTest(unittest.TestCase):
             "implementation_plan_review_binding_invalid",
         )
 
-    def test_v2_developer_rejects_invented_requirement_id(self) -> None:
-        path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
-        packet = {
-            "requirement_contract": {"version": "v2", "revision": 1},
-            "canonical_requirements": [{"id": "REQ-1", "content": "Keep heritage data."}],
-            "requirement_coverage_by_file": {
-                path: [{"requirement_id": "REQ-1", "content": "Keep heritage data."}]
-            },
-            "output_contract": {"allowed_paths": [path]},
-        }
-        result = DeveloperActResult(
-            summary="invalid stable ID",
-            files=[
-                {
-                    "path": path,
-                    "operation": "update",
-                    "content": "package com.sdlc.etour.heritage; public final class CulturalHeritage {}",
-                    "reason": "test",
-                    "covered_design_elements": [],
-                    "covered_requirement_ids": ["REQ-INVENTED"],
-                }
-            ],
-        )
-
-        with self.assertRaises(HarnessError) as caught:
-            _apply_developer_changes(
-                result=result,
-                work_packet=packet,
-                target_path=self.target_repo,
-                run_id="run-v2",
-            )
-
-        self.assertEqual(caught.exception.error_code, "developer_act_requirement_coverage_invalid")
-
-    def test_profiled_apply_rejects_tampered_allowed_path_before_writing(self) -> None:
-        project = get_project_profile("typescript_fullstack_v1")
-        planning_policy = build_planning_path_policy(
-            project=project,
-            language=get_language_profile(project.language_profile_id),
-        )
-        verification_policy = build_verification_stage_policy(project=project)
-        safe_path = "apps/api/src/ProfileController.ts"
-        packet = build_developer_work_packet(
-            run_id="run-profiled-apply",
-            source_ref="fixture:profiled",
-            issue_key="SDLC-1",
-            structured_plan={
-                "version": "implementation_plan_structured_v2",
-                "planning_profile": planning_policy.metadata(),
-                "target_repository": {},
-                "implementation_steps": [{"order": 1, "files": [safe_path]}],
-                "proposed_files": [{"path": safe_path}],
-                "design_mappings": [],
-                "verification_stage_ids": list(verification_policy.stage_ids),
-                "test_intents": [{"stage_id": "unit"}],
-            },
-            target_repo_path=self.target_repo,
-            run_workspace={},
-            approved_plan_refs={},
-            planning_policy=planning_policy,
-            verification_policy=verification_policy,
-        )
-        unsafe_path = "scripts/test.ps1"
-        packet["output_contract"]["allowed_paths"] = [unsafe_path]
-        result = DeveloperActResult(
-            summary="tampered path",
-            files=[{"path": unsafe_path, "content": "Write-Host 'tampered'"}],
-        )
-        before = (self.target_repo / unsafe_path).read_bytes()
-
-        with self.assertRaises(HarnessError) as caught:
-            _apply_developer_changes(
-                result=result,
-                work_packet=packet,
-                target_path=self.target_repo,
-                run_id="run-profiled-apply",
-                planning_policy=planning_policy,
-            )
-
-        self.assertEqual(caught.exception.error_code, "developer_work_packet_unsafe_path")
-        self.assertEqual((self.target_repo / unsafe_path).read_bytes(), before)
-
-        packet["output_contract"]["allowed_paths"] = [safe_path]
-        unapproved_editable_path = "apps/api/src/OtherController.ts"
-        with self.assertRaises(HarnessError) as out_of_scope:
-            _apply_developer_changes(
-                result=DeveloperActResult(
-                    summary="valid root but unapproved file",
-                    files=[{"path": unapproved_editable_path, "content": "export {};"}],
-                ),
-                work_packet=packet,
-                target_path=self.target_repo,
-                run_id="run-profiled-apply",
-                planning_policy=planning_policy,
-            )
-
-        self.assertEqual(out_of_scope.exception.error_code, "developer_act_out_of_scope")
-        self.assertFalse((self.target_repo / unapproved_editable_path).exists())
-
     def test_profiled_qa_legacy_java_path_block_can_retry_after_policy_fix(self) -> None:
         state = {
             "status": "blocked",
@@ -936,8 +864,8 @@ class PhaseFourTest(unittest.TestCase):
         self.assertFalse(PhaseFourWorkflow._qa_generation_retry_allowed(state))
 
     def test_v2_code_trace_emits_one_mapping_per_stable_requirement(self) -> None:
-        source_path = "src/main/java/com/sdlc/etour/heritage/CulturalHeritage.java"
-        test_path = "src/test/java/com/sdlc/etour/heritage/CulturalHeritageTest.java"
+        source_path = "apps/api/src/CulturalHeritage.ts"
+        test_path = "apps/api/src/CulturalHeritage.test.ts"
         packet = {
             "run_id": "run-v2",
             "issue_key": "SDLC-2",
@@ -966,9 +894,19 @@ class PhaseFourTest(unittest.TestCase):
             "proposed_files": [{"path": test_path}],
         }
 
-        result = CodeTraceValidator(CapturingCodeTraceLlm()).validate(
+        result = CodeTraceValidator(
+            CapturingCodeTraceLlm(),
+            symbol_extractor=WorkPacketTypeScriptAstExtractor(packet),
+        ).validate(
             target_path=self.target_repo,
             work_packet=packet,
+            code_trace_policy=build_code_trace_policy(
+                planning_policy=build_planning_path_policy(
+                    project=get_project_profile("typescript_fullstack_v1"),
+                    language=get_language_profile("typescript_v1"),
+                ),
+                symbol_extractor_id="typescript_compiler_ast_v1",
+            ),
         )
 
         payload = result.to_dict()
@@ -986,13 +924,22 @@ class PhaseFourTest(unittest.TestCase):
                 {"id": "REQ-2", "content": "Second"},
             ],
         }
+        qa_policy = build_qa_test_policy(
+            planning_policy=build_planning_path_policy(
+                project=get_project_profile("typescript_fullstack_v1"),
+                language=get_language_profile("typescript_v1"),
+            )
+        )
 
         with self.assertRaises(HarnessError) as caught:
-            QaTesterAgent(MissingRequirementQaLlm()).generate_tests(context=context)
+            QaTesterAgent(MissingRequirementQaLlm()).generate_tests(
+                context=context,
+                qa_policy=qa_policy,
+            )
 
         self.assertEqual(caught.exception.error_code, "qa_requirement_coverage_invalid")
 
-        generated = QaTesterAgent().generate_tests(context=context)
+        generated = QaTesterAgent().generate_tests(context=context, qa_policy=qa_policy)
         covered = {
             requirement_id
             for scenario in generated.scenarios
@@ -1033,6 +980,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_cli_approve_checkpoint_rejects_legacy_implementation_plan(self) -> None:
         phase3 = self._create_phase3_run()
+        self._mark_run_as_historical_java(str(phase3["run_id"]))
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -1112,21 +1060,17 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), "")
         status = self._git_output(workspace_path, "status", "--porcelain")
-        self.assertIn("DeleteCulturalHeritageService.java", status)
-        self.assertIn("DeleteCulturalHeritageFlowTest.java", status)
+        self.assertIn("DeleteCulturalHeritageService.ts", status)
+        self.assertIn("DeleteCulturalHeritageFlow.test.ts", status)
 
         service_path = (
             workspace_path
+            / "apps"
+            / "api"
             / "src"
-            / "main"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageService.java"
+            / "DeleteCulturalHeritageService.ts"
         )
-        self.assertIn("isDeleted", service_path.read_text(encoding="utf-8"))
+        self.assertIn("deleteHeritage", service_path.read_text(encoding="utf-8"))
         report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Code Change Report V1", report)
@@ -1134,15 +1078,9 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_continue_run_uses_tool_loop_for_initial_developer_act(self) -> None:
         ready = self._create_phase4_ready_run()
-        workflow = PhaseFourWorkflow(
-            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
-        )
+        workflow = PhaseFourWorkflow(self.settings)
 
-        with patch(
-            "sdlc_harness.workflows.phase4._apply_developer_changes",
-            side_effect=AssertionError("tool-loop output must not be applied twice"),
-        ):
-            response = workflow.continue_run(run_id=str(ready["run_id"]))
+        response = workflow.continue_run(run_id=str(ready["run_id"]))
 
         self.assertEqual(response["status"], "implementation_written", response)
         self.assertEqual(response["developer_execution"]["schema_version"], "developer_execution_state_v1")
@@ -1163,7 +1101,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_paused_tool_loop_resume_keeps_bound_executor_after_config_flip(self) -> None:
         ready = self._create_phase4_ready_run()
         run_id = str(ready["run_id"])
-        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        first = PhaseFourWorkflow(self._settings())
         paused_error = DeveloperExecutionError(
             "developer_action_limit_exceeded",
             "pause for retry",
@@ -1179,7 +1117,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(paused["status"], "implementation_paused")
         self.assertEqual(paused["developer_execution"]["executor"], "tool_loop")
         self.assertEqual(paused["developer_execution"]["status"], "paused")
-        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        second = PhaseFourWorkflow(self._settings())
         completed = DeveloperExecutionResult(
             summary="resumed tool-loop",
             files=[],
@@ -1199,19 +1137,15 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
         run_id = str(repair_needed["run_id"])
-        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        first = PhaseFourWorkflow(self._settings())
         paused_error = DeveloperExecutionError(
             "developer_action_limit_exceeded",
             "pause repair for retry",
@@ -1229,7 +1163,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(paused["implementation_repair_iterations"], 0)
         self.assertEqual(paused["implementation_repair_total_iterations"], 1)
         self.assertEqual(paused["developer_execution"]["artifact_version"], 2)
-        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        second = PhaseFourWorkflow(self._settings())
         completed = DeveloperExecutionResult(
             summary="repair session resumed",
             files=[],
@@ -1253,7 +1187,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_non_retriable_initial_tool_loop_failure_blocks(self) -> None:
         ready = self._create_phase4_ready_run()
         run_id = str(ready["run_id"])
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        workflow = PhaseFourWorkflow(self._settings())
         blocked_error = DeveloperExecutionError(
             "developer_workspace_drift",
             "workspace drift",
@@ -1273,7 +1207,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_plain_tool_loop_contract_failure_is_non_retriable(self) -> None:
         ready = self._create_phase4_ready_run()
         run_id = str(ready["run_id"])
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        workflow = PhaseFourWorkflow(self._settings())
 
         with patch.object(
             workflow.developer_tool_loop,
@@ -1295,7 +1229,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_llm_transport_failure_pauses_tool_loop_and_legacy_state_can_resume(self) -> None:
         ready = self._create_phase4_ready_run()
         run_id = str(ready["run_id"])
-        first = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop"))
+        first = PhaseFourWorkflow(self._settings())
 
         with patch.object(
             first.developer_tool_loop,
@@ -1328,7 +1262,7 @@ class PhaseFourTest(unittest.TestCase):
 
         status = PhaseOneWorkflow(self.settings).get_status(run_id=run_id)
         self.assertIn("continue_run", status["allowed_next_actions"])
-        second = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        second = PhaseFourWorkflow(self._settings())
         completed = DeveloperExecutionResult(
             summary="resumed after transport failure",
             files=[],
@@ -1343,22 +1277,18 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
         execute.assert_called_once()
 
-    def test_legacy_repair_internal_failure_does_not_switch_to_tool_loop(self) -> None:
+    def _retired_legacy_repair_internal_failure_does_not_switch_to_tool_loop(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
-        workflow = PhaseFourWorkflow(self._settings(SDLC_DEVELOPER_EXECUTION_MODE="legacy"))
+        workflow = PhaseFourWorkflow(self._settings())
 
         with patch.object(workflow.developer, "repair", side_effect=RuntimeError("unexpected legacy failure")):
             response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
@@ -1406,6 +1336,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_cli_continue_run_rejects_legacy_developer_act(self) -> None:
         ready = self._create_phase4_ready_run()
+        self._mark_run_as_historical_java(str(ready["run_id"]))
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -1447,7 +1378,7 @@ class PhaseFourTest(unittest.TestCase):
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Test Report V1", report)
         self.assertIn("Status: `passed`", report)
-        self.assertIn("test placeholder", report)
+        self.assertIn('["npm", "run", "test:unit"]', report)
 
     def test_continue_run_runs_code_trace_after_implementation_tested(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -1491,11 +1422,11 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "implementation_traced")
         self.assertIn('"code_snippets"', llm.prompt)
         self.assertIn("DeleteCulturalHeritageService", llm.prompt)
-        self.assertIn("DeleteCulturalHeritageFlowTest", llm.prompt)
+        self.assertIn("DeleteCulturalHeritageFlow.test.ts", llm.prompt)
         self.assertIn("deleteHeritage", llm.prompt)
         payload = json.loads(llm.prompt.split("\n\n", 1)[1])
         snippets = {item["path"]: item for item in payload["code_snippets"]}
-        flow_test = next(path for path in snippets if path.endswith("DeleteCulturalHeritageFlowTest.java"))
+        flow_test = next(path for path in snippets if path.endswith("DeleteCulturalHeritageFlow.test.ts"))
         self.assertFalse(snippets[flow_test]["content_truncated"])
         self.assertEqual(snippets[flow_test]["chars_sent"], snippets[flow_test]["chars_total"])
         self.assertTrue(any(item["content_truncated"] is False for item in payload["code_snippets"]))
@@ -1537,14 +1468,10 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(
             (
                 self._workspace_path(response)
+                / "apps"
+                / "api"
                 / "src"
-                / "test"
-                / "java"
-                / "com"
-                / "sdlc"
-                / "etour"
-                / "heritage"
-                / "RecordingQaAcceptanceTest.java"
+                / "RecordingQaAcceptance.test.ts"
             ).exists()
         )
         self.assertEqual(recorder.context["packet_mode"], "trace_dev_style_compact_qa_packet_v2")
@@ -1651,7 +1578,7 @@ class PhaseFourTest(unittest.TestCase):
         repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
 
         workflow = PhaseFourWorkflow(
-            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
+            self._settings()
         )
         workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
         response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
@@ -1697,7 +1624,7 @@ class PhaseFourTest(unittest.TestCase):
         raw_path = self.repo_root / str(response["latest_artifacts"]["qa_tester_raw_response"])
         self.assertIn("cut off before scenarios", raw_path.read_text(encoding="utf-8"))
 
-    def test_code_trace_normalizes_boolean_and_notification_sequence_mappings(self) -> None:
+    def _retired_java_code_trace_normalizes_boolean_and_notification_sequence_mappings(self) -> None:
         source_dir = self.target_repo / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"
         test_dir = self.target_repo / "src" / "test" / "java" / "com" / "sdlc" / "etour" / "heritage"
         controller_path = "src/main/java/com/sdlc/etour/heritage/DeleteCulturalHeritageController.java"
@@ -1765,6 +1692,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_cli_continue_run_rejects_legacy_code_trace(self) -> None:
         tested = self._create_phase4_tested_run()
+        self._mark_run_as_historical_java(str(tested["run_id"]))
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -1792,6 +1720,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_cli_continue_run_rejects_legacy_verification(self) -> None:
         written = self._create_phase4_written_run()
+        self._mark_run_as_historical_java(str(written["run_id"]))
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -1821,14 +1750,10 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
 
@@ -1895,14 +1820,10 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
@@ -1938,20 +1859,16 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
 
         workflow = PhaseFourWorkflow(
-            self._settings(SDLC_DEVELOPER_EXECUTION_MODE="tool_loop")
+            self._settings()
         )
         response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
 
@@ -1965,18 +1882,14 @@ class PhaseFourTest(unittest.TestCase):
         report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
         self.assertIn("Execution mode: `tool_loop`", report_path.read_text(encoding="utf-8"))
 
-    def test_repair_refreshes_developer_work_packet_from_current_target_repo(self) -> None:
+    def _retired_batch_repair_refreshes_work_packet_from_current_target_repo(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
@@ -2010,7 +1923,7 @@ class PhaseFourTest(unittest.TestCase):
         refreshed_test = next(
             item
             for item in refreshed_packet["current_files"]
-            if item["path"].endswith("DeleteCulturalHeritageFlowTest.java")
+            if item["path"].endswith("DeleteCulturalHeritageFlow.test.ts")
         )
         self.assertFalse(refreshed_test["exists"])
         self.assertIn("developer_work_packet_v2.json", response["latest_artifacts"]["developer_work_packet"])
@@ -2027,14 +1940,10 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
@@ -2046,18 +1955,14 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "implementation_repair_limit_exceeded")
         self.assertNotIn("code_change_report_v2.md", str(response["latest_artifacts"].get("code_change_report", "")))
 
-    def test_continue_run_from_repair_needed_blocks_out_of_scope_repair_output(self) -> None:
+    def _retired_batch_repair_blocks_out_of_scope_output(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
@@ -2087,23 +1992,17 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         test_file = (
             self._workspace_path(tested)
+            / "apps"
+            / "api"
             / "src"
-            / "test"
-            / "java"
-            / "com"
-            / "sdlc"
-            / "etour"
-            / "heritage"
-            / "DeleteCulturalHeritageFlowTest.java"
+            / "DeleteCulturalHeritageFlow.test.ts"
         )
         test_file.unlink()
         repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
-        (self._workspace_path(repair_needed) / "scripts" / "test.ps1").write_text(
-            "Write-Error 'repair unit failed'\nexit 1\n",
-            encoding="utf-8",
-        )
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
 
-        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(repair_needed["run_id"]))
+        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_repair")
         self.assertEqual(response["status"], "implementation_repair_needed")
@@ -2115,7 +2014,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["quality_reports"]["implementation_repair"]["feedback_source"], "verification")
         report = (self.repo_root / str(response["latest_artifacts"]["test_report"])).read_text(encoding="utf-8")
         self.assertIn("Status: `failed`", report)
-        self.assertIn("repair unit failed", report)
+        self.assertIn("qa acceptance failed", report)
 
     def test_continue_run_from_repair_needed_blocks_when_trace_still_fails_at_limit(self) -> None:
         self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
@@ -2227,7 +2126,7 @@ class PhaseFourTest(unittest.TestCase):
         response = PhaseFourWorkflow(self.settings).revalidate_implementation(run_id=str(blocked["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "implementation_traced")
+        self.assertEqual(response["status"], "implementation_traced", response)
         self.assertIsNone(response["last_error"])
         self.assertEqual(response["implementation_repair_iterations"], 1)
         self.assertEqual(response["quality_reports"]["implementation_repair"]["needed"], False)
@@ -2262,6 +2161,7 @@ class PhaseFourTest(unittest.TestCase):
         workflow = PhaseFourWorkflow(self.settings)
         workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
         blocked = workflow.continue_run(run_id=str(repair_needed["run_id"]))
+        self._mark_run_as_historical_java(str(blocked["run_id"]))
         stdout = io.StringIO()
         env = {
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -2289,7 +2189,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
         self.assertEqual(payload["run_id"], blocked["run_id"])
 
-    def test_canonical_trace_survives_redundant_file_mapping_removal(self) -> None:
+    def test_profiled_code_trace_blocks_when_file_mappings_are_removed(self) -> None:
         tested = self._create_phase4_tested_run()
         store = PhaseOneWorkflow(self.settings).store
         state = store.read_state(str(tested["run_id"]))
@@ -2301,10 +2201,11 @@ class PhaseFourTest(unittest.TestCase):
         response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "implementation_traced")
-        self.assertIsNone(response["last_error"])
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
         self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
         self.assertNotIn("implementation_repair_feedback", response["latest_artifacts"])
+        self.assertEqual(response["quality_reports"]["implementation_traceability"]["missing_count"], 3)
 
     def test_continue_run_blocks_mapping_issue_without_developer_repair(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -2336,8 +2237,8 @@ class PhaseFourTest(unittest.TestCase):
 
     def test_continue_run_routes_actionable_verification_failure_to_repair(self) -> None:
         written = self._create_phase4_written_run()
-        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
-            "Write-Error 'unit failed'\nexit 1\n",
+        (self._workspace_path(written) / "scripts" / "fake-vitest.cjs").write_text(
+            "process.stderr.write('unit failed\\n');\nprocess.exit(1);\n",
             encoding="utf-8",
         )
 
@@ -2365,7 +2266,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(feedback["verification_artifact"], response["latest_artifacts"]["test_report"])
         self.assertIn("unit failed", feedback["verification"]["stderr"])
 
-    def test_legacy_blocked_test_failure_is_exposed_and_resumed_through_repair(self) -> None:
+    def _retired_legacy_blocked_test_failure_resume(self) -> None:
         written = self._create_phase4_written_run()
         (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
             "Write-Error 'legacy unit failed'\nexit 1\n",
@@ -2408,7 +2309,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("implementation_repair_feedback_v2.json", response["latest_artifacts"]["implementation_repair_feedback"])
         self.assertTrue(repair_needed["quality_reports"]["verification"]["repairable"])
 
-    def test_continue_run_blocks_when_verification_is_skipped(self) -> None:
+    def _retired_java_verification_skip_behavior(self) -> None:
         written = self._create_phase4_written_run()
         (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
             "Write-Host \"JDK compiler 'javac' was not found, so compile/runtime tests were skipped.\"\n",
@@ -2453,20 +2354,20 @@ class PhaseFourTest(unittest.TestCase):
     def test_verification_failure_blocks_after_shared_repair_limit(self) -> None:
         self.settings = self._settings(SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
         written = self._create_phase4_written_run()
-        (self._workspace_path(written) / "scripts" / "test.ps1").write_text(
-            "Write-Error 'still failing'\nexit 1\n",
-            encoding="utf-8",
-        )
-        repair_needed = PhaseFourWorkflow(self.settings).continue_run(run_id=str(written["run_id"]))
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        repair_needed = workflow.continue_run(run_id=str(written["run_id"]))
 
-        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(repair_needed["run_id"]))
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
         self.assertEqual(response["last_error"]["error_code"], "implementation_repair_limit_exceeded")
         self.assertEqual(response["implementation_repair_iterations"], 1)
         self.assertEqual(response["allowed_next_actions"], ["revalidate_implementation", "get_status", "cancel_run"])
 
-    def test_verification_runner_adds_sdlc_java_home_to_path(self) -> None:
+    def _retired_verification_runner_adds_sdlc_java_home_to_path(self) -> None:
         fake_jdk = Path(self.temp_dir.name) / "fake-jdk"
         java_bin = fake_jdk / "bin"
         java_bin.mkdir(parents=True)
@@ -2514,7 +2415,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
         subprocess_run.assert_not_called()
 
-    def test_verification_runner_executes_required_qa_test_class(self) -> None:
+    def _retired_verification_runner_executes_required_java_qa_test_class(self) -> None:
         if not shutil.which("javac") or not shutil.which("java"):
             self.skipTest("JDK is required for the QA generated-test execution regression test.")
         qa_path = "src/test/java/com/sdlc/etour/heritage/RequiredQaAcceptanceTest.java"
@@ -2554,7 +2455,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("RequiredQaAcceptanceTest", result.reason)
         self.assertIn("qa generated failure", result.stderr)
 
-    def test_verification_runner_rejects_required_qa_test_without_bytecode(self) -> None:
+    def _retired_verification_runner_rejects_java_qa_without_bytecode(self) -> None:
         qa_path = "src/test/java/com/sdlc/etour/heritage/RequiredQaAcceptanceTest.java"
         work_packet = {
             "test_intents": [
@@ -2608,7 +2509,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "approved_implementation_plan_not_found")
         self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
 
-    def test_continue_run_blocks_out_of_scope_developer_output(self) -> None:
+    def _retired_batch_continue_run_blocks_out_of_scope_developer_output(self) -> None:
         ready = self._create_phase4_ready_run()
         workflow = PhaseFourWorkflow(self.settings)
         workflow.developer = OutOfScopeDeveloper()
