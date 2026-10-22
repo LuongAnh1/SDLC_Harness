@@ -204,17 +204,33 @@ backend và database.
 Tài liệu nguồn nằm tại
 [`docs/typescript-fullstack-upgrade/`](typescript-fullstack-upgrade/README.md).
 Hướng đã chốt dùng repo mới `SDLC_Target_TypeScript`, React/Vite, Fastify,
-PostgreSQL/Prisma, Vitest và Playwright. A1.1 đã thêm profile contract/registry
-thuần; A1.2a thêm selector config fail-closed; A1.2b thêm run snapshot,
-downstream settings binding và status metadata tối thiểu. Mặc định vẫn rỗng nên
-Java tiếp tục là execution target của baseline đang chạy.
+PostgreSQL/Prisma, Vitest và Playwright. Profile contract, target bootstrap,
+controlled live smoke, default TypeScript cutover và Java runtime cleanup đã
+hoàn tất. Run mới mặc định dùng `typescript_fullstack_v1` cùng
+Developer tool-loop; historical Java run chỉ còn read/audit, sync artifact đã
+có và cleanup workspace.
 
 Roadmap tương lai chia hai chặng:
 
 1. TypeScript profile foundation và target bootstrap;
 2. full-stack design/planning/verification/trace cho một vertical feature.
 
-Hai chặng chỉ bắt đầu sau khi docs-first gate trong bộ tài liệu mới được review.
+Chặng A đã hoàn tất; Chặng B chưa bắt đầu.
+
+## Hướng Song Song - Role-specific Agent Loops (Docs-first)
+
+Repo có roadmap độc lập tại
+[`docs/role-specific-agent-loop-upgrade/`](role-specific-agent-loop-upgrade/README.md)
+để phân biệt one-shot generation, workflow repair loop và model-tool loop, rồi
+nâng cấp quyền/tool/completion/failure routing theo từng vai trò Requirement,
+Designer, Planner/Developer, QA và Validator.
+
+Roadmap này không phải Chặng C của TypeScript full-stack và không thay thế Phase
+5/6. TypeScript full-stack là acceptance target hiện tại; dependency được nối rõ
+với B1 Design Bundle, B2 Component-aware Plan, B3 Multi-stage Verification, B4
+Browser QA và B5 Cross-layer Trace. Gate 0 của roadmap agent-loop đã được duyệt
+để ghi nhận hướng và boundary. Roadmap vẫn đang park; Chặng A hoàn
+tất không tự động xếp lịch hoặc tạo kế hoạch triển khai chi tiết cho L1.1.
 
 ## Phase 5 - Sửa Tại Checkpoint
 

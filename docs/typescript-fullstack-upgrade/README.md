@@ -10,8 +10,8 @@ web/API/contracts, Prisma/PostgreSQL/Compose, Playwright Chromium smoke chạy
 thật; canonical private remote, GitHub-hosted CI và protected bootstrap audit
 đều đã hoàn tất. Controlled live Harness workflow đã tạo production TypeScript,
 Vitest acceptance test và Draft PR có hosted CI xanh. Từ 2026-10-22, run mới mặc
-định dùng profile TypeScript, target TypeScript và Developer tool-loop; Java
-runtime-only cleanup vẫn là lát cuối còn lại của Chặng A.
+định dùng profile TypeScript, target TypeScript và Developer tool-loop. Java
+runtime-only cleanup đã hoàn tất; Chặng A đã đóng.
 
 ## Mục Tiêu
 
@@ -60,6 +60,9 @@ legacy chỉ còn đường rollback/audit có giới hạn trước lát cleanu
   triển khai.
 - [Test Performance Optimization](test-performance-optimization.md): baseline,
   ngân sách và guardrail cho việc giảm thời gian regression suite.
+- [Role-specific Agent Loop Upgrade](../role-specific-agent-loop-upgrade/README.md):
+  roadmap độc lập cho capability/tool loop của Requirement, Designer,
+  Planner/Developer, QA và Validator; tài liệu này chỉ giữ dependency với B1-B5.
 
 ## Docs-first Gate
 
@@ -88,5 +91,5 @@ profile-aware discovery và TypeScript Compiler AST bridge fail-closed cho exact
 symbol/signature evidence. Plan V3 và work packet V2 bind contract chữ ký được
 human duyệt; comparator đã smoke thật trên target pin TypeScript 6.0.3.
 React/Fastify/Prisma/PostgreSQL/Playwright/CI, canonical remote và controlled
-live workflow đều đã pass. Phần còn lại của Chặng A là xóa Java runtime-only
-behavior/migration flag nhưng vẫn giữ historical evidence/read path có nhãn.
+live workflow đều đã pass. Java runtime-only behavior và migration flag đã
+bị xóa; historical evidence/read-only lifecycle tiếp tục được giữ có nhãn.
