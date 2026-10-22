@@ -18,6 +18,10 @@ from sdlc_harness.interfaces.http import ApiServerConfig, create_server
 
 class ConfigApiTests(unittest.TestCase):
     def setUp(self) -> None:
+        clean_environment = dict(os.environ)
+        clean_environment.pop("SDLC_PROJECT_PROFILE", None)
+        self.environment = patch.dict(os.environ, clean_environment, clear=True)
+        self.environment.start()
         self.temp_dir = TemporaryDirectory()
         self.root = Path(self.temp_dir.name) / "repo"
         self.root.mkdir()
@@ -42,6 +46,7 @@ class ConfigApiTests(unittest.TestCase):
         self.server.server_close()
         self.thread.join(timeout=3)
         self.temp_dir.cleanup()
+        self.environment.stop()
 
     def request(
         self,
@@ -77,8 +82,22 @@ class ConfigApiTests(unittest.TestCase):
         profile_field = next(
             field for field in target_section["fields"] if field["name"] == "SDLC_PROJECT_PROFILE"
         )
-        self.assertEqual(profile_field["value"], "")
+        self.assertEqual(profile_field["value"], "typescript_fullstack_v1")
+        self.assertEqual(profile_field["source"], "default")
         self.assertEqual(profile_field["options"], ["", "typescript_fullstack_v1"])
+        path_field = next(
+            field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_PATH"
+        )
+        remote_field = next(
+            field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_REMOTE"
+        )
+        self.assertEqual(path_field["value"], "../SDLC_Target_TypeScript")
+        self.assertEqual(path_field["source"], "default")
+        self.assertEqual(
+            remote_field["value"],
+            "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git",
+        )
+        self.assertEqual(remote_field["source"], "default")
 
         health_status, health = self.request("/api/v1/health")
         self.assertEqual(health_status, 200)
@@ -152,7 +171,10 @@ class ConfigApiTests(unittest.TestCase):
             one["mutation"]["changed_keys"],
             ["SDLC_DESIGN_REPAIR_LIMIT", "SDLC_PROJECT_PROFILE"],
         )
-        self.assertIsNone(load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id)
+        self.assertEqual(
+            load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id,
+            "typescript_fullstack_v1",
+        )
         status, section = self.request(
             "/api/v1/config/reset",
             method="POST",

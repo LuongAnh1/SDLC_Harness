@@ -7,7 +7,9 @@
 > còn phục vụ read/audit/sync-existing/cleanup. A2, A3.1-A3.4b, target bootstrap
 > local A4.1a cùng toàn bộ A4.1b web/API, Prisma/PostgreSQL, Playwright, CI và
 > protected bootstrap audit đã hoàn tất; canonical private remote cùng hosted
-> CI đều pass. Config cutover và các behavior Chặng B vẫn chưa hoàn tất.
+> CI đều pass. Controlled live workflow và config cutover sang TypeScript mặc
+> định đã hoàn tất; Java runtime-only cleanup và các behavior Chặng B chưa hoàn
+> tất.
 
 ## Nguyên Tắc
 

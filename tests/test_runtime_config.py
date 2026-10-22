@@ -55,57 +55,80 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(overridden.llm_model, "invocation-model")
         self.assertEqual(settings.runtime_config_path, self.config_path.resolve())
 
-    def test_project_profile_defaults_off_and_uses_normal_config_precedence(self) -> None:
-        default = load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertIsNone(default.project_profile_id)
+    def test_project_profile_defaults_to_typescript_and_uses_normal_config_precedence(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            default = load_settings(root=self.root, runtime_root=self.runtime_root)
+            self.assertEqual(default.project_profile_id, "typescript_fullstack_v1")
 
-        (self.root / ".env").write_text(
-            "SDLC_PROJECT_PROFILE=typescript_fullstack_v1\n",
-            encoding="utf-8",
-        )
-        from_dotenv = load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertEqual(from_dotenv.project_profile_id, "typescript_fullstack_v1")
-
-        RuntimeConfigStore(self.config_path).update({"SDLC_PROJECT_PROFILE": ""})
-        from_runtime = load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertIsNone(from_runtime.project_profile_id)
-
-        with patch.dict(os.environ, {"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"}):
-            from_os = load_settings(root=self.root, runtime_root=self.runtime_root)
-            overridden = load_settings(
-                root=self.root,
-                runtime_root=self.runtime_root,
-                overrides={"SDLC_PROJECT_PROFILE": ""},
+            (self.root / ".env").write_text(
+                "SDLC_PROJECT_PROFILE=\n",
+                encoding="utf-8",
             )
-        self.assertEqual(from_os.project_profile_id, "typescript_fullstack_v1")
-        self.assertIsNone(overridden.project_profile_id)
+            from_dotenv = load_settings(root=self.root, runtime_root=self.runtime_root)
+            self.assertIsNone(from_dotenv.project_profile_id)
+
+            RuntimeConfigStore(self.config_path).update(
+                {"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"}
+            )
+            from_runtime = load_settings(root=self.root, runtime_root=self.runtime_root)
+            self.assertEqual(from_runtime.project_profile_id, "typescript_fullstack_v1")
+
+            with patch.dict(os.environ, {"SDLC_PROJECT_PROFILE": ""}):
+                from_os = load_settings(root=self.root, runtime_root=self.runtime_root)
+                overridden = load_settings(
+                    root=self.root,
+                    runtime_root=self.runtime_root,
+                    overrides={"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"},
+                )
+            self.assertIsNone(from_os.project_profile_id)
+            self.assertEqual(overridden.project_profile_id, "typescript_fullstack_v1")
+
+    def test_cutover_defaults_select_typescript_target_and_tool_loop(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            settings = load_settings(root=self.root, runtime_root=self.runtime_root)
+
+        target = (self.root.parent / "SDLC_Target_TypeScript").resolve()
+        self.assertEqual(settings.project_profile_id, "typescript_fullstack_v1")
+        self.assertEqual(settings.developer_execution_mode, "tool_loop")
+        self.assertEqual(settings.target_repo_path, target)
+        self.assertEqual(
+            settings.target_worktree_root,
+            target.parent / "SDLC_Target_TypeScript-worktrees",
+        )
+        self.assertEqual(
+            settings.target_repo_remote,
+            "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git",
+        )
+        self.assertEqual(settings.llm_mode, "fake")
+        self.assertEqual(settings.sync_mode, "mock")
 
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
-        env_path = self.root / ".env"
-        env_path.write_text("SDLC_PROJECT_PROFILE=unknown_profile\n", encoding="utf-8")
-        with self.assertRaises(HarnessError) as dotenv_error:
-            load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertEqual(dotenv_error.exception.error_code, "project_profile_not_supported")
-
-        env_path.write_text("", encoding="utf-8")
-        RuntimeConfigStore(self.config_path).update({"SDLC_PROJECT_PROFILE": "unknown_profile"})
-        with self.assertRaises(HarnessError) as runtime_error:
-            load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertEqual(runtime_error.exception.error_code, "config_corrupted")
-        self.config_path.unlink()
-
-        with patch.dict(os.environ, {"SDLC_PROJECT_PROFILE": "unknown_profile"}):
-            with self.assertRaises(HarnessError) as os_error:
+        with patch.dict(os.environ, {}, clear=True):
+            env_path = self.root / ".env"
+            env_path.write_text("SDLC_PROJECT_PROFILE=unknown_profile\n", encoding="utf-8")
+            with self.assertRaises(HarnessError) as dotenv_error:
                 load_settings(root=self.root, runtime_root=self.runtime_root)
-        self.assertEqual(os_error.exception.error_code, "project_profile_not_supported")
+            self.assertEqual(dotenv_error.exception.error_code, "project_profile_not_supported")
 
-        with self.assertRaises(HarnessError) as override_error:
-            load_settings(
-                root=self.root,
-                runtime_root=self.runtime_root,
-                overrides={"SDLC_PROJECT_PROFILE": "unknown_profile"},
-            )
-        self.assertEqual(override_error.exception.error_code, "project_profile_not_supported")
+            env_path.write_text("", encoding="utf-8")
+            RuntimeConfigStore(self.config_path).update({"SDLC_PROJECT_PROFILE": "unknown_profile"})
+            with self.assertRaises(HarnessError) as runtime_error:
+                load_settings(root=self.root, runtime_root=self.runtime_root)
+            self.assertEqual(runtime_error.exception.error_code, "config_corrupted")
+            self.config_path.unlink()
+
+            with patch.dict(os.environ, {"SDLC_PROJECT_PROFILE": "unknown_profile"}):
+                with self.assertRaises(HarnessError) as os_error:
+                    load_settings(root=self.root, runtime_root=self.runtime_root)
+            self.assertEqual(os_error.exception.error_code, "project_profile_not_supported")
+
+            with self.assertRaises(HarnessError) as override_error:
+                load_settings(
+                    root=self.root,
+                    runtime_root=self.runtime_root,
+                    overrides={"SDLC_PROJECT_PROFILE": "unknown_profile"},
+                )
+            self.assertEqual(override_error.exception.error_code, "project_profile_not_supported")
 
     def test_update_is_atomic_and_secret_blank_or_mask_keeps_current_value(self) -> None:
         first = self.service.update(
@@ -144,29 +167,33 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertTrue(queue["restart_required"])
 
     def test_project_profile_schema_update_and_reset_are_registry_bounded(self) -> None:
-        profile = field_by_name(self.service.snapshot(), "SDLC_PROJECT_PROFILE")
-        self.assertEqual(profile["value"], "")
-        self.assertEqual(profile["options"], ["", "typescript_fullstack_v1"])
-        self.assertFalse(profile["restart_required"])
+        with patch.dict(os.environ, {}, clear=True):
+            profile = field_by_name(self.service.snapshot(), "SDLC_PROJECT_PROFILE")
+            self.assertEqual(profile["value"], "typescript_fullstack_v1")
+            self.assertEqual(profile["options"], ["", "typescript_fullstack_v1"])
+            self.assertFalse(profile["restart_required"])
 
-        updated = self.service.update({"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"})
-        self.assertEqual(updated["mutation"]["changed_keys"], ["SDLC_PROJECT_PROFILE"])
-        self.assertEqual(
-            load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id,
-            "typescript_fullstack_v1",
-        )
+            updated = self.service.update({"SDLC_PROJECT_PROFILE": "typescript_fullstack_v1"})
+            self.assertEqual(updated["mutation"]["changed_keys"], ["SDLC_PROJECT_PROFILE"])
+            self.assertEqual(
+                load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id,
+                "typescript_fullstack_v1",
+            )
 
-        with self.assertRaises(HarnessError) as invalid:
-            self.service.update({"SDLC_PROJECT_PROFILE": "unknown_profile"})
-        self.assertEqual(invalid.exception.error_code, "config_invalid")
-        self.assertEqual(
-            RuntimeConfigStore(self.config_path).read()["SDLC_PROJECT_PROFILE"],
-            "typescript_fullstack_v1",
-        )
+            with self.assertRaises(HarnessError) as invalid:
+                self.service.update({"SDLC_PROJECT_PROFILE": "unknown_profile"})
+            self.assertEqual(invalid.exception.error_code, "config_invalid")
+            self.assertEqual(
+                RuntimeConfigStore(self.config_path).read()["SDLC_PROJECT_PROFILE"],
+                "typescript_fullstack_v1",
+            )
 
-        reset = self.service.reset(keys=["SDLC_PROJECT_PROFILE"])
-        self.assertEqual(reset["mutation"]["changed_keys"], ["SDLC_PROJECT_PROFILE"])
-        self.assertIsNone(load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id)
+            reset = self.service.reset(keys=["SDLC_PROJECT_PROFILE"])
+            self.assertEqual(reset["mutation"]["changed_keys"], ["SDLC_PROJECT_PROFILE"])
+            self.assertEqual(
+                load_settings(root=self.root, runtime_root=self.runtime_root).project_profile_id,
+                "typescript_fullstack_v1",
+            )
 
     def test_os_values_are_locked_and_bootstrap_values_are_read_only(self) -> None:
         with patch.dict(os.environ, {"SDLC_DESIGN_REPAIR_LIMIT": "7"}):

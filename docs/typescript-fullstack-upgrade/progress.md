@@ -1143,6 +1143,51 @@ Execution log này chỉ ghi công việc đã thực hiện. Roadmap chưa ch�
 
 ## Mẫu Ghi Cho Các Lần Sau
 
+## 2026-10-22 - Kế Hoạch A4.3 Default TypeScript Cutover
+
+- Baseline Harness `a86f3fe`, canonical target `a440304`; target hygiene commit đã
+  push lên `origin/main` trước cutover. Live run
+  `run_20261021_032521_a7c9d772` và Draft PR #1 tiếp tục được giữ nguyên.
+- Đổi default cấu hình cho run mới sang profile `typescript_fullstack_v1`, target
+  `../SDLC_Target_TypeScript`, canonical TypeScript remote và Developer
+  `tool_loop`. Config schema, loader fallback và `.env.example` phải đồng bộ.
+- Không xóa Java runtime trong lát này. Explicit `legacy`/profile rỗng vẫn là
+  đường rollback có chủ đích; legacy run chỉ giữ read, existing-artifact sync và
+  workspace cleanup theo retirement contract hiện hành.
+- Giữ LLM mặc định `fake`, sync mặc định `mock` và worktree root suy ra từ target.
+  Không approve/merge PR #1 và không mở thêm live DeepSeek/Jira run.
+- Acceptance dự kiến: default/config API/reset/preference regression, isolated
+  fake/mock start snapshot đúng TypeScript, target manifest preflight, full
+  pytest-xdist, `compileall` và `git diff --check` đều pass; sau đó mới tích mục
+  A4 target path/remote và push Harness.
+
+## 2026-10-22 - A4.3 Default TypeScript Cutover
+
+- Canonical target commit `a440304` đã push lên `origin/main`; GitHub-hosted CI
+  run `39707870600` pass toàn bộ bootstrap, PostgreSQL, typecheck, unit và
+  Playwright. PR #1 vẫn mở ở Draft với head `fc80323`; không approve hoặc merge.
+- Config schema, loader fallback và `.env.example` nay mặc định
+  `typescript_fullstack_v1`, Developer `tool_loop`, target
+  `../SDLC_Target_TypeScript` và canonical TypeScript remote. LLM vẫn `fake`,
+  sync vẫn `mock`, worktree root vẫn được suy ra từ tên target.
+- Config API/reset trả về TypeScript default; precedence không đổi. Explicit
+  profile rỗng và `legacy` vẫn hoạt động như migration/rollback tạm thời, còn
+  run Java lịch sử tiếp tục bị retirement guard giới hạn đúng contract.
+- Regression lần đầu phát hiện test isolation cũ: hai class fixture Phase 3/4
+  dựng target Java trước function fixture nên vô tình nhận profile TypeScript,
+  tạo 114 setup error. Test setup đã được khóa rõ profile rỗng cho legacy
+  fixture; test default mới chủ động bỏ override, không làm yếu production guard.
+- Isolated fake/mock start đã lưu `profile_snapshot_v1` với
+  `typescript_fullstack_v1` và đúng canonical remote. `prepare-target-repo` dùng
+  default mới pass; manifest preflight pass digest
+  `sha256:a1520dd257f7441691f035b01125412fb3d296b8178d7a0d39633b0ff4ad2038`
+  với đủ `web`, `api`, `contracts`, `database`, `e2e`.
+- Targeted regression cuối `20 passed`; full pytest-xdist `574 passed, 1 skipped
+  in 105.42s`. Skip duy nhất vẫn là ca symlink Windows thiếu quyền đã biết;
+  `compileall` và `git diff --check` pass.
+- Đã đóng mục A4 target path/remote. Việc còn lại của Chặng A là xóa Java
+  runtime-only behavior/migration flag trong một lát riêng.
+
 ```text
 ## YYYY-MM-DD - <slice hoặc quyết định>
 

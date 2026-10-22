@@ -26,9 +26,10 @@ JOURNEY_MODULES = {
 
 @pytest.fixture(autouse=True)
 def isolate_live_workflow_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Use stable legacy defaults unless a test explicitly supplies an override."""
+    """Giữ fixture legacy ổn định trừ khi test chủ động kiểm profile mới."""
 
     monkeypatch.setenv("SDLC_DEVELOPER_EXECUTION_MODE", "legacy")
+    monkeypatch.setenv("SDLC_PROJECT_PROFILE", "")
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:

@@ -8,7 +8,10 @@ manifest preflight, workspace binding fail-closed và retirement guard cho run
 Java cũ. Profile rỗng không còn được mở run mới; target TypeScript local đã có
 web/API/contracts, Prisma/PostgreSQL/Compose, Playwright Chromium smoke chạy
 thật; canonical private remote, GitHub-hosted CI và protected bootstrap audit
-đều đã hoàn tất. Config cutover và live Harness workflow vẫn chưa triển khai.
+đều đã hoàn tất. Controlled live Harness workflow đã tạo production TypeScript,
+Vitest acceptance test và Draft PR có hosted CI xanh. Từ 2026-10-22, run mới mặc
+định dùng profile TypeScript, target TypeScript và Developer tool-loop; Java
+runtime-only cleanup vẫn là lát cuối còn lại của Chặng A.
 
 ## Mục Tiêu
 
@@ -37,8 +40,8 @@ planning, code, verification, QA, workspace và sync vẫn thuộc SDLC Harness.
   đọc/audit/sync-existing/cleanup được, còn resume/revalidate sinh artifact đã
   bị chặn bởi retirement contract tại application boundary.
 
-Các quyết định trên là hướng thiết kế đã thống nhất, chưa mô tả hành vi đang tồn
-tại trong code.
+Các quyết định trên đã được triển khai cho luồng TypeScript hiện hành; Java
+legacy chỉ còn đường rollback/audit có giới hạn trước lát cleanup riêng.
 
 ## Tài Liệu
 
@@ -47,8 +50,8 @@ tại trong code.
 - [Target Direction](target-direction.md): kiến trúc profile/topology và artifact
   đích ở mức proposal.
 - [Implementation Plan](implementation-plan.md): roadmap triển khai; Gate 0,
-  toàn bộ A1, A2.1a/A2.1b, A2.2a, A2.3, A3.1-A3.4b và A4.1a đã hoàn tất; các
-  checklist còn lại giữ theo trạng thái thực tế.
+  A1-A3, target bootstrap, controlled smoke và default cutover của A4 đã hoàn
+  tất; checklist xóa Java runtime và Chặng B giữ theo trạng thái thực tế.
 - [Prompt Usage Map](prompt-usage-map.md): call site prompt thật, file
   reference-only và owner của từng lát migration.
 - [Gate 0 Review](gate-0-review.md): phát hiện, quyết định contract và acceptance
@@ -69,9 +72,9 @@ Trước khi triển khai code cần review đủ bốn câu hỏi:
 
 Gate này đã được review và đóng ở mức tài liệu ngày 2026-10-19. A1 hiện đã khóa
 profile contract, selector, immutable run snapshot, target manifest/workspace
-binding và legacy retirement. Run mới bắt buộc chọn profile; target repo local
-đã có manifest/npm workspace/toolchain khóa phiên bản và smoke fixture, nhưng
-chưa có canonical remote, config cutover hay live workflow cho hướng TypeScript.
+binding và legacy retirement. Run mới mặc định nhận profile
+`typescript_fullstack_v1`, Developer `tool_loop` và canonical target TypeScript;
+explicit profile rỗng/`legacy` chỉ còn phục vụ migration và rollback tạm thời.
 Phase 3 profiled hiện phát hành `implementation_plan_structured_v2`, bind review
 với SHA-256 của artifact và chỉ kích hoạt smoke suite `typecheck -> unit`.
 Verification Runner đã ánh xạ smoke suite qua code-reviewed registry sang fixed
@@ -83,7 +86,7 @@ co-located TypeScript/Vitest test và chỉ pass khi Vitest JSON report chứng 
 đúng các generated files đã được execute. Code Trace profiled đã có policy,
 profile-aware discovery và TypeScript Compiler AST bridge fail-closed cho exact
 symbol/signature evidence. Plan V3 và work packet V2 bind contract chữ ký được
-human duyệt; comparator đã smoke thật trên target local pin TypeScript 6.0.3.
-Phần code tiếp theo của Chặng A là A2.2b cho Developer.act/tool-loop. Infra
-React/Fastify/Prisma/PostgreSQL/Playwright/CI, browser E2E, remote và live
-workflow vẫn chưa thực hiện.
+human duyệt; comparator đã smoke thật trên target pin TypeScript 6.0.3.
+React/Fastify/Prisma/PostgreSQL/Playwright/CI, canonical remote và controlled
+live workflow đều đã pass. Phần còn lại của Chặng A là xóa Java runtime-only
+behavior/migration flag nhưng vẫn giữ historical evidence/read path có nhãn.

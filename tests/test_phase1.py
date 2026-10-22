@@ -17,6 +17,7 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.sources.fixtures import UseCaseSource, load_use_case
 from sdlc_harness.sources.jira import load_jira_issue_source
+from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.atlassian import real_sync_requirement_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 
@@ -265,6 +266,35 @@ class PhaseOneTest(unittest.TestCase):
         self.assertTrue(first["created_new_run"])
         self.assertFalse(second["created_new_run"])
         self.assertEqual(first["run_id"], second["run_id"])
+
+    def test_clean_default_start_snapshots_typescript_profile_in_fake_mock_mode(self) -> None:
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("sdlc_harness.core.config._read_dotenv", return_value={}),
+        ):
+            settings = load_settings(root=self.repo_root, runtime_root=self.runtime_root)
+
+        self.assertEqual(settings.llm_mode, "fake")
+        self.assertEqual(settings.sync_mode, "mock")
+        self.assertEqual(settings.developer_execution_mode, "tool_loop")
+        response = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="cutover-smoke",
+        )
+        state = RuntimeStore(
+            repo_root=self.repo_root,
+            runtime_root=self.runtime_root,
+        ).read_state(str(response["run_id"]))
+
+        self.assertEqual(
+            state["profile_snapshot"]["project_profile_id"],
+            "typescript_fullstack_v1",
+        )
+        self.assertEqual(
+            state["profile_snapshot"]["target_remote"],
+            "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git",
+        )
 
     def test_profile_snapshot_is_persisted_before_requirement_refiner_runs(self) -> None:
         settings = load_settings(

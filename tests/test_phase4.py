@@ -397,6 +397,7 @@ class PhaseFourTest(unittest.TestCase):
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
+                "SDLC_PROJECT_PROFILE": "",
                 "SDLC_TARGET_REPO_PATH": str(topology.canonical),
                 "SDLC_TARGET_REPO_REMOTE": str(topology.remote.resolve()),
             },

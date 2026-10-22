@@ -181,14 +181,14 @@ def load_settings(
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
         sync_mode = "mock"
-    developer_execution_mode = merged.get("SDLC_DEVELOPER_EXECUTION_MODE", "legacy").strip().lower() or "legacy"
+    developer_execution_mode = merged.get("SDLC_DEVELOPER_EXECUTION_MODE", "tool_loop").strip().lower() or "tool_loop"
     if developer_execution_mode not in {"legacy", "tool_loop"}:
-        developer_execution_mode = "legacy"
-    project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "").strip()
+        developer_execution_mode = "tool_loop"
+    project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
     project_profile_id = (
         get_project_profile(project_profile_raw).profile_id if project_profile_raw else None
     )
-    target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_eTour")))
+    target_repo_path = Path(merged.get("SDLC_TARGET_REPO_PATH", str(root_path.parent / "SDLC_Target_TypeScript")))
     if not target_repo_path.is_absolute():
         target_repo_path = root_path / target_repo_path
     target_repo_path = target_repo_path.resolve()
@@ -231,7 +231,7 @@ def load_settings(
         project_profile_id=project_profile_id,
         target_repo_path=target_repo_path,
         target_worktree_root=target_worktree_root.resolve(),
-        target_repo_remote=merged.get("SDLC_TARGET_REPO_REMOTE", "https://github.com/LuongAnh1/SDLC_Target_eTour.git"),
+        target_repo_remote=merged.get("SDLC_TARGET_REPO_REMOTE", "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git"),
         target_base_branch=merged.get("SDLC_TARGET_BASE_BRANCH", "main").strip() or "main",
         implementation_branch_prefix=(merged.get("SDLC_IMPLEMENTATION_BRANCH_PREFIX", "feature").strip().strip("/") or "feature"),
         api_host=merged.get("SDLC_API_HOST", "127.0.0.1").strip() or "127.0.0.1",

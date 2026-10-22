@@ -230,7 +230,7 @@ tất và không tự cho phép cutover.
   - Hoàn tất: 2026-10-21. Registry/manifest khớp 19 protected path tồn tại;
     bootstrap positive/negative tests và full React/Fastify/Prisma/Playwright
     lifecycle pass trên local lẫn GitHub Actions.
-- [ ] Chuyển target path/remote sau regression và controlled smoke.
+- [x] Chuyển target path/remote sau regression và controlled smoke.
   - Controlled smoke dùng Jira `SDLC-2`, DeepSeek/tool-loop, Jira/Confluence
     real sync và canonical GitHub target; cấu hình TypeScript chỉ được override
     theo process trước khi đổi default.
@@ -305,6 +305,13 @@ tất và không tự cho phép cutover.
     merge trong lát cutover.
   - Chỉ sau khi smoke pass mới đổi default profile/path/remote trong config,
     schema và `.env.example`; nếu smoke fail thì giữ nguyên default Java cũ.
+  - Hoàn tất: 2026-10-22. Default mới là `typescript_fullstack_v1`, Developer
+    `tool_loop`, `../SDLC_Target_TypeScript` và canonical TypeScript remote;
+    worktree root tiếp tục suy ra theo target. Target `a440304` đã push và hosted
+    CI run `39707870600` xanh. Default fake/mock smoke, manifest preflight cùng
+    full Harness regression `574 passed, 1 skipped` đều pass. Explicit
+    `legacy`/profile rỗng vẫn được giữ cho rollback và audit run cũ đến lát xóa
+    Java runtime riêng; PR #1 vẫn Draft, không đổi head hoặc approval state.
 - [ ] Xóa Java runtime-only behavior và migration flag; giữ historical
   docs/evidence/read path có nhãn.
 
