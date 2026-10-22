@@ -43,15 +43,34 @@ không biến mọi vai trò thành một coding agent tổng quát.
   do Harness kiểm soát, không phải agent độc lập.
 - Repo Discovery cũng là Harness-owned read-only service/artifact step, không tạo
   thêm một agent có quyền tự quyết workflow.
+- Trong scope hiện tại, Repo Discovery bị giới hạn bởi immutable project profile
+  đã chọn sẵn. Nó lập inventory và đối chiếu thành phần thực tế trong các root đã
+  cấu hình; nó không tự suy luận stack mới, đổi kiến trúc hay chọn profile khác.
 - Lỗi transport/môi trường phải pause/resume và không tiêu hao repair iteration.
 - Contract mới được version theo hướng additive; run lịch sử vẫn đọc/audit được.
 - DeepSeek/OpenAI-compatible client hiện tại tiếp tục là runtime LLM; roadmap này
   không mở một generic provider abstraction mới.
-- Nâng cấp mới đi từ Requirement -> repo discovery -> Design -> Validator ->
+- Nâng cấp mới đi từ Requirement -> profile-bounded repo discovery -> Design -> Validator ->
   Plan/Developer -> QA; Developer tool-loop hiện tại được giữ làm baseline chứ
   không còn là điểm bắt đầu của roadmap.
 - Traceability đích là vertical-slice graph nối scenario qua UI, API, rule, data,
   code và test. UI/API/DB là các lớp trong design/code, không phải phase mới.
+
+## Ranh Giới Repo Discovery Hiện Tại
+
+Với target hiện tại, Harness đã biết trước kiến trúc qua
+`typescript_fullstack_v1`: TypeScript monolith, React, Fastify, Prisma/
+PostgreSQL, npm và các component roots tương ứng.
+
+Repo Discovery chỉ trả lời các câu hỏi AS-IS bên trong boundary đó:
+
+- component/UI nào đã tồn tại và có thể khớp scenario;
+- route/API, service/rule và Prisma model/query nào liên quan;
+- test, migration và contract hiện có ở đâu;
+- repo thực tế có vi phạm/mâu thuẫn với profile đã khóa hay không.
+
+Khả năng nhận một repo bất kỳ, tự suy luận stack/topology rồi chọn hoặc sinh
+project profile phù hợp là hướng tương lai, không thuộc L2 hiện tại.
 
 ## Tài Liệu
 

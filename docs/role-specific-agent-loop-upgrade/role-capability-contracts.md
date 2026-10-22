@@ -80,7 +80,7 @@ trước khi artifact writer phát hành version mới.
 
 - approved Requirement Model và evidence refs;
 - frozen workspace snapshot và `repo_landscape_v1`;
-- project profile/topology expectation;
+- immutable project profile/topology contract;
 - current design graph/artifact khi repair;
 - bounded repo/CodeGraph access;
 - Validator findings của đúng design version.

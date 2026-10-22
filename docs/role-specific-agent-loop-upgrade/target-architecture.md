@@ -28,7 +28,7 @@ thượng nguồn xuống:
 ~~~text
 Requirement làm rõ scenario và surface
 -> Harness khóa snapshot/workspace cho run
--> Repo Discovery mô tả AS-IS
+-> Profile-bounded Repo Discovery mô tả AS-IS
 -> Designer so sánh AS-IS với requirement để tạo TO-BE
 -> Validator kiểm vertical trace và design
 -> Planner chia execution unit
@@ -146,6 +146,11 @@ Read-only là capability của Requirement/Designer. Base snapshot identity đư
 đóng băng để evidence ổn định; tới Developer, Harness mới cấp write scope và phát
 hành graph/evidence version mới theo current hashes.
 
+Trong scope hiện tại, project profile đã được chọn trước và là authority. Repo
+Discovery chỉ quét/đối chiếu trong roots và capabilities profile cho phép để tìm
+UI, API, rule, data và test hiện hữu. Package/manifest evidence có thể tạo
+conformance finding nhưng không được dùng để tự đổi stack hoặc chọn profile khác.
+
 ### Graph Lớn Nhưng Context Phải Nhỏ
 
 - Canonical graph được Python lưu và kiểm deterministic trên toàn cục.
@@ -185,8 +190,8 @@ Các artifact domain mới đi cùng contract role-loop:
 
 - `requirement_scenario_model_v1`: scenario, acceptance criteria và trạng thái
   surface `required|not_applicable|clarification_required`.
-- `repo_landscape_v1`: snapshot, observed stack/topology, component, route,
-  schema/test anchors và uncertainty.
+- `repo_landscape_v1`: snapshot, immutable profile identity, conformance
+  findings, component, route, schema/test anchors và uncertainty.
 - `vertical_design_graph_v1`: typed design nodes/edges cùng disposition
   `reuse|modify|add|no_change`.
 - `vertical_trace_graph_v1`: liên kết Requirement -> Design -> Implementation ->
@@ -226,6 +231,11 @@ Role capability là language-neutral; project profile cung cấp dữ liệu c�
 - approved verification stage IDs;
 - QA test ownership policy;
 - topology và runtime-service capabilities.
+
+Hiện tại workflow chọn/freeze profile trước Repo Discovery. Việc tự suy luận
+stack/topology của một repo bất kỳ và tự chọn/sinh profile mới không thuộc
+roadmap này; đó là một capability tương lai cần contract, confidence và human
+confirmation riêng.
 
 Vì vậy TypeScript có thể dùng CodeGraph, TypeScript AST, Vitest và Playwright,
 trong khi một profile tương lai thay adapter mà không thay workflow semantics.

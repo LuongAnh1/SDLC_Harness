@@ -246,6 +246,10 @@ read-only, giữ deterministic checks làm hard gate.
 ## Hướng Khắc Phục Đã Chốt
 
 Không mở rộng Developer loop trước. Roadmap mới đi theo thứ tự Requirement
-scenario/surface -> read-only repo discovery -> repo-aware Designer -> vertical
+scenario/surface -> profile-bounded read-only repo discovery -> repo-aware Designer -> vertical
 trace Validator -> Plan/Developer -> QA. Chi tiết mô hình graph nằm tại
 [Vertical-slice Trace Graph](vertical-slice-trace-graph.md).
+
+Repo discovery trong roadmap này là profile-bounded: profile/kiến trúc được chọn
+trước, discovery chỉ inventory thành phần hiện hữu và kiểm conformance. Dynamic
+stack detection/profile selection cho repo bất kỳ chưa nằm trong scope.

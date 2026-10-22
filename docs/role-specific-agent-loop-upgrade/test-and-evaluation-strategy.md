@@ -58,6 +58,8 @@ Dùng scripted fake LLM trả chuỗi action có chủ ý:
 ### Designer
 
 - cùng frozen repo snapshot tạo cùng AS-IS anchors;
+- profile TypeScript/React/Fastify/Prisma đã khóa không bị Discovery tự đổi khi
+  gặp package hoặc cấu trúc ngoài kỳ vọng; mismatch tạo finding/human decision;
 - brownfield lookup tìm đúng component/API hiện hữu;
 - existing component được đánh dấu `reuse|modify`, không bị phát minh thành component mới;
 - backend-only scenario cho phép UI `not_applicable`; full-stack scenario bị
@@ -133,7 +135,7 @@ database, unit/integration/acceptance evidence. Luồng tối thiểu:
 ```text
 Jira/source
 -> Requirement scenario/surface loop + human checkpoint
--> frozen workspace + repo discovery
+-> frozen workspace + profile-bounded repo discovery
 -> Designer AS-IS/GAP/TO-BE loop + vertical design graph checkpoint
 -> vertical trace validation
 -> component-aware Planner execution units + plan checkpoint

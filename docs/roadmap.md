@@ -226,7 +226,7 @@ nâng cấp quyền/tool/completion/failure routing theo từng vai trò Require
 Designer, Planner/Developer, QA và Validator.
 
 Roadmap đã được điều chỉnh theo thứ tự upstream-first: Requirement scenario/
-surface -> repo discovery read-only -> repo-aware Design -> vertical trace
+surface -> profile-bounded repo discovery read-only -> repo-aware Design -> vertical trace
 Validator -> Plan/Developer -> QA. Vertical graph nối từng scenario qua các lớp
 UI/API/rule/data tới code và test thay vì chỉ nối Requirement -> class/sequence ->
 code symbol.

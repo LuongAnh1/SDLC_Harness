@@ -112,6 +112,11 @@ Sau khi Requirement được duyệt, Harness tạo hoặc khóa workspace read-
 run và phát hành `repo_landscape` từ manifest, cấu trúc repo, route, schema,
 test và CodeGraph nếu có.
 
+Repo Discovery ở đây **không tự đoán kiến trúc dự án**. Profile hiện hành đã khóa
+TypeScript monolith với React, Fastify, Prisma/PostgreSQL, npm và các root cần
+quét. Discovery chỉ tìm trong boundary đó xem UI/API/rule/data/test nào đã có,
+cái nào khớp requirement và repo có mâu thuẫn với profile hay không.
+
 “Read-only” ở đây là quyền của Requirement/Designer, không nhất thiết là khóa
 filesystem vĩnh viễn. Harness đóng băng **base snapshot identity** để design có
 bằng chứng ổn định; tới Developer, workflow mới cấp write scope trong worktree.

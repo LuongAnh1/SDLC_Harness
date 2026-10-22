@@ -41,7 +41,7 @@ policy khác. Thay đổi một trong các authority input phải mở session v
 | `role_failure_classification_v1.json` | failure owner, severity, repairability, route | Role/Validator đề xuất, workflow xác nhận |
 | Role delta artifact | requirement/design/test/code mutation đề xuất hoặc đã apply | Domain writer/workflow |
 | `requirement_scenario_model_v1.json` | scenario, acceptance criteria, required surfaces và provenance | Requirement workflow |
-| `repo_landscape_v1.json` | frozen snapshot, observed stack/topology và code/schema/test anchors | Repo Discovery |
+| `repo_landscape_v1.json` | frozen snapshot, profile identity/conformance và code/schema/test anchors | Repo Discovery |
 | `vertical_design_graph_v1.json` | typed UI/API/rule/data nodes, interactions và disposition | Designer đề xuất, Harness apply |
 | `vertical_trace_graph_v1.json` | Requirement -> Design -> Implementation -> Verification edges | Harness/Validator |
 

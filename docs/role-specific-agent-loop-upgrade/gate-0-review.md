@@ -110,7 +110,7 @@ của Gate 0, nhưng thay thế thứ tự L1-L6 và định nghĩa “lát đ�
 
 - không bọc Developer hiện hành trước;
 - L1.1 mới là Requirement scenario/surface contract;
-- repo discovery read-only phải có trước repo-aware Design;
+- profile-bounded repo discovery read-only phải có trước repo-aware Design;
 - canonical Design/Trace chuyển từ class/sequence-centric sang typed vertical
   graph; class và sequence vẫn là projection khi phù hợp;
 - Validator deterministic kiểm toàn graph, semantic reviewer chỉ đọc bounded

@@ -9,7 +9,7 @@ Roadmap dùng thứ tự **upstream-first**:
 
 ~~~text
 Requirement scenario/surface contract
--> frozen read-only workspace + repo discovery
+-> frozen read-only workspace + profile-bounded repo discovery
 -> repo-aware Designer + vertical design graph
 -> vertical trace Validator
 -> component-aware Plan + Developer execution loop
@@ -59,19 +59,24 @@ Acceptance:
 - Requirement có thể tìm evidence trước khi hỏi người dùng.
 - Requirement không đoán file/class/route cụ thể và không sửa target repo.
 
-## L2 — Frozen Workspace And Repo Discovery
+## L2 — Frozen Workspace And Profile-bounded Repo Discovery
 
-Mục tiêu: tạo ảnh chụp AS-IS đáng tin cậy để Designer không thiết kế chỉ từ
-requirement hoặc project profile hard-code.
+Mục tiêu: với project profile/kiến trúc đã được chọn và khóa sẵn, tạo ảnh chụp
+AS-IS đáng tin cậy để Designer biết thành phần nào đã tồn tại và có thể khớp
+requirement.
 
 - [ ] Tạo/freeze run workspace read-only cho bước khảo sát sau Requirement approval.
-- [ ] Inventory manifest, package manager, workspace layout, source/test roots,
-  route, UI entry point, database schema/migration và verification config.
+- [ ] Nhận immutable profile snapshot và target manifest làm boundary; không tự
+  chọn, sửa hoặc sinh profile mới.
+- [ ] Trong các root/profile capability đã khai báo, inventory manifest, package
+  manager evidence, workspace layout, source/test files, route, UI entry point,
+  database schema/migration và verification config.
 - [ ] Dùng CodeGraph khi repo đã có index; dùng bounded search/AST adapter làm
   fallback và ghi rõ provenance.
-- [ ] Phát hành `repo_landscape_v1` với snapshot SHA/hash, discovered stack,
-  component map, symbol anchors và uncertainty.
-- [ ] Phân biệt profile expectation với observed repository evidence.
+- [ ] Phát hành `repo_landscape_v1` với snapshot SHA/hash, immutable profile ID/
+  digest, conformance findings, component map, symbol anchors và uncertainty.
+- [ ] Dùng package/manifest evidence để xác minh profile cố định, không dùng nó để
+  âm thầm đổi từ React/Fastify/Prisma sang stack khác.
 - [ ] Fail closed hoặc yêu cầu human decision khi target manifest và repo thực tế
   mâu thuẫn đáng kể.
 
@@ -80,6 +85,8 @@ Acceptance:
 - Cùng snapshot tạo cùng deterministic inventory.
 - Designer có thể biết component/API/data nào đã tồn tại trước khi đề xuất TO-BE.
 - Discovery không sửa target repo và không tự khởi tạo project.
+- Discovery không tự nhận diện/chọn kiến trúc cho repo bất kỳ; dynamic stack
+  detection/profile selection được để cho roadmap tương lai.
 - Read-only là quyền tool của L2/L3; base snapshot được giữ bằng SHA/hash, còn
   Developer ở L5 mới được cấp write scope và phát hành evidence version mới.
 - Thiếu CodeGraph không làm mất khả năng khảo sát, nhưng fallback được ghi nhãn.
@@ -203,7 +210,7 @@ Acceptance:
 | Lát | Cutover | Rollback boundary |
 | --- | --- | --- |
 | L1 Requirement | Bật schema/loop cho run Phase 1 mới; giữ reader tương thích artifact cũ | Run mới quay về Requirement V2 hiện hành; checkpoint và stable ID cũ không đổi |
-| L2 Discovery | Bật read-only discovery sau Requirement approval | Ngừng phát hành `repo_landscape_v1`; không làm thay đổi workspace hay approved requirement |
+| L2 Discovery | Bật profile-bounded read-only discovery sau Requirement approval | Ngừng phát hành `repo_landscape_v1`; không làm thay đổi workspace hay approved requirement |
 | L3 Designer | Bật theo run Phase 2 mới, giữ versioned design artifact | Run mới quay về draft/update_design hiện hành; không rewrite active artifact |
 | L4 Validator | Chạy shadow trước khi finding mới có decision authority | Thu hồi authority của vertical finding; candidate artifact vẫn read-only |
 | L5 Plan/Developer | Bật theo session contract version cho run mới | Không đổi executor của persisted session; session cũ hoàn tất/pause theo executor đã bind |

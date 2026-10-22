@@ -83,7 +83,7 @@ role-specific agent loops. Mốc docs không được dùng để suy ra runtime
   directive từ profile, nhưng chưa khảo sát target repo/CodeGraph/schema/route để
   phân biệt AS-IS với TO-BE.
 - Đổi roadmap từ thứ tự shared-core/Developer-first sang Requirement scenario và
-  surface -> frozen workspace/repo discovery -> repo-aware Designer -> vertical
+  surface -> frozen workspace/profile-bounded repo discovery -> repo-aware Designer -> vertical
   trace Validator -> Plan/Developer -> QA.
 - Bổ sung tài liệu [Vertical-slice Trace Graph](vertical-slice-trace-graph.md):
   UI/API/rule/data là các cột trong Design/Code, không phải phase mới; mỗi
@@ -93,6 +93,9 @@ role-specific agent loops. Mốc docs không được dùng để suy ra runtime
   chép toàn bộ call graph.
 - Bổ sung contract định hướng cho scenario/surface, repo landscape, typed design
   graph, vertical trace graph và trạng thái `reuse|modify|add|no_change`.
+- Làm rõ Repo Discovery hiện bị giới hạn bởi immutable project profile: nó
+  inventory/đối chiếu UI, API, rule, data và test hiện hữu, không tự suy luận
+  stack hoặc chọn profile cho một repo bất kỳ.
 - Đây là thay đổi docs-only; không có runtime code, prompt, API hoặc config nào
   được triển khai bởi lần cập nhật này.
 
