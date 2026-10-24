@@ -53,7 +53,11 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_fixture_loader_reads_etour_uc1(self) -> None:
         source = load_use_case(dataset="eTour", use_case="UC1", repo_root=self.repo_root)
+        self.assertEqual(source.source_id, "SRC-1")
+        self.assertEqual(source.source_type, "dataset")
         self.assertEqual(source.source_ref, "dataset_use_case:eTour:UC1")
+        self.assertEqual(source.locator, "fixtures/etour/UC1.txt")
+        self.assertIsNone(source.revision)
         self.assertIn("DeleteCulturalHeritage", source.text)
 
     def test_fixture_loader_rejects_unsupported_dataset(self) -> None:
@@ -83,6 +87,7 @@ class PhaseOneTest(unittest.TestCase):
             return {
                 "key": "SDLC-1",
                 "fields": {
+                    "updated": "2026-10-24T12:34:56.000+0000",
                     "summary": "eTour UC1 - Delete cultural heritage",
                     "description": {
                         "type": "doc",
@@ -120,6 +125,10 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(source.dataset, "jira")
         self.assertEqual(source.use_case, "SDLC-1")
         self.assertEqual(source.source_ref, "jira_issue:SDLC-1")
+        self.assertEqual(source.source_id, "SRC-1")
+        self.assertEqual(source.source_type, "jira")
+        self.assertEqual(source.locator, "SDLC-1")
+        self.assertEqual(source.revision, "2026-10-24T12:34:56.000+0000")
         self.assertIsNone(source.source_path)
         self.assertIn("Delete a cultural object", source.text)
         self.assertIn("Reviewer", source.text)

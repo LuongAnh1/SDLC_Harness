@@ -34,7 +34,8 @@ def render_requirement_packet_v2(model: RequirementModelV2) -> str:
     _packet_assumption_section(lines, data["assumptions"])
     _packet_question_section(lines, data["open_questions"])
     _packet_decision_section(lines, data["decisions"])
-    _packet_evidence_section(lines, data["evidence"])
+    _packet_provenance_section(lines, data["provenance_ledger"])
+    _packet_evidence_section(lines, data["evidence"], data["provenance_ledger"])
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -198,12 +199,33 @@ def _packet_decision_section(lines: list[str], items: Any) -> None:
     lines.append("")
 
 
-def _packet_evidence_section(lines: list[str], items: Any) -> None:
+def _packet_provenance_section(lines: list[str], ledger: Any) -> None:
+    lines.extend(["## Source Provenance", ""])
+    sources = _dict_items(ledger.get("sources")) if isinstance(ledger, dict) else []
+    for item in sources:
+        revision = str(item.get("revision") or "none")
+        lines.append(
+            f"- [{item.get('id', '')}] `{item.get('type', '')}` | "
+            f"`{item.get('source_ref', '')}` | locator: `{item.get('locator', '')}` | "
+            f"revision: `{revision}` | snapshot: `{item.get('artifact_ref', '')}`"
+        )
+    if not sources:
+        lines.append("- none")
+    lines.append("")
+
+
+def _packet_evidence_section(lines: list[str], items: Any, ledger: Any) -> None:
     lines.extend(["## Source Evidence", ""])
     values = _dict_items(items)
+    sources = _dict_items(ledger.get("sources")) if isinstance(ledger, dict) else []
+    source_refs = {str(item.get("id") or ""): str(item.get("source_ref") or "") for item in sources}
     for item in values:
         quote = str(item.get("quote") or "").replace("\n", " ").strip()
-        lines.append(f"- [{item.get('id', '')}] `{item.get('source_ref', '')}` / {item.get('location', '')}: {quote}")
+        source_id = str(item.get("source_id") or "")
+        lines.append(
+            f"- [{item.get('id', '')}] `{source_id}` / `{source_refs.get(source_id, '')}` / "
+            f"{item.get('location', '')}: {quote}"
+        )
     if not values:
         lines.append("- none")
     lines.append("")

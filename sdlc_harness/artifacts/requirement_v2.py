@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ..agents.requirements.model_v2 import RequirementModelV2
@@ -13,34 +14,45 @@ from ..agents.requirements.refiner_v2 import RequirementModelV2RefinementResult
 from ..agents.requirements.renderer_v2 import render_formal_use_case_v2, render_requirement_packet_v2
 from ..agents.requirements.validator_v2 import RequirementModelV2ValidationReport
 from ..core.errors import HarnessError
-from ..sources.fixtures import UseCaseSource
+from ..sources.fixtures import UseCaseSource, source_provenance_entry
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
 
+SOURCE_SNAPSHOT_VERSION = "source_snapshot_v2"
+
+
 def write_source_snapshot_v2(*, store: RuntimeStore, run_id: str, source: UseCaseSource) -> str:
+    path = _source_snapshot_path(store=store, run_id=run_id, source_id=source.source_id)
+    artifact_ref = store.relative(path)
+    provenance = source_provenance_entry(source=source, artifact_ref=artifact_ref)
     payload: dict[str, object] = {
-        "artifact_version": "source_snapshot_v1",
+        "artifact_version": SOURCE_SNAPSHOT_VERSION,
         "run_id": run_id,
         "dataset": source.dataset,
         "use_case": source.use_case,
-        "source_ref": source.source_ref,
+        **provenance,
         "text": source.text,
-        "fingerprint": _fingerprint(source.text),
     }
-    path = store.artifact_path(run_id, "source_snapshot_v1.json")
     _write_json_immutable(path, payload, run_id=run_id)
-    return store.relative(path)
+    return artifact_ref
 
 
 def read_source_snapshot_v2(
     *,
     store: RuntimeStore,
     run_id: str,
-    artifact_ref: str,
-    expected_source_ref: str,
-    expected_fingerprint: str,
+    expected_source: dict[str, Any],
 ) -> str:
+    source_id = str(expected_source.get("id") or "")
+    artifact_ref = str(expected_source.get("artifact_ref") or "")
     path = (store.repo_root / artifact_ref).resolve()
+    expected_path = _source_snapshot_path(store=store, run_id=run_id, source_id=source_id).resolve()
+    if path != expected_path:
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            "Requirement V2 source snapshot path does not match its stable source ID.",
+            run_id=run_id,
+        )
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -50,11 +62,13 @@ def read_source_snapshot_v2(
             run_id=run_id,
         ) from exc
     text = payload.get("text") if isinstance(payload, dict) else None
+    expected_fields = ("id", "type", "source_ref", "locator", "revision", "artifact_ref", "fingerprint")
     if (
         not isinstance(text, str)
-        or payload.get("source_ref") != expected_source_ref
-        or payload.get("fingerprint") != expected_fingerprint
-        or _fingerprint(text) != expected_fingerprint
+        or payload.get("artifact_version") != SOURCE_SNAPSHOT_VERSION
+        or payload.get("run_id") != run_id
+        or any(payload.get(field) != expected_source.get(field) for field in expected_fields)
+        or _fingerprint(text) != expected_source.get("fingerprint")
     ):
         raise HarnessError(
             "source_snapshot_corrupted",
@@ -62,6 +76,32 @@ def read_source_snapshot_v2(
             run_id=run_id,
         )
     return text
+
+
+def read_requirement_source_texts(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    model: RequirementModelV2,
+) -> dict[str, str]:
+    """Đọc và xác minh toàn bộ immutable source snapshots được canonical model tham chiếu."""
+
+    ledger = model.provenance_ledger
+    sources = ledger.get("sources") if isinstance(ledger, dict) else None
+    if not isinstance(sources, list) or any(not isinstance(item, dict) for item in sources):
+        raise HarnessError(
+            "requirement_model_v2_invalid",
+            "Requirement provenance ledger does not contain a valid sources list.",
+            run_id=run_id,
+        )
+    return {
+        str(source.get("id") or ""): read_source_snapshot_v2(
+            store=store,
+            run_id=run_id,
+            expected_source=source,
+        )
+        for source in sources
+    }
 
 
 def write_requirement_v2_artifacts(
@@ -233,3 +273,13 @@ def _write_json_immutable(
 
 def _fingerprint(text: str) -> str:
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _source_snapshot_path(*, store: RuntimeStore, run_id: str, source_id: str) -> Path:
+    if re.fullmatch(r"SRC-[1-9]\d*", source_id) is None:
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            f"Invalid Requirement V2 source ID: {source_id!r}.",
+            run_id=run_id,
+        )
+    return store.artifact_path(run_id, f"source_snapshot_{source_id}_v2.json")

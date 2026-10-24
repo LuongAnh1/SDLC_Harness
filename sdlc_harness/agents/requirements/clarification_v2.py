@@ -160,7 +160,7 @@ class RequirementClarificationUpdater:
     def apply(
         self,
         *,
-        source_text: str,
+        source_text_by_id: dict[str, str],
         model: RequirementModelV2,
         question_id: str,
         answer: str,
@@ -186,6 +186,14 @@ class RequirementClarificationUpdater:
                 run_id=model.run_id,
             )
 
+        primary_source_id = str(model.source.get("source_id") or "")
+        source_text = source_text_by_id.get(primary_source_id)
+        if not isinstance(source_text, str):
+            raise HarnessError(
+                "source_snapshot_corrupted",
+                f"Primary Requirement source snapshot is unavailable: {primary_source_id}",
+                run_id=model.run_id,
+            )
         prompt = self._prompt(source_text, model, question, answer_text)
         max_tokens = self._structured_max_tokens()
         attempts: list[ClarificationAttempt] = []
@@ -214,7 +222,7 @@ class RequirementClarificationUpdater:
             try:
                 result = self._apply_proposal(
                     proposal=proposal,
-                    source_text=source_text,
+                    source_text_by_id=source_text_by_id,
                     model=model,
                     question=question,
                     answer=answer_text,
@@ -248,7 +256,7 @@ class RequirementClarificationUpdater:
         self,
         *,
         proposal: dict[str, Any],
-        source_text: str,
+        source_text_by_id: dict[str, str],
         model: RequirementModelV2,
         question: CurrentRequirementQuestion,
         answer: str,
@@ -387,7 +395,7 @@ class RequirementClarificationUpdater:
             question_data["status"] = "resolved"
 
         data["validation"] = {"status": "invalid", "errors": []}
-        validation = normalize_and_validate_requirement_model_v2(data, source_text)
+        validation = normalize_and_validate_requirement_model_v2(data, source_text_by_id)
         if not validation.report.ok:
             details = "; ".join(
                 f"{item.code}@{item.path}: {item.message}"

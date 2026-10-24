@@ -3,9 +3,24 @@
   "revision": 1,
   "run_id": "run_test_uc2",
   "source": {
+    "source_id": "SRC-1",
     "source_ref": "dataset_use_case:eTour:UC2",
     "artifact_ref": "use_case_packet_v1",
-    "fingerprint": "sha256:test-uc2"
+    "fingerprint": "sha256:42135a402c264bcdd4950d27bc6312ce3f3ce518e931e562e76f956b113d287a"
+  },
+  "provenance_ledger": {
+    "schema_version": "requirement_provenance_v1",
+    "sources": [
+      {
+        "id": "SRC-1",
+        "type": "dataset",
+        "source_ref": "dataset_use_case:eTour:UC2",
+        "locator": "fixtures/etour/UC2.txt",
+        "revision": null,
+        "artifact_ref": "use_case_packet_v1",
+        "fingerprint": "sha256:42135a402c264bcdd4950d27bc6312ce3f3ce518e931e562e76f956b113d287a"
+      }
+    ]
   },
   "use_case": {
     "id": "UC-1",
@@ -161,19 +176,19 @@
   ],
   "decisions": [],
   "evidence": [
-    {"id": "E-1", "source_ref": "dataset_use_case:eTour:UC2", "location": "description", "quote": "Inserts a new cultural object in the system."},
-    {"id": "E-2", "source_ref": "dataset_use_case:eTour:UC2", "location": "actor", "quote": "Participating Actor: initialization Agency Operator"},
-    {"id": "E-3", "source_ref": "dataset_use_case:eTour:UC2", "location": "entry conditions", "quote": "Entry Operator conditions: The agency has logged."},
-    {"id": "E-4", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 1", "quote": "Activate the feature for the insertion of a new cultural good."},
-    {"id": "E-5", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 2", "quote": "Displays the corresponding form."},
-    {"id": "E-6", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 3", "quote": "Fill out the form with the data of the cultural and submit."},
-    {"id": "E-7", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 4", "quote": "Verify the data entered and asks for confirmation of the transaction. Where the data is invalid or insufficient, the system activates the use case Errored."},
-    {"id": "E-8", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 5", "quote": "Confirm the operation."},
-    {"id": "E-9", "source_ref": "dataset_use_case:eTour:UC2", "location": "flow 6", "quote": "Memorize your new cultural good."},
-    {"id": "E-10", "source_ref": "dataset_use_case:eTour:UC2", "location": "alternative", "quote": "Operator Agency cancels the operation."},
-    {"id": "E-11", "source_ref": "dataset_use_case:eTour:UC2", "location": "exception", "quote": "Interruption of the connection to the server ETOUR."},
-    {"id": "E-12", "source_ref": "dataset_use_case:eTour:UC2", "location": "exit conditions", "quote": "The system shall notify the proper inclusion of the cultural."},
-    {"id": "E-13", "source_ref": "dataset_use_case:eTour:UC2", "location": "quality requirements", "quote": "The system requirements will not accept duplicates cultural heritage."}
+    {"id": "E-1", "source_id": "SRC-1", "location": "description", "quote": "Inserts a new cultural object in the system."},
+    {"id": "E-2", "source_id": "SRC-1", "location": "actor", "quote": "Participating Actor: initialization Agency Operator"},
+    {"id": "E-3", "source_id": "SRC-1", "location": "entry conditions", "quote": "Entry Operator conditions: The agency has logged."},
+    {"id": "E-4", "source_id": "SRC-1", "location": "flow 1", "quote": "Activate the feature for the insertion of a new cultural good."},
+    {"id": "E-5", "source_id": "SRC-1", "location": "flow 2", "quote": "Displays the corresponding form."},
+    {"id": "E-6", "source_id": "SRC-1", "location": "flow 3", "quote": "Fill out the form with the data of the cultural and submit."},
+    {"id": "E-7", "source_id": "SRC-1", "location": "flow 4", "quote": "Verify the data entered and asks for confirmation of the transaction. Where the data is invalid or insufficient, the system activates the use case Errored."},
+    {"id": "E-8", "source_id": "SRC-1", "location": "flow 5", "quote": "Confirm the operation."},
+    {"id": "E-9", "source_id": "SRC-1", "location": "flow 6", "quote": "Memorize your new cultural good."},
+    {"id": "E-10", "source_id": "SRC-1", "location": "alternative", "quote": "Operator Agency cancels the operation."},
+    {"id": "E-11", "source_id": "SRC-1", "location": "exception", "quote": "Interruption of the connection to the server ETOUR."},
+    {"id": "E-12", "source_id": "SRC-1", "location": "exit conditions", "quote": "The system shall notify the proper inclusion of the cultural."},
+    {"id": "E-13", "source_id": "SRC-1", "location": "quality requirements", "quote": "The system requirements will not accept duplicates cultural heritage."}
   ],
   "validation": {"status": "invalid", "errors": []}
 }

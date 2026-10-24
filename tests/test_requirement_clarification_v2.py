@@ -31,7 +31,7 @@ from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import build_parser, main as cli_main
 from sdlc_harness.llm.client import LlmCompletion
-from sdlc_harness.sources.fixtures import UseCaseSource
+from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
@@ -55,7 +55,7 @@ class StubV2Refiner:
         self.test = test
         self.model_payload = model_payload
 
-    def refine(self, source, *, run_id: str, source_artifact_ref: str):
+    def refine(self, source, *, run_id: str, source_artifact_ref: str, source_catalog=None):
         return self.test.refinement_result(
             run_id=run_id,
             source_ref=source.source_ref,
@@ -80,26 +80,41 @@ class RequirementClarificationV2Test(unittest.TestCase):
         run_id: str = "run_clarification",
         source_ref: str = "dataset_use_case:eTour:UC2",
         source_text: str | None = None,
-        source_artifact_ref: str = "source_snapshot_v1.json",
+        source_artifact_ref: str = "source_snapshot_SRC-1_v2.json",
         model_payload: dict[str, object] | None = None,
     ) -> RequirementModelV2RefinementResult:
         text = source_text or self.source_text
         payload = deepcopy(model_payload if model_payload is not None else self.payload)
+        fingerprint = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        source_entry = {
+            "id": "SRC-1",
+            "type": "jira" if source_ref.startswith("jira_issue:") else "dataset",
+            "source_ref": source_ref,
+            "locator": "fixtures/etour/UC2.txt",
+            "revision": None,
+            "artifact_ref": source_artifact_ref,
+            "fingerprint": fingerprint,
+        }
         payload.update(
             {
                 "schema_version": "requirement_model_v2",
                 "revision": 1,
                 "run_id": run_id,
                 "source": {
+                    "source_id": "SRC-1",
                     "source_ref": source_ref,
                     "artifact_ref": source_artifact_ref,
-                    "fingerprint": "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                    "fingerprint": fingerprint,
+                },
+                "provenance_ledger": {
+                    "schema_version": "requirement_provenance_v1",
+                    "sources": [source_entry],
                 },
                 "decisions": [],
                 "validation": {"status": "invalid", "errors": []},
             }
         )
-        normalized = normalize_and_validate_requirement_model_v2(payload, text)
+        normalized = normalize_and_validate_requirement_model_v2(payload, {"SRC-1": text})
         assert normalized.model is not None
         assert normalized.report.ok
         return RequirementModelV2RefinementResult(
@@ -232,9 +247,10 @@ class RequirementClarificationV2Test(unittest.TestCase):
 
     def test_accepted_answer_creates_revision_and_decision(self) -> None:
         client = ScriptedClient([self.accepted_q4()])
+        original = self.refinement_result().model
         result = RequirementClarificationUpdater(client).apply(
-            source_text=self.source_text,
-            model=self.refinement_result().model,
+            source_text_by_id={"SRC-1": self.source_text},
+            model=original,
             question_id="Q-4",
             answer="Use normalized heritage name and location.",
             answered_by="owner",
@@ -246,6 +262,8 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertTrue(str(result.decision["submission_hash"]).startswith("sha256:"))
         self.assertEqual(result.model.open_questions[3]["status"], "resolved")
         self.assertEqual(result.final_report.blocking_question_ids, ["Q-1", "Q-2", "Q-3"])
+        self.assertEqual(result.model.provenance_ledger, original.provenance_ledger)
+        self.assertEqual(result.model.source, original.source)
 
     def test_accepted_answer_resolves_a_clarification_required_surface(self) -> None:
         payload = deepcopy(self.payload)
@@ -261,7 +279,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
             }
         ]
         result = RequirementClarificationUpdater(ScriptedClient([proposal])).apply(
-            source_text=self.source_text,
+            source_text_by_id={"SRC-1": self.source_text},
             model=self.refinement_result(model_payload=payload).model,
             question_id="Q-4",
             answer="Use normalized heritage name and location; no separate UI behavior is required.",
@@ -287,7 +305,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         ]
         client = ScriptedClient([self.accepted_q4(), repaired])
         result = RequirementClarificationUpdater(client).apply(
-            source_text=self.source_text,
+            source_text_by_id={"SRC-1": self.source_text},
             model=self.refinement_result(model_payload=payload).model,
             question_id="Q-4",
             answer="Use normalized heritage name and location.",
@@ -303,7 +321,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
             [{"resolution": "insufficient", "follow_up_text": "Please list every identity field.", "updates": [], "surface_updates": []}]
         )
         result = RequirementClarificationUpdater(client).apply(
-            source_text=self.source_text,
+            source_text_by_id={"SRC-1": self.source_text},
             model=original,
             question_id="Q-4",
             answer="Use a unique key.",
@@ -316,7 +334,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertEqual(result.decision["status"], "insufficient")
 
         accepted = RequirementClarificationUpdater(ScriptedClient([self.accepted_q4()])).apply(
-            source_text=self.source_text,
+            source_text_by_id={"SRC-1": self.source_text},
             model=result.model,
             question_id="Q-4",
             answer="Use normalized heritage name and location.",
@@ -335,7 +353,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         }
         client = ScriptedClient([invalid, self.accepted_q4()])
         result = RequirementClarificationUpdater(client).apply(
-            source_text=self.source_text,
+            source_text_by_id={"SRC-1": self.source_text},
             model=self.refinement_result().model,
             question_id="Q-4",
             answer="Use normalized heritage name and location.",
@@ -350,7 +368,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         model = self.refinement_result().model
         with self.assertRaises(HarnessError) as wrong_question:
             updater.apply(
-                source_text=self.source_text,
+                source_text_by_id={"SRC-1": self.source_text},
                 model=model,
                 question_id="Q-1",
                 answer="Stop without saving.",
@@ -359,7 +377,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertEqual(wrong_question.exception.error_code, "requirement_question_not_current")
         with self.assertRaises(HarnessError) as empty_answer:
             updater.apply(
-                source_text=self.source_text,
+                source_text_by_id={"SRC-1": self.source_text},
                 model=model,
                 question_id="Q-4",
                 answer="   ",
@@ -678,28 +696,46 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 text=self.source_text,
             )
             artifact_ref = write_source_snapshot_v2(store=store, run_id="run_source", source=source)
-            fingerprint = "sha256:" + hashlib.sha256(self.source_text.encode("utf-8")).hexdigest()
+            expected_source = source_provenance_entry(source=source, artifact_ref=artifact_ref)
             self.assertEqual(
                 read_source_snapshot_v2(
                     store=store,
                     run_id="run_source",
-                    artifact_ref=artifact_ref,
-                    expected_source_ref=source.source_ref,
-                    expected_fingerprint=fingerprint,
+                    expected_source=expected_source,
                 ),
                 self.source_text,
             )
             path = root / artifact_ref
             payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["locator"] = "tampered-locator"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(HarnessError) as identity_context:
+                read_source_snapshot_v2(
+                    store=store,
+                    run_id="run_source",
+                    expected_source=expected_source,
+                )
+            self.assertEqual(identity_context.exception.error_code, "source_snapshot_corrupted")
+
+            payload["locator"] = expected_source["locator"]
+            payload["fingerprint"] = "sha256:tampered"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(HarnessError) as fingerprint_context:
+                read_source_snapshot_v2(
+                    store=store,
+                    run_id="run_source",
+                    expected_source=expected_source,
+                )
+            self.assertEqual(fingerprint_context.exception.error_code, "source_snapshot_corrupted")
+
+            payload["fingerprint"] = expected_source["fingerprint"]
             payload["text"] += " tampered"
             path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaises(HarnessError) as context:
                 read_source_snapshot_v2(
                     store=store,
                     run_id="run_source",
-                    artifact_ref=artifact_ref,
-                    expected_source_ref=source.source_ref,
-                    expected_fingerprint=fingerprint,
+                    expected_source=expected_source,
                 )
             self.assertEqual(context.exception.error_code, "source_snapshot_corrupted")
 

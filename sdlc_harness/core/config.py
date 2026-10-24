@@ -32,6 +32,8 @@ class Settings:
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
     llm_context_window_tokens: int
+    requirement_max_tool_actions: int
+    requirement_max_action_retries: int
     developer_max_actions_per_item: int
     developer_max_action_retries: int
     requirement_contract_version: str
@@ -213,6 +215,8 @@ def load_settings(
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
+        requirement_max_tool_actions=_int_value(merged.get("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS"), default=12, minimum=3),
+        requirement_max_action_retries=_int_value(merged.get("SDLC_REQUIREMENT_MAX_ACTION_RETRIES"), default=2, minimum=0),
         developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),
         developer_max_action_retries=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"), default=2, minimum=0),
         requirement_contract_version="v2",

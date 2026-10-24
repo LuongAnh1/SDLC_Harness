@@ -223,6 +223,8 @@ def strip_code_fence(text: str) -> str:
 def fake_completion(prompt: str) -> str:
     """Fake output theo loại prompt để test không gọi API thật."""
 
+    if "# Requirement Source Tool Loop" in prompt:
+        return fake_requirement_source_action(prompt)
     if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
         return fake_requirement_model_v2(prompt)
     if "UML Audit / Report" in prompt and "updated Class Diagram" in prompt:
@@ -257,6 +259,70 @@ def fake_completion(prompt: str) -> str:
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
+
+
+def fake_requirement_source_action(prompt: str) -> str:
+    """Đi theo list -> read -> complete để fake mode kiểm thử đúng tool-loop thật."""
+
+    marker_start = "TOOL_STATE_JSON_BEGIN\n"
+    marker_end = "\nTOOL_STATE_JSON_END"
+    try:
+        raw_state = prompt.split(marker_start, 1)[1].split(marker_end, 1)[0]
+        state = json.loads(raw_state)
+    except (IndexError, json.JSONDecodeError):
+        return json.dumps({"action": "source.list", "arguments": {}, "summary": "List allowed sources."})
+    history = state.get("history") if isinstance(state, dict) else []
+    entries = [item for item in history if isinstance(item, dict)] if isinstance(history, list) else []
+    listed = next((item for item in entries if item.get("action") == "source.list"), None)
+    if listed is None:
+        return json.dumps({"action": "source.list", "arguments": {}, "summary": "List allowed sources."})
+    read_entry = next(
+        (
+            item
+            for item in entries
+            if item.get("action") in {"source.read", "source.search"}
+            and isinstance(item.get("result"), dict)
+            and item["result"].get("ok") is True
+        ),
+        None,
+    )
+    if read_entry is None:
+        result = listed.get("result") if isinstance(listed.get("result"), dict) else {}
+        sources = result.get("sources") if isinstance(result, dict) else []
+        source = next((item for item in sources if isinstance(item, dict)), {}) if isinstance(sources, list) else {}
+        return json.dumps(
+            {
+                "action": "source.read",
+                "arguments": {
+                    "source_id": source.get("source_id", "SRC-1"),
+                    "start_line": 1,
+                    "line_count": 200,
+                },
+                "summary": "Read the immutable source snapshot.",
+            }
+        )
+    result = read_entry.get("result") if isinstance(read_entry.get("result"), dict) else {}
+    observation_id = str(result.get("observation_id") or "OBS-1")
+    source_ref = str(result.get("source_ref") or "fake:source")
+    source_text = str(result.get("text") or "Fake requirement source.")
+    use_case_match = re.search(r"Use case:\s*`([^`]+)`", prompt)
+    use_case = use_case_match.group(1).strip() if use_case_match else "FakeUseCase"
+    synthetic_prompt = (
+        f"Source ref: `{source_ref}`\nUse case: `{use_case}`\n"
+        f"## Source snapshot\n{source_text}\n## End source snapshot"
+    )
+    model = json.loads(fake_requirement_model_v2(synthetic_prompt))
+    for evidence in model.get("evidence", []):
+        if isinstance(evidence, dict):
+            evidence["observation_ref"] = observation_id
+    return json.dumps(
+        {
+            "action": "complete",
+            "arguments": {"requirement_model": model},
+            "summary": "Build the grounded Requirement Model V2.",
+        },
+        ensure_ascii=False,
+    )
 
 
 def fake_progressive_semantic_review(prompt: str) -> str:
@@ -348,9 +414,24 @@ def fake_requirement_model_v2(prompt: str) -> str:
         "revision": 1,
         "run_id": "fake_run",
         "source": {
+            "source_id": "SRC-1",
             "source_ref": source_ref,
             "artifact_ref": "fake_source_snapshot",
             "fingerprint": "fake_fingerprint",
+        },
+        "provenance_ledger": {
+            "schema_version": "requirement_provenance_v1",
+            "sources": [
+                {
+                    "id": "SRC-1",
+                    "type": "dataset",
+                    "source_ref": source_ref,
+                    "locator": source_ref,
+                    "revision": None,
+                    "artifact_ref": "fake_source_snapshot",
+                    "fingerprint": "fake_fingerprint",
+                }
+            ],
         },
         "use_case": {
             "id": "UC-1",
@@ -451,7 +532,7 @@ def fake_requirement_model_v2(prompt: str) -> str:
         "evidence": [
             {
                 "id": "E-1",
-                "source_ref": source_ref,
+                "source_id": "SRC-1",
                 "location": "source snapshot",
                 "quote": evidence_quote,
             }

@@ -11,7 +11,7 @@ from ..agents.requirements import (
 )
 from ..core.errors import HarnessError
 from ..storage.runtime import RuntimeStore
-from .requirement_v2 import read_requirement_model_v2, read_source_snapshot_v2
+from .requirement_v2 import read_requirement_model_v2, read_requirement_source_texts
 
 
 @dataclass(frozen=True)
@@ -92,14 +92,8 @@ def _read_requirement_input(
     if require_current_checkpoint:
         _require_current_v2_checkpoint(state, model_ref=model_ref, revision=model.revision, run_id=run_id)
 
-    source_text = read_source_snapshot_v2(
-        store=store,
-        run_id=run_id,
-        artifact_ref=str(model.source.get("artifact_ref") or ""),
-        expected_source_ref=str(model.source.get("source_ref") or ""),
-        expected_fingerprint=str(model.source.get("fingerprint") or ""),
-    )
-    validation = normalize_and_validate_requirement_model_v2(model, source_text)
+    source_text_by_id = read_requirement_source_texts(store=store, run_id=run_id, model=model)
+    validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
     if validation.model.to_dict() != model.to_dict():
         raise HarnessError(
             "requirement_model_v2_invalid",

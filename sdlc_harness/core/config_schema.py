@@ -88,6 +88,8 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
         "label": "Developer & Validation",
         "description": "Giới hạn action, repair và semantic validation.",
         "fields": (
+            _field("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS", "Requirement tool actions", "integer", 12, "Số action tối đa cho Requirement source loop.", minimum=3),
+            _field("SDLC_REQUIREMENT_MAX_ACTION_RETRIES", "Requirement action retries", "integer", 2, "Số lần thử lại action Requirement sai hoặc bị cắt.", minimum=0),
             _field("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM", "Actions per item", "integer", 24, "Số action tối đa cho mỗi work item.", minimum=1),
             _field("SDLC_DEVELOPER_MAX_ACTION_RETRIES", "Action retries", "integer", 2, "Số lần thử lại action lỗi hoặc bị cắt.", minimum=0),
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 2, "Số vòng Designer sửa design.", minimum=0),

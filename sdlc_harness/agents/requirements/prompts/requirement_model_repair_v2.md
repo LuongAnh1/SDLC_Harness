@@ -6,6 +6,10 @@ Repair only the schema, ID/reference, dependency, evidence-grounding, or excepti
 
 Preserve valid `SC-*` scenario identities and repair `scenario_contract` deterministically from the rejected model. Every scenario must retain source evidence, acceptance coverage, all four UI/API/business-rule/data surfaces, and its existing valid requirement/question links. Surface reasons describe product behavior only; never invent repository files, routes, classes, tables, framework details, or implementation choices.
 
+`source`, `provenance_ledger`, and every evidence `source_id` are Python-owned.
+Keep placeholder values only; do not create, rename, merge, or reinterpret `SRC-*`
+sources during repair.
+
 ## Unknown-content repair
 
 When the report contains `unknown_contains_inferred_content`:

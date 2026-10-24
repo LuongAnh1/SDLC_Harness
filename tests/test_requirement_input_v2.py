@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import hashlib
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,7 +21,7 @@ from sdlc_harness.artifacts import (
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import fake_design_model
-from sdlc_harness.sources.fixtures import UseCaseSource
+from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 
@@ -165,6 +164,7 @@ class RequirementInputV2Test(unittest.TestCase):
             text=self.source_text,
         )
         snapshot_ref = write_source_snapshot_v2(store=store, run_id=run_id, source=source)
+        source_entry = source_provenance_entry(source=source, artifact_ref=snapshot_ref)
         payload = self._valid_payload() if valid else deepcopy(self.base_payload)
         payload.update(
             {
@@ -172,15 +172,23 @@ class RequirementInputV2Test(unittest.TestCase):
                 "revision": 1,
                 "run_id": run_id,
                 "source": {
+                    "source_id": source_entry["id"],
                     "source_ref": source.source_ref,
                     "artifact_ref": snapshot_ref,
-                    "fingerprint": "sha256:" + hashlib.sha256(self.source_text.encode("utf-8")).hexdigest(),
+                    "fingerprint": source_entry["fingerprint"],
+                },
+                "provenance_ledger": {
+                    "schema_version": "requirement_provenance_v1",
+                    "sources": [source_entry],
                 },
                 "decisions": [],
                 "validation": {"status": "invalid", "errors": []},
             }
         )
-        validation = normalize_and_validate_requirement_model_v2(payload, self.source_text)
+        validation = normalize_and_validate_requirement_model_v2(
+            payload,
+            {str(source_entry["id"]): self.source_text},
+        )
         refs = write_requirement_v2_revision_artifacts(
             store=store,
             run_id=run_id,

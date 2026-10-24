@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import hashlib
 import re
 from typing import Any, Iterable
 
@@ -24,6 +25,8 @@ SCENARIO_CONTRACT_VERSION = "requirement_scenario_surface_v1"
 SCENARIO_KINDS = frozenset({"main", "alternative", "exception"})
 SURFACE_NAMES = frozenset({"ui", "api", "business_rule", "data"})
 SURFACE_STATUSES = frozenset({"required", "not_applicable", "clarification_required"})
+PROVENANCE_SCHEMA_VERSION = "requirement_provenance_v1"
+SOURCE_TYPES = frozenset({"dataset", "jira", "document", "approved_evidence"})
 EXPECTED_PREFIXES = {
     "use_case": "UC-",
     "goal": "GOAL-",
@@ -41,6 +44,7 @@ EXPECTED_PREFIXES = {
     "decisions": "D-",
     "evidence": "E-",
     "scenarios": "SC-",
+    "sources": "SRC-",
 }
 EXCEPTION_TERMS = (
     "cancel",
@@ -90,7 +94,7 @@ class RequirementModelV2ValidationResult:
 
 def normalize_and_validate_requirement_model_v2(
     payload: RequirementModelV2 | object,
-    source_text: str,
+    source_text_by_id: dict[str, str],
 ) -> RequirementModelV2ValidationResult:
     """Return a normalized copy and a fail-closed validation report."""
 
@@ -102,7 +106,7 @@ def normalize_and_validate_requirement_model_v2(
     _validate_schema(data, issues)
     ids = _validate_ids(data, issues)
     _validate_references(data, ids, issues)
-    _validate_grounding(data, source_text, ids, issues)
+    _validate_grounding(data, source_text_by_id, ids, issues)
     _validate_decisions(data, ids, issues)
     _validate_question_dependencies(data, ids, issues)
     _validate_scenario_contract(data, ids, issues)
@@ -155,9 +159,52 @@ def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]
     if not isinstance(source, dict):
         _add(issues, "invalid_type", "source", "source must be an object.")
     else:
-        for name in ("source_ref", "artifact_ref", "fingerprint"):
+        for name in ("source_id", "source_ref", "artifact_ref", "fingerprint"):
             if not _non_empty(source.get(name)):
                 _add(issues, "required_field", f"source.{name}", f"{name} must not be empty.")
+
+    provenance = data.get("provenance_ledger")
+    if not isinstance(provenance, dict):
+        _add(issues, "invalid_type", "provenance_ledger", "provenance_ledger must be an object.")
+    else:
+        _require_fields(provenance, ("schema_version", "sources"), "provenance_ledger", issues)
+        if provenance.get("schema_version") != PROVENANCE_SCHEMA_VERSION:
+            _add(
+                issues,
+                "invalid_provenance_schema_version",
+                "provenance_ledger.schema_version",
+                f"Expected {PROVENANCE_SCHEMA_VERSION!r}.",
+            )
+        sources = provenance.get("sources")
+        if not isinstance(sources, list):
+            _add(issues, "invalid_type", "provenance_ledger.sources", "sources must be a list.")
+        elif not sources:
+            _add(issues, "provenance_sources_empty", "provenance_ledger.sources", "At least one source is required.")
+        else:
+            for index, item in enumerate(sources):
+                path = f"provenance_ledger.sources[{index}]"
+                if not isinstance(item, dict):
+                    _add(issues, "invalid_type", path, "Source entry must be an object.")
+                    continue
+                _require_fields(
+                    item,
+                    ("id", "type", "source_ref", "locator", "revision", "artifact_ref", "fingerprint"),
+                    path,
+                    issues,
+                )
+                if item.get("type") not in SOURCE_TYPES:
+                    _add(issues, "invalid_source_type", f"{path}.type", "Unknown provenance source type.")
+                for name in ("source_ref", "locator", "artifact_ref", "fingerprint"):
+                    if not _non_empty(item.get(name)):
+                        _add(issues, "required_field", f"{path}.{name}", f"{name} must not be empty.")
+                revision = item.get("revision")
+                if revision is not None and not _non_empty(revision):
+                    _add(
+                        issues,
+                        "invalid_source_revision",
+                        f"{path}.revision",
+                        "Source revision must be null or a non-empty string.",
+                    )
 
     use_case = data.get("use_case")
     if not isinstance(use_case, dict):
@@ -333,7 +380,11 @@ def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]
         _require_string_list(item, "affected_requirement_ids", path, issues)
 
     for index, item in enumerate(_dict_list(data.get("evidence"))):
-        _require_fields(item, ("id", "source_ref", "location", "quote"), f"evidence[{index}]", issues)
+        path = f"evidence[{index}]"
+        _require_fields(item, ("id", "source_id", "location", "quote"), path, issues)
+        for name in ("source_id", "location", "quote"):
+            if not _non_empty(item.get(name)):
+                _add(issues, "required_field", f"{path}.{name}", f"{name} must not be empty.")
 
 
 def _validate_ids(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -> dict[str, str]:
@@ -356,9 +407,14 @@ def _validate_ids(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -
 
 def _validate_references(data: dict[str, Any], ids: dict[str, str], issues: list[RequirementModelV2Issue]) -> None:
     evidence_ids = {item.get("id") for item in _dict_list(data.get("evidence"))}
+    provenance = data.get("provenance_ledger") if isinstance(data.get("provenance_ledger"), dict) else {}
+    source_ids = {item.get("id") for item in _dict_list(provenance.get("sources"))}
     question_ids = {item.get("id") for item in _dict_list(data.get("open_questions"))}
     decision_ids = {item.get("id") for item in _dict_list(data.get("decisions"))}
-    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "SC-"))}
+    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "SC-", "SRC-"))}
+
+    for index, item in enumerate(_dict_list(data.get("evidence"))):
+        _refs_exist([item.get("source_id")], source_ids, f"evidence[{index}].source_id", "source", issues)
 
     for path, item in _requirement_like_items(data):
         _refs_exist(item.get("evidence_refs"), evidence_ids, f"{path}.evidence_refs", "evidence", issues)
@@ -399,21 +455,56 @@ def _validate_references(data: dict[str, Any], ids: dict[str, str], issues: list
 
 def _validate_grounding(
     data: dict[str, Any],
-    source_text: str,
+    source_text_by_id: dict[str, str],
     ids: dict[str, str],
     issues: list[RequirementModelV2Issue],
 ) -> None:
-    normalized_source = _normalize_whitespace(source_text)
     evidence_by_id = {str(item.get("id")): item for item in _dict_list(data.get("evidence"))}
-    source_ref = str(data.get("source", {}).get("source_ref") or "") if isinstance(data.get("source"), dict) else ""
+    provenance = data.get("provenance_ledger") if isinstance(data.get("provenance_ledger"), dict) else {}
+    sources = _dict_list(provenance.get("sources"))
+    source_by_id = {str(item.get("id")): item for item in sources if _non_empty(item.get("id"))}
+    root_source = data.get("source") if isinstance(data.get("source"), dict) else {}
+    primary = source_by_id.get(str(root_source.get("source_id") or ""))
+    if primary is None or any(
+        root_source.get(field) != primary.get(field)
+        for field in ("source_ref", "artifact_ref", "fingerprint")
+    ):
+        _add(
+            issues,
+            "source_root_mismatch",
+            "source",
+            "Primary source pointer must match exactly one provenance ledger entry.",
+        )
+
+    normalized_sources: dict[str, str] = {}
+    for index, source in enumerate(sources):
+        source_id = str(source.get("id") or "")
+        text = source_text_by_id.get(source_id)
+        if not isinstance(text, str):
+            _add(
+                issues,
+                "source_snapshot_missing",
+                f"provenance_ledger.sources[{index}]",
+                f"Verified snapshot text is unavailable for {source_id}.",
+            )
+            continue
+        normalized_sources[source_id] = _normalize_whitespace(text)
+        fingerprint = "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+        if source.get("fingerprint") != fingerprint:
+            _add(
+                issues,
+                "source_fingerprint_mismatch",
+                f"provenance_ledger.sources[{index}].fingerprint",
+                f"Source fingerprint does not match verified snapshot text for {source_id}.",
+            )
 
     for index, item in enumerate(_dict_list(data.get("evidence"))):
         path = f"evidence[{index}]"
+        source_id = str(item.get("source_id") or "")
+        normalized_source = normalized_sources.get(source_id, "")
         quote = _normalize_whitespace(str(item.get("quote") or ""))
         if not quote or quote not in normalized_source:
             _add(issues, "evidence_not_in_source", f"{path}.quote", "Evidence quote is not present in the source snapshot.")
-        if item.get("source_ref") != source_ref:
-            _add(issues, "evidence_source_mismatch", f"{path}.source_ref", "Evidence source_ref must match model source_ref.")
 
     accepted_decisions = {
         str(item.get("id"))
@@ -443,7 +534,7 @@ def _validate_grounding(
 
 def _validate_decisions(data: dict[str, Any], ids: dict[str, str], issues: list[RequirementModelV2Issue]) -> None:
     question_ids = {str(item.get("id")) for item in _dict_list(data.get("open_questions"))}
-    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "UC-", "SC-"))}
+    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "UC-", "SC-", "SRC-"))}
     decision_ids = {str(item.get("id")) for item in _dict_list(data.get("decisions"))}
     accepted_by_question: dict[str, list[str]] = {}
     for index, decision in enumerate(_dict_list(data.get("decisions"))):
@@ -703,6 +794,9 @@ def _all_identified_items(data: dict[str, Any]) -> Iterable[tuple[str, str, dict
     for collection in ("open_questions", "decisions", "evidence"):
         for index, item in enumerate(_dict_list(data.get(collection))):
             yield collection, f"{collection}[{index}]", item
+    provenance = data.get("provenance_ledger") if isinstance(data.get("provenance_ledger"), dict) else {}
+    for index, item in enumerate(_dict_list(provenance.get("sources"))):
+        yield "sources", f"provenance_ledger.sources[{index}]", item
     scenario_contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
     for index, item in enumerate(_dict_list(scenario_contract.get("scenarios"))):
         yield "scenarios", f"scenario_contract.scenarios[{index}]", item

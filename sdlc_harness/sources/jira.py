@@ -55,7 +55,7 @@ def load_jira_issue_source(
         "GET",
         (
             f"{settings.atlassian_base_url}/rest/api/3/issue/{encoded_key}"
-            "?fields=summary,description,status,labels,issuetype,comment"
+            "?fields=summary,description,status,labels,issuetype,comment,updated"
         ),
         None,
     )
@@ -91,6 +91,9 @@ def load_jira_issue_source(
         source_ref=jira_source_ref_for(normalized_key),
         source_path=None,
         text=source_text,
+        source_type="jira",
+        locator=normalized_key,
+        revision=str(fields.get("updated") or "").strip() or None,
     )
 
 

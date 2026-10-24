@@ -55,6 +55,7 @@ class RequirementModelV2:
     revision: int
     run_id: str
     source: dict[str, Any]
+    provenance_ledger: dict[str, Any]
     use_case: dict[str, Any]
     scenario_contract: dict[str, Any]
     preconditions: list[dict[str, Any]]
@@ -82,6 +83,7 @@ class RequirementModelV2:
             "revision",
             "run_id",
             "source",
+            "provenance_ledger",
             "use_case",
             "scenario_contract",
             "preconditions",
@@ -103,7 +105,7 @@ class RequirementModelV2:
                 "Requirement Model V2 is missing root fields: " + ", ".join(missing),
             )
 
-        object_fields = ("source", "use_case", "scenario_contract", "flows", "validation")
+        object_fields = ("source", "provenance_ledger", "use_case", "scenario_contract", "flows", "validation")
         list_fields = (
             "preconditions",
             "postconditions",
@@ -135,6 +137,7 @@ class RequirementModelV2:
                 revision=payload["revision"],
                 run_id=payload["run_id"],
                 source=deepcopy(payload["source"]),
+                provenance_ledger=deepcopy(payload["provenance_ledger"]),
                 use_case=deepcopy(payload["use_case"]),
                 scenario_contract=deepcopy(payload["scenario_contract"]),
                 preconditions=deepcopy(payload["preconditions"]),
@@ -161,6 +164,7 @@ class RequirementModelV2:
             "revision": self.revision,
             "run_id": self.run_id,
             "source": deepcopy(self.source),
+            "provenance_ledger": deepcopy(self.provenance_ledger),
             "use_case": deepcopy(self.use_case),
             "scenario_contract": deepcopy(self.scenario_contract),
             "preconditions": deepcopy(self.preconditions),

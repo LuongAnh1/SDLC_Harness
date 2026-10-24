@@ -9,6 +9,7 @@ from __future__ import annotations
 from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
     read_requirement_model_v2,
+    read_requirement_source_texts,
     read_source_snapshot_v2,
     write_requirement_v2_artifacts,
     write_requirement_v2_revision_artifacts,
@@ -17,7 +18,7 @@ from ..artifacts import (
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..profiles import build_profile_snapshot, profile_status_metadata
-from ..sources.fixtures import UseCaseSource, load_use_case
+from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_entry
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..agents.developer import (
@@ -27,6 +28,7 @@ from ..agents.developer import (
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementModelV2Refiner,
+    RequirementSourceCatalog,
     find_clarification_submission,
     select_current_requirement_question,
 )
@@ -60,7 +62,7 @@ class PhaseOneWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.llm_client = LlmClient(settings)
-        self.refiner_v2 = RequirementModelV2Refiner(self.llm_client)
+        self.refiner_v2 = RequirementModelV2Refiner(self.llm_client, store=self.store)
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
 
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
@@ -124,13 +126,35 @@ class PhaseOneWorkflow:
         try:
             use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
             source_snapshot_path = write_source_snapshot_v2(store=self.store, run_id=run_id, source=source)
+            source_entry = source_provenance_entry(source=source, artifact_ref=source_snapshot_path)
+            verified_source_text = read_source_snapshot_v2(
+                store=self.store,
+                run_id=run_id,
+                expected_source=source_entry,
+            )
+            source_catalog = RequirementSourceCatalog(
+                run_id=run_id,
+                sources=[source_entry],
+                source_text_by_id={source.source_id: verified_source_text},
+            )
             refinement = self.refiner_v2.refine(
                 source,
                 run_id=run_id,
                 source_artifact_ref=source_snapshot_path,
+                source_catalog=source_catalog,
             )
             artifact_paths = {
                 "use_case_packet": use_case_packet_path,
+                **(
+                    {"requirement_source_manifest": refinement.source_manifest_path}
+                    if refinement.source_manifest_path
+                    else {}
+                ),
+                **(
+                    {"requirement_source_journal": refinement.source_journal_path}
+                    if refinement.source_journal_path
+                    else {}
+                ),
                 **write_requirement_v2_artifacts(
                     store=self.store,
                     run_id=run_id,
@@ -156,11 +180,20 @@ class PhaseOneWorkflow:
             self.store.register_active_run(source.source_ref, run_id)
             return self._status_response(state, created_new_run=True)
         except HarnessError as exc:
+            latest_artifacts = self._normalized_artifacts(state)
+            for key, filename in (
+                ("requirement_source_manifest", "requirement_source_manifest_v1.json"),
+                ("requirement_source_journal", "requirement_source_journal_v1.json"),
+            ):
+                path = self.store.artifact_path(run_id, filename)
+                if path.exists():
+                    latest_artifacts[key] = self.store.relative(path)
             state.update(
                 {
                     "updated_at": utc_now_iso(),
                     "status": "failed",
                     "last_error": exc.to_response(),
+                    "latest_artifacts": latest_artifacts,
                     "summary_for_user": f"Phase 1 V2 lỗi khi chuẩn hóa requirement: {exc.message}",
                 }
             )
@@ -209,16 +242,9 @@ class PhaseOneWorkflow:
                 f"Question is not current: {question_id}",
                 run_id=run_id,
             )
-        source_meta = model.source
-        source_text = read_source_snapshot_v2(
-            store=self.store,
-            run_id=run_id,
-            artifact_ref=str(source_meta.get("artifact_ref") or ""),
-            expected_source_ref=str(source_meta.get("source_ref") or ""),
-            expected_fingerprint=str(source_meta.get("fingerprint") or ""),
-        )
+        source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
         result = self.clarification_updater.apply(
-            source_text=source_text,
+            source_text_by_id=source_text_by_id,
             model=model,
             question_id=question_id,
             answer=answer,

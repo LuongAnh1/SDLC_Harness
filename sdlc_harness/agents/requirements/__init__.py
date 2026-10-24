@@ -34,6 +34,7 @@ from .projection_v2 import (
     validate_requirement_v2_projections,
 )
 from .renderer_v2 import render_formal_use_case_v2, render_requirement_packet_v2
+from .source_tools import RequirementSourceCatalog
 from .validator_v2 import (
     HARD_BLOCKING_CATEGORIES,
     RequirementModelV2Issue,
@@ -60,6 +61,7 @@ __all__ = [
     "RequirementProjectionV2Report",
     "RequirementQuestionSelection",
     "RequirementStatus",
+    "RequirementSourceCatalog",
     "ValidationStatus",
     "clarification_submission_hash",
     "find_clarification_submission",

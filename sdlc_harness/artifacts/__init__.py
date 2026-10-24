@@ -7,6 +7,7 @@ workflow sở hữu vòng đời, còn ``storage`` sở hữu state/runtime layo
 
 from .requirement_v2 import (
     read_requirement_model_v2,
+    read_requirement_source_texts,
     read_source_snapshot_v2,
     write_requirement_v2_artifacts,
     write_requirement_v2_revision_artifacts,
@@ -36,6 +37,7 @@ __all__ = [
     "read_approved_requirement_input",
     "read_frozen_requirement_input",
     "read_requirement_model_v2",
+    "read_requirement_source_texts",
     "read_source_snapshot_v2",
     "write_requirement_v2_artifacts",
     "write_requirement_v2_revision_artifacts",

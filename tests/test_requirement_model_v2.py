@@ -24,7 +24,10 @@ class RequirementModelV2Test(unittest.TestCase):
         cls.payload = json.loads((root / "tests" / "fixtures" / "requirement_v2" / "uc2.json").read_text(encoding="utf-8"))
 
     def validate(self, payload: dict[str, object] | None = None):
-        return normalize_and_validate_requirement_model_v2(deepcopy(payload or self.payload), self.source_text)
+        return normalize_and_validate_requirement_model_v2(
+            deepcopy(payload or self.payload),
+            {"SRC-1": self.source_text},
+        )
 
     def issue_codes(self, payload: dict[str, object]) -> set[str]:
         return {issue.code for issue in self.validate(payload).report.issues}
@@ -70,6 +73,51 @@ class RequirementModelV2Test(unittest.TestCase):
         with self.assertRaises(HarnessError) as context:
             RequirementModelV2.from_dict(payload)
         self.assertEqual(context.exception.error_code, "requirement_model_v2_invalid")
+
+    def test_legacy_payload_without_provenance_ledger_is_rejected(self) -> None:
+        payload = deepcopy(self.payload)
+        payload.pop("provenance_ledger")
+        with self.assertRaises(HarnessError) as context:
+            RequirementModelV2.from_dict(payload)
+        self.assertEqual(context.exception.error_code, "requirement_model_v2_invalid")
+
+    def test_provenance_requires_unique_stable_source_ids(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["provenance_ledger"]["sources"].append(
+            deepcopy(payload["provenance_ledger"]["sources"][0])
+        )
+        codes = self.issue_codes(payload)
+        self.assertIn("duplicate_id", codes)
+
+    def test_evidence_must_reference_a_known_source(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["evidence"][0]["source_id"] = "SRC-999"
+        self.assertIn("dangling_reference", self.issue_codes(payload))
+
+    def test_primary_source_pointer_must_match_the_ledger(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["source"]["artifact_ref"] = "different_snapshot.json"
+        self.assertIn("source_root_mismatch", self.issue_codes(payload))
+
+    def test_evidence_is_checked_against_its_selected_source(self) -> None:
+        payload = deepcopy(self.payload)
+        second = deepcopy(payload["provenance_ledger"]["sources"][0])
+        second.update(
+            {
+                "id": "SRC-2",
+                "source_ref": "approved_evidence:empty",
+                "locator": "approved_evidence:empty",
+                "artifact_ref": "source_snapshot_SRC-2_v2.json",
+                "fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            }
+        )
+        payload["provenance_ledger"]["sources"].append(second)
+        payload["evidence"][0]["source_id"] = "SRC-2"
+        result = normalize_and_validate_requirement_model_v2(
+            payload,
+            {"SRC-1": self.source_text, "SRC-2": ""},
+        )
+        self.assertIn("evidence_not_in_source", {issue.code for issue in result.report.issues})
 
     def test_scenario_contract_requires_exact_surface_set_and_reason(self) -> None:
         payload = deepcopy(self.payload)

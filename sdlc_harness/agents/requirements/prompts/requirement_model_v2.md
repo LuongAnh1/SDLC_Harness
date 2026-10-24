@@ -19,7 +19,7 @@ Source ref: `{{SOURCE_REF}}`
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, and `evidence_refs`.
-- `effective_blocking`, root metadata, decisions, and validation are controlled by Python. Include placeholders for them; Python will overwrite their values.
+- `effective_blocking`, root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
 
 ## Required source coverage pass
 
@@ -69,6 +69,12 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - Return `scenario_contract.schema_version="requirement_scenario_surface_v1"` and at least one scenario.
 - Split source behavior into stable `SC-*` main, alternative, and exception scenarios. Every `MF-*`, `AF-*`, `EF-*`, `BR-*`, and `AC-*` must be covered by at least one scenario.
 - Every scenario must reference at least one behavior item, one acceptance criterion, and source evidence.
+- `scenario.requirement_refs` may contain only scenario behavior IDs (`MF-*`, `AF-*`,
+  `EF-*`, or `BR-*`). `scenario.acceptance_refs` may contain only `AC-*` IDs. Never put
+  an `AC-*` ID in `scenario.requirement_refs`. Together those two lists form the
+  scenario-local allowlist; every surface `requirement_refs` entry must occur in one of them.
+- A scenario `open_question_refs` list must contain every open question whose `affects`
+  intersects the scenario-local allowlist, and must not contain unrelated questions.
 - Every scenario must contain exactly four surfaces: `ui`, `api`, `business_rule`, and `data`.
 - Each surface uses exactly one status: `required`, `not_applicable`, or `clarification_required`, plus a non-empty reason.
 - `required` means the product behavior must address that surface; it does not mean new code must be created. Reference the scenario-local behavior or acceptance criteria that justify it.
@@ -76,6 +82,9 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - Use `clarification_required` only when the human answer can change whether that surface participates. It must reference affected behavior and an open question.
 - A known required surface may still list open questions about its detailed behavior without changing its status to `clarification_required`.
 - Map every scenario open question to at least one surface. Do not create file names, routes, classes, database tables, framework choices, or repository claims.
+- Put a question in a surface `open_question_refs` only when that question's `affects`
+  intersects that surface's `requirement_refs`. Otherwise map it to the related surface;
+  never attach a question merely to satisfy the mapping requirement.
 
 ## Exact encoding for unknown content
 
@@ -99,7 +108,11 @@ Use this counterfactual test: if two implementations can both satisfy the litera
   "schema_version": "requirement_model_v2",
   "revision": 1,
   "run_id": "python_owned",
-  "source": {"source_ref": "{{SOURCE_REF}}", "artifact_ref": "python_owned", "fingerprint": "python_owned"},
+  "source": {"source_id": "SRC-1", "source_ref": "{{SOURCE_REF}}", "artifact_ref": "python_owned", "fingerprint": "python_owned"},
+  "provenance_ledger": {
+    "schema_version": "requirement_provenance_v1",
+    "sources": [{"id": "SRC-1", "type": "python_owned", "source_ref": "{{SOURCE_REF}}", "locator": "python_owned", "revision": null, "artifact_ref": "python_owned", "fingerprint": "python_owned"}]
+  },
   "use_case": {
     "id": "UC-1",
     "name": "...",
@@ -138,7 +151,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
   "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": []}],
   "decisions": [],
-  "evidence": [{"id": "E-1", "source_ref": "{{SOURCE_REF}}", "location": "...", "quote": "exact source quote"}],
+  "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}
 }
 ```
