@@ -12,6 +12,15 @@ from .model_v2 import (
     RequirementStatus,
     ValidationStatus,
 )
+from .gap_report import (
+    GAP_REPORT_VERSION,
+    GAP_TYPES,
+    MISSING_EVIDENCE_CODES,
+    SOURCE_UNAVAILABLE_CODES,
+    build_requirement_gap_report,
+    gap_report_summary,
+    validate_requirement_gap_report,
+)
 from .clarification_v2 import (
     ClarificationAttempt,
     CurrentRequirementQuestion,
@@ -47,7 +56,10 @@ __all__ = [
     "ClarificationAttempt",
     "CurrentRequirementQuestion",
     "DecisionStatus",
+    "GAP_REPORT_VERSION",
+    "GAP_TYPES",
     "HARD_BLOCKING_CATEGORIES",
+    "MISSING_EVIDENCE_CODES",
     "QuestionStatus",
     "RequirementClarificationResult",
     "RequirementClarificationUpdater",
@@ -62,9 +74,12 @@ __all__ = [
     "RequirementQuestionSelection",
     "RequirementStatus",
     "RequirementSourceCatalog",
+    "SOURCE_UNAVAILABLE_CODES",
     "ValidationStatus",
     "clarification_submission_hash",
+    "build_requirement_gap_report",
     "find_clarification_submission",
+    "gap_report_summary",
     "normalize_and_validate_requirement_model_v2",
     "normalize_clarification_answer",
     "require_valid_requirement_v2_projections",
@@ -72,4 +87,5 @@ __all__ = [
     "render_requirement_packet_v2",
     "select_current_requirement_question",
     "validate_requirement_v2_projections",
+    "validate_requirement_gap_report",
 ]

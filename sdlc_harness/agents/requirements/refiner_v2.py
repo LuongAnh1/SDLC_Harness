@@ -15,6 +15,7 @@ from ...llm.client import LlmClient, LlmCompletion
 from ...sources.fixtures import UseCaseSource
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .model_v2 import RequirementModelV2, SCHEMA_VERSION
+from .gap_report import build_requirement_gap_report, validate_requirement_gap_report
 from .source_tools import RequirementSourceCatalog, observation_text_contains_quote
 from .validator_v2 import (
     RequirementModelV2ValidationReport,
@@ -55,7 +56,8 @@ _REPAIRABLE_ISSUE_CODES = {
     "surface_question_unrelated", "scenario_question_not_mapped", "scenario_coverage_missing",
     "invalid_provenance_schema_version", "provenance_sources_empty", "invalid_source_type",
     "invalid_source_revision", "source_root_mismatch", "source_snapshot_missing",
-    "source_fingerprint_mismatch",
+    "source_fingerprint_mismatch", "question_without_evidence",
+    "source_conflict_evidence_insufficient",
 }
 
 
@@ -98,6 +100,8 @@ class RequirementModelV2RefinementResult:
     attempts: list[RequirementModelV2Attempt]
     source_manifest_path: str = ""
     source_journal_path: str = ""
+    gap_report: dict[str, object] | None = None
+    gap_report_path: str = ""
 
     def to_report_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -110,6 +114,8 @@ class RequirementModelV2RefinementResult:
             payload["source_manifest_path"] = self.source_manifest_path
         if self.source_journal_path:
             payload["source_journal_path"] = self.source_journal_path
+        if self.gap_report_path:
+            payload["gap_report_path"] = self.gap_report_path
         return payload
 
 
@@ -292,6 +298,13 @@ class RequirementModelV2Refiner:
                                 summary=summary, result=result, completion=completion, duration=duration,
                                 status="completed",
                             )
+                            gap_report = build_requirement_gap_report(
+                                run_id=run_id,
+                                attempts=[attempt.to_dict() for attempt in attempts],
+                                model=model,
+                                source_manifest_input_hash=str(journal.get("manifest_input_hash") or "") or None,
+                            )
+                            gap_report_path = self._write_gap_report(run_id, gap_report)
                             return RequirementModelV2RefinementResult(
                                 model=model,
                                 initial_report=initial_report,
@@ -300,6 +313,8 @@ class RequirementModelV2Refiner:
                                 attempts=attempts,
                                 source_manifest_path=manifest_path,
                                 source_journal_path=journal_path,
+                                gap_report=gap_report,
+                                gap_report_path=gap_report_path,
                             )
                         result = {
                             "ok": False,
@@ -340,6 +355,14 @@ class RequirementModelV2Refiner:
             )
         except Exception as exc:
             self._finish_journal_failure(journal, journal_path, exc)
+            error = exc if isinstance(exc, HarnessError) else HarnessError("internal_error", str(exc), run_id=run_id)
+            gap_report = build_requirement_gap_report(
+                run_id=run_id,
+                attempts=[attempt.to_dict() for attempt in attempts],
+                error=error,
+                source_manifest_input_hash=str(journal.get("manifest_input_hash") or "") or None,
+            )
+            self._write_gap_report(run_id, gap_report)
             raise
 
     def _process_candidate(
@@ -627,6 +650,13 @@ class RequirementModelV2Refiner:
         if self.store is None or not journal_path:
             return
         self.store.write_json_artifact(str(journal.get("run_id") or ""), Path(journal_path).name, journal)
+
+    def _write_gap_report(self, run_id: str, report: dict[str, object]) -> str:
+        if self.store is None:
+            return ""
+        validate_requirement_gap_report(report, run_id=run_id)
+        path = self.store.write_json_artifact(run_id, "requirement_gap_report_v1.json", report)
+        return self.store.relative(path)
 
     @staticmethod
     def _journal_arguments(action: str, arguments: dict[str, object]) -> dict[str, object]:

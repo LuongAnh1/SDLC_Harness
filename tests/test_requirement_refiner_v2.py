@@ -161,6 +161,9 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertIn("surface's `requirement_refs`", prompt)
         self.assertIn("Never put", prompt)
         self.assertIn("AC-*", prompt)
+        self.assertIn("Gap routing before clarification", prompt)
+        self.assertIn('category="source_conflict"', prompt)
+        self.assertIn("Never ask a human to repair", prompt)
 
     def test_truncated_action_uses_bounded_action_retry(self) -> None:
         result, client = self.refine(
@@ -210,6 +213,11 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertEqual(result.attempts[1].purpose, "validator_repair")
         self.assertIn("requirement_evidence_observation_invalid", str(client.calls[3]["prompt"]))
         self.assertTrue(result.final_report.ok)
+        missing = [
+            gap for gap in result.gap_report["gaps"] if gap["type"] == "missing_evidence"
+        ]
+        self.assertTrue(missing)
+        self.assertTrue(all(gap["status"] == "resolved" for gap in missing))
 
     def test_repair_prompt_explains_acceptance_and_scenario_question_fixes(self) -> None:
         invalid = deepcopy(self.payload)

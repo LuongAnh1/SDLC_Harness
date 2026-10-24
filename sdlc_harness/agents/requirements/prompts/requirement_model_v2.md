@@ -101,6 +101,18 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - Do not mark wording, presentation, internal design, implementation preference, or optional contextual information as blocking.
 - Use a category that names the product decision. Use `business_rule`, `acceptance_criteria`, `data_identity`, `api_contract`, or `observable_behavior` only when that category is genuinely the unresolved contract.
 
+## Gap routing before clarification
+
+- Do not turn a failed source tool call, unread source, missing quote, or ungrounded claim
+  into a human question. Use `source.search`/`source.read` and repair the evidence first.
+- Use `category="source_conflict"` only when at least two grounded evidence items state
+  incompatible facts that require a human choice. Cite both evidence IDs; source conflict
+  is always blocking.
+- All other open questions represent a missing business/product decision. Every question
+  must cite source evidence showing the supported clause whose deciding detail is absent.
+- Never ask a human to repair a snapshot, catalog, fingerprint, tool argument, JSON shape,
+  or validation error.
+
 ## Required JSON shape
 
 ```json

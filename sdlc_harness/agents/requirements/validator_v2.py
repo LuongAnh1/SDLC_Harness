@@ -18,7 +18,10 @@ from .model_v2 import (
 
 
 HARD_BLOCKING_CATEGORIES = frozenset(
-    {"business_rule", "acceptance_criteria", "data_identity", "api_contract", "observable_behavior"}
+    {
+        "business_rule", "acceptance_criteria", "data_identity", "api_contract",
+        "observable_behavior", "source_conflict",
+    }
 )
 BEHAVIOR_PREFIXES = ("MF-", "AF-", "EF-", "POST-", "BR-", "AC-", "QR-")
 SCENARIO_CONTRACT_VERSION = "requirement_scenario_surface_v1"
@@ -107,6 +110,7 @@ def normalize_and_validate_requirement_model_v2(
     ids = _validate_ids(data, issues)
     _validate_references(data, ids, issues)
     _validate_grounding(data, source_text_by_id, ids, issues)
+    _validate_question_gap_semantics(data, issues)
     _validate_decisions(data, ids, issues)
     _validate_question_dependencies(data, ids, issues)
     _validate_scenario_contract(data, ids, issues)
@@ -530,6 +534,31 @@ def _validate_grounding(
             content = str(item.get("text") or item.get("name") or item.get("action") or "").strip()
             if content and not content.startswith("UNKNOWN_FROM_SOURCE"):
                 _add(issues, "unknown_contains_inferred_content", path, "Unknown requirement must not contain inferred content.")
+
+
+def _validate_question_gap_semantics(
+    data: dict[str, Any],
+    issues: list[RequirementModelV2Issue],
+) -> None:
+    """Giữ clarification grounded và tách source conflict khỏi business ambiguity."""
+
+    for index, question in enumerate(_dict_list(data.get("open_questions"))):
+        path = f"open_questions[{index}]"
+        evidence_refs = _string_list(question.get("evidence_refs"))
+        if not evidence_refs:
+            _add(
+                issues,
+                "question_without_evidence",
+                f"{path}.evidence_refs",
+                "An open question must cite evidence explaining why clarification is needed.",
+            )
+        if str(question.get("category") or "") == "source_conflict" and len(set(evidence_refs)) < 2:
+            _add(
+                issues,
+                "source_conflict_evidence_insufficient",
+                f"{path}.evidence_refs",
+                "A source conflict must cite at least two distinct evidence items.",
+            )
 
 
 def _validate_decisions(data: dict[str, Any], ids: dict[str, str], issues: list[RequirementModelV2Issue]) -> None:

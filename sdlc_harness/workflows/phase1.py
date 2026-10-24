@@ -8,10 +8,12 @@ from __future__ import annotations
 
 from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
+    read_requirement_gap_report,
     read_requirement_model_v2,
     read_requirement_source_texts,
     read_source_snapshot_v2,
     write_requirement_v2_artifacts,
+    write_requirement_gap_report,
     write_requirement_v2_revision_artifacts,
     write_source_snapshot_v2,
 )
@@ -29,7 +31,9 @@ from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementModelV2Refiner,
     RequirementSourceCatalog,
+    build_requirement_gap_report,
     find_clarification_submission,
+    gap_report_summary,
     select_current_requirement_question,
 )
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -143,6 +147,15 @@ class PhaseOneWorkflow:
                 source_artifact_ref=source_snapshot_path,
                 source_catalog=source_catalog,
             )
+            gap_report = refinement.gap_report or build_requirement_gap_report(
+                run_id=run_id,
+                model=refinement.model,
+            )
+            gap_report_path = refinement.gap_report_path or write_requirement_gap_report(
+                store=self.store,
+                run_id=run_id,
+                report=gap_report,
+            )
             artifact_paths = {
                 "use_case_packet": use_case_packet_path,
                 **(
@@ -155,6 +168,7 @@ class PhaseOneWorkflow:
                     if refinement.source_journal_path
                     else {}
                 ),
+                "requirement_gap_report": gap_report_path,
                 **write_requirement_v2_artifacts(
                     store=self.store,
                     run_id=run_id,
@@ -169,6 +183,7 @@ class PhaseOneWorkflow:
                 current_question=selection.current_question.to_dict() if selection.current_question else None,
                 remaining_blocking_count=selection.remaining_blocking_count,
                 quality_report=refinement.to_report_dict(),
+                gap_report=gap_report,
                 latest_decision=None,
             )
             self.store.write_state(state)
@@ -184,16 +199,37 @@ class PhaseOneWorkflow:
             for key, filename in (
                 ("requirement_source_manifest", "requirement_source_manifest_v1.json"),
                 ("requirement_source_journal", "requirement_source_journal_v1.json"),
+                ("requirement_gap_report", "requirement_gap_report_v1.json"),
             ):
                 path = self.store.artifact_path(run_id, filename)
                 if path.exists():
                     latest_artifacts[key] = self.store.relative(path)
+            gap_path = latest_artifacts.get("requirement_gap_report")
+            if gap_path:
+                gap_report = read_requirement_gap_report(
+                    store=self.store,
+                    run_id=run_id,
+                    artifact_ref=gap_path,
+                )
+            else:
+                gap_report = build_requirement_gap_report(run_id=run_id, error=exc)
+                gap_path = write_requirement_gap_report(
+                    store=self.store,
+                    run_id=run_id,
+                    report=gap_report,
+                )
+                latest_artifacts["requirement_gap_report"] = gap_path
+            quality_reports = state.get("quality_reports")
+            if not isinstance(quality_reports, dict):
+                quality_reports = {}
+            quality_reports["requirement_gaps"] = gap_report_summary(gap_report)
             state.update(
                 {
                     "updated_at": utc_now_iso(),
                     "status": "failed",
                     "last_error": exc.to_response(),
                     "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
                     "summary_for_user": f"Phase 1 V2 lỗi khi chuẩn hóa requirement: {exc.message}",
                 }
             )
@@ -258,6 +294,29 @@ class PhaseOneWorkflow:
             audit=result.to_report_dict(),
         )
         artifacts.update(revised_artifacts)
+        previous_gap_report = None
+        gap_ref = artifacts.get("requirement_gap_report")
+        if gap_ref:
+            previous_gap_report = read_requirement_gap_report(
+                store=self.store,
+                run_id=run_id,
+                artifact_ref=gap_ref,
+            )
+        gap_report = build_requirement_gap_report(
+            run_id=run_id,
+            model=result.model,
+            source_manifest_input_hash=(
+                str(previous_gap_report.get("source_manifest_input_hash") or "") or None
+                if isinstance(previous_gap_report, dict)
+                else None
+            ),
+            previous_report=previous_gap_report,
+        )
+        artifacts["requirement_gap_report"] = write_requirement_gap_report(
+            store=self.store,
+            run_id=run_id,
+            report=gap_report,
+        )
         selection = select_current_requirement_question(result.model)
         self._apply_v2_checkpoint_state(
             state=state,
@@ -266,6 +325,7 @@ class PhaseOneWorkflow:
             current_question=selection.current_question.to_dict() if selection.current_question else None,
             remaining_blocking_count=selection.remaining_blocking_count,
             quality_report=result.to_report_dict(),
+            gap_report=gap_report,
             latest_decision=result.decision,
         )
         self.store.write_state(state)
@@ -285,6 +345,7 @@ class PhaseOneWorkflow:
         current_question: dict[str, object] | None,
         remaining_blocking_count: int,
         quality_report: dict[str, object],
+        gap_report: dict[str, object],
         latest_decision: dict[str, object] | None,
     ) -> None:
         run_id = str(state["run_id"])
@@ -320,7 +381,10 @@ class PhaseOneWorkflow:
                 "pending_checkpoint": checkpoint,
                 "allowed_next_actions": list(allowed),
                 "last_error": None,
-                "quality_reports": {"requirement_model_v2": quality_report},
+                "quality_reports": {
+                    "requirement_model_v2": quality_report,
+                    "requirement_gaps": gap_report_summary(gap_report),
+                },
                 "latest_requirement_decision": latest_decision,
             }
         )

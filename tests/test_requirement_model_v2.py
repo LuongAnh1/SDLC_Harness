@@ -242,6 +242,31 @@ class RequirementModelV2Test(unittest.TestCase):
         payload["open_questions"][0]["status"] = "resolved"
         self.assertIn("resolved_question_without_decision", self.issue_codes(payload))
 
+    def test_open_question_requires_source_evidence(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["open_questions"][0]["evidence_refs"] = []
+        self.assertIn("question_without_evidence", self.issue_codes(payload))
+
+    def test_source_conflict_requires_two_distinct_evidence_references(self) -> None:
+        payload = deepcopy(self.payload)
+        question = payload["open_questions"][0]
+        question["category"] = "source_conflict"
+        question["evidence_refs"] = ["E-1"]
+        self.assertIn("source_conflict_evidence_insufficient", self.issue_codes(payload))
+
+    def test_source_conflict_is_always_normalized_as_blocking(self) -> None:
+        payload = deepcopy(self.payload)
+        question = payload["open_questions"][0]
+        question["category"] = "source_conflict"
+        question["proposed_blocking"] = False
+        question["effective_blocking"] = False
+        question["evidence_refs"] = ["E-1", "E-2"]
+
+        result = self.validate(payload)
+
+        self.assertTrue(result.report.ok)
+        self.assertTrue(result.model.open_questions[0]["effective_blocking"])
+
     @staticmethod
     def _formal_section(text: str, start: str, end: str) -> str:
         return text.split(start, 1)[1].split(end, 1)[0]

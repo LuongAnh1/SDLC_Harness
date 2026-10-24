@@ -224,7 +224,12 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIn("formal_use_case", response["latest_artifacts"])
         self.assertEqual(response["requirement_contract_version"], "v2")
         self.assertIn("requirement_model", response["latest_artifacts"])
+        self.assertIn("requirement_gap_report", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["requirement_model_v2"]["final_report"]["ok"])
+        self.assertEqual(
+            response["quality_reports"]["requirement_gaps"]["status"],
+            "clear",
+        )
 
         run_id = str(response["run_id"])
         run_dir = self.runtime_root / "runs" / run_id
@@ -235,7 +240,35 @@ class PhaseOneTest(unittest.TestCase):
         self.assertTrue((run_dir / "artifacts" / "requirement_packet_v2_r1.md").exists())
         self.assertTrue((run_dir / "artifacts" / "requirement_validation_v2_r1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "requirement_decisions_v2_r1.json").exists())
+        self.assertTrue((run_dir / "artifacts" / "requirement_gap_report_v1.json").exists())
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
+
+    def test_source_failure_keeps_failed_state_and_persists_classified_gap(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        with patch.object(
+            workflow.refiner_v2,
+            "refine",
+            side_effect=HarnessError(
+                "source_snapshot_corrupted",
+                "The immutable source snapshot is corrupted.",
+            ),
+        ):
+            with self.assertRaises(HarnessError) as context:
+                workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        run_id = str(context.exception.run_id)
+        state = workflow.store.read_state(run_id)
+        report = json.loads(
+            (self.runtime_root / "runs" / run_id / "artifacts" / "requirement_gap_report_v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(state["last_error"]["error_code"], "source_snapshot_corrupted")
+        self.assertEqual(state["quality_reports"]["requirement_gaps"]["status"], "failed")
+        self.assertEqual(report["gaps"][0]["type"], "source_unavailable")
+        self.assertEqual(report["gaps"][0]["route"], "fail")
 
     def test_start_from_jira_creates_runtime_files(self) -> None:
         source = UseCaseSource(

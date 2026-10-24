@@ -155,7 +155,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 "id": "ASM-1",
                 "text": "The reviewer may choose a display label later.",
                 "status": "assumption",
-                "evidence_refs": [],
+                "evidence_refs": ["E-1"],
                 "open_question_refs": ["Q-1"],
                 "reason": "Display wording is not specified by the source.",
                 "affects": [],
@@ -172,7 +172,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 "depends_on": [],
                 "status": "open",
                 "answer_guidance": None,
-                "evidence_refs": [],
+                "evidence_refs": ["E-1"],
             }
         ]
         return payload
@@ -244,6 +244,13 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn("Which display label should the review page use?", packet)
+            gap_report = json.loads(
+                Path(response["latest_artifacts"]["requirement_gap_report"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(gap_report["status"], "clear")
+            self.assertEqual(gap_report["gaps"][0]["route"], "record_only")
 
     def test_accepted_answer_creates_revision_and_decision(self) -> None:
         client = ScriptedClient([self.accepted_q4()])
@@ -418,6 +425,14 @@ class RequirementClarificationV2Test(unittest.TestCase):
             )
             self.assertEqual(updated["pending_checkpoint"]["current_question"]["id"], "Q-1")
             self.assertTrue(updated["latest_artifacts"]["requirement_model"].endswith("_r2.json"))
+            updated_gaps = json.loads(
+                Path(updated["latest_artifacts"]["requirement_gap_report"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            q4_gap = next(gap for gap in updated_gaps["gaps"] if gap["question_ref"] == "Q-4")
+            self.assertEqual(q4_gap["status"], "resolved")
+            self.assertEqual(q4_gap["route"], "record_only")
 
             repeated = workflow.answer_clarification(
                 run_id=str(start["run_id"]),
@@ -473,6 +488,13 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 )
             self.assertEqual(completed["status"], "waiting_requirement_approval")
             self.assertTrue(completed["latest_artifacts"]["requirement_model"].endswith("_r5.json"))
+            completed_gaps = json.loads(
+                Path(completed["latest_artifacts"]["requirement_gap_report"]).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(completed_gaps["status"], "clear")
+            self.assertEqual(completed["quality_reports"]["requirement_gaps"]["unresolved"], 0)
             design = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(start["run_id"]))
             self.assertEqual(design["status"], "waiting_design_approval")
             self.assertEqual(design["requirement_contract_version"], "v2")
