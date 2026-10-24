@@ -17,7 +17,7 @@ Source ref: `{{SOURCE_REF}}`
 - Never infer confirmed requirements from domain knowledge.
 - Never create human decisions. Return `decisions` as an empty list and never use `human_decision` status.
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
-- Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`.
+- Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, and `evidence_refs`.
 - `effective_blocking`, root metadata, decisions, and validation are controlled by Python. Include placeholders for them; Python will overwrite their values.
 
@@ -64,6 +64,19 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - When the outcome is fully specified, create an `explicit` acceptance criterion directly and do not ask a question.
 - When pass/fail depends on a missing decision criterion, create an `unknown` acceptance criterion with `text=""`, link its `open_question_refs`, and make its `verifies` references point to the affected rule or flow.
 
+## Required scenario and surface contract
+
+- Return `scenario_contract.schema_version="requirement_scenario_surface_v1"` and at least one scenario.
+- Split source behavior into stable `SC-*` main, alternative, and exception scenarios. Every `MF-*`, `AF-*`, `EF-*`, `BR-*`, and `AC-*` must be covered by at least one scenario.
+- Every scenario must reference at least one behavior item, one acceptance criterion, and source evidence.
+- Every scenario must contain exactly four surfaces: `ui`, `api`, `business_rule`, and `data`.
+- Each surface uses exactly one status: `required`, `not_applicable`, or `clarification_required`, plus a non-empty reason.
+- `required` means the product behavior must address that surface; it does not mean new code must be created. Reference the scenario-local behavior or acceptance criteria that justify it.
+- `not_applicable` requires a reason and empty requirement/question references.
+- Use `clarification_required` only when the human answer can change whether that surface participates. It must reference affected behavior and an open question.
+- A known required surface may still list open questions about its detailed behavior without changing its status to `clarification_required`.
+- Map every scenario open question to at least one surface. Do not create file names, routes, classes, database tables, framework choices, or repository claims.
+
 ## Exact encoding for unknown content
 
 - Every `unknown` item must reference at least one open question through `open_question_refs`.
@@ -92,6 +105,25 @@ Use this counterfactual test: if two implementations can both satisfy the litera
     "name": "...",
     "goal": {"id": "GOAL-1", "text": "...", "status": "explicit|assumption|unknown", "evidence_refs": ["E-1"], "open_question_refs": []},
     "actors": [{"id": "ACT-1", "name": "...", "status": "explicit|assumption|unknown", "evidence_refs": ["E-2"], "open_question_refs": []}]
+  },
+  "scenario_contract": {
+    "schema_version": "requirement_scenario_surface_v1",
+    "scenarios": [{
+      "id": "SC-1",
+      "name": "...",
+      "kind": "main|alternative|exception",
+      "actor_refs": ["ACT-1"],
+      "requirement_refs": ["MF-1"],
+      "acceptance_refs": ["AC-1"],
+      "evidence_refs": ["E-1"],
+      "open_question_refs": [],
+      "surfaces": {
+        "ui": {"status": "required|not_applicable|clarification_required", "reason": "...", "requirement_refs": ["MF-1"], "evidence_refs": ["E-1"], "open_question_refs": []},
+        "api": {"status": "required|not_applicable|clarification_required", "reason": "...", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []},
+        "business_rule": {"status": "required|not_applicable|clarification_required", "reason": "...", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []},
+        "data": {"status": "required|not_applicable|clarification_required", "reason": "...", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []}
+      }
+    }]
   },
   "preconditions": [{"id": "PRE-1", "text": "...", "status": "explicit|assumption|unknown", "evidence_refs": [], "open_question_refs": []}],
   "flows": {

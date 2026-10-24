@@ -103,11 +103,11 @@ test("config update payload contains changed editable fields only", () => {
 
 test("config update payload omits unchanged values and accepts a replaced secret", () => {
   const sections = [{ fields: [
-    { name: "MODEL", kind: "string", value: "deepseek-chat", editable: true },
+    { name: "MODEL", kind: "string", value: "deepseek-flash", editable: true },
     { name: "TOKEN", kind: "secret", value: "********", editable: true, secret: true },
   ] }];
   assert.deepEqual(dashboard.configUpdateValues(sections, {
-    MODEL: " deepseek-chat ",
+    MODEL: " deepseek-flash ",
     TOKEN: "new-secret",
   }), { TOKEN: "new-secret" });
   assert.equal(dashboard.configFieldDisabled({ editable: false }), true);

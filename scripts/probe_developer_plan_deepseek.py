@@ -154,6 +154,8 @@ def _call_chat_completions(*, settings, prompt: str) -> dict[str, object]:
         ],
         "temperature": 0.1,
     }
+    if settings.llm_mode == "deepseek":
+        payload["thinking"] = {"type": settings.llm_thinking_mode}
     request = urllib.request.Request(
         settings.llm_base_url.rstrip("/") + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),

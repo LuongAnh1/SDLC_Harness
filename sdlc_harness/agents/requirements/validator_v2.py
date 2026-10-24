@@ -20,6 +20,10 @@ HARD_BLOCKING_CATEGORIES = frozenset(
     {"business_rule", "acceptance_criteria", "data_identity", "api_contract", "observable_behavior"}
 )
 BEHAVIOR_PREFIXES = ("MF-", "AF-", "EF-", "POST-", "BR-", "AC-", "QR-")
+SCENARIO_CONTRACT_VERSION = "requirement_scenario_surface_v1"
+SCENARIO_KINDS = frozenset({"main", "alternative", "exception"})
+SURFACE_NAMES = frozenset({"ui", "api", "business_rule", "data"})
+SURFACE_STATUSES = frozenset({"required", "not_applicable", "clarification_required"})
 EXPECTED_PREFIXES = {
     "use_case": "UC-",
     "goal": "GOAL-",
@@ -36,6 +40,7 @@ EXPECTED_PREFIXES = {
     "open_questions": "Q-",
     "decisions": "D-",
     "evidence": "E-",
+    "scenarios": "SC-",
 }
 EXCEPTION_TERMS = (
     "cancel",
@@ -100,6 +105,7 @@ def normalize_and_validate_requirement_model_v2(
     _validate_grounding(data, source_text, ids, issues)
     _validate_decisions(data, ids, issues)
     _validate_question_dependencies(data, ids, issues)
+    _validate_scenario_contract(data, ids, issues)
     _validate_semantics(data, issues)
 
     blocking_ids = [
@@ -170,6 +176,88 @@ def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]
         for name in ("main", "alternatives", "exceptions"):
             if not isinstance(flows.get(name), list):
                 _add(issues, "invalid_type", f"flows.{name}", f"{name} must be a list.")
+
+    scenario_contract = data.get("scenario_contract")
+    if not isinstance(scenario_contract, dict):
+        _add(issues, "invalid_type", "scenario_contract", "scenario_contract must be an object.")
+    else:
+        _require_fields(scenario_contract, ("schema_version", "scenarios"), "scenario_contract", issues)
+        if scenario_contract.get("schema_version") != SCENARIO_CONTRACT_VERSION:
+            _add(
+                issues,
+                "invalid_scenario_contract_version",
+                "scenario_contract.schema_version",
+                f"Expected {SCENARIO_CONTRACT_VERSION!r}.",
+            )
+        scenarios = scenario_contract.get("scenarios")
+        if not isinstance(scenarios, list):
+            _add(issues, "invalid_type", "scenario_contract.scenarios", "scenarios must be a list.")
+        elif not scenarios:
+            _add(issues, "scenario_contract_empty", "scenario_contract.scenarios", "At least one scenario is required.")
+        else:
+            for index, scenario in enumerate(scenarios):
+                path = f"scenario_contract.scenarios[{index}]"
+                if not isinstance(scenario, dict):
+                    _add(issues, "invalid_type", path, "Scenario must be an object.")
+                    continue
+                _require_fields(
+                    scenario,
+                    (
+                        "id",
+                        "name",
+                        "kind",
+                        "actor_refs",
+                        "requirement_refs",
+                        "acceptance_refs",
+                        "evidence_refs",
+                        "open_question_refs",
+                        "surfaces",
+                    ),
+                    path,
+                    issues,
+                )
+                for field in (
+                    "actor_refs",
+                    "requirement_refs",
+                    "acceptance_refs",
+                    "evidence_refs",
+                    "open_question_refs",
+                ):
+                    _require_string_list(scenario, field, path, issues)
+                if not _non_empty(scenario.get("name")):
+                    _add(issues, "required_field", f"{path}.name", "Scenario name must not be empty.")
+                if scenario.get("kind") not in SCENARIO_KINDS:
+                    _add(issues, "invalid_scenario_kind", f"{path}.kind", "Unknown scenario kind.")
+                surfaces = scenario.get("surfaces")
+                if not isinstance(surfaces, dict):
+                    _add(issues, "invalid_type", f"{path}.surfaces", "surfaces must be an object.")
+                    continue
+                actual_surfaces = set(surfaces)
+                if actual_surfaces != SURFACE_NAMES:
+                    _add(
+                        issues,
+                        "invalid_surface_set",
+                        f"{path}.surfaces",
+                        "surfaces must contain exactly ui, api, business_rule, and data.",
+                    )
+                for surface_name in sorted(SURFACE_NAMES.intersection(actual_surfaces)):
+                    surface = surfaces.get(surface_name)
+                    surface_path = f"{path}.surfaces.{surface_name}"
+                    if not isinstance(surface, dict):
+                        _add(issues, "invalid_type", surface_path, "Surface must be an object.")
+                        continue
+                    _require_fields(
+                        surface,
+                        ("status", "reason", "requirement_refs", "evidence_refs", "open_question_refs"),
+                        surface_path,
+                        issues,
+                    )
+                    for field in ("requirement_refs", "evidence_refs", "open_question_refs"):
+                        _require_string_list(surface, field, surface_path, issues)
+                    if surface.get("status") not in SURFACE_STATUSES:
+                        _add(issues, "invalid_surface_status", f"{surface_path}.status", "Unknown surface status.")
+                    if not _non_empty(surface.get("reason")):
+                        _add(issues, "surface_reason_required", f"{surface_path}.reason", "Surface reason must not be empty.")
 
     for collection, items in _statement_collections(data):
         for index, item in enumerate(items):
@@ -270,7 +358,7 @@ def _validate_references(data: dict[str, Any], ids: dict[str, str], issues: list
     evidence_ids = {item.get("id") for item in _dict_list(data.get("evidence"))}
     question_ids = {item.get("id") for item in _dict_list(data.get("open_questions"))}
     decision_ids = {item.get("id") for item in _dict_list(data.get("decisions"))}
-    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-"))}
+    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "SC-"))}
 
     for path, item in _requirement_like_items(data):
         _refs_exist(item.get("evidence_refs"), evidence_ids, f"{path}.evidence_refs", "evidence", issues)
@@ -355,7 +443,7 @@ def _validate_grounding(
 
 def _validate_decisions(data: dict[str, Any], ids: dict[str, str], issues: list[RequirementModelV2Issue]) -> None:
     question_ids = {str(item.get("id")) for item in _dict_list(data.get("open_questions"))}
-    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "UC-"))}
+    requirement_ids = {item_id for item_id in ids if not item_id.startswith(("Q-", "D-", "E-", "UC-", "SC-"))}
     decision_ids = {str(item.get("id")) for item in _dict_list(data.get("decisions"))}
     accepted_by_question: dict[str, list[str]] = {}
     for index, decision in enumerate(_dict_list(data.get("decisions"))):
@@ -408,6 +496,164 @@ def _validate_question_dependencies(data: dict[str, Any], ids: dict[str, str], i
             break
 
 
+def _validate_scenario_contract(
+    data: dict[str, Any],
+    ids: dict[str, str],
+    issues: list[RequirementModelV2Issue],
+) -> None:
+    contract = data.get("scenario_contract")
+    if not isinstance(contract, dict):
+        return
+    scenarios = _dict_list(contract.get("scenarios"))
+    if not scenarios:
+        return
+
+    actor_ids = {item_id for item_id in ids if item_id.startswith("ACT-")}
+    evidence_ids = {item_id for item_id in ids if item_id.startswith("E-")}
+    question_by_id = {
+        str(item.get("id")): item for item in _dict_list(data.get("open_questions")) if _non_empty(item.get("id"))
+    }
+    question_ids = set(question_by_id)
+    acceptance_ids = {item_id for item_id in ids if item_id.startswith("AC-")}
+    scenario_requirement_ids = {
+        item_id
+        for item_id in ids
+        if item_id.startswith(("MF-", "AF-", "EF-", "POST-", "BR-", "QR-"))
+    }
+    required_coverage_ids = {
+        item_id for item_id in ids if item_id.startswith(("MF-", "AF-", "EF-", "BR-", "AC-"))
+    }
+    covered_ids: set[str] = set()
+
+    for index, scenario in enumerate(scenarios):
+        path = f"scenario_contract.scenarios[{index}]"
+        actor_refs = _string_list(scenario.get("actor_refs"))
+        requirement_refs = _string_list(scenario.get("requirement_refs"))
+        acceptance_refs = _string_list(scenario.get("acceptance_refs"))
+        evidence_refs = _string_list(scenario.get("evidence_refs"))
+        question_refs = _string_list(scenario.get("open_question_refs"))
+        _refs_exist(actor_refs, actor_ids, f"{path}.actor_refs", "actor", issues)
+        _refs_exist(requirement_refs, scenario_requirement_ids, f"{path}.requirement_refs", "scenario requirement", issues)
+        _refs_exist(acceptance_refs, acceptance_ids, f"{path}.acceptance_refs", "acceptance criterion", issues)
+        _refs_exist(evidence_refs, evidence_ids, f"{path}.evidence_refs", "evidence", issues)
+        _refs_exist(question_refs, question_ids, f"{path}.open_question_refs", "question", issues)
+        if not requirement_refs:
+            _add(issues, "scenario_requirement_required", f"{path}.requirement_refs", "Scenario must reference behavior.")
+        if not acceptance_refs:
+            _add(issues, "scenario_acceptance_required", f"{path}.acceptance_refs", "Scenario must reference acceptance criteria.")
+        if not evidence_refs:
+            _add(issues, "scenario_evidence_required", f"{path}.evidence_refs", "Scenario must reference source evidence.")
+        covered_ids.update(requirement_refs)
+        covered_ids.update(acceptance_refs)
+
+        scenario_scope = set(requirement_refs + acceptance_refs)
+        expected_questions = {
+            question_id
+            for question_id, question in question_by_id.items()
+            if question.get("status") == QuestionStatus.OPEN.value
+            and set(_string_list(question.get("affects"))).intersection(scenario_scope)
+        }
+        missing_questions = sorted(expected_questions.difference(question_refs))
+        if missing_questions:
+            _add(
+                issues,
+                "scenario_question_coverage_missing",
+                f"{path}.open_question_refs",
+                "Scenario is missing related questions: " + ", ".join(missing_questions) + ".",
+            )
+        unrelated_questions = sorted(
+            question_id
+            for question_id in question_refs
+            if question_id in question_by_id
+            and not set(_string_list(question_by_id[question_id].get("affects"))).intersection(scenario_scope)
+        )
+        if unrelated_questions:
+            _add(
+                issues,
+                "scenario_question_unrelated",
+                f"{path}.open_question_refs",
+                "Questions do not affect this scenario: " + ", ".join(unrelated_questions) + ".",
+            )
+
+        mapped_questions: set[str] = set()
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        for surface_name in sorted(SURFACE_NAMES):
+            surface = surfaces.get(surface_name)
+            if not isinstance(surface, dict):
+                continue
+            surface_path = f"{path}.surfaces.{surface_name}"
+            status = surface.get("status")
+            surface_requirements = _string_list(surface.get("requirement_refs"))
+            surface_evidence = _string_list(surface.get("evidence_refs"))
+            surface_questions = _string_list(surface.get("open_question_refs"))
+            _refs_exist(surface_requirements, scenario_scope, f"{surface_path}.requirement_refs", "scenario-local requirement", issues)
+            _refs_exist(surface_evidence, evidence_ids, f"{surface_path}.evidence_refs", "evidence", issues)
+            _refs_exist(surface_questions, set(question_refs), f"{surface_path}.open_question_refs", "scenario-local question", issues)
+            mapped_questions.update(surface_questions)
+            if status == "required" and not surface_requirements:
+                _add(
+                    issues,
+                    "surface_requirement_required",
+                    f"{surface_path}.requirement_refs",
+                    "A required surface must reference scenario behavior or acceptance.",
+                )
+            elif status == "not_applicable" and (surface_requirements or surface_questions):
+                _add(
+                    issues,
+                    "surface_not_applicable_conflict",
+                    surface_path,
+                    "A not_applicable surface cannot reference requirements or open questions.",
+                )
+            elif status == "clarification_required":
+                if not surface_requirements:
+                    _add(
+                        issues,
+                        "surface_requirement_required",
+                        f"{surface_path}.requirement_refs",
+                        "A clarification_required surface must identify affected behavior.",
+                    )
+                if not surface_questions:
+                    _add(
+                        issues,
+                        "surface_clarification_question_required",
+                        f"{surface_path}.open_question_refs",
+                        "A clarification_required surface must reference an open question.",
+                    )
+            for question_id in surface_questions:
+                question = question_by_id.get(question_id)
+                if question is not None and question.get("status") != QuestionStatus.OPEN.value:
+                    _add(
+                        issues,
+                        "surface_question_not_open",
+                        f"{surface_path}.open_question_refs",
+                        f"Surface question must be open: {question_id}.",
+                    )
+                if question is not None and not set(_string_list(question.get("affects"))).intersection(surface_requirements):
+                    _add(
+                        issues,
+                        "surface_question_unrelated",
+                        f"{surface_path}.open_question_refs",
+                        f"Question does not affect this surface's requirements: {question_id}.",
+                    )
+        unmapped_questions = sorted(set(question_refs).difference(mapped_questions))
+        if unmapped_questions:
+            _add(
+                issues,
+                "scenario_question_not_mapped",
+                f"{path}.surfaces",
+                "Scenario questions are not assigned to a surface: " + ", ".join(unmapped_questions) + ".",
+            )
+
+    missing_coverage = sorted(required_coverage_ids.difference(covered_ids))
+    if missing_coverage:
+        _add(
+            issues,
+            "scenario_coverage_missing",
+            "scenario_contract.scenarios",
+            "Requirement behavior is not covered by a scenario: " + ", ".join(missing_coverage) + ".",
+        )
+
+
 def _validate_semantics(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -> None:
     flows = data.get("flows") if isinstance(data.get("flows"), dict) else {}
     for index, item in enumerate(_dict_list(flows.get("main"))):
@@ -457,6 +703,9 @@ def _all_identified_items(data: dict[str, Any]) -> Iterable[tuple[str, str, dict
     for collection in ("open_questions", "decisions", "evidence"):
         for index, item in enumerate(_dict_list(data.get(collection))):
             yield collection, f"{collection}[{index}]", item
+    scenario_contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
+    for index, item in enumerate(_dict_list(scenario_contract.get("scenarios"))):
+        yield "scenarios", f"scenario_contract.scenarios[{index}]", item
 
 
 def _require_fields(item: dict[str, Any], fields: Iterable[str], path: str, issues: list[RequirementModelV2Issue]) -> None:

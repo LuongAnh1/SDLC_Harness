@@ -101,7 +101,19 @@ class RuntimeConfigTests(unittest.TestCase):
             "https://github.com/LuongAnh1/SDLC_Target_TypeScript.git",
         )
         self.assertEqual(settings.llm_mode, "fake")
+        self.assertEqual(settings.llm_model, "deepseek-flash")
+        self.assertEqual(settings.llm_thinking_mode, "disabled")
         self.assertEqual(settings.sync_mode, "mock")
+
+    def test_invalid_thinking_mode_from_non_api_source_falls_back_to_disabled(self) -> None:
+        (self.root / ".env").write_text(
+            "SDLC_LLM_THINKING_MODE=unexpected\n",
+            encoding="utf-8",
+        )
+
+        settings = load_settings(root=self.root, runtime_root=self.runtime_root)
+
+        self.assertEqual(settings.llm_thinking_mode, "disabled")
 
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

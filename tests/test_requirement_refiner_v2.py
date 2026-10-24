@@ -144,6 +144,15 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertEqual(result.attempts[0].parse_status, "schema_failed")
         self.assertEqual(result.attempts[1].purpose, "validator_repair")
 
+    def test_missing_scenario_contract_uses_bounded_validator_repair(self) -> None:
+        legacy = deepcopy(self.payload)
+        legacy.pop("scenario_contract")
+        result, client = self.refine(self.completion(legacy), self.completion(self.payload))
+        self.assertTrue(result.repaired)
+        self.assertEqual(result.attempts[0].parse_status, "schema_failed")
+        self.assertEqual(result.attempts[1].purpose, "validator_repair")
+        self.assertIn("scenario_contract", str(client.calls[1]["prompt"]))
+
     def test_invalid_after_validator_repair_fails_closed(self) -> None:
         invalid = deepcopy(self.payload)
         invalid["evidence"][0]["quote"] = "invented evidence"

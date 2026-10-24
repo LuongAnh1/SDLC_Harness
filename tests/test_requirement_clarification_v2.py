@@ -116,14 +116,21 @@ class RequirementClarificationV2Test(unittest.TestCase):
         for item in payload["flows"]["alternatives"] + payload["flows"]["exceptions"]:
             item["open_question_refs"] = []
         payload["business_rules"][0]["open_question_refs"] = []
-        payload["acceptance_criteria"][0].update(
-            {
-                "text": "The system rejects a duplicate cultural heritage record.",
-                "status": "explicit",
-                "evidence_refs": ["E-13"],
-                "open_question_refs": [],
-            }
-        )
+        resolved_acceptance = {
+            "AC-1": ("The system rejects a duplicate cultural heritage record.", ["E-13"]),
+            "AC-3": ("The operator can cancel the insertion operation.", ["E-10"]),
+            "AC-4": ("Invalid or insufficient data activates the Errored use case.", ["E-7"]),
+            "AC-5": ("A connection interruption is handled as an insertion exception.", ["E-11"]),
+        }
+        for item in payload["acceptance_criteria"]:
+            item["open_question_refs"] = []
+            if item["id"] in resolved_acceptance:
+                item["text"], item["evidence_refs"] = resolved_acceptance[item["id"]]
+                item["status"] = "explicit"
+        for scenario in payload["scenario_contract"]["scenarios"]:
+            scenario["open_question_refs"] = []
+            for surface in scenario["surfaces"].values():
+                surface["open_question_refs"] = []
         return payload
 
     def payload_with_only_non_blocking_question(self) -> dict[str, object]:
@@ -160,6 +167,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         return {
             "resolution": "accepted",
             "follow_up_text": None,
+            "surface_updates": [],
             "updates": [
                 {
                     "requirement_id": "BR-1",
@@ -239,10 +247,60 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertEqual(result.model.open_questions[3]["status"], "resolved")
         self.assertEqual(result.final_report.blocking_question_ids, ["Q-1", "Q-2", "Q-3"])
 
+    def test_accepted_answer_resolves_a_clarification_required_surface(self) -> None:
+        payload = deepcopy(self.payload)
+        ui = payload["scenario_contract"]["scenarios"][4]["surfaces"]["ui"]
+        ui["status"] = "clarification_required"
+        proposal = self.accepted_q4()
+        proposal["surface_updates"] = [
+            {
+                "scenario_id": "SC-5",
+                "surface": "ui",
+                "status": "not_applicable",
+                "reason": "The owner's duplicate rule does not require a separate UI behavior.",
+            }
+        ]
+        result = RequirementClarificationUpdater(ScriptedClient([proposal])).apply(
+            source_text=self.source_text,
+            model=self.refinement_result(model_payload=payload).model,
+            question_id="Q-4",
+            answer="Use normalized heritage name and location; no separate UI behavior is required.",
+            answered_by="owner",
+        )
+        updated_ui = result.model.scenario_contract["scenarios"][4]["surfaces"]["ui"]
+        self.assertEqual(updated_ui["status"], "not_applicable")
+        self.assertEqual(updated_ui["requirement_refs"], [])
+        self.assertEqual(updated_ui["open_question_refs"], [])
+        self.assertNotIn("Q-4", result.model.scenario_contract["scenarios"][4]["open_question_refs"])
+
+    def test_missing_required_surface_update_gets_one_bounded_repair(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["scenario_contract"]["scenarios"][4]["surfaces"]["ui"]["status"] = "clarification_required"
+        repaired = self.accepted_q4()
+        repaired["surface_updates"] = [
+            {
+                "scenario_id": "SC-5",
+                "surface": "ui",
+                "status": "required",
+                "reason": "The duplicate decision remains observable through the existing required UI surface.",
+            }
+        ]
+        client = ScriptedClient([self.accepted_q4(), repaired])
+        result = RequirementClarificationUpdater(client).apply(
+            source_text=self.source_text,
+            model=self.refinement_result(model_payload=payload).model,
+            question_id="Q-4",
+            answer="Use normalized heritage name and location.",
+            answered_by="owner",
+        )
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(result.attempts[0].parse_status, "invalid_update")
+        self.assertEqual(result.model.scenario_contract["scenarios"][4]["surfaces"]["ui"]["status"], "required")
+
     def test_insufficient_answer_is_audited_without_requirement_mutation(self) -> None:
         original = self.refinement_result().model
         client = ScriptedClient(
-            [{"resolution": "insufficient", "follow_up_text": "Please list every identity field.", "updates": []}]
+            [{"resolution": "insufficient", "follow_up_text": "Please list every identity field.", "updates": [], "surface_updates": []}]
         )
         result = RequirementClarificationUpdater(client).apply(
             source_text=self.source_text,
@@ -272,6 +330,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
         invalid = {
             "resolution": "accepted",
             "follow_up_text": None,
+            "surface_updates": [],
             "updates": [{"requirement_id": "G-1", "fields": {"text": "changed"}}],
         }
         client = ScriptedClient([invalid, self.accepted_q4()])
@@ -356,17 +415,29 @@ class RequirementClarificationV2Test(unittest.TestCase):
                     {
                         "resolution": "accepted",
                         "follow_up_text": None,
-                        "updates": [{"requirement_id": "AF-1", "fields": {"outcome": "Stop without saving."}}],
+                        "surface_updates": [],
+                        "updates": [
+                            {"requirement_id": "AF-1", "fields": {"outcome": "Stop without saving."}},
+                            {"requirement_id": "AC-3", "fields": {"text": "Cancelling stops without saving.", "verifies": ["AF-1"]}},
+                        ],
                     },
                     {
                         "resolution": "accepted",
                         "follow_up_text": None,
-                        "updates": [{"requirement_id": "EF-1", "fields": {"outcome": "Show validation errors."}}],
+                        "surface_updates": [],
+                        "updates": [
+                            {"requirement_id": "EF-1", "fields": {"outcome": "Show validation errors."}},
+                            {"requirement_id": "AC-4", "fields": {"text": "Invalid data shows validation errors.", "verifies": ["EF-1"]}},
+                        ],
                     },
                     {
                         "resolution": "accepted",
                         "follow_up_text": None,
-                        "updates": [{"requirement_id": "EF-2", "fields": {"outcome": "Keep the form for retry."}}],
+                        "surface_updates": [],
+                        "updates": [
+                            {"requirement_id": "EF-2", "fields": {"outcome": "Keep the form for retry."}},
+                            {"requirement_id": "AC-5", "fields": {"text": "A connection interruption keeps the form for retry.", "verifies": ["EF-2"]}},
+                        ],
                     },
                 ]
             )

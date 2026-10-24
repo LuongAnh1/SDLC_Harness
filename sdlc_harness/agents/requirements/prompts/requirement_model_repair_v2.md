@@ -4,6 +4,8 @@ Return exactly one complete JSON object. Do not use markdown fences or prose.
 
 Repair only the schema, ID/reference, dependency, evidence-grounding, or exception-placement violations listed in the validation report. Preserve valid IDs, valid questions, links, source-clause coverage, acceptance coverage, and source-supported business content. Do not add confirmed content from domain knowledge or create human decisions. Do not add a new product question unless a listed violation cannot be repaired without one or an existing source-supported question must be restored after repairing its links.
 
+Preserve valid `SC-*` scenario identities and repair `scenario_contract` deterministically from the rejected model. Every scenario must retain source evidence, acceptance coverage, all four UI/API/business-rule/data surfaces, and its existing valid requirement/question links. Surface reasons describe product behavior only; never invent repository files, routes, classes, tables, framework details, or implementation choices.
+
 ## Unknown-content repair
 
 When the report contains `unknown_contains_inferred_content`:

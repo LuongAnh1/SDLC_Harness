@@ -205,7 +205,7 @@ class RequirementClarificationUpdater:
             try:
                 proposal = parse_first_json_object(
                     completion.content,
-                    expected_keys={"resolution", "follow_up_text", "updates"},
+                    expected_keys={"resolution", "follow_up_text", "updates", "surface_updates"},
                 )
             except (json.JSONDecodeError, TypeError, ValueError):
                 issue = "Structured clarification output was not parseable JSON."
@@ -257,21 +257,32 @@ class RequirementClarificationUpdater:
     ):
         resolution = proposal.get("resolution")
         updates = proposal.get("updates")
+        surface_updates = proposal.get("surface_updates")
         follow_up = proposal.get("follow_up_text")
-        if resolution not in {"accepted", "insufficient"} or not isinstance(updates, list):
-            raise HarnessError("requirement_answer_update_failed", "Proposal must contain resolution and updates.")
+        if (
+            resolution not in {"accepted", "insufficient"}
+            or not isinstance(updates, list)
+            or not isinstance(surface_updates, list)
+        ):
+            raise HarnessError(
+                "requirement_answer_update_failed",
+                "Proposal must contain resolution, updates, and surface_updates.",
+            )
         if any(not isinstance(item, dict) for item in updates):
             raise HarnessError("requirement_answer_update_failed", "Every clarification update must be an object.")
+        if any(not isinstance(item, dict) for item in surface_updates):
+            raise HarnessError("requirement_answer_update_failed", "Every surface update must be an object.")
+        expected_surface_targets = _clarification_surface_targets(model.to_dict(), question.id)
         if resolution == "insufficient":
             if not isinstance(follow_up, str) or not follow_up.strip():
                 raise HarnessError(
                     "requirement_answer_update_failed",
                     "Insufficient answer requires a non-empty follow_up_text.",
                 )
-            if updates:
+            if updates or surface_updates:
                 raise HarnessError(
                     "requirement_answer_update_failed",
-                    "Insufficient answer must not mutate requirements.",
+                    "Insufficient answer must not mutate requirements or surfaces.",
                 )
         else:
             if follow_up not in {None, ""}:
@@ -284,6 +295,18 @@ class RequirementClarificationUpdater:
                 raise HarnessError(
                     "requirement_answer_update_failed",
                     "Accepted answer must update exactly the current question affects IDs.",
+                )
+            proposed_surface_targets = [
+                (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
+                for item in surface_updates
+            ]
+            if (
+                len(proposed_surface_targets) != len(set(proposed_surface_targets))
+                or set(proposed_surface_targets) != expected_surface_targets
+            ):
+                raise HarnessError(
+                    "requirement_answer_update_failed",
+                    "Accepted answer must update exactly the clarification_required surfaces linked to the current question.",
                 )
 
         data = model.to_dict()
@@ -335,6 +358,32 @@ class RequirementClarificationUpdater:
                 if requirement_like and not refs:
                     item["status"] = "human_decision"
                     item["decision_ref"] = decision_id
+            for surface_update in surface_updates:
+                allowed = {"scenario_id", "surface", "status", "reason"}
+                unknown_fields = sorted(set(surface_update).difference(allowed))
+                if unknown_fields:
+                    raise HarnessError(
+                        "requirement_answer_update_failed",
+                        "Surface update contains forbidden fields: " + ", ".join(unknown_fields) + ".",
+                    )
+                status = surface_update.get("status")
+                reason = surface_update.get("reason")
+                if status not in {"required", "not_applicable", "clarification_required"}:
+                    raise HarnessError("requirement_answer_update_failed", "Surface update has an invalid status.")
+                if not isinstance(reason, str) or not reason.strip():
+                    raise HarnessError("requirement_answer_update_failed", "Surface update reason must not be empty.")
+                surface = _find_scenario_surface(
+                    data,
+                    str(surface_update.get("scenario_id") or ""),
+                    str(surface_update.get("surface") or ""),
+                )
+                surface["status"] = status
+                surface["reason"] = reason.strip()
+                if status == "not_applicable":
+                    surface["requirement_refs"] = []
+                    surface["evidence_refs"] = []
+                    surface["open_question_refs"] = []
+            _remove_question_from_scenario_contract(data, question.id)
             question_data["status"] = "resolved"
 
         data["validation"] = {"status": "invalid", "errors": []}
@@ -445,6 +494,55 @@ def _find_question(data: dict[str, Any], question_id: str) -> dict[str, Any]:
         if isinstance(item, dict) and item.get("id") == question_id:
             return item
     raise HarnessError("requirement_question_not_current", f"Question does not exist: {question_id}")
+
+
+def _clarification_surface_targets(data: dict[str, Any], question_id: str) -> set[tuple[str, str]]:
+    targets: set[tuple[str, str]] = set()
+    contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
+    for scenario in contract.get("scenarios", []) if isinstance(contract.get("scenarios"), list) else []:
+        if not isinstance(scenario, dict):
+            continue
+        scenario_id = str(scenario.get("id") or "")
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        for surface_name, surface in surfaces.items():
+            if (
+                isinstance(surface, dict)
+                and surface.get("status") == "clarification_required"
+                and question_id in _string_list(surface.get("open_question_refs"))
+            ):
+                targets.add((scenario_id, str(surface_name)))
+    return targets
+
+
+def _find_scenario_surface(data: dict[str, Any], scenario_id: str, surface_name: str) -> dict[str, Any]:
+    contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
+    for scenario in contract.get("scenarios", []) if isinstance(contract.get("scenarios"), list) else []:
+        if not isinstance(scenario, dict) or scenario.get("id") != scenario_id:
+            continue
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        surface = surfaces.get(surface_name)
+        if isinstance(surface, dict):
+            return surface
+    raise HarnessError(
+        "requirement_answer_update_failed",
+        f"Scenario surface does not exist: {scenario_id}/{surface_name}.",
+    )
+
+
+def _remove_question_from_scenario_contract(data: dict[str, Any], question_id: str) -> None:
+    contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
+    for scenario in contract.get("scenarios", []) if isinstance(contract.get("scenarios"), list) else []:
+        if not isinstance(scenario, dict):
+            continue
+        scenario["open_question_refs"] = [
+            ref for ref in _string_list(scenario.get("open_question_refs")) if ref != question_id
+        ]
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        for surface in surfaces.values():
+            if isinstance(surface, dict):
+                surface["open_question_refs"] = [
+                    ref for ref in _string_list(surface.get("open_question_refs")) if ref != question_id
+                ]
 
 
 def _find_requirement(data: dict[str, Any], requirement_id: str) -> tuple[dict[str, Any], set[str], bool]:

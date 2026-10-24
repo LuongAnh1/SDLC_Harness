@@ -28,6 +28,7 @@ class Settings:
     llm_api_key: str
     llm_base_url: str
     llm_model: str
+    llm_thinking_mode: str
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
     llm_context_window_tokens: int
@@ -185,6 +186,9 @@ def load_settings(
     sync_mode = merged.get("SDLC_SYNC_MODE", "mock").strip().lower() or "mock"
     if sync_mode not in {"mock", "real", "both"}:
         sync_mode = "mock"
+    llm_thinking_mode = merged.get("SDLC_LLM_THINKING_MODE", "disabled").strip().lower()
+    if llm_thinking_mode not in {"disabled", "enabled"}:
+        llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
     project_profile_id = get_project_profile(
         project_profile_raw or "typescript_fullstack_v1"
@@ -204,7 +208,8 @@ def load_settings(
         llm_mode=merged.get("SDLC_LLM_MODE", "fake").strip().lower() or "fake",
         llm_api_key=merged.get("SDLC_LLM_API_KEY", ""),
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
-        llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-chat"),
+        llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-flash"),
+        llm_thinking_mode=llm_thinking_mode,
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),

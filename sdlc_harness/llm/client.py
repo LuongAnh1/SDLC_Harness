@@ -159,6 +159,8 @@ class LlmClient:
             "messages": messages,
             "temperature": 0.1,
         }
+        if self.settings.llm_mode == "deepseek":
+            payload["thinking"] = {"type": self.settings.llm_thinking_mode}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
@@ -361,6 +363,51 @@ def fake_requirement_model_v2(prompt: str) -> str:
                 "open_question_refs": [],
             },
             "actors": [],
+        },
+        "scenario_contract": {
+            "schema_version": "requirement_scenario_surface_v1",
+            "scenarios": [
+                {
+                    "id": "SC-1",
+                    "name": "Complete the source-described behavior",
+                    "kind": "main",
+                    "actor_refs": [],
+                    "requirement_refs": ["MF-1"],
+                    "acceptance_refs": ["AC-1"],
+                    "evidence_refs": ["E-1"],
+                    "open_question_refs": [],
+                    "surfaces": {
+                        "ui": {
+                            "status": "not_applicable",
+                            "reason": "The minimal fake source does not establish a user interface contract.",
+                            "requirement_refs": [],
+                            "evidence_refs": [],
+                            "open_question_refs": [],
+                        },
+                        "api": {
+                            "status": "not_applicable",
+                            "reason": "The minimal fake source does not establish an API contract.",
+                            "requirement_refs": [],
+                            "evidence_refs": [],
+                            "open_question_refs": [],
+                        },
+                        "business_rule": {
+                            "status": "required",
+                            "reason": "The source-described behavior must be implemented and verified.",
+                            "requirement_refs": ["MF-1", "AC-1"],
+                            "evidence_refs": ["E-1"],
+                            "open_question_refs": [],
+                        },
+                        "data": {
+                            "status": "not_applicable",
+                            "reason": "The minimal fake source does not establish persisted state.",
+                            "requirement_refs": [],
+                            "evidence_refs": [],
+                            "open_question_refs": [],
+                        },
+                    },
+                }
+            ],
         },
         "preconditions": [
             {

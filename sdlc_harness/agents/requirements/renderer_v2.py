@@ -29,6 +29,7 @@ def render_requirement_packet_v2(model: RequirementModelV2) -> str:
     _packet_statement_section(lines, "Postconditions", data["postconditions"])
     _packet_statement_section(lines, "Business Rules", data["business_rules"])
     _packet_acceptance_section(lines, data["acceptance_criteria"])
+    _packet_scenario_section(lines, data["scenario_contract"])
     _packet_statement_section(lines, "Quality / Non-functional Requirements", data["quality_requirements"])
     _packet_assumption_section(lines, data["assumptions"])
     _packet_question_section(lines, data["open_questions"])
@@ -137,6 +138,30 @@ def _packet_acceptance_section(lines: list[str], items: Any) -> None:
         lines.append(f"- [{item.get('id', '')}] {_content(item, 'text')}{_status_suffix(item)} (verifies: {verifies})")
     if not values:
         lines.append("- none")
+    lines.append("")
+
+
+def _packet_scenario_section(lines: list[str], contract: Any) -> None:
+    lines.extend(["## Scenarios and Surface Expectations", ""])
+    scenarios = _dict_items(contract.get("scenarios")) if isinstance(contract, dict) else []
+    if not scenarios:
+        lines.extend(["- none", ""])
+        return
+    for scenario in scenarios:
+        scenario_id = str(scenario.get("id") or "")
+        lines.append(
+            f"- [{scenario_id}] {scenario.get('name', '')} "
+            f"_(kind: {scenario.get('kind', '')}; acceptance: "
+            f"{', '.join(str(ref) for ref in scenario.get('acceptance_refs', [])) or 'none'})_"
+        )
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        for surface_name in ("ui", "api", "business_rule", "data"):
+            surface = surfaces.get(surface_name) if isinstance(surfaces.get(surface_name), dict) else {}
+            refs = ", ".join(str(ref) for ref in surface.get("requirement_refs", [])) or "none"
+            lines.append(
+                f"  - {surface_name}: `{surface.get('status', '')}` — "
+                f"{surface.get('reason', '')} (refs: {refs})"
+            )
     lines.append("")
 
 

@@ -25,6 +25,7 @@ _INITIAL_PROMPT_PATH = _PROMPT_DIR / "requirement_model_v2.md"
 _REPAIR_PROMPT_PATH = _PROMPT_DIR / "requirement_model_repair_v2.md"
 _EXPECTED_ROOT_KEYS = {
     "use_case",
+    "scenario_contract",
     "preconditions",
     "flows",
     "postconditions",
@@ -58,6 +59,24 @@ _REPAIRABLE_ISSUE_CODES = {
     "resolved_question_without_decision",
     "exception_in_main_flow",
     "exception_in_postcondition",
+    "invalid_scenario_contract_version",
+    "scenario_contract_empty",
+    "invalid_scenario_kind",
+    "invalid_surface_set",
+    "invalid_surface_status",
+    "surface_reason_required",
+    "scenario_requirement_required",
+    "scenario_acceptance_required",
+    "scenario_evidence_required",
+    "scenario_question_coverage_missing",
+    "scenario_question_unrelated",
+    "surface_requirement_required",
+    "surface_not_applicable_conflict",
+    "surface_clarification_question_required",
+    "surface_question_not_open",
+    "surface_question_unrelated",
+    "scenario_question_not_mapped",
+    "scenario_coverage_missing",
 }
 
 

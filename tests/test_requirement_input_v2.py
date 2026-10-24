@@ -136,14 +136,21 @@ class RequirementInputV2Test(unittest.TestCase):
         for item in payload["flows"]["alternatives"] + payload["flows"]["exceptions"]:
             item["open_question_refs"] = []
         payload["business_rules"][0]["open_question_refs"] = []
-        payload["acceptance_criteria"][0].update(
-            {
-                "text": "The system rejects a duplicate cultural heritage record.",
-                "status": "explicit",
-                "evidence_refs": ["E-13"],
-                "open_question_refs": [],
-            }
-        )
+        resolved_acceptance = {
+            "AC-1": ("The system rejects a duplicate cultural heritage record.", ["E-13"]),
+            "AC-3": ("The operator can cancel the insertion operation.", ["E-10"]),
+            "AC-4": ("Invalid or insufficient data activates the Errored use case.", ["E-7"]),
+            "AC-5": ("A connection interruption is handled as an insertion exception.", ["E-11"]),
+        }
+        for item in payload["acceptance_criteria"]:
+            item["open_question_refs"] = []
+            if item["id"] in resolved_acceptance:
+                item["text"], item["evidence_refs"] = resolved_acceptance[item["id"]]
+                item["status"] = "explicit"
+        for scenario in payload["scenario_contract"]["scenarios"]:
+            scenario["open_question_refs"] = []
+            for surface in scenario["surfaces"].values():
+                surface["open_question_refs"] = []
         return payload
 
     def _v2_bundle(self, directory: str, *, valid: bool = True):

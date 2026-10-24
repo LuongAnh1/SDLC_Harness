@@ -27,6 +27,91 @@
       }
     ]
   },
+  "scenario_contract": {
+    "schema_version": "requirement_scenario_surface_v1",
+    "scenarios": [
+      {
+        "id": "SC-1",
+        "name": "Insert a cultural heritage record successfully",
+        "kind": "main",
+        "actor_refs": ["ACT-1"],
+        "requirement_refs": ["MF-1", "MF-2", "MF-3", "MF-4", "MF-5", "MF-6", "POST-1"],
+        "acceptance_refs": ["AC-2"],
+        "evidence_refs": ["E-4", "E-5", "E-6", "E-7", "E-8", "E-9", "E-12"],
+        "open_question_refs": [],
+        "surfaces": {
+          "ui": {"status": "required", "reason": "The operator opens, fills, submits, confirms, and receives the result through a user-facing form.", "requirement_refs": ["MF-1", "MF-2", "MF-3", "MF-4", "MF-5", "POST-1"], "evidence_refs": ["E-4", "E-5", "E-6", "E-7", "E-8", "E-12"], "open_question_refs": []},
+          "api": {"status": "required", "reason": "The submitted operation must cross an application boundary for verification and insertion.", "requirement_refs": ["MF-3", "MF-4", "MF-6", "AC-2"], "evidence_refs": ["E-6", "E-7", "E-9"], "open_question_refs": []},
+          "business_rule": {"status": "required", "reason": "The submitted data must be verified before confirmation and insertion.", "requirement_refs": ["MF-4", "AC-2"], "evidence_refs": ["E-7"], "open_question_refs": []},
+          "data": {"status": "required", "reason": "Successful completion stores the new cultural heritage record.", "requirement_refs": ["MF-6", "AC-2"], "evidence_refs": ["E-9"], "open_question_refs": []}
+        }
+      },
+      {
+        "id": "SC-2",
+        "name": "Cancel insertion",
+        "kind": "alternative",
+        "actor_refs": ["ACT-1"],
+        "requirement_refs": ["AF-1"],
+        "acceptance_refs": ["AC-3"],
+        "evidence_refs": ["E-10"],
+        "open_question_refs": ["Q-1"],
+        "surfaces": {
+          "ui": {"status": "required", "reason": "The operator initiates cancellation and its observable outcome must be handled.", "requirement_refs": ["AF-1", "AC-3"], "evidence_refs": ["E-10"], "open_question_refs": ["Q-1"]},
+          "api": {"status": "not_applicable", "reason": "The source does not require a server operation for cancellation.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []},
+          "business_rule": {"status": "not_applicable", "reason": "The source states no separate business decision for cancellation.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []},
+          "data": {"status": "not_applicable", "reason": "The source does not require persisted data changes when the insertion is cancelled.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []}
+        }
+      },
+      {
+        "id": "SC-3",
+        "name": "Reject invalid or insufficient data",
+        "kind": "exception",
+        "actor_refs": ["ACT-1"],
+        "requirement_refs": ["EF-1"],
+        "acceptance_refs": ["AC-4"],
+        "evidence_refs": ["E-7"],
+        "open_question_refs": ["Q-2"],
+        "surfaces": {
+          "ui": {"status": "required", "reason": "The invalid-data outcome must be observable to the operator.", "requirement_refs": ["EF-1", "AC-4"], "evidence_refs": ["E-7"], "open_question_refs": ["Q-2"]},
+          "api": {"status": "required", "reason": "Submitted data reaches the system verification boundary.", "requirement_refs": ["EF-1", "AC-4"], "evidence_refs": ["E-7"], "open_question_refs": ["Q-2"]},
+          "business_rule": {"status": "required", "reason": "The system must decide whether submitted data is valid and sufficient.", "requirement_refs": ["EF-1", "AC-4"], "evidence_refs": ["E-7"], "open_question_refs": ["Q-2"]},
+          "data": {"status": "not_applicable", "reason": "The source does not require invalid data to be persisted.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []}
+        }
+      },
+      {
+        "id": "SC-4",
+        "name": "Handle eTour server connection interruption",
+        "kind": "exception",
+        "actor_refs": ["ACT-1"],
+        "requirement_refs": ["EF-2"],
+        "acceptance_refs": ["AC-5"],
+        "evidence_refs": ["E-11"],
+        "open_question_refs": ["Q-3"],
+        "surfaces": {
+          "ui": {"status": "required", "reason": "The connection failure needs an observable user outcome.", "requirement_refs": ["EF-2", "AC-5"], "evidence_refs": ["E-11"], "open_question_refs": ["Q-3"]},
+          "api": {"status": "required", "reason": "The exception occurs at the eTour server communication boundary.", "requirement_refs": ["EF-2", "AC-5"], "evidence_refs": ["E-11"], "open_question_refs": ["Q-3"]},
+          "business_rule": {"status": "not_applicable", "reason": "The source introduces a transport exception rather than a business decision.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []},
+          "data": {"status": "not_applicable", "reason": "The source does not define a persisted-data effect for the interruption.", "requirement_refs": [], "evidence_refs": [], "open_question_refs": []}
+        }
+      },
+      {
+        "id": "SC-5",
+        "name": "Reject a duplicate cultural heritage record",
+        "kind": "exception",
+        "actor_refs": ["ACT-1"],
+        "requirement_refs": ["BR-1"],
+        "acceptance_refs": ["AC-1"],
+        "evidence_refs": ["E-13"],
+        "open_question_refs": ["Q-4"],
+        "surfaces": {
+          "ui": {"status": "required", "reason": "The operator must receive the observable result of duplicate rejection.", "requirement_refs": ["BR-1", "AC-1"], "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]},
+          "api": {"status": "required", "reason": "The submission boundary must enforce duplicate rejection.", "requirement_refs": ["BR-1", "AC-1"], "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]},
+          "business_rule": {"status": "required", "reason": "Duplicate detection is an explicit business rule.", "requirement_refs": ["BR-1", "AC-1"], "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]},
+          "data": {"status": "required", "reason": "Duplicate identity is evaluated against cultural heritage records.", "requirement_refs": ["BR-1", "AC-1"], "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]}
+        }
+      }
+    ]
+  },
   "preconditions": [
     {
       "id": "PRE-1",
@@ -60,14 +145,18 @@
     {"id": "BR-1", "text": "The system requirements will not accept duplicates cultural heritage.", "status": "explicit", "evidence_refs": ["E-13"], "open_question_refs": ["Q-4"]}
   ],
   "acceptance_criteria": [
-    {"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-4"], "verifies": ["BR-1"]}
+    {"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-4"], "verifies": ["BR-1"]},
+    {"id": "AC-2", "text": "After valid data is confirmed, the system stores the new cultural heritage record and notifies its proper inclusion.", "status": "explicit", "evidence_refs": ["E-7", "E-8", "E-9", "E-12"], "open_question_refs": [], "verifies": ["MF-4", "MF-5", "MF-6", "POST-1"]},
+    {"id": "AC-3", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["AF-1"]},
+    {"id": "AC-4", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-2"], "verifies": ["EF-1"]},
+    {"id": "AC-5", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-3"], "verifies": ["EF-2"]}
   ],
   "quality_requirements": [],
   "assumptions": [],
   "open_questions": [
-    {"id": "Q-1", "question": "What happens after the operator cancels the operation?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["AF-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-10"]},
-    {"id": "Q-2", "question": "What is the observable outcome after invalid or insufficient data?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-7"]},
-    {"id": "Q-3", "question": "What happens after connection interruption?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-2"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-11"]},
+    {"id": "Q-1", "question": "What happens after the operator cancels the operation?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["AF-1", "AC-3"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-10"]},
+    {"id": "Q-2", "question": "What is the observable outcome after invalid or insufficient data?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-1", "AC-4"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-7"]},
+    {"id": "Q-3", "question": "What happens after connection interruption?", "category": "observable_behavior", "proposed_blocking": false, "effective_blocking": false, "affects": ["EF-2", "AC-5"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-11"]},
     {"id": "Q-4", "question": "Which identity fields determine whether two cultural heritage records are duplicates?", "category": "data_identity", "proposed_blocking": false, "effective_blocking": false, "affects": ["BR-1", "AC-1"], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": ["E-13"]}
   ],
   "decisions": [],
