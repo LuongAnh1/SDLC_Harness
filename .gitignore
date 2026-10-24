@@ -9,4 +9,7 @@ __pycache__/
 !.env.example
 
 .codegraph/
+
+# Local planning/research documentation; do not publish to the remote repository.
+/docs/
  
