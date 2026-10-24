@@ -270,6 +270,41 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(report["gaps"][0]["type"], "source_unavailable")
         self.assertEqual(report["gaps"][0]["route"], "fail")
 
+    def test_failed_requirement_delta_remains_visible_in_internal_run_state(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+
+        def reject_delta(*args: object, run_id: str, **kwargs: object) -> object:
+            workflow.store.write_json_artifact(
+                run_id,
+                "requirement_delta_v1_a1.json",
+                {
+                    "schema_version": "requirement_delta_v1",
+                    "run_id": run_id,
+                    "status": "rejected",
+                },
+            )
+            raise HarnessError(
+                "requirement_delta_policy_violation",
+                "The proposed repair delta violates Python-owned policy.",
+                run_id=run_id,
+            )
+
+        with patch.object(workflow.refiner_v2, "refine", side_effect=reject_delta):
+            with self.assertRaises(HarnessError) as context:
+                workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        state = workflow.store.read_state(str(context.exception.run_id))
+        self.assertEqual(state["status"], "failed")
+        self.assertEqual(
+            state["latest_artifacts"]["requirement_delta"],
+            workflow.store.relative(
+                workflow.store.artifact_path(
+                    str(context.exception.run_id),
+                    "requirement_delta_v1_a1.json",
+                )
+            ),
+        )
+
     def test_start_from_jira_creates_runtime_files(self) -> None:
         source = UseCaseSource(
             dataset="jira",

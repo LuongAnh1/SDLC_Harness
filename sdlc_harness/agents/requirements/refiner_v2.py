@@ -15,6 +15,12 @@ from ...llm.client import LlmClient, LlmCompletion
 from ...sources.fixtures import UseCaseSource
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .model_v2 import RequirementModelV2, SCHEMA_VERSION
+from .delta_v1 import (
+    DELTA_SCHEMA_VERSION,
+    MAX_DELTA_OPERATIONS,
+    apply_requirement_delta,
+    requirement_candidate_hash,
+)
 from .gap_report import build_requirement_gap_report, validate_requirement_gap_report
 from .source_tools import RequirementSourceCatalog, observation_text_contains_quote
 from .validator_v2 import (
@@ -24,7 +30,10 @@ from .validator_v2 import (
 
 
 _PROMPT_PATH = Path(__file__).with_name("prompts") / "requirement_model_v2.md"
-_ACTION_NAMES = {"source.list", "source.search", "source.read", "complete"}
+_DELTA_PROMPT_PATH = Path(__file__).with_name("prompts") / "requirement_delta_v1.md"
+_ACTION_NAMES = {
+    "source.list", "source.search", "source.read", "complete", "requirement.propose_delta",
+}
 _EXPECTED_ROOT_KEYS = {
     "use_case",
     "scenario_contract",
@@ -59,6 +68,13 @@ _REPAIRABLE_ISSUE_CODES = {
     "source_fingerprint_mismatch", "question_without_evidence",
     "source_conflict_evidence_insufficient",
 }
+_DELTA_UNSAFE_ISSUE_CODES = {
+    "required_id", "invalid_id_prefix", "duplicate_id", "invalid_type", "invalid_schema_version",
+    "invalid_revision", "invalid_scenario_contract_version", "scenario_contract_empty",
+    "invalid_surface_set", "invalid_provenance_schema_version", "provenance_sources_empty",
+    "invalid_source_type", "invalid_source_revision", "source_root_mismatch",
+    "source_snapshot_missing", "source_fingerprint_mismatch",
+}
 
 
 @dataclass(frozen=True)
@@ -71,7 +87,7 @@ class RequirementModelV2Attempt:
     usage: dict[str, object]
     json_mode_requested: bool
     max_tokens: int
-    parse_status: Literal["parsed", "parse_failed", "schema_failed", "truncated"]
+    parse_status: Literal["parsed", "parse_failed", "schema_failed", "truncated", "delta_failed"]
     validation_report: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -102,6 +118,7 @@ class RequirementModelV2RefinementResult:
     source_journal_path: str = ""
     gap_report: dict[str, object] | None = None
     gap_report_path: str = ""
+    delta_artifact_paths: list[str] | None = None
 
     def to_report_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -116,6 +133,8 @@ class RequirementModelV2RefinementResult:
             payload["source_journal_path"] = self.source_journal_path
         if self.gap_report_path:
             payload["gap_report_path"] = self.gap_report_path
+        if self.delta_artifact_paths:
+            payload["delta_artifact_paths"] = list(self.delta_artifact_paths)
         return payload
 
 
@@ -179,6 +198,9 @@ class RequirementModelV2Refiner:
         invalid_failures = 0
         truncated_failures = 0
         candidate_count = 0
+        repair_base: RequirementModelV2 | None = None
+        repair_report: dict[str, object] | None = None
+        delta_artifact_paths: list[str] = []
         max_tokens = self._structured_max_tokens()
 
         try:
@@ -188,6 +210,8 @@ class RequirementModelV2Refiner:
                     source_count=len(catalog.sources),
                     history=history,
                     action_index=action_index,
+                    repair_base=repair_base,
+                    repair_report=repair_report,
                 )
                 started = time.monotonic()
                 completion = self._complete(prompt, max_tokens=max_tokens)
@@ -264,12 +288,150 @@ class RequirementModelV2Refiner:
                         result["observation_id"] = observation_id
                         observations[observation_id] = deepcopy(result)
                         content_observations += 1
+                elif name == "requirement.propose_delta":
+                    if not listed or content_observations < 1:
+                        result = {
+                            "ok": False,
+                            "error_code": "requirement_source_observation_required",
+                            "message": "Call source.list and inspect source content before proposing a delta.",
+                        }
+                    elif repair_base is None:
+                        result = {
+                            "ok": False,
+                            "error_code": "requirement_delta_not_ready",
+                            "message": "A parsed invalid candidate is required before proposing a delta.",
+                        }
+                    else:
+                        candidate_count += 1
+                        raw_delta = arguments.get("requirement_delta")
+                        try:
+                            application = apply_requirement_delta(
+                                base_model=repair_base,
+                                raw_delta=raw_delta,
+                                observations=observations,
+                                source_text_by_id=catalog.source_text_by_id,
+                            )
+                        except HarnessError as exc:
+                            report_dict = self._schema_report(exc.message, code=exc.error_code)
+                            attempts.append(
+                                self._attempt(
+                                    candidate_count,
+                                    "validator_repair",
+                                    completion,
+                                    max_tokens,
+                                    parse_status="delta_failed",
+                                    validation_report=report_dict,
+                                )
+                            )
+                            delta_path = self._write_delta_artifact(
+                                run_id=run_id,
+                                attempt=1,
+                                raw_delta=raw_delta,
+                                status="rejected",
+                                base_hash=requirement_candidate_hash(repair_base),
+                                result_hash=None,
+                                validation_report=report_dict,
+                                error=exc,
+                            )
+                            if delta_path:
+                                delta_artifact_paths.append(delta_path)
+                            result = {
+                                "ok": False,
+                                "error_code": exc.error_code,
+                                "message": exc.message,
+                                "candidate_attempt": candidate_count,
+                                "validation_report": report_dict,
+                            }
+                            self._append_journal(
+                                journal,
+                                journal_path,
+                                action_index=action_index,
+                                action=name,
+                                arguments=self._journal_arguments(name, arguments),
+                                summary=summary,
+                                result=result,
+                                completion=completion,
+                                duration=duration,
+                                status="failed",
+                            )
+                            raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
+
+                        attempts.append(
+                            self._attempt(
+                                candidate_count,
+                                "validator_repair",
+                                completion,
+                                max_tokens,
+                                parse_status="parsed",
+                                validation_report=application.report.to_dict(),
+                            )
+                        )
+                        delta_path = self._write_delta_artifact(
+                            run_id=run_id,
+                            attempt=1,
+                            raw_delta={
+                                "schema_version": DELTA_SCHEMA_VERSION,
+                                "base_candidate_sha256": application.base_candidate_sha256,
+                                "operations": application.operations,
+                            },
+                            status="applied",
+                            base_hash=application.base_candidate_sha256,
+                            result_hash=application.result_candidate_sha256,
+                            validation_report=application.report.to_dict(),
+                            error=None,
+                        )
+                        if delta_path:
+                            delta_artifact_paths.append(delta_path)
+                        result = {
+                            "ok": True,
+                            "status": "completed",
+                            "candidate_attempt": candidate_count,
+                            "base_candidate_sha256": application.base_candidate_sha256,
+                            "result_candidate_sha256": application.result_candidate_sha256,
+                        }
+                        self._append_journal(
+                            journal,
+                            journal_path,
+                            action_index=action_index,
+                            action=name,
+                            arguments=self._journal_arguments(name, arguments),
+                            summary=summary,
+                            result=result,
+                            completion=completion,
+                            duration=duration,
+                            status="completed",
+                        )
+                        gap_report = build_requirement_gap_report(
+                            run_id=run_id,
+                            attempts=[attempt.to_dict() for attempt in attempts],
+                            model=application.model,
+                            source_manifest_input_hash=str(journal.get("manifest_input_hash") or "") or None,
+                        )
+                        gap_report_path = self._write_gap_report(run_id, gap_report)
+                        return RequirementModelV2RefinementResult(
+                            model=application.model,
+                            initial_report=initial_report,
+                            final_report=application.report,
+                            repaired=True,
+                            attempts=attempts,
+                            source_manifest_path=manifest_path,
+                            source_journal_path=journal_path,
+                            gap_report=gap_report,
+                            gap_report_path=gap_report_path,
+                            delta_artifact_paths=delta_artifact_paths,
+                        )
                 else:
                     if not listed or content_observations < 1:
                         result = {
                             "ok": False,
                             "error_code": "requirement_source_observation_required",
                             "message": "Call source.list and inspect source content before complete.",
+                        }
+                    elif repair_base is not None:
+                        result = {
+                            "ok": False,
+                            "error_code": "requirement_delta_required",
+                            "message": "A parsed invalid candidate must be repaired with requirement.propose_delta.",
                         }
                     else:
                         candidate_count += 1
@@ -315,13 +477,15 @@ class RequirementModelV2Refiner:
                                 source_journal_path=journal_path,
                                 gap_report=gap_report,
                                 gap_report_path=gap_report_path,
+                                delta_artifact_paths=delta_artifact_paths,
                             )
+                        can_use_delta = self._can_use_delta_base(processed)
                         result = {
                             "ok": False,
                             "error_code": "requirement_model_v2_validation_failed",
                             "candidate_attempt": candidate_count,
                             "validation_report": processed["report_dict"],
-                            "instruction": self._repair_instruction(processed),
+                            "instruction": self._repair_instruction(processed, use_delta=can_use_delta),
                         }
                         if candidate_count >= 2:
                             self._append_journal(
@@ -331,18 +495,31 @@ class RequirementModelV2Refiner:
                                 status="failed",
                             )
                             self._raise_candidate_error(processed, run_id=run_id)
-                        history.append(
-                            {"action": name, "arguments": arguments, "summary": summary, "result": result}
-                        )
+                        history.append({
+                            "action": name,
+                            "arguments": self._journal_arguments(name, arguments),
+                            "summary": summary,
+                            "result": result,
+                        })
                         self._append_journal(
                             journal, journal_path, action_index=action_index, action=name,
                             arguments=self._journal_arguments(name, arguments), summary=summary,
                             result=result, completion=completion, duration=duration,
                         )
                         self._require_repairable(processed, run_id=run_id)
+                        if can_use_delta and isinstance(model, RequirementModelV2):
+                            repair_base = model
+                            repair_report = deepcopy(processed["report_dict"])
                         continue
 
-                history.append({"action": name, "arguments": arguments, "summary": summary, "result": result})
+                history_arguments = (
+                    self._journal_arguments(name, arguments)
+                    if name in {"complete", "requirement.propose_delta"}
+                    else arguments
+                )
+                history.append(
+                    {"action": name, "arguments": history_arguments, "summary": summary, "result": result}
+                )
                 self._append_journal(
                     journal, journal_path, action_index=action_index, action=name,
                     arguments=self._journal_arguments(name, arguments), summary=summary,
@@ -485,8 +662,11 @@ class RequirementModelV2Refiner:
         source_count: int,
         history: list[dict[str, object]],
         action_index: int,
+        repair_base: RequirementModelV2 | None,
+        repair_report: dict[str, object] | None,
     ) -> str:
-        model_contract = _PROMPT_PATH.read_text(encoding="utf-8")
+        contract_path = _DELTA_PROMPT_PATH if repair_base is not None else _PROMPT_PATH
+        model_contract = contract_path.read_text(encoding="utf-8")
         model_contract = self._replace_prompt_tokens(
             model_contract,
             {
@@ -502,16 +682,44 @@ class RequirementModelV2Refiner:
             "available_source_count": source_count,
             "history": history,
         }
+        if repair_base is not None:
+            state["repair_context"] = {
+                "required_action": "requirement.propose_delta",
+                "delta_schema_version": DELTA_SCHEMA_VERSION,
+                "max_operations": MAX_DELTA_OPERATIONS,
+                "base_candidate_sha256": requirement_candidate_hash(repair_base),
+                "base_candidate": repair_base.to_dict(),
+                "validation_report": deepcopy(repair_report),
+            }
+        repair_contract = (
+            "A parsed invalid candidate exists in repair_context. You MUST call "
+            "requirement.propose_delta with arguments.requirement_delta. Do not call complete. "
+            "The delta root has schema_version, base_candidate_sha256, and operations. "
+            "Operation shapes: entity.update={op,target_id,fields}; "
+            "entity.add={op,collection,temp_ref,value}; entity.remove={op,target_id}; "
+            "surface.update={op,scenario_id,surface,fields}. "
+            "Add collections: use_case.actors, preconditions, flows.main, flows.alternatives, "
+            "flows.exceptions, postconditions, business_rules, acceptance_criteria, "
+            "quality_requirements, assumptions, open_questions, evidence, and "
+            "scenario_contract.scenarios. Use temp_ref=tmp:<name> for added entities and exact "
+            "temp refs inside reference fields. Never provide or mutate stable IDs, root metadata, "
+            "provenance, decisions, validation, or effective_blocking. New or changed evidence "
+            "quotes must cite observation_ref=OBS-*.\n"
+            if repair_base is not None
+            else "Call complete with arguments.requirement_model after inspecting source content.\n"
+        )
         return (
             "# Requirement Source Tool Loop\n\n"
             "Return exactly one JSON action object and no prose or markdown.\n"
-            "Action schema: {\"action\":\"source.list|source.search|source.read|complete\","
+            "Action schema: {\"action\":\"source.list|source.search|source.read|complete|requirement.propose_delta\","
             "\"arguments\":{},\"summary\":\"short reason\"}.\n"
             "Call source.list first. Inspect source content before complete. "
             "source.search arguments: query, optional source_ids, optional max_results. "
             "source.read arguments: source_id, optional start_line and line_count. "
             "complete arguments: requirement_model. Every evidence item in that candidate must use "
             "observation_ref=OBS-* from a successful read/search result; source identity is Python-owned.\n\n"
+            + repair_contract
+            + "\n"
             "TOOL_STATE_JSON_BEGIN\n"
             + json.dumps(state, ensure_ascii=False, indent=2)
             + "\nTOOL_STATE_JSON_END\n\n"
@@ -658,8 +866,47 @@ class RequirementModelV2Refiner:
         path = self.store.write_json_artifact(run_id, "requirement_gap_report_v1.json", report)
         return self.store.relative(path)
 
+    def _write_delta_artifact(
+        self,
+        *,
+        run_id: str,
+        attempt: int,
+        raw_delta: object,
+        status: str,
+        base_hash: str,
+        result_hash: str | None,
+        validation_report: dict[str, object],
+        error: HarnessError | None,
+    ) -> str:
+        if self.store is None:
+            return ""
+        payload: dict[str, object] = {
+            "schema_version": DELTA_SCHEMA_VERSION,
+            "run_id": run_id,
+            "attempt": attempt,
+            "status": status,
+            "base_candidate_sha256": base_hash,
+            "result_candidate_sha256": result_hash,
+            "delta": deepcopy(raw_delta),
+            "validation_report": deepcopy(validation_report),
+            "error": error.to_response() if error is not None else None,
+        }
+        path = self.store.write_json_artifact(
+            run_id,
+            f"requirement_delta_v1_a{attempt}.json",
+            payload,
+        )
+        return self.store.relative(path)
+
     @staticmethod
     def _journal_arguments(action: str, arguments: dict[str, object]) -> dict[str, object]:
+        if action == "requirement.propose_delta":
+            delta = arguments.get("requirement_delta")
+            base_hash = delta.get("base_candidate_sha256") if isinstance(delta, dict) else None
+            return {
+                "base_candidate_sha256": base_hash,
+                "delta_sha256": RequirementModelV2Refiner._json_hash(delta),
+            }
         if action != "complete":
             return deepcopy(arguments)
         return {"candidate_sha256": RequirementModelV2Refiner._json_hash(arguments.get("requirement_model"))}
@@ -693,8 +940,12 @@ class RequirementModelV2Refiner:
             ):
                 if key in result:
                     common[key] = deepcopy(result[key])
-        elif action == "complete" and "validation_report" in result:
+        elif action in {"complete", "requirement.propose_delta"} and "validation_report" in result:
             common["validation_report"] = deepcopy(result["validation_report"])
+        if action == "requirement.propose_delta":
+            for key in ("base_candidate_sha256", "result_candidate_sha256"):
+                if key in result:
+                    common[key] = result[key]
         return common
 
     @staticmethod
@@ -735,7 +986,7 @@ class RequirementModelV2Refiner:
         completion: LlmCompletion,
         max_tokens: int,
         *,
-        parse_status: Literal["parsed", "parse_failed", "schema_failed", "truncated"],
+        parse_status: Literal["parsed", "parse_failed", "schema_failed", "truncated", "delta_failed"],
         validation_report: dict[str, object] | None = None,
     ) -> RequirementModelV2Attempt:
         return RequirementModelV2Attempt(
@@ -762,7 +1013,17 @@ class RequirementModelV2Refiner:
             )
 
     @staticmethod
-    def _repair_instruction(processed: dict[str, object]) -> str:
+    def _can_use_delta_base(processed: dict[str, object]) -> bool:
+        model = processed.get("model")
+        report = processed.get("report")
+        return (
+            isinstance(model, RequirementModelV2)
+            and isinstance(report, RequirementModelV2ValidationReport)
+            and not {issue.code for issue in report.issues}.intersection(_DELTA_UNSAFE_ISSUE_CODES)
+        )
+
+    @staticmethod
+    def _repair_instruction(processed: dict[str, object], *, use_delta: bool) -> str:
         """Chuyển validator finding thành chỉ dẫn sửa ngắn, không thay đổi ownership."""
 
         report = processed.get("report_dict")
@@ -770,7 +1031,14 @@ class RequirementModelV2Refiner:
         normalized = [item for item in issues if isinstance(item, dict)] if isinstance(issues, list) else []
         codes = {str(item.get("code") or "") for item in normalized}
         paths = [str(item.get("path") or "") for item in normalized]
-        guidance = ["Repair only the reported violations, preserve valid content, then call complete again."]
+        guidance = [
+            (
+                "Repair only the reported violations with requirement.propose_delta, preserve valid content, "
+                "and bind the exact base_candidate_sha256."
+                if use_delta
+                else "No safe delta base exists; return one corrected full model with complete."
+            )
+        ]
         if any(
             item.get("code") == "dangling_reference"
             and ".scenarios[" in str(item.get("path") or "")

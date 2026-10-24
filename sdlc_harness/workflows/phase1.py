@@ -169,6 +169,11 @@ class PhaseOneWorkflow:
                     else {}
                 ),
                 "requirement_gap_report": gap_report_path,
+                **(
+                    {"requirement_delta": refinement.delta_artifact_paths[-1]}
+                    if refinement.delta_artifact_paths
+                    else {}
+                ),
                 **write_requirement_v2_artifacts(
                     store=self.store,
                     run_id=run_id,
@@ -200,6 +205,7 @@ class PhaseOneWorkflow:
                 ("requirement_source_manifest", "requirement_source_manifest_v1.json"),
                 ("requirement_source_journal", "requirement_source_journal_v1.json"),
                 ("requirement_gap_report", "requirement_gap_report_v1.json"),
+                ("requirement_delta", "requirement_delta_v1_a1.json"),
             ):
                 path = self.store.artifact_path(run_id, filename)
                 if path.exists():

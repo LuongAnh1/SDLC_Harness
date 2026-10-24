@@ -25,14 +25,18 @@ from sdlc_harness.storage.runtime import RuntimeStore
 
 
 class ScriptedLlmClient:
-    def __init__(self, completions: list[LlmCompletion], *, max_tokens: int = 4096):
+    def __init__(self, completions: list[object], *, max_tokens: int = 4096):
         self.completions = list(completions)
         self.settings = SimpleNamespace(llm_structured_max_tokens=max_tokens)
         self.calls: list[dict[str, object]] = []
 
     def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
         self.calls.append(dict(kwargs))
-        return self.completions.pop(0)
+        completion = self.completions.pop(0)
+        if callable(completion):
+            return completion(kwargs)
+        assert isinstance(completion, LlmCompletion)
+        return completion
 
 
 class RequirementModelV2RefinerTest(unittest.TestCase):
@@ -62,7 +66,11 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         return LlmCompletion(content=content, finish_reason=finish_reason, usage=usage or {})
 
     def refine(self, *completions: LlmCompletion):
-        client = ScriptedLlmClient(self.source_actions() + [self.as_complete(item) for item in completions])
+        scripted = [
+            self.as_complete(item) if isinstance(item, LlmCompletion) else item
+            for item in completions
+        ]
+        client = ScriptedLlmClient(self.source_actions() + scripted)
         result = RequirementModelV2Refiner(client).refine(
             self.source,
             run_id="run_v2_test",
@@ -104,6 +112,30 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             finish_reason=completion.finish_reason,
             usage=completion.usage,
         )
+
+    def delta_action(self, operations: list[dict[str, object]]):
+        def completion(call: dict[str, object]) -> LlmCompletion:
+            prompt = str(call["prompt"])
+            raw_state = prompt.split("TOOL_STATE_JSON_BEGIN\n", 1)[1].split(
+                "\nTOOL_STATE_JSON_END", 1
+            )[0]
+            state = json.loads(raw_state)
+            repair = state["repair_context"]
+            return self.completion(
+                {
+                    "action": "requirement.propose_delta",
+                    "arguments": {
+                        "requirement_delta": {
+                            "schema_version": "requirement_delta_v1",
+                            "base_candidate_sha256": repair["base_candidate_sha256"],
+                            "operations": operations,
+                        }
+                    },
+                    "summary": "Apply the bounded validator repair.",
+                }
+            )
+
+        return completion
 
     def test_valid_json_is_stamped_by_python_and_keeps_clarification_state(self) -> None:
         payload = deepcopy(self.payload)
@@ -224,11 +256,146 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         scenario = invalid["scenario_contract"]["scenarios"][0]
         scenario["requirement_refs"].append("AC-1")
         scenario["open_question_refs"] = []
-        result, client = self.refine(self.completion(invalid), self.completion(self.payload))
+        result, client = self.refine(
+            self.completion(invalid),
+            self.delta_action(
+                [
+                    {
+                        "op": "entity.update",
+                        "target_id": "SC-1",
+                        "fields": {
+                            "requirement_refs": [
+                                ref for ref in scenario["requirement_refs"] if ref != "AC-1"
+                            ]
+                        },
+                    }
+                ]
+            ),
+        )
         self.assertTrue(result.repaired)
         repair_prompt = str(client.calls[3]["prompt"])
         self.assertIn("Move every AC-* ID out of scenario.requirement_refs", repair_prompt)
         self.assertIn("scenario.open_question_refs", repair_prompt)
+        self.assertIn("requirement.propose_delta", repair_prompt)
+        self.assertIn("Requirement Repair Delta V1", repair_prompt)
+        self.assertNotIn("## Required JSON shape", repair_prompt)
+
+    def test_full_model_repair_is_rejected_when_delta_base_exists(self) -> None:
+        invalid = deepcopy(self.payload)
+        scenario = invalid["scenario_contract"]["scenarios"][0]
+        scenario["requirement_refs"].append("AC-1")
+        result, client = self.refine(
+            self.completion(invalid),
+            self.completion(self.payload),
+            self.delta_action(
+                [
+                    {
+                        "op": "entity.update",
+                        "target_id": "SC-1",
+                        "fields": {
+                            "requirement_refs": [
+                                ref for ref in scenario["requirement_refs"] if ref != "AC-1"
+                            ]
+                        },
+                    }
+                ]
+            ),
+        )
+
+        self.assertTrue(result.final_report.ok)
+        self.assertEqual(len(client.calls), 5)
+        self.assertIn("requirement_delta_required", str(client.calls[4]["prompt"]))
+
+    def test_applied_delta_is_persisted_and_journal_arguments_are_sanitized(self) -> None:
+        invalid = deepcopy(self.payload)
+        scenario = invalid["scenario_contract"]["scenarios"][0]
+        scenario["requirement_refs"].append("AC-1")
+        delta = self.delta_action(
+            [
+                {
+                    "op": "entity.update",
+                    "target_id": "SC-1",
+                    "fields": {
+                        "requirement_refs": [
+                            ref for ref in scenario["requirement_refs"] if ref != "AC-1"
+                        ]
+                    },
+                }
+            ]
+        )
+        client = ScriptedLlmClient(
+            self.source_actions() + [self.as_complete(self.completion(invalid)), delta]
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            result = RequirementModelV2Refiner(client, store=store).refine(
+                self.source,
+                run_id="run_v2_test",
+                source_artifact_ref=".runtime/runs/run_v2_test/artifacts/use_case_packet_v1.md",
+            )
+            delta_artifact = json.loads(
+                (root / result.delta_artifact_paths[0]).read_text(encoding="utf-8")
+            )
+            journal = json.loads((root / result.source_journal_path).read_text(encoding="utf-8"))
+
+        self.assertEqual(delta_artifact["status"], "applied")
+        self.assertEqual(delta_artifact["delta"]["schema_version"], "requirement_delta_v1")
+        delta_call = journal["calls"][-1]
+        self.assertEqual(delta_call["action"], "requirement.propose_delta")
+        self.assertIn("delta_sha256", delta_call["arguments"])
+        self.assertNotIn("requirement_delta", delta_call["arguments"])
+
+    def test_rejected_delta_is_persisted_and_journal_arguments_are_sanitized(self) -> None:
+        invalid = deepcopy(self.payload)
+        invalid["scenario_contract"]["scenarios"][0]["requirement_refs"].append("AC-1")
+        rejected_delta = self.delta_action(
+            [
+                {
+                    "op": "entity.update",
+                    "target_id": "SC-1",
+                    "fields": {"id": "SC-999"},
+                }
+            ]
+        )
+        client = ScriptedLlmClient(
+            self.source_actions() + [self.as_complete(self.completion(invalid)), rejected_delta]
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            with self.assertRaises(HarnessError) as context:
+                RequirementModelV2Refiner(client, store=store).refine(
+                    self.source,
+                    run_id="run_v2_test",
+                    source_artifact_ref=(
+                        ".runtime/runs/run_v2_test/artifacts/use_case_packet_v1.md"
+                    ),
+                )
+            delta_artifact = json.loads(
+                (
+                    root
+                    / ".runtime/runs/run_v2_test/artifacts/requirement_delta_v1_a1.json"
+                ).read_text(encoding="utf-8")
+            )
+            journal = json.loads(
+                (
+                    root
+                    / ".runtime/runs/run_v2_test/artifacts/requirement_source_journal_v1.json"
+                ).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(context.exception.error_code, "requirement_delta_policy_violation")
+        self.assertEqual(delta_artifact["status"], "rejected")
+        self.assertEqual(
+            delta_artifact["error"]["error_code"],
+            "requirement_delta_policy_violation",
+        )
+        self.assertEqual(journal["status"], "failed")
+        delta_call = journal["calls"][-1]
+        self.assertEqual(delta_call["action"], "requirement.propose_delta")
+        self.assertIn("delta_sha256", delta_call["arguments"])
+        self.assertNotIn("requirement_delta", delta_call["arguments"])
 
     def test_invalid_root_schema_uses_bounded_validator_repair(self) -> None:
         result, _ = self.refine(self.completion({"use_case": {}}), self.completion(self.payload))
@@ -266,7 +433,23 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         invalid["flows"]["main"][0]["action"] = "Cancel the operation."
         invalid["postconditions"][0]["text"] = "Connection failure is reported."
 
-        result, client = self.refine(self.completion(invalid), self.completion(self.payload))
+        result, client = self.refine(
+            self.completion(invalid),
+            self.delta_action(
+                [
+                    {
+                        "op": "entity.update",
+                        "target_id": "MF-1",
+                        "fields": {"action": self.payload["flows"]["main"][0]["action"]},
+                    },
+                    {
+                        "op": "entity.update",
+                        "target_id": "POST-1",
+                        "fields": {"text": self.payload["postconditions"][0]["text"]},
+                    },
+                ]
+            ),
+        )
 
         self.assertTrue(result.repaired)
         self.assertEqual([attempt.purpose for attempt in result.attempts], ["initial", "validator_repair"])
