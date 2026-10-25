@@ -1151,6 +1151,7 @@ def _jira_comment_body(
     goal = _section_preview(requirement_text, "Goal", default="See requirement packet.")
     alternative_flows = _section_items(requirement_text, "Alternative / Exception Flows")
     acceptance_criteria = _section_items(requirement_text, "Acceptance Criteria")
+    assumptions = _section_items(requirement_text, "Assumptions")
     open_questions = _section_items(requirement_text, "Open Questions")
     artifact_items = [f"{_artifact_label(name)}: {path}" for name, path in artifact_paths.items()]
     context = checkpoint_context or {}
@@ -1160,6 +1161,9 @@ def _jira_comment_body(
     remaining = context.get("remaining_blocking_count")
     deferred_count = context.get("deferred_to_design_count", 0)
     deferred_ids = context.get("deferred_to_design_question_ids", [])
+    policy_default_count = context.get("policy_default_count", 0)
+    policy_default_ids = context.get("policy_default_assumption_ids", [])
+    policy_default_policies = context.get("policy_default_policy_ids", [])
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     if checkpoint_status == "waiting_requirement_clarification":
@@ -1174,6 +1178,12 @@ def _jira_comment_body(
         f"Acceptance criteria: {len(acceptance_criteria)} item(s)",
         f"Open questions: {len(open_questions)} item(s)",
         f"Deferred to Design: {deferred_count} item(s) ({', '.join(str(item) for item in deferred_ids) or 'none'})",
+        (
+            f"Policy defaults: {policy_default_count} item(s); assumptions="
+            f"{', '.join(str(item) for item in policy_default_ids) or 'none'}; policies="
+            f"{', '.join(str(item) for item in policy_default_policies) or 'none'}"
+        ),
+        f"Assumptions visible for review: {len(assumptions)} item(s)",
         "Full packet is available in the synced Confluence page and local artifacts.",
     ]
     if question_text:
@@ -1396,11 +1406,10 @@ def _confluence_storage_body(
     postconditions = _section_items(requirement_text, "Postconditions")
     business_rules = _section_items(requirement_text, "Business Rules")
     acceptance_criteria = _section_items(requirement_text, "Acceptance Criteria")
+    assumptions = _section_items(requirement_text, "Assumptions")
     open_questions = _section_items(requirement_text, "Open Questions")
     human_decisions = _section_items(requirement_text, "Human Decisions")
-    unresolved_questions = [
-        item for item in open_questions if "status: resolved" not in item.lower()
-    ]
+    unresolved_questions = [item for item in open_questions if "status: open" in item.lower()]
     main_flow_lines = _confluence_review_list(main_flow, empty_text="Chưa có luồng chính.")
     exception_lines = _confluence_review_list(
         [*alternative_flows, *exception_flows],
@@ -1422,6 +1431,10 @@ def _confluence_storage_body(
         unresolved_questions,
         empty_text="Không còn câu hỏi cần làm rõ.",
     )
+    assumption_lines = _confluence_review_list(
+        assumptions,
+        empty_text="No assumptions require review.",
+    )
     requirement_body = _markdown_to_confluence_storage(requirement_text)
     context = checkpoint_context or {}
     checkpoint_status = str(context.get("status") or "waiting_requirement_approval")
@@ -1433,6 +1446,9 @@ def _confluence_storage_body(
     remaining = context.get("remaining_blocking_count")
     deferred_count = context.get("deferred_to_design_count", 0)
     deferred_ids = context.get("deferred_to_design_question_ids", [])
+    policy_default_count = context.get("policy_default_count", 0)
+    policy_default_ids = context.get("policy_default_assumption_ids", [])
+    policy_default_policies = context.get("policy_default_policy_ids", [])
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     decision_summary = ""
@@ -1450,6 +1466,12 @@ def _confluence_storage_body(
         "<p><strong>Deferred to Design:</strong> "
         f"{escape(str(deferred_count))}; IDs="
         f"{escape(', '.join(str(item) for item in deferred_ids) or 'none')}</p>"
+    )
+    policy_default_summary = (
+        "<p><strong>Policy defaults:</strong> "
+        f"{escape(str(policy_default_count))}; assumptions="
+        f"{escape(', '.join(str(item) for item in policy_default_ids) or 'none')}; policies="
+        f"{escape(', '.join(str(item) for item in policy_default_policies) or 'none')}</p>"
     )
     is_clarification = checkpoint_status in {
         "waiting_requirement_clarification",
@@ -1524,6 +1546,7 @@ def _confluence_storage_body(
 {clarification_panel}
 {checklist_summary}
 {deferred_summary}
+{policy_default_summary}
 <h2>Tổng quan checkpoint</h2>
 <table data-layout="wide">
 <tbody>
@@ -1550,6 +1573,8 @@ def _confluence_storage_body(
 <h2>Acceptance Criteria <small>({len(acceptance_criteria)})</small></h2>
 {acceptance_lines}
 <h2>Quyết định và câu hỏi</h2>
+<h3>Assumptions requiring review</h3>
+{assumption_lines}
 <h3>Quyết định đã chốt</h3>
 {decision_lines}
 <h3>Câu hỏi chưa giải quyết</h3>

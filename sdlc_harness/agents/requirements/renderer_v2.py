@@ -4,7 +4,11 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from .clarification_policy_v1 import CLARIFICATION_DISPOSITION_FIELD, DEFERRED_TO_DESIGN
+from .clarification_policy_v1 import (
+    CLARIFICATION_DISPOSITION_FIELD,
+    DEFERRED_TO_DESIGN,
+    POLICY_DEFAULT,
+)
 from .model_v2 import RequirementModelV2
 
 
@@ -172,7 +176,12 @@ def _packet_assumption_section(lines: list[str], items: Any) -> None:
     values = _dict_items(items)
     for item in values:
         affects = ", ".join(str(ref) for ref in item.get("affects", [])) or "none"
-        lines.append(f"- [{item.get('id', '')}] {_content(item, 'text')} (reason: {item.get('reason', '')}; affects: {affects})")
+        policy = (
+            f"POLICY DEFAULT `{item.get('policy_id', '')}` | "
+            if item.get("origin") == POLICY_DEFAULT
+            else ""
+        )
+        lines.append(f"- [{item.get('id', '')}] {policy}{_content(item, 'text')} (reason: {item.get('reason', '')}; affects: {affects})")
     if not values:
         lines.append("- none")
     lines.append("")
@@ -194,6 +203,8 @@ def _question_label(item: dict[str, Any]) -> str:
     disposition = item.get(CLARIFICATION_DISPOSITION_FIELD)
     if isinstance(disposition, dict) and disposition.get("value") == DEFERRED_TO_DESIGN:
         return "DEFERRED-TO-DESIGN"
+    if isinstance(disposition, dict) and disposition.get("value") == POLICY_DEFAULT:
+        return "POLICY-DEFAULT"
     return "BLOCKING" if item.get("effective_blocking") is True else "NON-BLOCKING"
 
 

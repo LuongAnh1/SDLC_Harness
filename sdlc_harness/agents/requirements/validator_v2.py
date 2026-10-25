@@ -14,10 +14,13 @@ from .clarification_policy_v1 import (
     DEFERRED_TO_DESIGN,
     HARD_BLOCKING_CATEGORIES,
     LEGACY_BLOCKING_POLICY_VERSION,
+    POLICY_DEFAULT,
+    REVIEWED_DEFAULT_POLICY_VERSION,
     SHADOW_POLICY_VERSION,
     classify_clarification_question,
     surface_blocking_question_ids,
 )
+from .safe_defaults_v1 import EVALUATION_FIELD, apply_reviewed_safe_defaults
 from .model_v2 import (
     DecisionStatus,
     QuestionStatus,
@@ -113,7 +116,11 @@ def normalize_and_validate_requirement_model_v2(
         data,
         requested=clarification_policy_version,
     )
-    _normalize_python_owned_fields(data, clarification_policy_version=policy_version)
+    _normalize_python_owned_fields(
+        data,
+        source_text_by_id=source_text_by_id,
+        clarification_policy_version=policy_version,
+    )
 
     issues: list[RequirementModelV2Issue] = []
     _validate_schema(data, issues)
@@ -142,7 +149,7 @@ def normalize_and_validate_requirement_model_v2(
         "status": status,
         "errors": [issue.to_dict() for issue in issues],
     }
-    if policy_version == SHADOW_POLICY_VERSION:
+    if policy_version in {SHADOW_POLICY_VERSION, REVIEWED_DEFAULT_POLICY_VERSION}:
         normalized_validation["clarification_policy_version"] = policy_version
     data["validation"] = normalized_validation
     normalized = RequirementModelV2.from_dict(data)
@@ -166,7 +173,11 @@ def _resolve_clarification_policy_version(
         if isinstance(validation, dict)
         else ""
     )
-    allowed = {LEGACY_BLOCKING_POLICY_VERSION, SHADOW_POLICY_VERSION}
+    allowed = {
+        LEGACY_BLOCKING_POLICY_VERSION,
+        SHADOW_POLICY_VERSION,
+        REVIEWED_DEFAULT_POLICY_VERSION,
+    }
     if requested is not None and requested not in allowed:
         raise HarnessError(
             "requirement_clarification_policy_invalid",
@@ -191,9 +202,16 @@ def _resolve_clarification_policy_version(
 def _normalize_python_owned_fields(
     data: dict[str, Any],
     *,
+    source_text_by_id: dict[str, str],
     clarification_policy_version: str,
 ) -> None:
     surface_blockers = surface_blocking_question_ids(data)
+    if clarification_policy_version == REVIEWED_DEFAULT_POLICY_VERSION:
+        apply_reviewed_safe_defaults(
+            data,
+            source_text_by_id=source_text_by_id,
+            surface_blockers=surface_blockers,
+        )
     for question in _dict_list(data.get("open_questions")):
         question.pop(CLARIFICATION_DISPOSITION_FIELD, None)
         affects = _string_list(question.get("affects"))
@@ -202,8 +220,22 @@ def _normalize_python_owned_fields(
         affects_behavior = any(ref.startswith(BEHAVIOR_PREFIXES) for ref in affects)
         legacy_effective = proposed or category in HARD_BLOCKING_CATEGORIES or affects_behavior
         question["effective_blocking"] = legacy_effective
+        evaluation = question.get(EVALUATION_FIELD)
         if (
-            clarification_policy_version == SHADOW_POLICY_VERSION
+            clarification_policy_version == REVIEWED_DEFAULT_POLICY_VERSION
+            and isinstance(evaluation, dict)
+            and evaluation.get("status") == "applied"
+        ):
+            question["effective_blocking"] = False
+            question[CLARIFICATION_DISPOSITION_FIELD] = {
+                "value": POLICY_DEFAULT,
+                "policy_version": REVIEWED_DEFAULT_POLICY_VERSION,
+                "policy_id": evaluation.get("policy_id"),
+                "assumption_id": evaluation.get("assumption_id"),
+                "reason_codes": list(evaluation.get("reason_codes") or []),
+            }
+        elif (
+            clarification_policy_version in {SHADOW_POLICY_VERSION, REVIEWED_DEFAULT_POLICY_VERSION}
             and question.get("status") == QuestionStatus.OPEN.value
         ):
             classification = classify_clarification_question(
@@ -214,7 +246,7 @@ def _normalize_python_owned_fields(
                 question["effective_blocking"] = False
                 question[CLARIFICATION_DISPOSITION_FIELD] = {
                     "value": DEFERRED_TO_DESIGN,
-                    "policy_version": SHADOW_POLICY_VERSION,
+                    "policy_version": clarification_policy_version,
                     "reason_codes": list(classification["reason_codes"]),
                 }
 

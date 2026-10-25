@@ -20,6 +20,12 @@ reference one option key. Each option must use
 Never use `label` in place of `answer`. Never mention implementation technologies
 or code layout.
 
+`suggested_policy_id` is advisory only. It must be `null` unless one reviewed
+policy below matches exactly. Never invent a policy ID and never turn a free-form
+answer into a default:
+
+{{SAFE_DEFAULT_POLICY_CATALOG}}
+
 `question_candidates[].affects` may contain only existing stable requirement IDs
 such as `UC-*`, `GOAL-*`, `ACT-*`, `PRE-*`, `MF-*`, `AF-*`, `EF-*`, `POST-*`,
 `BR-*`, `AC-*`, or `QR-*`. Never put `Q-*`, `E-*`, `SC-*`, `SRC-*`, or `D-*`
@@ -33,7 +39,7 @@ Return one JSON object with this shape and no markdown fence:
   "source_ref": "{{SOURCE_REF}}",
   "requirement_revision": {{REQUIREMENT_REVISION}},
   "coverage": [{"category":"functional_scope","status":"clear","requirement_refs":["UC-1"],"evidence_refs":["E-1"],"rationale":"Reason."}],
-  "question_candidates": [{"category":"edge_failures","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
+  "question_candidates": [{"category":"edge_failures","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"suggested_policy_id":null,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
   "deferred": [{"category":"quality_attributes","reason":"Lower impact than current blockers."}]
 }
 

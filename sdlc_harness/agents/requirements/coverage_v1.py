@@ -14,6 +14,7 @@ from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
 from .clarification_policy_v1 import CLARIFICATION_DISPOSITION_FIELD, DEFERRED_TO_DESIGN
 from .model_v2 import RequirementModelV2
+from .safe_defaults_v1 import safe_default_prompt_catalog
 from .validator_v2 import RequirementModelV2ValidationReport, normalize_and_validate_requirement_model_v2
 
 
@@ -160,6 +161,13 @@ def build_requirement_quality_checklist(
         and item[CLARIFICATION_DISPOSITION_FIELD].get("value") == DEFERRED_TO_DESIGN
         and str(item.get("id") or "")
     ]
+    policy_default_assumption_ids = [
+        str(item.get("id") or "")
+        for item in model.assumptions
+        if isinstance(item, dict)
+        and item.get("origin") == "policy_default"
+        and str(item.get("id") or "")
+    ]
     coverage = analysis.get("coverage") if isinstance(analysis, dict) else []
     covered_categories = {
         str(item.get("category") or "")
@@ -197,6 +205,8 @@ def build_requirement_quality_checklist(
         "blocking_question_ids": blocking_ids,
         "deferred_to_design_count": len(deferred_ids),
         "deferred_to_design_question_ids": deferred_ids,
+        "policy_default_count": len(policy_default_assumption_ids),
+        "policy_default_assumption_ids": policy_default_assumption_ids,
         "checks": checks,
         "validation_issue_codes": sorted(issue_codes),
     }
@@ -220,6 +230,7 @@ def _semantic_analysis(
     prompt = (
         template.replace("{{SOURCE_REF}}", str(model.source.get("source_ref") or ""))
         .replace("{{REQUIREMENT_REVISION}}", str(model.revision))
+        .replace("{{SAFE_DEFAULT_POLICY_CATALOG}}", safe_default_prompt_catalog())
         .replace("{{SOURCE_TEXT}}", source_text)
         .replace("{{REQUIREMENT_MODEL}}", json.dumps(model.to_dict(), ensure_ascii=False, indent=2))
         .replace("{{VALIDATION_REPORT}}", json.dumps(validation_report.to_dict(), ensure_ascii=False, indent=2))
@@ -280,6 +291,7 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
                     "options": [],
                     "recommended_option": None,
                     "suggested_answer": None,
+                    "suggested_policy_id": None,
                     "impact": "high",
                     "uncertainty": "high",
                     "affects": [flow_id, *_related_acceptance_refs(data, flow_id)],
@@ -566,6 +578,7 @@ def _adopt_candidates(
                 "options": _normalize_options(candidate.get("options")),
                 "recommended_option": candidate.get("recommended_option"),
                 "suggested_answer": candidate.get("suggested_answer"),
+                "suggested_policy_id": candidate.get("suggested_policy_id"),
                 "impact": str(candidate["impact"]),
                 "uncertainty": str(candidate["uncertainty"]),
             }

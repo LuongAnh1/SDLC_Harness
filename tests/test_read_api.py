@@ -248,6 +248,30 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertEqual(result["content"]["mode"], "shadow")
         self.assertEqual(result["content"]["summary"]["would_change_count"], 1)
 
+    def test_read_requirement_policy_defaults_artifact(self) -> None:
+        report_path = self.store.write_json_artifact(
+            self.run_id,
+            "requirement_policy_defaults_v1_r1.json",
+            {
+                "schema_version": "requirement_policy_defaults_v1",
+                "registry_version": "reviewed_safe_defaults_v1",
+                "summary": {"applied_count": 1, "assumption_ids": ["ASM-1"]},
+            },
+        )
+        state = self.store.read_state(self.run_id)
+        state["latest_artifacts"]["requirement_policy_defaults"] = str(report_path)
+        self.store.write_state(state)
+
+        detail = self.read_service.get_run(run_id=self.run_id)
+        result = self.read_service.read_artifact(
+            run_id=self.run_id,
+            artifact_key="requirement_policy_defaults",
+        )
+
+        self.assertIn("requirement_policy_defaults", detail["latest_artifacts"])
+        self.assertEqual(result["content"]["summary"]["applied_count"], 1)
+        self.assertEqual(result["content"]["summary"]["assumption_ids"], ["ASM-1"])
+
     def test_artifact_allowlist_and_run_directory_boundary_are_fail_closed(self) -> None:
         with self.assertRaises(HarnessError) as hidden:
             self.read_service.read_artifact(

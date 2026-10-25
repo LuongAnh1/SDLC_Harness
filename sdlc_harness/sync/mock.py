@@ -44,6 +44,18 @@ def mock_sync_requirement_checkpoint(
     if deferred_count is not None:
         deferred_suffix = f" ({', '.join(str(item) for item in deferred_ids)})" if deferred_ids else ""
         deferred_line = f"\nDeferred to Design: {deferred_count} item(s){deferred_suffix}\n"
+    policy_default_ids = context.get("policy_default_assumption_ids")
+    policy_default_ids = policy_default_ids if isinstance(policy_default_ids, list) else []
+    policy_default_policies = context.get("policy_default_policy_ids")
+    policy_default_policies = policy_default_policies if isinstance(policy_default_policies, list) else []
+    policy_default_count = context.get("policy_default_count")
+    policy_default_line = ""
+    if policy_default_count is not None:
+        policy_default_line = (
+            f"\nPolicy defaults: {policy_default_count} item(s); assumptions="
+            f"{', '.join(str(item) for item in policy_default_ids) or 'none'}; policies="
+            f"{', '.join(str(item) for item in policy_default_policies) or 'none'}\n"
+        )
     decision = context.get("decision_summary")
     decision_line = ""
     if isinstance(decision, dict):
@@ -55,7 +67,7 @@ def mock_sync_requirement_checkpoint(
 
 Source: `{source_ref}`
 
-Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{decision_line}
+Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{decision_line}
 
 Requirement artifact: `{artifact_paths['requirement_packet']}`
 """,
@@ -80,7 +92,7 @@ Source: `{source_ref}`
 
 Trang này giả lập nơi lưu formal use case và requirement packet để reviewer đọc trước khi chuyển sang phase design.
 
-Checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{decision_line}
+Checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{decision_line}
 
 Artifacts:
 - Use case packet: `{artifact_paths['use_case_packet']}`

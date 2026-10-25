@@ -31,6 +31,11 @@ Add collections are `use_case.actors`, `preconditions`, `flows.main`,
 
 ## Authority rules
 
+`suggested_policy_id` remains advisory. Use `null` unless this reviewed catalog
+matches exactly; never provide a free-form policy answer:
+
+{{SAFE_DEFAULT_POLICY_CATALOG}}
+
 - Never provide or mutate `id`, root schema/run/revision, source/provenance, decisions,
   validation, `decision_ref`, `source_id`, or `effective_blocking`.
 - For every added entity, use a unique `temp_ref=tmp:<name>` and omit its ID. Reference

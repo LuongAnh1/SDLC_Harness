@@ -19,7 +19,12 @@ Source ref: `{{SOURCE_REF}}`
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, and `evidence_refs`.
+- `suggested_policy_id` is advisory only. Use `null` unless an exact reviewed policy below matches; never invent an ID or provide a policy answer yourself.
 - `effective_blocking`, root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
+
+Reviewed safe-default policies:
+
+{{SAFE_DEFAULT_POLICY_CATALOG}}
 
 ## Required source coverage pass
 
@@ -161,7 +166,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
   "acceptance_criteria": [{"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["BR-1"]}],
   "quality_requirements": [],
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
-  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "evidence_refs": []}],
+  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "suggested_policy_id": null, "evidence_refs": []}],
   "decisions": [],
   "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}

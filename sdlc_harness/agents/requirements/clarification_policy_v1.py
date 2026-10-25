@@ -14,6 +14,7 @@ from .model_v2 import RequirementModelV2
 
 SHADOW_SCHEMA_VERSION = "requirement_clarification_policy_shadow_v1"
 SHADOW_POLICY_VERSION = "clarification_disposition_v1"
+REVIEWED_DEFAULT_POLICY_VERSION = "clarification_disposition_v2"
 LEGACY_BLOCKING_POLICY_VERSION = "legacy_blocking_v1"
 CLARIFICATION_DISPOSITION_FIELD = "clarification_disposition"
 SHADOW_ARTIFACT_KEY = "requirement_clarification_policy_shadow"

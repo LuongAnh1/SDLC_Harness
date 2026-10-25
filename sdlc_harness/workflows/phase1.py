@@ -39,11 +39,16 @@ from ..agents.requirements import (
     CLARIFICATION_DISPOSITION_FIELD,
     DEFERRED_TO_DESIGN,
     LEGACY_BLOCKING_POLICY_VERSION,
+    POLICY_DEFAULT,
+    REVIEWED_DEFAULT_POLICY_VERSION,
+    SAFE_DEFAULT_ARTIFACT_KEY,
+    SAFE_DEFAULT_ARTIFACT_PREFIX,
     SHADOW_ARTIFACT_KEY,
     SHADOW_ARTIFACT_PREFIX,
     SHADOW_POLICY_VERSION,
     build_requirement_gap_report,
     build_clarification_policy_shadow,
+    build_reviewed_safe_default_report,
     build_requirement_quality_checklist,
     close_clarification_session,
     find_clarification_submission,
@@ -55,6 +60,7 @@ from ..agents.requirements import (
     session_pending_ids,
     shadow_error_summary,
     shadow_quality_summary,
+    safe_default_quality_summary,
     start_clarification_session,
 )
 from ..agents.requirements.session_v1 import (
@@ -136,7 +142,7 @@ class PhaseOneWorkflow:
             "use_case": source.use_case,
             "requested_by": requested_by,
             "requirement_contract_version": self.settings.requirement_contract_version,
-            "requirement_clarification_policy_version": SHADOW_POLICY_VERSION,
+            "requirement_clarification_policy_version": REVIEWED_DEFAULT_POLICY_VERSION,
             "created_at": now,
             "updated_at": now,
             "current_phase": "requirement_drafting",
@@ -268,6 +274,16 @@ class PhaseOneWorkflow:
                 refinement,
                 model=coverage.model,
                 final_report=coverage.validation_report,
+            )
+            policy_validation = normalize_and_validate_requirement_model_v2(
+                refinement.model,
+                source_catalog.source_text_by_id,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            refinement = replace(
+                refinement,
+                model=policy_validation.model,
+                final_report=policy_validation.report,
             )
             quality_checklist = build_requirement_quality_checklist(
                 model=refinement.model,
@@ -867,10 +883,22 @@ class PhaseOneWorkflow:
     ) -> None:
         run_id = str(state["run_id"])
         deferred_question_ids = self._deferred_question_ids(model)
+        policy_default_assumption_ids, policy_default_policy_ids = self._policy_default_metadata(model)
         shadow_quality = self._write_clarification_policy_shadow(
             model=model,
             artifact_paths=artifact_paths,
         )
+        safe_default_quality = None
+        if self._clarification_policy_version(state) == REVIEWED_DEFAULT_POLICY_VERSION:
+            safe_default_quality = self._write_reviewed_safe_default_report(
+                model=model,
+                artifact_paths=artifact_paths,
+            )
+        policy_default_fields = {
+            "policy_default_count": len(policy_default_assumption_ids),
+            "policy_default_assumption_ids": policy_default_assumption_ids,
+            "policy_default_policy_ids": policy_default_policy_ids,
+        }
         if current_question is not None:
             status = "waiting_requirement_clarification"
             current_phase = "requirement_clarification"
@@ -883,6 +911,7 @@ class PhaseOneWorkflow:
                 "remaining_blocking_count": remaining_blocking_count,
                 "deferred_to_design_count": len(deferred_question_ids),
                 "deferred_to_design_question_ids": deferred_question_ids,
+                **policy_default_fields,
             }
             allowed = ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS
         elif remaining_blocking_count > 0:
@@ -897,6 +926,7 @@ class PhaseOneWorkflow:
                 "session_limit_reached": True,
                 "deferred_to_design_count": len(deferred_question_ids),
                 "deferred_to_design_question_ids": deferred_question_ids,
+                **policy_default_fields,
             }
             allowed = ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS
         else:
@@ -910,6 +940,7 @@ class PhaseOneWorkflow:
                 "review_projection_ref": artifact_paths["requirement_packet"],
                 "deferred_to_design_count": len(deferred_question_ids),
                 "deferred_to_design_question_ids": deferred_question_ids,
+                **policy_default_fields,
             }
             allowed = ALLOWED_REQUIREMENT_ACTIONS
         state.update(
@@ -925,10 +956,16 @@ class PhaseOneWorkflow:
                     "requirement_model_v2": quality_report,
                     "requirement_gaps": gap_report_summary(gap_report),
                     "requirement_clarification_policy_shadow": shadow_quality,
+                    **(
+                        {"requirement_policy_defaults": safe_default_quality}
+                        if safe_default_quality is not None
+                        else {}
+                    ),
                     "requirement_clarification_disposition": {
                         "policy_version": self._clarification_policy_version(state),
                         "deferred_to_design_count": len(deferred_question_ids),
                         "deferred_to_design_question_ids": deferred_question_ids,
+                        **policy_default_fields,
                     },
                 },
                 "latest_requirement_decision": latest_decision,
@@ -950,11 +987,30 @@ class PhaseOneWorkflow:
         return ids
 
     @staticmethod
+    def _policy_default_metadata(model: RequirementModelV2) -> tuple[list[str], list[str]]:
+        assumption_ids: list[str] = []
+        policy_ids: list[str] = []
+        for assumption in model.assumptions:
+            if not isinstance(assumption, dict) or assumption.get("origin") != POLICY_DEFAULT:
+                continue
+            assumption_id = str(assumption.get("id") or "")
+            policy_id = str(assumption.get("policy_id") or "")
+            if assumption_id:
+                assumption_ids.append(assumption_id)
+            if policy_id and policy_id not in policy_ids:
+                policy_ids.append(policy_id)
+        return assumption_ids, policy_ids
+
+    @staticmethod
     def _clarification_policy_version(state: dict[str, object]) -> str:
         value = str(state.get("requirement_clarification_policy_version") or "")
         if not value:
             return LEGACY_BLOCKING_POLICY_VERSION
-        if value not in {LEGACY_BLOCKING_POLICY_VERSION, SHADOW_POLICY_VERSION}:
+        if value not in {
+            LEGACY_BLOCKING_POLICY_VERSION,
+            SHADOW_POLICY_VERSION,
+            REVIEWED_DEFAULT_POLICY_VERSION,
+        }:
             raise HarnessError(
                 "requirement_clarification_policy_invalid",
                 f"Unsupported Requirement clarification policy: {value!r}.",
@@ -984,6 +1040,22 @@ class PhaseOneWorkflow:
             artifact_paths.pop(SHADOW_ARTIFACT_KEY, None)
             return shadow_error_summary(exc)
 
+    def _write_reviewed_safe_default_report(
+        self,
+        *,
+        model: RequirementModelV2,
+        artifact_paths: dict[str, str],
+    ) -> dict[str, object]:
+        report = build_reviewed_safe_default_report(model)
+        artifact_paths[SAFE_DEFAULT_ARTIFACT_KEY] = self.store.relative(
+            self.store.write_json_artifact(
+                model.run_id,
+                f"{SAFE_DEFAULT_ARTIFACT_PREFIX}_r{model.revision}.json",
+                report,
+            )
+        )
+        return safe_default_quality_summary(report)
+
     def _normalized_artifacts(self, state: dict[str, object]) -> dict[str, str]:
         value = state.get("latest_artifacts")
         if not isinstance(value, dict):
@@ -1003,6 +1075,15 @@ class PhaseOneWorkflow:
             context["deferred_to_design_count"] = checkpoint.get("deferred_to_design_count", 0)
             context["deferred_to_design_question_ids"] = checkpoint.get(
                 "deferred_to_design_question_ids",
+                [],
+            )
+            context["policy_default_count"] = checkpoint.get("policy_default_count", 0)
+            context["policy_default_assumption_ids"] = checkpoint.get(
+                "policy_default_assumption_ids",
+                [],
+            )
+            context["policy_default_policy_ids"] = checkpoint.get(
+                "policy_default_policy_ids",
                 [],
             )
         decision = state.get("latest_requirement_decision")
@@ -1058,8 +1139,10 @@ class PhaseOneWorkflow:
                 f"Chỉ dùng clarify_more khi người dùng muốn mở thêm một lượt. "
                 f"Sync status={last_sync.get('status')}."
             )
+        policy_default_count = checkpoint.get("policy_default_count", 0) if isinstance(checkpoint, dict) else 0
         return (
             "Requirement V2 đã hết câu hỏi blocking và đang chờ duyệt. "
+            f"Policy defaults cần review={policy_default_count}. "
             f"Sync status={last_sync.get('status')}."
         )
 
