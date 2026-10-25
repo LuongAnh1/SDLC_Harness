@@ -1164,6 +1164,7 @@ def _jira_comment_body(
     policy_default_count = context.get("policy_default_count", 0)
     policy_default_ids = context.get("policy_default_assumption_ids", [])
     policy_default_policies = context.get("policy_default_policy_ids", [])
+    policy_challenge = context.get("policy_default_challenge")
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     if checkpoint_status == "waiting_requirement_clarification":
@@ -1171,7 +1172,11 @@ def _jira_comment_body(
     elif checkpoint_status == "waiting_requirement_clarification_continue":
         next_action = "clarify_more, revalidate_requirement, get_status, sync_run, or cancel_run"
     else:
-        next_action = "approve_checkpoint, clarify_more, revalidate_requirement, request_change, cancel_run, or get_status"
+        challenge_action = ", challenge_policy_default" if policy_default_count else ""
+        next_action = (
+            "approve_checkpoint"
+            f"{challenge_action}, clarify_more, revalidate_requirement, request_change, cancel_run, or get_status"
+        )
     summary_items = [
         f"Goal: {goal}",
         f"Alternative / exception flows: {len(alternative_flows)} item(s)",
@@ -1188,6 +1193,15 @@ def _jira_comment_body(
     ]
     if question_text:
         summary_items.insert(0, f"Current clarification question: {question_text}")
+    if isinstance(policy_challenge, dict):
+        summary_items.insert(
+            0,
+            "Policy default challenged: "
+            f"assumption={policy_challenge.get('assumption_id')}; "
+            f"policy={policy_challenge.get('policy_id')}; "
+            f"question={policy_challenge.get('question_id')}; "
+            f"by={policy_challenge.get('challenged_by')}",
+        )
     if remaining is not None:
         summary_items.insert(1 if question_text else 0, f"Remaining blocking questions: {remaining}")
     if isinstance(decision, dict):
@@ -1449,6 +1463,7 @@ def _confluence_storage_body(
     policy_default_count = context.get("policy_default_count", 0)
     policy_default_ids = context.get("policy_default_assumption_ids", [])
     policy_default_policies = context.get("policy_default_policy_ids", [])
+    policy_challenge = context.get("policy_default_challenge")
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     decision_summary = ""
@@ -1473,6 +1488,17 @@ def _confluence_storage_body(
         f"{escape(', '.join(str(item) for item in policy_default_ids) or 'none')}; policies="
         f"{escape(', '.join(str(item) for item in policy_default_policies) or 'none')}</p>"
     )
+    policy_challenge_summary = ""
+    if isinstance(policy_challenge, dict):
+        challenge_text = (
+            f"assumption={policy_challenge.get('assumption_id')}; "
+            f"policy={policy_challenge.get('policy_id')}; "
+            f"question={policy_challenge.get('question_id')}; "
+            f"by={policy_challenge.get('challenged_by')}"
+        )
+        policy_challenge_summary = (
+            f"<p><strong>Policy default đã bị phản đối:</strong> {escape(challenge_text)}</p>"
+        )
     is_clarification = checkpoint_status in {
         "waiting_requirement_clarification",
         "waiting_requirement_clarification_continue",
@@ -1486,7 +1512,12 @@ def _confluence_storage_body(
         else (
             "Trả lời câu hỏi làm rõ hiện tại; Harness sẽ cập nhật requirement và chạy Validator lại."
             if is_clarification
-            else "Review requirement bên dưới, sau đó duyệt checkpoint để bắt đầu Design Workflow."
+            else (
+                "Review requirement bên dưới; có thể dùng challenge_policy_default để thu hồi "
+                "default trước khi duyệt, sau đó duyệt checkpoint để bắt đầu Design Workflow."
+                if policy_default_count
+                else "Review requirement bên dưới, sau đó duyệt checkpoint để bắt đầu Design Workflow."
+            )
         )
     )
     option_items = []
@@ -1547,6 +1578,7 @@ def _confluence_storage_body(
 {checklist_summary}
 {deferred_summary}
 {policy_default_summary}
+{policy_challenge_summary}
 <h2>Tổng quan checkpoint</h2>
 <table data-layout="wide">
 <tbody>

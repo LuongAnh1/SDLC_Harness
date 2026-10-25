@@ -92,6 +92,7 @@ class ApplicationService:
             "revalidate-design",
             "revalidate-requirement",
             "clarify-more",
+            "challenge-policy-default",
             "approve-checkpoint",
             "answer-clarification",
             "adopt-run-workspace",
@@ -272,6 +273,13 @@ class ApplicationService:
         if name == "clarify-more":
             return PhaseOneWorkflow(settings).clarify_more(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "challenge-policy-default":
+            return PhaseOneWorkflow(settings).challenge_policy_default(
+                run_id=self._required_text(command, "run_id"),
+                assumption_id=self._required_text(command, "assumption_id"),
+                instruction=self._required_text(command, "instruction"),
+                challenged_by=self._required_text(command, "challenged_by"),
             )
         if name == "experiment-design-consensus":
             return PhaseTwoWorkflow(settings).experiment_design_consensus(

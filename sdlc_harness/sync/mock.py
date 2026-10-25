@@ -62,12 +62,20 @@ def mock_sync_requirement_checkpoint(
         decision_line = (
             f"\nLatest decision: {decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}\n"
         )
+    challenge = context.get("policy_default_challenge")
+    challenge_line = ""
+    if isinstance(challenge, dict):
+        challenge_line = (
+            f"\nPolicy default challenged: assumption={challenge.get('assumption_id')}; "
+            f"policy={challenge.get('policy_id')}; question={challenge.get('question_id')}; "
+            f"by={challenge.get('challenged_by')}\n"
+        )
     jira_comment_path.write_text(
         f"""# Mock Jira Comment
 
 Source: `{source_ref}`
 
-Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{decision_line}
+Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{challenge_line}{decision_line}
 
 Requirement artifact: `{artifact_paths['requirement_packet']}`
 """,
@@ -92,7 +100,7 @@ Source: `{source_ref}`
 
 Trang này giả lập nơi lưu formal use case và requirement packet để reviewer đọc trước khi chuyển sang phase design.
 
-Checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{decision_line}
+Checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{policy_default_line}{challenge_line}{decision_line}
 
 Artifacts:
 - Use case packet: `{artifact_paths['use_case_packet']}`

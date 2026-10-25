@@ -68,6 +68,22 @@ def apply_reviewed_safe_defaults(
         and validation.get("clarification_policy_version") == POLICY_VERSION
     ):
         _validate_existing_policy_output(data)
+    previous_policy_ids = {
+        (str(item.get("source_question_id") or ""), str(item.get("policy_id") or "")): str(item.get("id") or "")
+        for item in _dict_items(data.get("assumptions"))
+        if item.get("origin") == POLICY_ORIGIN and str(item.get("id") or "")
+    }
+    reserved_assumption_ids = {
+        str(item.get("id") or "")
+        for item in _dict_items(data.get("assumptions"))
+        if str(item.get("id") or "")
+    }
+    reserved_assumption_ids.update(
+        str(item.get("challenged_assumption_id") or "")
+        for item in _dict_items(data.get("decisions"))
+        if item.get("decision_kind") == "policy_default_challenge"
+        and str(item.get("challenged_assumption_id") or "")
+    )
     _remove_previous_policy_output(data)
     evidence_by_id = {
         str(item.get("id") or ""): item
@@ -76,16 +92,13 @@ def apply_reviewed_safe_defaults(
     }
     requirements_by_id = _requirement_items_by_id(data)
     questions = _dict_items(data.get("open_questions"))
-    used_assumption_ids = {
-        str(item.get("id") or "")
-        for item in _dict_items(data.get("assumptions"))
-        if str(item.get("id") or "")
-    }
+    used_assumption_ids = set(reserved_assumption_ids)
     assumptions = data.get("assumptions")
     if not isinstance(assumptions, list):
         return
 
     for question in questions:
+        question_id = str(question.get("id") or "")
         proposed_policy = str(question.get("suggested_policy_id") or "").strip()
         if not proposed_policy:
             continue
@@ -101,7 +114,9 @@ def apply_reviewed_safe_defaults(
         question[EVALUATION_FIELD] = evaluation
         if evaluation["status"] != "matched":
             continue
-        assumption_id = _next_assumption_id(used_assumption_ids)
+        assumption_id = previous_policy_ids.get((question_id, proposed_policy)) or _next_assumption_id(
+            used_assumption_ids
+        )
         used_assumption_ids.add(assumption_id)
         assumption = {
             "id": assumption_id,
@@ -313,6 +328,12 @@ def _validate_existing_policy_output(data: dict[str, Any]) -> None:
                 "Canonical policy-default question is missing its assumption.",
                 run_id=str(data.get("run_id") or "") or None,
             )
+
+
+def validate_reviewed_safe_default_integrity(model: RequirementModelV2) -> None:
+    """Fail closed nếu policy assumption hiện hành không khớp reviewed registry."""
+
+    _validate_existing_policy_output(model.to_dict())
 
 
 def _evidence_has_exact_marker(

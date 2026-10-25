@@ -35,6 +35,14 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": set(),
         "confirmation": "standard",
     },
+    "challenge_policy_default": {
+        "command": "challenge-policy-default",
+        "required": {"assumption_id", "instruction"},
+        "optional": set(),
+        "overrides": set(),
+        "actor_argument": "challenged_by",
+        "confirmation": "standard",
+    },
     "continue_run": {
         "command": "continue-run",
         "required": set(),

@@ -40,6 +40,8 @@ from ..agents.requirements import (
     DEFERRED_TO_DESIGN,
     LEGACY_BLOCKING_POLICY_VERSION,
     POLICY_DEFAULT,
+    POLICY_CHALLENGE_ARTIFACT_KEY,
+    POLICY_CHALLENGE_ARTIFACT_PREFIX,
     REVIEWED_DEFAULT_POLICY_VERSION,
     SAFE_DEFAULT_ARTIFACT_KEY,
     SAFE_DEFAULT_ARTIFACT_PREFIX,
@@ -50,6 +52,8 @@ from ..agents.requirements import (
     build_clarification_policy_shadow,
     build_reviewed_safe_default_report,
     build_requirement_quality_checklist,
+    challenge_quality_summary,
+    challenge_reviewed_safe_default,
     close_clarification_session,
     find_clarification_submission,
     gap_report_summary,
@@ -868,6 +872,172 @@ class PhaseOneWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def challenge_policy_default(
+        self,
+        *,
+        run_id: str,
+        assumption_id: str,
+        instruction: str,
+        challenged_by: str,
+    ) -> dict[str, object]:
+        """Thu hồi một reviewed default rồi mở lại source question cho con người."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("requirement_contract_version") or "v2") != "v2" or (
+            self._clarification_policy_version(state) != REVIEWED_DEFAULT_POLICY_VERSION
+        ):
+            raise HarnessError(
+                "requirement_policy_challenge_not_ready",
+                "Policy-default challenge requires a Requirement V2 run using the reviewed-default policy.",
+                run_id=run_id,
+            )
+        checkpoint = state.get("pending_checkpoint")
+        active_ids = (
+            checkpoint.get("policy_default_assumption_ids")
+            if isinstance(checkpoint, dict)
+            else None
+        )
+        if not isinstance(active_ids, list) or assumption_id not in active_ids:
+            raise HarnessError(
+                "requirement_policy_default_stale",
+                f"Policy-default assumption is no longer active: {assumption_id}",
+                run_id=run_id,
+            )
+        if (
+            state.get("status") != "waiting_requirement_approval"
+            or not isinstance(checkpoint, dict)
+            or checkpoint.get("type") != "requirement_approval"
+        ):
+            raise HarnessError(
+                "requirement_policy_challenge_not_ready",
+                "Policy defaults can only be challenged at the Requirement Approval checkpoint.",
+                run_id=run_id,
+            )
+
+        artifacts = self._normalized_artifacts(state)
+        model_ref = artifacts.get("requirement_model")
+        if not model_ref:
+            raise HarnessError(
+                "requirement_model_v2_missing",
+                "Canonical Requirement V2 artifact is missing.",
+                run_id=run_id,
+            )
+        model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
+        source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
+        challenge = challenge_reviewed_safe_default(
+            model,
+            assumption_id=assumption_id,
+            instruction=instruction,
+            challenged_by=challenged_by,
+        )
+        validation = normalize_and_validate_requirement_model_v2(
+            challenge.model,
+            source_text_by_id,
+            clarification_policy_version=REVIEWED_DEFAULT_POLICY_VERSION,
+        )
+        clarification_session = start_clarification_session(validation.model)
+        selection = select_current_requirement_question(
+            validation.model,
+            allowed_question_ids=(
+                session_pending_ids(clarification_session)
+                if clarification_session is not None
+                else None
+            ),
+        )
+        challenged_question_id = str(challenge.decision.get("question_id") or "")
+        if selection.current_question is None or selection.current_question.id != challenged_question_id:
+            raise HarnessError(
+                "requirement_policy_default_integrity_failed",
+                "Challenged policy default did not reopen its source question.",
+                run_id=run_id,
+            )
+        report = challenge.build_report(validation.model)
+        revised_artifacts = write_requirement_v2_revision_artifacts(
+            store=self.store,
+            run_id=run_id,
+            model=validation.model,
+            validation_report=validation.report,
+            audit={
+                "action": "challenge_policy_default",
+                "mode": "deterministic_only",
+                "policy_challenge": report,
+            },
+        )
+        artifacts.update(revised_artifacts)
+        artifacts[POLICY_CHALLENGE_ARTIFACT_KEY] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"{POLICY_CHALLENGE_ARTIFACT_PREFIX}_r{validation.model.revision}.json",
+                report,
+            )
+        )
+
+        quality_checklist = build_requirement_quality_checklist(
+            model=validation.model,
+            validation_report=validation.report,
+        )
+        artifacts["requirement_quality_checklist"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_quality_checklist_v1_r{validation.model.revision}.json",
+                quality_checklist,
+            )
+        )
+        previous_gap_report = None
+        gap_ref = artifacts.get("requirement_gap_report")
+        if gap_ref:
+            previous_gap_report = read_requirement_gap_report(
+                store=self.store,
+                run_id=run_id,
+                artifact_ref=gap_ref,
+            )
+        gap_report = build_requirement_gap_report(
+            run_id=run_id,
+            model=validation.model,
+            source_manifest_input_hash=(
+                str(previous_gap_report.get("source_manifest_input_hash") or "") or None
+                if isinstance(previous_gap_report, dict)
+                else None
+            ),
+            previous_report=previous_gap_report,
+        )
+        artifacts["requirement_gap_report"] = write_requirement_gap_report(
+            store=self.store,
+            run_id=run_id,
+            report=gap_report,
+        )
+        quality_report = {
+            "action": "challenge_policy_default",
+            "mode": "deterministic_only",
+            "policy_challenge": report,
+            "final_report": validation.report.to_dict(),
+            "quality_checklist": quality_checklist,
+        }
+        self._apply_v2_checkpoint_state(
+            state=state,
+            model=validation.model,
+            artifact_paths=artifacts,
+            current_question=selection.current_question.to_dict(),
+            remaining_blocking_count=selection.remaining_blocking_count,
+            quality_report=quality_report,
+            gap_report=gap_report,
+            latest_decision=challenge.decision,
+            clarification_session=clarification_session,
+        )
+        reports = state.get("quality_reports")
+        if isinstance(reports, dict):
+            reports["requirement_policy_default_challenge"] = challenge_quality_summary(report)
+        self.store.write_state(state)
+        last_sync = self._sync_requirement_state(state)
+        state["last_sync"] = last_sync
+        state["updated_at"] = utc_now_iso()
+        state["summary_for_user"] = (
+            f"Đã thu hồi policy default {assumption_id}; Requirement V2 cần người dùng "
+            f"trả lời lại câu {challenged_question_id}. Sync status={last_sync.get('status')}."
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
     def _apply_v2_checkpoint_state(
         self,
         *,
@@ -942,7 +1112,9 @@ class PhaseOneWorkflow:
                 "deferred_to_design_question_ids": deferred_question_ids,
                 **policy_default_fields,
             }
-            allowed = ALLOWED_REQUIREMENT_ACTIONS
+            allowed = list(ALLOWED_REQUIREMENT_ACTIONS)
+            if policy_default_assumption_ids:
+                allowed.insert(1, "challenge_policy_default")
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -1110,6 +1282,15 @@ class PhaseOneWorkflow:
                 "status": checklist.get("status"),
                 "blocking_failure_count": checklist.get("blocking_failure_count", 0),
                 "blocking_question_ids": checklist.get("blocking_question_ids", []),
+            }
+        challenge = quality_reports.get("requirement_policy_default_challenge") if isinstance(quality_reports, dict) else None
+        if isinstance(challenge, dict):
+            context["policy_default_challenge"] = {
+                "status": challenge.get("status"),
+                "assumption_id": challenge.get("assumption_id"),
+                "policy_id": challenge.get("policy_id"),
+                "question_id": challenge.get("question_id"),
+                "challenged_by": challenge.get("challenged_by"),
             }
         return context
 

@@ -409,6 +409,9 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
         overrides = set(spec["overrides"])
         _require_fields(arguments, allowed=required | optional | overrides, required=required)
         command_arguments: dict[str, object] = {"run_id": run_id}
+        actor_argument = spec.get("actor_argument")
+        if isinstance(actor_argument, str) and actor_argument:
+            command_arguments[actor_argument] = requested_by
         normalized_arguments: dict[str, object] = {}
         for key in sorted(required | optional):
             if key not in arguments:
@@ -723,6 +726,8 @@ def _http_status_for_error(error_code: str) -> int:
         "legacy_execution_profile_retired",
         "legacy_developer_executor_retired",
         "project_profile_required",
+        "requirement_policy_default_stale",
+        "requirement_policy_challenge_not_ready",
     }:
         return 409
     if error_code in {"operation_queue_full", "operation_manager_stopping"}:

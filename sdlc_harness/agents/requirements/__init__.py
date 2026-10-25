@@ -83,6 +83,15 @@ from .safe_defaults_v1 import (
     build_reviewed_safe_default_report,
     safe_default_prompt_catalog,
     safe_default_quality_summary,
+    validate_reviewed_safe_default_integrity,
+)
+from .policy_challenge_v1 import (
+    ARTIFACT_KEY as POLICY_CHALLENGE_ARTIFACT_KEY,
+    ARTIFACT_PREFIX as POLICY_CHALLENGE_ARTIFACT_PREFIX,
+    DECISION_KIND as POLICY_CHALLENGE_DECISION_KIND,
+    RequirementPolicyDefaultChallenge,
+    challenge_quality_summary,
+    challenge_reviewed_safe_default,
 )
 from .refiner_v2 import (
     RequirementModelV2Attempt,
@@ -176,6 +185,13 @@ __all__ = [
     "shadow_quality_summary",
     "safe_default_prompt_catalog",
     "safe_default_quality_summary",
+    "validate_reviewed_safe_default_integrity",
+    "POLICY_CHALLENGE_ARTIFACT_KEY",
+    "POLICY_CHALLENGE_ARTIFACT_PREFIX",
+    "POLICY_CHALLENGE_DECISION_KIND",
+    "RequirementPolicyDefaultChallenge",
+    "challenge_quality_summary",
+    "challenge_reviewed_safe_default",
     "start_clarification_session",
     "surface_blocking_question_ids",
     "validate_requirement_v2_projections",

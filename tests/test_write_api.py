@@ -179,6 +179,11 @@ class WriteApiTests(unittest.TestCase):
             ("revalidate_design", {"design_validation_trials": 3, "design_llm_call_budget": 8}, "revalidate-design"),
             ("revalidate_requirement", {}, "revalidate-requirement"),
             ("clarify_more", {}, "clarify-more"),
+            (
+                "challenge_policy_default",
+                {"assumption_id": "ASM-1", "instruction": "Ask me instead."},
+                "challenge-policy-default",
+            ),
             ("revalidate_implementation_plan", {"implementation_plan_repair_limit": 2}, "revalidate-implementation-plan"),
             ("revalidate_implementation", {"implementation_repair_limit": 3}, "revalidate-implementation"),
             ("adopt_run_workspace", {}, "adopt-run-workspace"),
@@ -208,6 +213,11 @@ class WriteApiTests(unittest.TestCase):
         )
         self.assertEqual(approve_command.arguments["checkpoint_id"], "cp-1")
         self.assertEqual(approve_command.settings_overrides["SDLC_DESIGN_REPAIR_LIMIT"], "3")
+        challenge_command = next(
+            command for command in self.recording_service.commands if command.name == "challenge-policy-default"
+        )
+        self.assertEqual(challenge_command.arguments["assumption_id"], "ASM-1")
+        self.assertEqual(challenge_command.arguments["challenged_by"], "telegram:owner")
 
     def test_idempotency_replay_and_conflict_are_exposed_over_http(self) -> None:
         body = {"action": "sync_run", "requested_by": "owner", "arguments": {}}
@@ -269,6 +279,7 @@ class WriteApiTests(unittest.TestCase):
             ({"path": "/api/v1/runs/run_1/actions", "body": valid, "token": self.token, "key": None}, 400, "idempotency_key_required"),
             ({"path": "/api/v1/runs/run_1/actions", "body": {**valid, "extra": 1}, "token": self.token, "key": "unknown"}, 400, "invalid_request"),
             ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "request_change", "requested_by": "owner"}, "token": self.token, "key": "unsupported"}, 400, "invalid_request"),
+            ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "challenge_policy_default", "requested_by": "owner", "arguments": {"assumption_id": "ASM-1"}}, "token": self.token, "key": "challenge-missing-instruction"}, 400, "invalid_request"),
             ({"path": "/api/v1/runs/run_1/actions", "body": {"action": "continue_run", "requested_by": "owner", "arguments": {"qa_repair_limit": True}}, "token": self.token, "key": "bad-limit"}, 400, "invalid_request"),
             ({"path": "/api/v1/unknown", "body": {}, "token": self.token, "key": "unknown-route"}, 404, "route_not_found"),
         ]
