@@ -123,7 +123,7 @@ def _classify_open_question(
     elif question_id in surface_blockers:
         disposition = HUMAN_REQUIRED
         shadow_reasons = ["shadow_surface_clarification_required"]
-    elif category == "terminology" or coverage_category == "terminology":
+    elif category == "terminology" and coverage_category in {"", "terminology"}:
         disposition = DEFERRED_TO_DESIGN
         shadow_reasons = ["shadow_terminology_only", "shadow_no_hard_impact"]
     else:

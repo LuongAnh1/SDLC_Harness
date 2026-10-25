@@ -1,0 +1,92 @@
+{
+  "schema_version": "clarification_disposition_gate_fixture_v1",
+  "fixture_id": "l1_12_deferred_to_design_gate",
+  "cases": [
+    {
+      "id": "Q-GATE-1",
+      "question": "Nên dùng thuật ngữ khách hay du khách trong nhãn hiển thị?",
+      "category": "terminology",
+      "coverage_category": "terminology",
+      "affects": ["ACT-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "expected_disposition": "deferred_to_design",
+      "expected_reason_codes": ["shadow_terminology_only", "shadow_no_hard_impact"],
+      "expected_would_change": true
+    },
+    {
+      "id": "Q-GATE-2",
+      "question": "Tiêu chí chấp nhận nào xác định thao tác đã thành công?",
+      "category": "acceptance_criteria",
+      "coverage_category": "terminology",
+      "affects": ["AC-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "expected_disposition": "human_required",
+      "expected_reason_codes": ["shadow_hard_category"],
+      "expected_would_change": false
+    },
+    {
+      "id": "Q-GATE-3",
+      "question": "Tên gọi này có làm thay đổi hành vi của luồng thay thế không?",
+      "category": "terminology",
+      "coverage_category": "terminology",
+      "affects": ["AF-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "expected_disposition": "human_required",
+      "expected_reason_codes": ["shadow_behavior_reference"],
+      "expected_would_change": false
+    },
+    {
+      "id": "Q-GATE-4",
+      "question": "Nhãn nào cần xuất hiện trên bề mặt UI đang chờ làm rõ?",
+      "category": "terminology",
+      "coverage_category": "terminology",
+      "affects": ["ACT-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "surface_blocker": {
+        "scenario_id": "SC-1",
+        "surface": "ui"
+      },
+      "expected_disposition": "human_required",
+      "expected_reason_codes": ["shadow_surface_clarification_required"],
+      "expected_would_change": false
+    },
+    {
+      "id": "Q-GATE-5",
+      "question": "Hai nguồn đang mâu thuẫn thì nguồn nào có thẩm quyền?",
+      "category": "source_conflict",
+      "coverage_category": "terminology",
+      "affects": ["ACT-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "expected_disposition": "human_required",
+      "expected_reason_codes": ["shadow_source_conflict"],
+      "expected_would_change": false
+    },
+    {
+      "id": "Q-GATE-6",
+      "question": "Có nên ưu tiên cách trình bày ngắn hơn không?",
+      "category": "presentation_preference",
+      "coverage_category": "terminology",
+      "affects": ["ACT-1"],
+      "proposed_blocking": true,
+      "effective_blocking": true,
+      "expected_disposition": "human_required",
+      "expected_reason_codes": ["shadow_fail_safe"],
+      "expected_would_change": false
+    }
+  ],
+  "expected_summary": {
+    "open_question_count": 6,
+    "resolved_or_superseded_question_count": 0,
+    "current_blocking_count": 6,
+    "shadow_human_required_count": 5,
+    "shadow_deferred_to_design_count": 1,
+    "shadow_policy_default_count": 0,
+    "shadow_irrelevant_count": 0,
+    "would_change_count": 1
+  }
+}

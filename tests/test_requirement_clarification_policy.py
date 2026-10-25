@@ -13,6 +13,13 @@ from sdlc_harness.agents.requirements import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+GATE_FIXTURE_PATH = (
+    ROOT
+    / "tests"
+    / "fixtures"
+    / "requirement_clarification_policy"
+    / "l1_12_gate_cases.json"
+)
 
 
 def _payload() -> dict[str, object]:
@@ -67,6 +74,39 @@ def _walk(value):
 def _entry(payload: dict[str, object]) -> dict[str, object]:
     report = build_clarification_policy_shadow(RequirementModelV2.from_dict(payload))
     return report["questions"][0]
+
+
+def _gate_payload() -> tuple[dict[str, object], dict[str, object]]:
+    fixture = json.loads(GATE_FIXTURE_PATH.read_text(encoding="utf-8"))
+    payload = _payload()
+    payload["open_questions"] = []
+    for value in _walk(payload):
+        if isinstance(value, dict) and "open_question_refs" in value:
+            value["open_question_refs"] = []
+
+    scenarios = payload["scenario_contract"]["scenarios"]
+    scenario_by_id = {scenario["id"]: scenario for scenario in scenarios}
+    for case in fixture["cases"]:
+        question = {
+            "id": case["id"],
+            "question": case["question"],
+            "category": case["category"],
+            "coverage_category": case["coverage_category"],
+            "proposed_blocking": case["proposed_blocking"],
+            "effective_blocking": case["effective_blocking"],
+            "affects": case["affects"],
+            "depends_on": [],
+            "status": "open",
+            "answer_guidance": None,
+            "evidence_refs": ["E-2"],
+        }
+        payload["open_questions"].append(question)
+        blocker = case.get("surface_blocker")
+        if blocker is not None:
+            surface = scenario_by_id[blocker["scenario_id"]]["surfaces"][blocker["surface"]]
+            surface["status"] = "clarification_required"
+            surface["open_question_refs"] = [case["id"]]
+    return payload, fixture
 
 
 def test_proposed_blocker_can_be_shadow_deferred_when_it_is_terminology_only() -> None:
@@ -138,6 +178,20 @@ def test_unknown_soft_category_fails_safe_to_human_required() -> None:
     assert entry["shadow_reason_codes"] == ["shadow_fail_safe"]
 
 
+def test_terminology_coverage_does_not_override_an_unknown_question_category() -> None:
+    entry = _entry(
+        _single_question_payload(
+            category="presentation_preference",
+            coverage_category="terminology",
+            affects=["ACT-1"],
+            proposed=True,
+        )
+    )
+
+    assert entry["shadow_disposition"] == "human_required"
+    assert entry["shadow_reason_codes"] == ["shadow_fail_safe"]
+
+
 def test_shadow_report_is_deterministic_and_does_not_mutate_model() -> None:
     payload = _single_question_payload(
         category="terminology",
@@ -169,3 +223,22 @@ def test_resolved_questions_are_counted_but_not_classified() -> None:
     assert report["questions"] == []
     assert report["summary"]["open_question_count"] == 0
     assert report["summary"]["resolved_or_superseded_question_count"] == 1
+
+
+def test_l1_12_controlled_gate_fixture_has_one_safe_downgrade_and_keeps_boundaries() -> None:
+    payload, fixture = _gate_payload()
+    before = deepcopy(payload)
+
+    report = build_clarification_policy_shadow(RequirementModelV2.from_dict(payload))
+    repeated = build_clarification_policy_shadow(RequirementModelV2.from_dict(payload))
+
+    assert report == repeated
+    assert payload == before
+    assert report["summary"] == fixture["expected_summary"]
+    by_id = {entry["question_id"]: entry for entry in report["questions"]}
+    assert set(by_id) == {case["id"] for case in fixture["cases"]}
+    for case in fixture["cases"]:
+        entry = by_id[case["id"]]
+        assert entry["shadow_disposition"] == case["expected_disposition"]
+        assert entry["shadow_reason_codes"] == case["expected_reason_codes"]
+        assert entry["would_change"] is case["expected_would_change"]
