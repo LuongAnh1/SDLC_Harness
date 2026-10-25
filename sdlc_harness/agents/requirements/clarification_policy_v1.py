@@ -1,7 +1,8 @@
-"""Phân loại shadow cho câu hỏi Requirement mà không có decision authority.
+"""Phân loại disposition cho câu hỏi Requirement bằng guardrail tất định.
 
-Module này chỉ quan sát Requirement Model V2 đã chuẩn hóa. Kết quả không được
-dùng để sửa ``effective_blocking``, queue clarification hoặc checkpoint hiện tại.
+LLM được đề xuất ``human_required``, ``agent_default`` hoặc
+``deferred_to_design``. Python mới sở hữu quyết định cuối cùng và luôn fail-safe
+về ``human_required`` khi proposal thiếu dữ liệu hoặc vượt ranh giới an toàn.
 """
 
 from __future__ import annotations
@@ -14,7 +15,8 @@ from .model_v2 import RequirementModelV2
 
 SHADOW_SCHEMA_VERSION = "requirement_clarification_policy_shadow_v1"
 SHADOW_POLICY_VERSION = "clarification_disposition_v1"
-REVIEWED_DEFAULT_POLICY_VERSION = "clarification_disposition_v2"
+REASONABLE_DEFAULT_POLICY_VERSION = "clarification_disposition_v3"
+REASONABLE_DEFAULT_SHADOW_POLICY_VERSION = "clarification_disposition_v3_shadow"
 LEGACY_BLOCKING_POLICY_VERSION = "legacy_blocking_v1"
 CLARIFICATION_DISPOSITION_FIELD = "clarification_disposition"
 SHADOW_ARTIFACT_KEY = "requirement_clarification_policy_shadow"
@@ -34,8 +36,27 @@ BEHAVIOR_PREFIXES = ("MF-", "AF-", "EF-", "POST-", "BR-", "AC-", "QR-")
 
 HUMAN_REQUIRED = "human_required"
 DEFERRED_TO_DESIGN = "deferred_to_design"
-POLICY_DEFAULT = "policy_default"
+AGENT_DEFAULT = "agent_default"
 IRRELEVANT = "irrelevant"
+
+DESIGN_OWNED_CATEGORIES = frozenset(
+    {
+        "terminology",
+        "presentation_preference",
+        "visual_style",
+        "layout",
+        "copy_wording",
+        "implementation_preference",
+    }
+)
+AGENT_DEFAULT_CATEGORIES = frozenset(
+    {
+        "optional_context",
+        "conventional_ux_behavior",
+        "noncritical_recovery",
+    }
+)
+AGENT_DEFAULT_FORBIDDEN_PREFIXES = ("BR-", "AC-", "QR-")
 
 
 def build_clarification_policy_shadow(model: RequirementModelV2) -> dict[str, object]:
@@ -57,13 +78,14 @@ def build_clarification_policy_shadow(model: RequirementModelV2) -> dict[str, ob
         "current_blocking_count": sum(1 for item in entries if item["current_effective_blocking"] is True),
         "shadow_human_required_count": _count(entries, HUMAN_REQUIRED),
         "shadow_deferred_to_design_count": _count(entries, DEFERRED_TO_DESIGN),
-        "shadow_policy_default_count": _count(entries, POLICY_DEFAULT),
+        "shadow_agent_default_count": _count(entries, AGENT_DEFAULT),
         "shadow_irrelevant_count": _count(entries, IRRELEVANT),
         "would_change_count": sum(1 for item in entries if item["would_change"] is True),
     }
     report: dict[str, object] = {
         "schema_version": SHADOW_SCHEMA_VERSION,
-        "policy_version": SHADOW_POLICY_VERSION,
+        "policy_version": REASONABLE_DEFAULT_SHADOW_POLICY_VERSION,
+        "target_policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
         "mode": "shadow",
         "run_id": model.run_id,
         "requirement_revision": model.revision,
@@ -96,7 +118,7 @@ def shadow_error_summary(exc: Exception) -> dict[str, object]:
     return {
         "status": "warning",
         "mode": "shadow",
-        "policy_version": SHADOW_POLICY_VERSION,
+        "policy_version": REASONABLE_DEFAULT_SHADOW_POLICY_VERSION,
         "error_code": str(error_code),
     }
 
@@ -114,6 +136,7 @@ def classify_clarification_question(
     affects = _string_items(question.get("affects"))
     behavior_refs = [ref for ref in affects if ref.startswith(BEHAVIOR_PREFIXES)]
     blockers = surface_blockers or set()
+    proposed_disposition = str(question.get("proposed_disposition") or "")
 
     if category == "source_conflict":
         disposition = HUMAN_REQUIRED
@@ -121,15 +144,29 @@ def classify_clarification_question(
     elif category in HARD_BLOCKING_CATEGORIES:
         disposition = HUMAN_REQUIRED
         reasons = ["shadow_hard_category"]
-    elif behavior_refs:
-        disposition = HUMAN_REQUIRED
-        reasons = ["shadow_behavior_reference"]
     elif question_id in blockers:
         disposition = HUMAN_REQUIRED
         reasons = ["shadow_surface_clarification_required"]
+    elif proposed_disposition == AGENT_DEFAULT:
+        default_reasons = _agent_default_rejection_reasons(question)
+        if default_reasons:
+            disposition = HUMAN_REQUIRED
+            reasons = default_reasons
+        else:
+            disposition = AGENT_DEFAULT
+            reasons = ["agent_default_low_risk", "agent_default_reversible"]
+    elif behavior_refs:
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_behavior_reference"]
     elif category == "terminology" and coverage_category in {"", "terminology"}:
         disposition = DEFERRED_TO_DESIGN
-        reasons = ["shadow_terminology_only", "shadow_no_hard_impact"]
+        reasons = [
+            "shadow_terminology_only",
+            "shadow_no_hard_impact",
+        ]
+    elif proposed_disposition == DEFERRED_TO_DESIGN and category in DESIGN_OWNED_CATEGORIES:
+        disposition = DEFERRED_TO_DESIGN
+        reasons = ["shadow_design_owned", "shadow_no_hard_impact"]
     else:
         disposition = HUMAN_REQUIRED
         reasons = ["shadow_fail_safe"]
@@ -174,6 +211,7 @@ def _classify_open_question(
         "coverage_category": coverage_category or None,
         "status": "open",
         "proposed_blocking": proposed,
+        "proposed_disposition": str(question.get("proposed_disposition") or "") or None,
         "current_effective_blocking": current_effective,
         "current_reason_codes": current_reasons,
         "affects": affects,
@@ -197,6 +235,45 @@ def surface_blocking_question_ids(data: dict[str, Any]) -> set[str]:
                 continue
             question_ids.update(_string_items(surface.get("open_question_refs")))
     return question_ids
+
+
+def proposed_default_answer(question: dict[str, Any]) -> str | None:
+    """Lấy đúng đáp án LLM đề xuất mà không tự suy diễn nội dung mới."""
+
+    answer_mode = str(question.get("answer_mode") or "short")
+    if answer_mode == "multiple_choice":
+        recommended = str(question.get("recommended_option") or "")
+        for option in _dict_items(question.get("options")):
+            if str(option.get("key") or "") == recommended:
+                answer = str(option.get("answer") or "").strip()
+                return answer or None
+        fallback = str(question.get("suggested_answer") or "").strip()
+        return fallback or None
+    answer = str(question.get("suggested_answer") or "").strip()
+    return answer or None
+
+
+def _agent_default_rejection_reasons(question: dict[str, Any]) -> list[str]:
+    reasons: list[str] = []
+    category = str(question.get("category") or "")
+    affects = _string_items(question.get("affects"))
+    if category not in AGENT_DEFAULT_CATEGORIES:
+        reasons.append("agent_default_category_not_allowed")
+    if question.get("proposed_blocking") is True:
+        reasons.append("agent_default_proposed_blocking")
+    if question.get("impact") != "low" or question.get("uncertainty") != "low":
+        reasons.append("agent_default_risk_not_low")
+    if question.get("reversible") is not True:
+        reasons.append("agent_default_not_reversible")
+    if not str(question.get("why_it_is_safe") or "").strip():
+        reasons.append("agent_default_safety_reason_missing")
+    if _string_items(question.get("depends_on")):
+        reasons.append("agent_default_has_dependencies")
+    if not affects or any(ref.startswith(AGENT_DEFAULT_FORBIDDEN_PREFIXES) for ref in affects):
+        reasons.append("agent_default_affects_not_allowed")
+    if proposed_default_answer(question) is None:
+        reasons.append("agent_default_answer_missing")
+    return reasons
 
 
 def _count(entries: list[dict[str, object]], disposition: str) -> int:

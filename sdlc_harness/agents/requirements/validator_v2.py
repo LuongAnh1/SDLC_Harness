@@ -9,18 +9,21 @@ from typing import Any, Iterable
 
 from ...core.errors import HarnessError
 from .clarification_policy_v1 import (
+    AGENT_DEFAULT,
     BEHAVIOR_PREFIXES,
     CLARIFICATION_DISPOSITION_FIELD,
     DEFERRED_TO_DESIGN,
     HARD_BLOCKING_CATEGORIES,
     LEGACY_BLOCKING_POLICY_VERSION,
-    POLICY_DEFAULT,
-    REVIEWED_DEFAULT_POLICY_VERSION,
+    REASONABLE_DEFAULT_POLICY_VERSION,
     SHADOW_POLICY_VERSION,
     classify_clarification_question,
     surface_blocking_question_ids,
 )
-from .safe_defaults_v1 import EVALUATION_FIELD, apply_reviewed_safe_defaults
+from .reasonable_defaults_v1 import (
+    EVALUATION_FIELD as REASONABLE_DEFAULT_EVALUATION_FIELD,
+    apply_agent_reasonable_defaults,
+)
 from .model_v2 import (
     DecisionStatus,
     QuestionStatus,
@@ -118,7 +121,6 @@ def normalize_and_validate_requirement_model_v2(
     )
     _normalize_python_owned_fields(
         data,
-        source_text_by_id=source_text_by_id,
         clarification_policy_version=policy_version,
     )
 
@@ -149,7 +151,10 @@ def normalize_and_validate_requirement_model_v2(
         "status": status,
         "errors": [issue.to_dict() for issue in issues],
     }
-    if policy_version in {SHADOW_POLICY_VERSION, REVIEWED_DEFAULT_POLICY_VERSION}:
+    if policy_version in {
+        SHADOW_POLICY_VERSION,
+        REASONABLE_DEFAULT_POLICY_VERSION,
+    }:
         normalized_validation["clarification_policy_version"] = policy_version
     data["validation"] = normalized_validation
     normalized = RequirementModelV2.from_dict(data)
@@ -176,7 +181,7 @@ def _resolve_clarification_policy_version(
     allowed = {
         LEGACY_BLOCKING_POLICY_VERSION,
         SHADOW_POLICY_VERSION,
-        REVIEWED_DEFAULT_POLICY_VERSION,
+        REASONABLE_DEFAULT_POLICY_VERSION,
     }
     if requested is not None and requested not in allowed:
         raise HarnessError(
@@ -202,14 +207,12 @@ def _resolve_clarification_policy_version(
 def _normalize_python_owned_fields(
     data: dict[str, Any],
     *,
-    source_text_by_id: dict[str, str],
     clarification_policy_version: str,
 ) -> None:
     surface_blockers = surface_blocking_question_ids(data)
-    if clarification_policy_version == REVIEWED_DEFAULT_POLICY_VERSION:
-        apply_reviewed_safe_defaults(
+    if clarification_policy_version == REASONABLE_DEFAULT_POLICY_VERSION:
+        apply_agent_reasonable_defaults(
             data,
-            source_text_by_id=source_text_by_id,
             surface_blockers=surface_blockers,
         )
     for question in _dict_list(data.get("open_questions")):
@@ -220,22 +223,24 @@ def _normalize_python_owned_fields(
         affects_behavior = any(ref.startswith(BEHAVIOR_PREFIXES) for ref in affects)
         legacy_effective = proposed or category in HARD_BLOCKING_CATEGORIES or affects_behavior
         question["effective_blocking"] = legacy_effective
-        evaluation = question.get(EVALUATION_FIELD)
+        reasonable_evaluation = question.get(REASONABLE_DEFAULT_EVALUATION_FIELD)
         if (
-            clarification_policy_version == REVIEWED_DEFAULT_POLICY_VERSION
-            and isinstance(evaluation, dict)
-            and evaluation.get("status") == "applied"
+            clarification_policy_version == REASONABLE_DEFAULT_POLICY_VERSION
+            and isinstance(reasonable_evaluation, dict)
+            and reasonable_evaluation.get("status") == "applied"
         ):
             question["effective_blocking"] = False
             question[CLARIFICATION_DISPOSITION_FIELD] = {
-                "value": POLICY_DEFAULT,
-                "policy_version": REVIEWED_DEFAULT_POLICY_VERSION,
-                "policy_id": evaluation.get("policy_id"),
-                "assumption_id": evaluation.get("assumption_id"),
-                "reason_codes": list(evaluation.get("reason_codes") or []),
+                "value": AGENT_DEFAULT,
+                "policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
+                "assumption_id": reasonable_evaluation.get("assumption_id"),
+                "reason_codes": list(reasonable_evaluation.get("reason_codes") or []),
             }
         elif (
-            clarification_policy_version in {SHADOW_POLICY_VERSION, REVIEWED_DEFAULT_POLICY_VERSION}
+            clarification_policy_version in {
+                SHADOW_POLICY_VERSION,
+                REASONABLE_DEFAULT_POLICY_VERSION,
+            }
             and question.get("status") == QuestionStatus.OPEN.value
         ):
             classification = classify_clarification_question(
@@ -247,6 +252,13 @@ def _normalize_python_owned_fields(
                 question[CLARIFICATION_DISPOSITION_FIELD] = {
                     "value": DEFERRED_TO_DESIGN,
                     "policy_version": clarification_policy_version,
+                    "reason_codes": list(classification["reason_codes"]),
+                }
+            elif clarification_policy_version == REASONABLE_DEFAULT_POLICY_VERSION:
+                question["effective_blocking"] = True
+                question[CLARIFICATION_DISPOSITION_FIELD] = {
+                    "value": "human_required",
+                    "policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
                     "reason_codes": list(classification["reason_codes"]),
                 }
 
@@ -470,6 +482,7 @@ def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]
             _add(issues, "invalid_type", f"{path}.proposed_blocking", "proposed_blocking must be boolean.")
         for field in ("affects", "depends_on", "evidence_refs"):
             _require_string_list(item, field, path, issues)
+        _validate_question_answer_contract(item, path, issues)
 
     for index, item in enumerate(_dict_list(data.get("decisions"))):
         path = f"decisions[{index}]"
@@ -634,6 +647,64 @@ def _validate_grounding(
             content = str(item.get("text") or item.get("name") or item.get("action") or "").strip()
             if content and not content.startswith("UNKNOWN_FROM_SOURCE"):
                 _add(issues, "unknown_contains_inferred_content", path, "Unknown requirement must not contain inferred content.")
+
+
+def _validate_question_answer_contract(
+    question: dict[str, Any],
+    path: str,
+    issues: list[RequirementModelV2Issue],
+) -> None:
+    """Kiểm tra shape lựa chọn khi Requirement Agent đã phát hành contract mới."""
+
+    answer_mode = question.get("answer_mode")
+    if answer_mode is None:
+        return
+    if answer_mode not in {"short", "multiple_choice"}:
+        _add(issues, "invalid_answer_mode", f"{path}.answer_mode", "Unknown answer mode.")
+        return
+    options = question.get("options")
+    if answer_mode == "short":
+        if options != []:
+            _add(issues, "invalid_question_options", f"{path}.options", "Short answers must have no options.")
+        return
+    if not isinstance(options, list) or not 2 <= len(options) <= 5:
+        _add(
+            issues,
+            "invalid_question_options",
+            f"{path}.options",
+            "Multiple-choice questions must have 2-5 options.",
+        )
+        return
+    keys: list[str] = []
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            _add(
+                issues,
+                "invalid_question_option",
+                f"{path}.options[{index}]",
+                "Question option must contain key and answer.",
+            )
+            continue
+        key = str(option.get("key") or "").strip()
+        answer = str(option.get("answer") or "").strip()
+        if not key or not answer:
+            _add(
+                issues,
+                "invalid_question_option",
+                f"{path}.options[{index}]",
+                "Question option must contain key and answer.",
+            )
+        keys.append(key)
+    if len(keys) != len(set(keys)):
+        _add(issues, "duplicate_question_option", f"{path}.options", "Question option keys must be unique.")
+    recommended = question.get("recommended_option")
+    if recommended is not None and str(recommended) not in keys:
+        _add(
+            issues,
+            "invalid_recommended_option",
+            f"{path}.recommended_option",
+            "Recommended option must reference an option key.",
+        )
 
 
 def _validate_question_gap_semantics(

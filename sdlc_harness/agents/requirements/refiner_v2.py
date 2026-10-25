@@ -16,7 +16,6 @@ from ...loop import RoleToolResultV1, canonical_json_hash
 from ...sources.fixtures import UseCaseSource
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .model_v2 import RequirementModelV2, SCHEMA_VERSION
-from .safe_defaults_v1 import safe_default_prompt_catalog
 from .delta_v1 import (
     DELTA_SCHEMA_VERSION,
     MAX_DELTA_OPERATIONS,
@@ -1203,7 +1202,7 @@ class RequirementModelV2Refiner:
             {
                 "model_prompt": _PROMPT_PATH.read_text(encoding="utf-8"),
                 "delta_prompt": _DELTA_PROMPT_PATH.read_text(encoding="utf-8"),
-                "safe_default_policy_catalog": safe_default_prompt_catalog(),
+                "clarification_disposition_policy": "clarification_disposition_v3",
                 "actions": sorted(_ACTION_NAMES),
                 "repairable_issue_codes": sorted(_REPAIRABLE_ISSUE_CODES),
             }
@@ -1353,7 +1352,6 @@ class RequirementModelV2Refiner:
                 "USE_CASE": source.use_case,
                 "SOURCE_REF": "python_owned_after_tool_observation",
                 "SOURCE_TEXT": "Source text is not injected. Use source tools and cite OBS-* observations.",
-                "SAFE_DEFAULT_POLICY_CATALOG": safe_default_prompt_catalog(),
             },
         )
         state = {

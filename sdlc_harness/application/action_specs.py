@@ -35,8 +35,8 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": set(),
         "confirmation": "standard",
     },
-    "challenge_policy_default": {
-        "command": "challenge-policy-default",
+    "challenge_assumption": {
+        "command": "challenge-assumption",
         "required": {"assumption_id", "instruction"},
         "optional": set(),
         "overrides": set(),

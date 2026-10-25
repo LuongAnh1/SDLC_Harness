@@ -1161,10 +1161,9 @@ def _jira_comment_body(
     remaining = context.get("remaining_blocking_count")
     deferred_count = context.get("deferred_to_design_count", 0)
     deferred_ids = context.get("deferred_to_design_question_ids", [])
-    policy_default_count = context.get("policy_default_count", 0)
-    policy_default_ids = context.get("policy_default_assumption_ids", [])
-    policy_default_policies = context.get("policy_default_policy_ids", [])
-    policy_challenge = context.get("policy_default_challenge")
+    challengeable_count = context.get("challengeable_assumption_count", 0)
+    challengeable_ids = context.get("challengeable_assumption_ids", [])
+    assumption_challenge = context.get("assumption_challenge")
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     if checkpoint_status == "waiting_requirement_clarification":
@@ -1172,7 +1171,7 @@ def _jira_comment_body(
     elif checkpoint_status == "waiting_requirement_clarification_continue":
         next_action = "clarify_more, revalidate_requirement, get_status, sync_run, or cancel_run"
     else:
-        challenge_action = ", challenge_policy_default" if policy_default_count else ""
+        challenge_action = ", challenge_assumption" if challengeable_count else ""
         next_action = (
             "approve_checkpoint"
             f"{challenge_action}, clarify_more, revalidate_requirement, request_change, cancel_run, or get_status"
@@ -1183,24 +1182,18 @@ def _jira_comment_body(
         f"Acceptance criteria: {len(acceptance_criteria)} item(s)",
         f"Open questions: {len(open_questions)} item(s)",
         f"Deferred to Design: {deferred_count} item(s) ({', '.join(str(item) for item in deferred_ids) or 'none'})",
-        (
-            f"Policy defaults: {policy_default_count} item(s); assumptions="
-            f"{', '.join(str(item) for item in policy_default_ids) or 'none'}; policies="
-            f"{', '.join(str(item) for item in policy_default_policies) or 'none'}"
-        ),
         f"Assumptions visible for review: {len(assumptions)} item(s)",
+        f"Challengeable assumptions: {challengeable_count} item(s) ({', '.join(str(item) for item in challengeable_ids) or 'none'})",
         "Full packet is available in the synced Confluence page and local artifacts.",
     ]
     if question_text:
         summary_items.insert(0, f"Current clarification question: {question_text}")
-    if isinstance(policy_challenge, dict):
+    if isinstance(assumption_challenge, dict):
         summary_items.insert(
             0,
-            "Policy default challenged: "
-            f"assumption={policy_challenge.get('assumption_id')}; "
-            f"policy={policy_challenge.get('policy_id')}; "
-            f"question={policy_challenge.get('question_id')}; "
-            f"by={policy_challenge.get('challenged_by')}",
+            "Assumption challenged: "
+            f"{assumption_challenge.get('assumption_id')}; reopened question="
+            f"{assumption_challenge.get('question_id')}",
         )
     if remaining is not None:
         summary_items.insert(1 if question_text else 0, f"Remaining blocking questions: {remaining}")
@@ -1460,10 +1453,9 @@ def _confluence_storage_body(
     remaining = context.get("remaining_blocking_count")
     deferred_count = context.get("deferred_to_design_count", 0)
     deferred_ids = context.get("deferred_to_design_question_ids", [])
-    policy_default_count = context.get("policy_default_count", 0)
-    policy_default_ids = context.get("policy_default_assumption_ids", [])
-    policy_default_policies = context.get("policy_default_policy_ids", [])
-    policy_challenge = context.get("policy_default_challenge")
+    challengeable_count = context.get("challengeable_assumption_count", 0)
+    challengeable_ids = context.get("challengeable_assumption_ids", [])
+    assumption_challenge = context.get("assumption_challenge")
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     decision_summary = ""
@@ -1482,22 +1474,21 @@ def _confluence_storage_body(
         f"{escape(str(deferred_count))}; IDs="
         f"{escape(', '.join(str(item) for item in deferred_ids) or 'none')}</p>"
     )
-    policy_default_summary = (
-        "<p><strong>Policy defaults:</strong> "
-        f"{escape(str(policy_default_count))}; assumptions="
-        f"{escape(', '.join(str(item) for item in policy_default_ids) or 'none')}; policies="
-        f"{escape(', '.join(str(item) for item in policy_default_policies) or 'none')}</p>"
+    challengeable_summary = (
+        "<p><strong>Challengeable assumptions:</strong> "
+        f"{escape(str(challengeable_count))}; IDs="
+        f"{escape(', '.join(str(item) for item in challengeable_ids) or 'none')}</p>"
     )
-    policy_challenge_summary = ""
-    if isinstance(policy_challenge, dict):
+    assumption_challenge_summary = ""
+    if isinstance(assumption_challenge, dict):
         challenge_text = (
-            f"assumption={policy_challenge.get('assumption_id')}; "
-            f"policy={policy_challenge.get('policy_id')}; "
-            f"question={policy_challenge.get('question_id')}; "
-            f"by={policy_challenge.get('challenged_by')}"
+            f"assumption={assumption_challenge.get('assumption_id')}; "
+            f"origin={assumption_challenge.get('origin')}; "
+            f"question={assumption_challenge.get('question_id')}; "
+            f"by={assumption_challenge.get('challenged_by')}"
         )
-        policy_challenge_summary = (
-            f"<p><strong>Policy default đã bị phản đối:</strong> {escape(challenge_text)}</p>"
+        assumption_challenge_summary = (
+            f"<p><strong>Assumption đã bị phản đối:</strong> {escape(challenge_text)}</p>"
         )
     is_clarification = checkpoint_status in {
         "waiting_requirement_clarification",
@@ -1513,9 +1504,9 @@ def _confluence_storage_body(
             "Trả lời câu hỏi làm rõ hiện tại; Harness sẽ cập nhật requirement và chạy Validator lại."
             if is_clarification
             else (
-                "Review requirement bên dưới; có thể dùng challenge_policy_default để thu hồi "
-                "default trước khi duyệt, sau đó duyệt checkpoint để bắt đầu Design Workflow."
-                if policy_default_count
+                "Review requirement bên dưới; có thể dùng challenge_assumption để thu hồi "
+                "giả định trước khi duyệt, sau đó duyệt checkpoint để bắt đầu Design Workflow."
+                if challengeable_count
                 else "Review requirement bên dưới, sau đó duyệt checkpoint để bắt đầu Design Workflow."
             )
         )
@@ -1577,8 +1568,8 @@ def _confluence_storage_body(
 {clarification_panel}
 {checklist_summary}
 {deferred_summary}
-{policy_default_summary}
-{policy_challenge_summary}
+{challengeable_summary}
+{assumption_challenge_summary}
 <h2>Tổng quan checkpoint</h2>
 <table data-layout="wide">
 <tbody>

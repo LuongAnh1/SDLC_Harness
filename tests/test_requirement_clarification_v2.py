@@ -167,7 +167,8 @@ class RequirementClarificationV2Test(unittest.TestCase):
             {
                 "id": "Q-1",
                 "question": "Which display label should the review page use?",
-                "category": "documentation",
+                "category": "copy_wording",
+                "proposed_disposition": "deferred_to_design",
                 "proposed_blocking": False,
                 "effective_blocking": False,
                 "affects": ["ASM-1"],

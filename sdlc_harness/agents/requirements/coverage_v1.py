@@ -14,7 +14,6 @@ from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
 from .clarification_policy_v1 import CLARIFICATION_DISPOSITION_FIELD, DEFERRED_TO_DESIGN
 from .model_v2 import RequirementModelV2
-from .safe_defaults_v1 import safe_default_prompt_catalog
 from .validator_v2 import RequirementModelV2ValidationReport, normalize_and_validate_requirement_model_v2
 
 
@@ -161,13 +160,6 @@ def build_requirement_quality_checklist(
         and item[CLARIFICATION_DISPOSITION_FIELD].get("value") == DEFERRED_TO_DESIGN
         and str(item.get("id") or "")
     ]
-    policy_default_assumption_ids = [
-        str(item.get("id") or "")
-        for item in model.assumptions
-        if isinstance(item, dict)
-        and item.get("origin") == "policy_default"
-        and str(item.get("id") or "")
-    ]
     coverage = analysis.get("coverage") if isinstance(analysis, dict) else []
     covered_categories = {
         str(item.get("category") or "")
@@ -205,8 +197,6 @@ def build_requirement_quality_checklist(
         "blocking_question_ids": blocking_ids,
         "deferred_to_design_count": len(deferred_ids),
         "deferred_to_design_question_ids": deferred_ids,
-        "policy_default_count": len(policy_default_assumption_ids),
-        "policy_default_assumption_ids": policy_default_assumption_ids,
         "checks": checks,
         "validation_issue_codes": sorted(issue_codes),
     }
@@ -230,7 +220,6 @@ def _semantic_analysis(
     prompt = (
         template.replace("{{SOURCE_REF}}", str(model.source.get("source_ref") or ""))
         .replace("{{REQUIREMENT_REVISION}}", str(model.revision))
-        .replace("{{SAFE_DEFAULT_POLICY_CATALOG}}", safe_default_prompt_catalog())
         .replace("{{SOURCE_TEXT}}", source_text)
         .replace("{{REQUIREMENT_MODEL}}", json.dumps(model.to_dict(), ensure_ascii=False, indent=2))
         .replace("{{VALIDATION_REPORT}}", json.dumps(validation_report.to_dict(), ensure_ascii=False, indent=2))
@@ -291,7 +280,10 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
                     "options": [],
                     "recommended_option": None,
                     "suggested_answer": None,
-                    "suggested_policy_id": None,
+                    "proposed_disposition": "human_required",
+                    "decision_category": "observable_behavior",
+                    "why_it_is_safe": None,
+                    "reversible": False,
                     "impact": "high",
                     "uncertainty": "high",
                     "affects": [flow_id, *_related_acceptance_refs(data, flow_id)],
@@ -442,6 +434,10 @@ def _validate_candidate(
     if not isinstance(item, dict):
         issues.append(f"{path} must be an object")
         return
+    item.setdefault("proposed_disposition", "human_required")
+    item.setdefault("decision_category", "")
+    item.setdefault("why_it_is_safe", None)
+    item.setdefault("reversible", False)
     if item.get("category") not in COVERAGE_CATEGORIES:
         issues.append(f"{path}.category is invalid")
     question = str(item.get("question") or "")
@@ -453,6 +449,19 @@ def _validate_candidate(
         issues.append(f"{path}.answer_mode is invalid")
     if item.get("impact") not in _LEVELS or item.get("uncertainty") not in _LEVELS:
         issues.append(f"{path} impact/uncertainty is invalid")
+    disposition = item.get("proposed_disposition")
+    if disposition not in {"human_required", "agent_default", "deferred_to_design"}:
+        issues.append(f"{path}.proposed_disposition is invalid")
+    decision_category = str(item.get("decision_category") or "")
+    if disposition in {"agent_default", "deferred_to_design"} and not decision_category:
+        issues.append(f"{path}.decision_category must not be empty")
+    if disposition == "agent_default":
+        if item.get("impact") != "low" or item.get("uncertainty") != "low":
+            issues.append(f"{path}.agent_default must have low impact and uncertainty")
+        if item.get("reversible") is not True:
+            issues.append(f"{path}.agent_default must be reversible")
+        if not _non_empty(item.get("why_it_is_safe")):
+            issues.append(f"{path}.why_it_is_safe must not be empty for agent_default")
     options = item.get("options")
     if item.get("answer_mode") == "multiple_choice":
         if not isinstance(options, list) or not 2 <= len(options) <= 5:
@@ -544,16 +553,18 @@ def _adopt_candidates(
             ),
             None,
         )
-        if existing is None:
+        created = existing is None
+        if created:
             if max_new_questions is not None and len(added) >= max_new_questions:
                 continue
             question_id = _next_question_id(questions)
             existing = {
                 "id": question_id,
                 "question": str(candidate["question"]),
-                "category": _model_question_category(str(candidate["category"]), affects),
-                "proposed_blocking": True,
-                "effective_blocking": True,
+                "category": str(candidate.get("decision_category") or "")
+                or _model_question_category(str(candidate["category"]), affects),
+                "proposed_blocking": candidate.get("proposed_disposition") == "human_required",
+                "effective_blocking": candidate.get("proposed_disposition") == "human_required",
                 "affects": affects,
                 "depends_on": [],
                 "status": "open",
@@ -570,6 +581,9 @@ def _adopt_candidates(
                     + _string_list(candidate.get("evidence_refs"))
                 )
             )
+        proposed_disposition = str(candidate.get("proposed_disposition") or "human_required")
+        if not created and existing.get("proposed_blocking") is True:
+            proposed_disposition = "human_required"
         existing.update(
             {
                 "coverage_category": str(candidate["category"]),
@@ -578,7 +592,9 @@ def _adopt_candidates(
                 "options": _normalize_options(candidate.get("options")),
                 "recommended_option": candidate.get("recommended_option"),
                 "suggested_answer": candidate.get("suggested_answer"),
-                "suggested_policy_id": candidate.get("suggested_policy_id"),
+                "proposed_disposition": proposed_disposition,
+                "why_it_is_safe": candidate.get("why_it_is_safe"),
+                "reversible": candidate.get("reversible") is True,
                 "impact": str(candidate["impact"]),
                 "uncertainty": str(candidate["uncertainty"]),
             }

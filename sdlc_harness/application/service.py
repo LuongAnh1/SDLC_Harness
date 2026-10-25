@@ -92,7 +92,7 @@ class ApplicationService:
             "revalidate-design",
             "revalidate-requirement",
             "clarify-more",
-            "challenge-policy-default",
+            "challenge-assumption",
             "approve-checkpoint",
             "answer-clarification",
             "adopt-run-workspace",
@@ -248,7 +248,6 @@ class ApplicationService:
             if str(state.get("status") or "") in {
                 "requirement_drafting",
                 "requirement_paused",
-                "waiting_requirement_clarification_continue",
             }:
                 return phase_one.continue_requirement_run(run_id=run_id)
             return PhaseFourWorkflow(settings).continue_until_implementation_checkpoint(
@@ -274,8 +273,8 @@ class ApplicationService:
             return PhaseOneWorkflow(settings).clarify_more(
                 run_id=self._required_text(command, "run_id")
             )
-        if name == "challenge-policy-default":
-            return PhaseOneWorkflow(settings).challenge_policy_default(
+        if name == "challenge-assumption":
+            return PhaseOneWorkflow(settings).challenge_assumption(
                 run_id=self._required_text(command, "run_id"),
                 assumption_id=self._required_text(command, "assumption_id"),
                 instruction=self._required_text(command, "instruction"),

@@ -85,7 +85,7 @@
     "current_blocking_count": 6,
     "shadow_human_required_count": 5,
     "shadow_deferred_to_design_count": 1,
-    "shadow_policy_default_count": 0,
+    "shadow_agent_default_count": 0,
     "shadow_irrelevant_count": 0,
     "would_change_count": 1
   }

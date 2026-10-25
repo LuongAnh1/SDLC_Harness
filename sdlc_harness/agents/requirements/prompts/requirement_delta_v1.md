@@ -31,10 +31,9 @@ Add collections are `use_case.actors`, `preconditions`, `flows.main`,
 
 ## Authority rules
 
-`suggested_policy_id` remains advisory. Use `null` unless this reviewed catalog
-matches exactly; never provide a free-form policy answer:
-
-{{SAFE_DEFAULT_POLICY_CATALOG}}
+Preserve `proposed_disposition` metadata. Do not create policy IDs. Agent defaults
+must remain low-impact, low-uncertainty, reversible and carry an explicit proposed
+answer plus `why_it_is_safe`; otherwise use `human_required`.
 
 - Never provide or mutate `id`, root schema/run/revision, source/provenance, decisions,
   validation, `decision_ref`, `source_id`, or `effective_blocking`.

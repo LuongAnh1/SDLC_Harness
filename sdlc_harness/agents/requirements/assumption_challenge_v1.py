@@ -1,4 +1,4 @@
-"""Mutation tất định để con người thu hồi một reviewed policy default."""
+"""Mutation tất định để con người thu hồi một agent reasonable default."""
 
 from __future__ import annotations
 
@@ -11,30 +11,26 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...loop import canonical_json_hash
 from ...storage.runtime import utc_now_iso
+from .clarification_policy_v1 import HUMAN_REQUIRED
 from .model_v2 import RequirementModelV2
-from .safe_defaults_v1 import (
+from .reasonable_defaults_v1 import (
+    AGENT_DEFAULT_ORIGIN,
+    DECISION_KIND_CHALLENGE,
     EVALUATION_FIELD,
-    POLICY_ID_QUALITY_NONE,
-    POLICY_ORIGIN,
-    REGISTRY_VERSION,
-    validate_reviewed_safe_default_integrity,
+    validate_agent_reasonable_default_integrity,
 )
 
 
-ARTIFACT_KEY = "requirement_policy_default_challenge"
-ARTIFACT_PREFIX = "requirement_policy_default_challenge_v1"
-SCHEMA_VERSION = "requirement_policy_default_challenge_v1"
-DECISION_KIND = "policy_default_challenge"
+ARTIFACT_KEY = "requirement_assumption_challenge"
+ARTIFACT_PREFIX = "requirement_assumption_challenge_v1"
+SCHEMA_VERSION = "requirement_assumption_challenge_v1"
 
 
 @dataclass(frozen=True)
-class RequirementPolicyDefaultChallenge:
-    """Kết quả draft trước khi workflow chạy normalizer/validator lần cuối."""
-
+class RequirementAssumptionChallenge:
     model: RequirementModelV2
     decision: dict[str, Any]
     withdrawn_assumption: dict[str, Any]
-    override_target_ids: tuple[str, ...]
     before_model_sha256: str
 
     def build_report(self, validated_model: RequirementModelV2) -> dict[str, object]:
@@ -45,59 +41,46 @@ class RequirementPolicyDefaultChallenge:
             "before_requirement_model_sha256": self.before_model_sha256,
             "after_requirement_model_sha256": canonical_json_hash(validated_model.to_dict()),
             "withdrawn_assumption": deepcopy(self.withdrawn_assumption),
-            "override_target_ids": list(self.override_target_ids),
             "challenge_decision": deepcopy(self.decision),
         }
         report["report_digest"] = canonical_json_hash(report)
         return report
 
 
-def challenge_reviewed_safe_default(
+def challenge_agent_assumption(
     model: RequirementModelV2,
     *,
     assumption_id: str,
     instruction: str,
     challenged_by: str,
     challenged_at: str | None = None,
-) -> RequirementPolicyDefaultChallenge:
-    """Thu hồi đúng một active policy assumption và mở lại source question."""
-
+) -> RequirementAssumptionChallenge:
     target_id = assumption_id.strip()
     challenge_text = instruction.strip()
     actor = challenged_by.strip()
     if not target_id:
-        raise HarnessError(
-            "requirement_policy_default_stale",
-            "Policy-default assumption id must not be empty.",
-            run_id=model.run_id,
-        )
+        raise HarnessError("requirement_assumption_stale", "Assumption id must not be empty.", run_id=model.run_id)
     if not challenge_text:
         raise HarnessError(
-            "requirement_policy_challenge_empty",
-            "Policy-default challenge instruction must not be empty.",
+            "requirement_assumption_challenge_empty",
+            "Assumption challenge instruction must not be empty.",
             run_id=model.run_id,
         )
     if not actor:
         raise HarnessError(
-            "requirement_policy_challenged_by_empty",
-            "Policy-default challenge actor must not be empty.",
+            "requirement_assumption_challenged_by_empty",
+            "Assumption challenge actor must not be empty.",
             run_id=model.run_id,
         )
 
-    validate_reviewed_safe_default_integrity(model)
+    validate_agent_reasonable_default_integrity(model)
     data = model.to_dict()
     assumptions = _dict_items(data.get("assumptions"))
     assumption = next((item for item in assumptions if item.get("id") == target_id), None)
-    if not isinstance(assumption, dict) or assumption.get("origin") != POLICY_ORIGIN:
+    if not isinstance(assumption, dict) or assumption.get("origin") != AGENT_DEFAULT_ORIGIN:
         raise HarnessError(
-            "requirement_policy_default_stale",
-            f"Policy-default assumption is not active: {target_id}",
-            run_id=model.run_id,
-        )
-    if assumption.get("policy_registry_version") != REGISTRY_VERSION:
-        raise HarnessError(
-            "requirement_policy_default_integrity_failed",
-            "Policy-default assumption uses an unsupported registry version.",
+            "requirement_assumption_stale",
+            f"Challengeable assumption is not active: {target_id}",
             run_id=model.run_id,
         )
 
@@ -115,8 +98,8 @@ def challenge_reviewed_safe_default(
         or evaluation.get("assumption_id") != target_id
     ):
         raise HarnessError(
-            "requirement_policy_default_integrity_failed",
-            "Policy-default assumption is not linked to its active source question.",
+            "requirement_agent_default_integrity_failed",
+            "Assumption is not linked to its active source question.",
             run_id=model.run_id,
         )
 
@@ -124,13 +107,12 @@ def challenge_reviewed_safe_default(
     data["revision"] = model.revision + 1
     data["assumptions"] = [item for item in assumptions if item.get("id") != target_id]
     question["status"] = "open"
-    question["suggested_policy_id"] = None
+    question["proposed_disposition"] = HUMAN_REQUIRED
+    question["proposed_blocking"] = True
+    question["suggested_answer"] = None
+    question["recommended_option"] = None
     question.pop(EVALUATION_FIELD, None)
-    override_target_ids = _create_override_targets(
-        data,
-        assumption=assumption,
-        question=question,
-    )
+    _reattach_open_question_refs(data, question_id, _string_items(question.get("affects")))
 
     decisions = data.get("decisions")
     if not isinstance(decisions, list):
@@ -149,22 +131,20 @@ def challenge_reviewed_safe_default(
         "status": "insufficient",
         "supersedes_decision_id": previous.get("id") if previous is not None else None,
         "submission_hash": _challenge_submission_hash(target_id, challenge_text),
-        "decision_kind": DECISION_KIND,
+        "decision_kind": DECISION_KIND_CHALLENGE,
         "challenged_assumption_id": target_id,
-        "challenged_policy_id": str(assumption.get("policy_id") or ""),
-        "policy_registry_version": REGISTRY_VERSION,
+        "challenged_assumption_origin": AGENT_DEFAULT_ORIGIN,
     }
     decisions.append(decision)
-    return RequirementPolicyDefaultChallenge(
+    return RequirementAssumptionChallenge(
         model=RequirementModelV2.from_dict(data),
         decision=deepcopy(decision),
         withdrawn_assumption=deepcopy(assumption),
-        override_target_ids=tuple(override_target_ids),
         before_model_sha256=before_sha256,
     )
 
 
-def challenge_quality_summary(report: dict[str, object]) -> dict[str, object]:
+def assumption_challenge_quality_summary(report: dict[str, object]) -> dict[str, object]:
     decision = report.get("challenge_decision")
     assumption = report.get("withdrawn_assumption")
     return {
@@ -174,46 +154,9 @@ def challenge_quality_summary(report: dict[str, object]) -> dict[str, object]:
         "decision_id": decision.get("id") if isinstance(decision, dict) else None,
         "question_id": decision.get("question_id") if isinstance(decision, dict) else None,
         "assumption_id": assumption.get("id") if isinstance(assumption, dict) else None,
-        "policy_id": assumption.get("policy_id") if isinstance(assumption, dict) else None,
+        "origin": assumption.get("origin") if isinstance(assumption, dict) else None,
         "challenged_by": decision.get("answered_by") if isinstance(decision, dict) else None,
-        "override_target_ids": list(report.get("override_target_ids") or []),
     }
-
-
-def _create_override_targets(
-    data: dict[str, Any],
-    *,
-    assumption: dict[str, Any],
-    question: dict[str, Any],
-) -> list[str]:
-    """Tạo requirement placeholder mà Human Decision hiện hành có thể cập nhật."""
-
-    if assumption.get("policy_id") != POLICY_ID_QUALITY_NONE:
-        raise HarnessError(
-            "requirement_policy_challenge_unsupported",
-            "Reviewed policy does not define a human-override target factory.",
-            run_id=str(data.get("run_id") or "") or None,
-        )
-    quality_requirements = data.get("quality_requirements")
-    if not isinstance(quality_requirements, list):
-        raise HarnessError(
-            "requirement_policy_default_integrity_failed",
-            "Requirement model has no quality_requirements collection.",
-            run_id=str(data.get("run_id") or "") or None,
-        )
-    target_id = _next_requirement_id(quality_requirements, prefix="QR")
-    question_id = str(question.get("id") or "")
-    quality_requirements.append(
-        {
-            "id": target_id,
-            "text": "UNKNOWN_FROM_SOURCE: quality target requires an explicit human decision.",
-            "status": "unknown",
-            "evidence_refs": list(assumption.get("evidence_refs") or []),
-            "open_question_refs": [question_id],
-        }
-    )
-    question["affects"] = [target_id]
-    return [target_id]
 
 
 def _challenge_submission_hash(assumption_id: str, instruction: str) -> str:
@@ -233,18 +176,6 @@ def _next_decision_id(decisions: list[object]) -> str:
     return f"D-{max(numbers, default=0) + 1}"
 
 
-def _next_requirement_id(items: list[object], *, prefix: str) -> str:
-    numbers: list[int] = []
-    pattern = re.compile(rf"{re.escape(prefix)}-([1-9]\d*)")
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        match = pattern.fullmatch(str(item.get("id") or ""))
-        if match:
-            numbers.append(int(match.group(1)))
-    return f"{prefix}-{max(numbers, default=0) + 1}"
-
-
 def _latest_question_decision(decisions: list[object], question_id: str) -> dict[str, Any] | None:
     for item in reversed(decisions):
         if isinstance(item, dict) and item.get("question_id") == question_id:
@@ -252,5 +183,50 @@ def _latest_question_decision(decisions: list[object], question_id: str) -> dict
     return None
 
 
+def _reattach_open_question_refs(data: dict[str, Any], question_id: str, affects: list[str]) -> None:
+    affected = set(affects)
+    _append_question_ref(data, affected, question_id)
+    contract = data.get("scenario_contract")
+    scenarios = contract.get("scenarios") if isinstance(contract, dict) else []
+    for scenario in scenarios if isinstance(scenarios, list) else []:
+        if not isinstance(scenario, dict):
+            continue
+        related = affected.intersection(
+            _string_items(scenario.get("requirement_refs"))
+            + _string_items(scenario.get("acceptance_refs"))
+        )
+        if not related:
+            continue
+        _append_unique(scenario, "open_question_refs", question_id)
+        surfaces = scenario.get("surfaces")
+        for surface in surfaces.values() if isinstance(surfaces, dict) else []:
+            if not isinstance(surface, dict) or surface.get("status") == "not_applicable":
+                continue
+            if related.intersection(_string_items(surface.get("requirement_refs"))):
+                _append_unique(surface, "open_question_refs", question_id)
+
+
+def _append_question_ref(value: object, affected: set[str], question_id: str) -> None:
+    if isinstance(value, dict):
+        if str(value.get("id") or "") in affected and "open_question_refs" in value:
+            _append_unique(value, "open_question_refs", question_id)
+        for nested in value.values():
+            _append_question_ref(nested, affected, question_id)
+    elif isinstance(value, list):
+        for nested in value:
+            _append_question_ref(nested, affected, question_id)
+
+
+def _append_unique(item: dict[str, Any], field: str, value: str) -> None:
+    values = _string_items(item.get(field))
+    if value not in values:
+        values.append(value)
+    item[field] = values
+
+
 def _dict_items(value: object) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _string_items(value: object) -> list[str]:
+    return [str(item) for item in value if isinstance(item, str) and item] if isinstance(value, list) else []

@@ -11,20 +11,20 @@ Source ref: `{{SOURCE_REF}}`
 - Use only facts supported by an exact quote from the source snapshot.
 - Every `explicit` item must reference one or more evidence IDs.
 - A broad source statement supports only the behavior it literally states. It does not support any unstated criterion, threshold, field, role, transition, outcome, or implementation choice.
-- Use `assumption` only for a low-impact, reversible working default that does not change business semantics, persisted-data meaning, authorization, an external contract, or acceptance-test pass/fail. Keep it visibly unconfirmed and explain the reason.
+- Do not write an agent-selected assumption directly. Represent every unresolved choice as an open question and propose its disposition; Python creates any approved `ASM-*`.
 - Never use an assumption to replace a missing validation criterion, matching or identity rule, limit, authorization rule, state-transition condition, or acceptance-test decision introduced by the source.
 - Use `unknown` only for a material product decision that the source does not answer and link it to an open question.
 - Never infer confirmed requirements from domain knowledge.
 - Never create human decisions. Return `decisions` as an empty list and never use `human_decision` status.
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
-- Each open question must include `category`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, and `evidence_refs`.
-- `suggested_policy_id` is advisory only. Use `null` unless an exact reviewed policy below matches; never invent an ID or provide a policy answer yourself.
+- Each open question must include `category`, `proposed_disposition`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, `answer_mode`, `options`, `recommended_option`, `suggested_answer`, `why_it_is_safe`, `impact`, `uncertainty`, `reversible`, and `evidence_refs`.
+- Set `proposed_disposition` to `human_required`, `agent_default`, or `deferred_to_design`.
+- Use `agent_default` only for a low-impact, low-uncertainty, reversible choice in `optional_context`, `conventional_ux_behavior`, or `noncritical_recovery`. Provide `suggested_answer` (or a valid `recommended_option`), `why_it_is_safe`, and `reversible=true`.
+- When the source explicitly delegates such a conventional default, keep the unresolved choice out of `BR-*`, `AC-*`, and `QR-*` until Python accepts it as an assumption. It may reference a related flow item, but use one of the exact agent-default categories above and do not mark a scenario surface `clarification_required` solely for that choice.
+- Use `deferred_to_design` for colors, layout, visual style, UI-only wording, terminology-only choices, and implementation preferences. Do not create an assumption for them.
+- Use `human_required` for source conflict, business rules, acceptance criteria, data identity, API/external contracts, authorization, security/privacy, compliance, scope, or a decision that changes whether a UI/API/business/data surface participates.
 - `effective_blocking`, root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
-
-Reviewed safe-default policies:
-
-{{SAFE_DEFAULT_POLICY_CATALOG}}
 
 ## Required source coverage pass
 
@@ -166,7 +166,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
   "acceptance_criteria": [{"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["BR-1"]}],
   "quality_requirements": [],
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
-  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "suggested_policy_id": null, "evidence_refs": []}],
+  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "short|multiple_choice", "options": [], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
   "decisions": [],
   "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}

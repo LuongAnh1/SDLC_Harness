@@ -726,8 +726,9 @@ def _http_status_for_error(error_code: str) -> int:
         "legacy_execution_profile_retired",
         "legacy_developer_executor_retired",
         "project_profile_required",
-        "requirement_policy_default_stale",
         "requirement_policy_challenge_not_ready",
+        "requirement_assumption_stale",
+        "requirement_assumption_challenge_not_ready",
     }:
         return 409
     if error_code in {"operation_queue_full", "operation_manager_stopping"}:

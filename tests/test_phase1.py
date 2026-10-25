@@ -16,9 +16,9 @@ from sdlc_harness.agents.requirements import (
     CLARIFICATION_DISPOSITION_FIELD,
     COVERAGE_CATEGORIES,
     DEFERRED_TO_DESIGN,
+    REASONABLE_DEFAULT_POLICY_VERSION,
     RequirementCoverageResult,
     RequirementModelV2,
-    REVIEWED_DEFAULT_POLICY_VERSION,
     SHADOW_POLICY_VERSION,
     normalize_and_validate_requirement_model_v2,
 )
@@ -239,7 +239,7 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIn("requirement_model", response["latest_artifacts"])
         self.assertIn("requirement_gap_report", response["latest_artifacts"])
         self.assertIn("requirement_clarification_policy_shadow", response["latest_artifacts"])
-        self.assertIn("requirement_policy_defaults", response["latest_artifacts"])
+        self.assertIn("requirement_reasonable_defaults", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["requirement_model_v2"]["final_report"]["ok"])
         self.assertEqual(
             response["quality_reports"]["requirement_clarification_policy_shadow"]["status"],
@@ -264,7 +264,7 @@ class PhaseOneTest(unittest.TestCase):
             (run_dir / "artifacts" / "requirement_clarification_policy_shadow_v1_r1.json").exists()
         )
         self.assertTrue(
-            (run_dir / "artifacts" / "requirement_policy_defaults_v1_r1.json").exists()
+            (run_dir / "artifacts" / "requirement_reasonable_defaults_v1_r1.json").exists()
         )
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
 
@@ -297,7 +297,7 @@ class PhaseOneTest(unittest.TestCase):
             validated = normalize_and_validate_requirement_model_v2(
                 RequirementModelV2.from_dict(payload),
                 source_text_by_id,
-                clarification_policy_version=REVIEWED_DEFAULT_POLICY_VERSION,
+                clarification_policy_version=REASONABLE_DEFAULT_POLICY_VERSION,
             )
             analysis = {
                 "coverage": [
@@ -318,7 +318,7 @@ class PhaseOneTest(unittest.TestCase):
         with patch.object(workflow.coverage_reviewer, "review", side_effect=review_with_terminology_question):
             response = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
 
-        self.assertEqual(response["requirement_clarification_policy_version"], REVIEWED_DEFAULT_POLICY_VERSION)
+        self.assertEqual(response["requirement_clarification_policy_version"], REASONABLE_DEFAULT_POLICY_VERSION)
         self.assertEqual(response["status"], "waiting_requirement_approval")
         self.assertEqual(response["pending_checkpoint"]["deferred_to_design_count"], 1)
         self.assertEqual(response["pending_checkpoint"]["deferred_to_design_question_ids"], ["Q-1"])
@@ -326,12 +326,11 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(
             response["quality_reports"]["requirement_clarification_disposition"],
             {
-                "policy_version": REVIEWED_DEFAULT_POLICY_VERSION,
+                "policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
                 "deferred_to_design_count": 1,
                 "deferred_to_design_question_ids": ["Q-1"],
-                "policy_default_count": 0,
-                "policy_default_assumption_ids": [],
-                "policy_default_policy_ids": [],
+                "challengeable_assumption_count": 0,
+                "challengeable_assumption_ids": [],
             },
         )
         checklist = response["quality_reports"]["requirement_model_v2"]["quality_checklist"]
@@ -342,7 +341,7 @@ class PhaseOneTest(unittest.TestCase):
         question = model["open_questions"][0]
         self.assertFalse(question["effective_blocking"])
         self.assertEqual(question[CLARIFICATION_DISPOSITION_FIELD]["value"], DEFERRED_TO_DESIGN)
-        self.assertEqual(model["validation"]["clarification_policy_version"], REVIEWED_DEFAULT_POLICY_VERSION)
+        self.assertEqual(model["validation"]["clarification_policy_version"], REASONABLE_DEFAULT_POLICY_VERSION)
         packet_path = self.repo_root / str(response["latest_artifacts"]["requirement_packet"])
         self.assertIn("DEFERRED-TO-DESIGN", packet_path.read_text(encoding="utf-8"))
         jira_comment = (

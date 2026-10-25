@@ -224,7 +224,6 @@ def test_shadow_report_is_deterministic_and_does_not_mutate_model() -> None:
     assert first == second
     assert first["report_digest"] == second["report_digest"]
     assert model.to_dict() == before
-    assert first["summary"]["shadow_policy_default_count"] == 0
     assert first["summary"]["shadow_irrelevant_count"] == 0
 
 

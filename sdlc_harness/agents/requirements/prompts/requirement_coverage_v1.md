@@ -20,11 +20,20 @@ reference one option key. Each option must use
 Never use `label` in place of `answer`. Never mention implementation technologies
 or code layout.
 
-`suggested_policy_id` is advisory only. It must be `null` unless one reviewed
-policy below matches exactly. Never invent a policy ID and never turn a free-form
-answer into a default:
+Classify every candidate with `proposed_disposition`:
+- `human_required` for decisions that materially affect scope, business rules,
+  acceptance, identity, authorization, security/privacy, API contracts or surface participation;
+- `agent_default` only for low-impact, low-uncertainty, reversible choices in
+  `optional_context`, `conventional_ux_behavior`, or `noncritical_recovery`;
+- `deferred_to_design` for color, layout, visual style, UI-only wording,
+  terminology-only choices, or implementation preferences.
 
-{{SAFE_DEFAULT_POLICY_CATALOG}}
+For `agent_default`, return `suggested_answer` (or a valid `recommended_option`),
+`why_it_is_safe`, and `reversible=true`. Python owns the final disposition and
+will fail safe to human clarification when any guardrail is missing.
+An `agent_default` candidate may reference a related flow item, but do not attach
+it to `BR-*`, `AC-*`, `QR-*`, API/data contracts, or a surface-participation
+decision; those require a human answer.
 
 `question_candidates[].affects` may contain only existing stable requirement IDs
 such as `UC-*`, `GOAL-*`, `ACT-*`, `PRE-*`, `MF-*`, `AF-*`, `EF-*`, `POST-*`,
@@ -39,7 +48,7 @@ Return one JSON object with this shape and no markdown fence:
   "source_ref": "{{SOURCE_REF}}",
   "requirement_revision": {{REQUIREMENT_REVISION}},
   "coverage": [{"category":"functional_scope","status":"clear","requirement_refs":["UC-1"],"evidence_refs":["E-1"],"rationale":"Reason."}],
-  "question_candidates": [{"category":"edge_failures","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"suggested_policy_id":null,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
+  "question_candidates": [{"category":"edge_failures","decision_category":"observable_behavior","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","proposed_disposition":"human_required","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"why_it_is_safe":null,"reversible":false,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
   "deferred": [{"category":"quality_attributes","reason":"Lower impact than current blockers."}]
 }
 
