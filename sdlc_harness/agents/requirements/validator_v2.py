@@ -776,6 +776,10 @@ def _validate_scenario_contract(
 
 def _validate_semantics(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -> None:
     flows = data.get("flows") if isinstance(data.get("flows"), dict) else {}
+    question_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_list(data.get("open_questions"))
+    }
     for index, item in enumerate(_dict_list(flows.get("main"))):
         text = " ".join(str(item.get(field) or "") for field in ("actor", "action", "target"))
         if _contains_exception_term(text):
@@ -783,6 +787,50 @@ def _validate_semantics(data: dict[str, Any], issues: list[RequirementModelV2Iss
     for index, item in enumerate(_dict_list(data.get("postconditions"))):
         if _contains_exception_term(str(item.get("text") or "")):
             _add(issues, "exception_in_postcondition", f"postconditions[{index}]", "Postcondition contains exception or cancellation behavior.")
+    for group in ("alternatives", "exceptions"):
+        for index, item in enumerate(_dict_list(flows.get(group))):
+            missing: list[str] = []
+            if not _string_list(item.get("steps")):
+                missing.append("steps")
+            if not _non_empty(item.get("outcome")):
+                missing.append("outcome")
+            if not missing:
+                continue
+            item_id = str(item.get("id") or "")
+            has_blocking_question = any(
+                question is not None
+                and question.get("status") == QuestionStatus.OPEN.value
+                and question.get("effective_blocking") is True
+                and item_id in _string_list(question.get("affects"))
+                for question_id in _string_list(item.get("open_question_refs"))
+                for question in [question_by_id.get(question_id)]
+            )
+            if not has_blocking_question:
+                _add(
+                    issues,
+                    "branch_behavior_without_clarification",
+                    f"flows.{group}[{index}]",
+                    (
+                        f"Branch {item_id} is missing {', '.join(missing)} and must link "
+                        "an open blocking clarification question."
+                    ),
+                )
+    for index, item in enumerate(_dict_list(data.get("acceptance_criteria"))):
+        text = str(item.get("text") or "")
+        if not _string_list(item.get("verifies")):
+            _add(
+                issues,
+                "acceptance_without_verifies",
+                f"acceptance_criteria[{index}].verifies",
+                "Acceptance criterion must identify the behavior it verifies.",
+            )
+        if re.search(r"\b(?:unknown_from_source|todo|tbd|to be defined)\b", text, re.IGNORECASE):
+            _add(
+                issues,
+                "acceptance_placeholder",
+                f"acceptance_criteria[{index}].text",
+                "Acceptance criterion contains an unresolved placeholder.",
+            )
     for index, item in enumerate(_dict_list(data.get("assumptions"))):
         if item.get("status") != RequirementStatus.ASSUMPTION.value:
             _add(issues, "assumption_marked_confirmed", f"assumptions[{index}].status", "Assumption collection items must use status=assumption.")

@@ -90,6 +90,8 @@ class ApplicationService:
             "revalidate-implementation",
             "revalidate-implementation-plan",
             "revalidate-design",
+            "revalidate-requirement",
+            "clarify-more",
             "approve-checkpoint",
             "answer-clarification",
             "adopt-run-workspace",
@@ -239,8 +241,17 @@ class ApplicationService:
                 return PhaseFourWorkflow(settings).sync_code_review(run_id=run_id)
             return phase_one.sync_run(run_id=run_id)
         if name == "continue-run":
+            run_id = self._required_text(command, "run_id")
+            phase_one = PhaseOneWorkflow(settings)
+            state = phase_one.store.read_state(run_id)
+            if str(state.get("status") or "") in {
+                "requirement_drafting",
+                "requirement_paused",
+                "waiting_requirement_clarification_continue",
+            }:
+                return phase_one.continue_requirement_run(run_id=run_id)
             return PhaseFourWorkflow(settings).continue_until_implementation_checkpoint(
-                run_id=self._required_text(command, "run_id")
+                run_id=run_id
             )
         if name == "revalidate-implementation":
             return PhaseFourWorkflow(settings).revalidate_implementation(
@@ -252,6 +263,14 @@ class ApplicationService:
             )
         if name == "revalidate-design":
             return PhaseTwoWorkflow(settings).revalidate_design(
+                run_id=self._required_text(command, "run_id")
+            )
+        if name == "revalidate-requirement":
+            return PhaseOneWorkflow(settings).revalidate_requirement(
+                run_id=self._required_text(command, "run_id")
+            )
+        if name == "clarify-more":
+            return PhaseOneWorkflow(settings).clarify_more(
                 run_id=self._required_text(command, "run_id")
             )
         if name == "experiment-design-consensus":

@@ -80,6 +80,18 @@ def build_parser() -> argparse.ArgumentParser:
     _add_sync_mode_argument(revalidate_design)
     revalidate_design.add_argument("--runtime-root", default=None)
 
+    revalidate_requirement = subparsers.add_parser("revalidate-requirement")
+    revalidate_requirement.add_argument("--run-id", required=True)
+    revalidate_requirement.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    _add_sync_mode_argument(revalidate_requirement)
+    revalidate_requirement.add_argument("--runtime-root", default=None)
+
+    clarify_more = subparsers.add_parser("clarify-more")
+    clarify_more.add_argument("--run-id", required=True)
+    clarify_more.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    _add_sync_mode_argument(clarify_more)
+    clarify_more.add_argument("--runtime-root", default=None)
+
     experiment_design = subparsers.add_parser("experiment-design-consensus")
     experiment_design.add_argument("--source-run-id", required=True)
     experiment_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
@@ -142,6 +154,8 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "revalidate-implementation": ("run_id",),
     "revalidate-implementation-plan": ("run_id",),
     "revalidate-design": ("run_id",),
+    "revalidate-requirement": ("run_id",),
+    "clarify-more": ("run_id",),
     "experiment-design-consensus": ("source_run_id", "experiment_root", "llm_call_budget"),
     "approve-checkpoint": ("run_id", "checkpoint_id"),
     "answer-clarification": ("run_id", "question_id", "answer", "answered_by"),

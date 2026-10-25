@@ -6,8 +6,11 @@ render các projection và lưu checkpoint để Niko có thể kiểm soát t�
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
+    load_source_snapshot_v2,
     read_requirement_gap_report,
     read_requirement_model_v2,
     read_requirement_source_texts,
@@ -29,18 +32,39 @@ from ..agents.developer import (
 )
 from ..agents.requirements import (
     RequirementClarificationUpdater,
+    RequirementCoverageReviewer,
+    RequirementModelV2,
     RequirementModelV2Refiner,
     RequirementSourceCatalog,
+    SHADOW_ARTIFACT_KEY,
+    SHADOW_ARTIFACT_PREFIX,
     build_requirement_gap_report,
+    build_clarification_policy_shadow,
+    build_requirement_quality_checklist,
+    close_clarification_session,
     find_clarification_submission,
     gap_report_summary,
+    normalize_and_validate_requirement_model_v2,
+    record_session_answer,
+    resolve_clarification_answer,
     select_current_requirement_question,
+    session_pending_ids,
+    shadow_error_summary,
+    shadow_quality_summary,
+    start_clarification_session,
+)
+from ..agents.requirements.session_v1 import (
+    SESSION_FILENAME,
+    read_requirement_session,
+    requirement_session_summary,
 )
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
+    "clarify_more",
+    "revalidate_requirement",
     "request_change",
     "cancel_run",
     "get_status",
@@ -49,6 +73,15 @@ ALLOWED_REQUIREMENT_ACTIONS = [
 ALLOWED_CODE_REVIEW_READY_ACTIONS = ["approve_checkpoint", "get_status", "sync_run", "cancel_run"]
 ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS = [
     "answer_clarification",
+    "revalidate_requirement",
+    "get_status",
+    "sync_run",
+    "cancel_run",
+]
+ALLOWED_REQUIREMENT_DRAFTING_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS = [
+    "clarify_more",
+    "revalidate_requirement",
     "get_status",
     "sync_run",
     "cancel_run",
@@ -68,6 +101,7 @@ class PhaseOneWorkflow:
         self.llm_client = LlmClient(settings)
         self.refiner_v2 = RequirementModelV2Refiner(self.llm_client, store=self.store)
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
+        self.coverage_reviewer = RequirementCoverageReviewer(self.llm_client)
 
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
@@ -104,7 +138,7 @@ class PhaseOneWorkflow:
             "status": "requirement_drafting",
             "latest_artifacts": {},
             "pending_checkpoint": None,
-            "allowed_next_actions": ["get_status", "cancel_run"],
+            "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
             "last_sync": None,
             "last_error": None,
             "llm": {
@@ -120,16 +154,75 @@ class PhaseOneWorkflow:
                 target_base_branch=self.settings.target_base_branch,
             ).to_dict()
         self.store.write_state(state)
+        self.store.register_active_run(source.source_ref, run_id)
 
-        return self._start_v2(source=source, state=state)
+        return self._start_v2(source=source, state=state, resume=False)
 
-    def _start_v2(self, *, source: UseCaseSource, state: dict[str, object]) -> dict[str, object]:
+    def continue_requirement_run(self, *, run_id: str) -> dict[str, object]:
+        """Tiếp tục Requirement loop từ immutable snapshot của chính run."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") not in {"requirement_drafting", "requirement_paused"}:
+            raise HarnessError(
+                "requirement_session_not_resumable",
+                f"Requirement run cannot continue from status {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        artifacts = self._normalized_artifacts(state)
+        source_snapshot_ref = artifacts.get("requirement_source_snapshot")
+        if not source_snapshot_ref:
+            raise HarnessError(
+                "requirement_session_not_resumable",
+                "Requirement run has no frozen source snapshot.",
+                run_id=run_id,
+            )
+        source = load_source_snapshot_v2(
+            store=self.store,
+            run_id=run_id,
+            artifact_ref=source_snapshot_ref,
+        )
+        return self._start_v2(source=source, state=state, resume=True)
+
+    def _start_v2(
+        self,
+        *,
+        source: UseCaseSource,
+        state: dict[str, object],
+        resume: bool,
+    ) -> dict[str, object]:
         """Create the canonical V2 model and stop at clarification or approval."""
 
         run_id = str(state["run_id"])
         try:
-            use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
-            source_snapshot_path = write_source_snapshot_v2(store=self.store, run_id=run_id, source=source)
+            existing_artifacts = self._normalized_artifacts(state)
+            if resume:
+                use_case_packet_path = existing_artifacts.get("use_case_packet", "")
+                source_snapshot_path = existing_artifacts.get("requirement_source_snapshot", "")
+                if not use_case_packet_path or not source_snapshot_path:
+                    raise HarnessError(
+                        "requirement_session_not_resumable",
+                        "Requirement run is missing its frozen input artifacts.",
+                        run_id=run_id,
+                    )
+            else:
+                use_case_packet_path = write_use_case_packet(store=self.store, run_id=run_id, source=source)
+                source_snapshot_path = write_source_snapshot_v2(store=self.store, run_id=run_id, source=source)
+                existing_artifacts.update(
+                    {
+                        "use_case_packet": use_case_packet_path,
+                        "requirement_source_snapshot": source_snapshot_path,
+                    }
+                )
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "latest_artifacts": existing_artifacts,
+                        "status": "requirement_drafting",
+                        "current_phase": "requirement_drafting",
+                        "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
+                    }
+                )
+                self.store.write_state(state)
             source_entry = source_provenance_entry(source=source, artifact_ref=source_snapshot_path)
             verified_source_text = read_source_snapshot_v2(
                 store=self.store,
@@ -141,11 +234,30 @@ class PhaseOneWorkflow:
                 sources=[source_entry],
                 source_text_by_id={source.source_id: verified_source_text},
             )
-            refinement = self.refiner_v2.refine(
-                source,
-                run_id=run_id,
-                source_artifact_ref=source_snapshot_path,
-                source_catalog=source_catalog,
+            refinement_kwargs: dict[str, object] = {
+                "run_id": run_id,
+                "source_artifact_ref": source_snapshot_path,
+                "source_catalog": source_catalog,
+            }
+            if resume:
+                refinement_kwargs["resume"] = True
+            refinement = self.refiner_v2.refine(source, **refinement_kwargs)
+            coverage = self.coverage_reviewer.review(
+                model=refinement.model,
+                source_text_by_id=source_catalog.source_text_by_id,
+                validation_report=refinement.final_report,
+                semantic=True,
+                question_limit=5,
+            )
+            refinement = replace(
+                refinement,
+                model=coverage.model,
+                final_report=coverage.validation_report,
+            )
+            quality_checklist = build_requirement_quality_checklist(
+                model=refinement.model,
+                validation_report=refinement.final_report,
+                analysis=coverage.analysis,
             )
             gap_report = refinement.gap_report or build_requirement_gap_report(
                 run_id=run_id,
@@ -158,6 +270,7 @@ class PhaseOneWorkflow:
             )
             artifact_paths = {
                 "use_case_packet": use_case_packet_path,
+                "requirement_source_snapshot": source_snapshot_path,
                 **(
                     {"requirement_source_manifest": refinement.source_manifest_path}
                     if refinement.source_manifest_path
@@ -174,22 +287,46 @@ class PhaseOneWorkflow:
                     if refinement.delta_artifact_paths
                     else {}
                 ),
+                **({"requirement_loop_session": refinement.session_path} if refinement.session_path else {}),
+                "requirement_clarification_analysis": self.store.relative(
+                    self.store.write_json_artifact(
+                        run_id,
+                        f"requirement_clarification_analysis_v1_r{refinement.model.revision}.json",
+                        coverage.analysis,
+                    )
+                ),
+                "requirement_quality_checklist": self.store.relative(
+                    self.store.write_json_artifact(
+                        run_id,
+                        f"requirement_quality_checklist_v1_r{refinement.model.revision}.json",
+                        quality_checklist,
+                    )
+                ),
                 **write_requirement_v2_artifacts(
                     store=self.store,
                     run_id=run_id,
                     refinement_result=refinement,
                 ),
             }
-            selection = select_current_requirement_question(refinement.model)
+            clarification_session = start_clarification_session(refinement.model)
+            selection = select_current_requirement_question(
+                refinement.model,
+                allowed_question_ids=(
+                    session_pending_ids(clarification_session)
+                    if clarification_session is not None
+                    else None
+                ),
+            )
             self._apply_v2_checkpoint_state(
                 state=state,
                 model=refinement.model,
                 artifact_paths=artifact_paths,
                 current_question=selection.current_question.to_dict() if selection.current_question else None,
                 remaining_blocking_count=selection.remaining_blocking_count,
-                quality_report=refinement.to_report_dict(),
+                quality_report={**refinement.to_report_dict(), "quality_checklist": quality_checklist},
                 gap_report=gap_report,
                 latest_decision=None,
+                clarification_session=clarification_session,
             )
             self.store.write_state(state)
             last_sync = self._sync_requirement_state(state)
@@ -197,11 +334,13 @@ class PhaseOneWorkflow:
             state["updated_at"] = utc_now_iso()
             state["summary_for_user"] = self._v2_summary(state, last_sync)
             self.store.write_state(state)
-            self.store.register_active_run(source.source_ref, run_id)
-            return self._status_response(state, created_new_run=True)
+            return self._status_response(state, created_new_run=not resume)
         except HarnessError as exc:
+            if exc.error_code == "requirement_session_not_resumable" and resume:
+                raise
             latest_artifacts = self._normalized_artifacts(state)
             for key, filename in (
+                ("requirement_loop_session", SESSION_FILENAME),
                 ("requirement_source_manifest", "requirement_source_manifest_v1.json"),
                 ("requirement_source_journal", "requirement_source_journal_v1.json"),
                 ("requirement_gap_report", "requirement_gap_report_v1.json"),
@@ -210,6 +349,25 @@ class PhaseOneWorkflow:
                 path = self.store.artifact_path(run_id, filename)
                 if path.exists():
                     latest_artifacts[key] = self.store.relative(path)
+            if exc.error_code == "llm_transport_failed":
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "current_phase": "requirement_drafting",
+                        "status": "requirement_paused",
+                        "last_error": HarnessError(exc.error_code, exc.message, run_id=run_id).to_response(),
+                        "latest_artifacts": latest_artifacts,
+                        "pending_checkpoint": None,
+                        "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
+                        "summary_for_user": (
+                            "Requirement loop đã tạm dừng vì kết nối LLM gián đoạn; "
+                            "có thể dùng continue_run để tiếp tục đúng session cũ."
+                        ),
+                    }
+                )
+                state["requirement_execution"] = self._requirement_execution_summary(run_id)
+                self.store.write_state(state)
+                return self._status_response(state, created_new_run=not resume)
             gap_path = latest_artifacts.get("requirement_gap_report")
             if gap_path:
                 gap_report = read_requirement_gap_report(
@@ -242,6 +400,278 @@ class PhaseOneWorkflow:
             self.store.write_state(state)
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
 
+    def revalidate_requirement(self, *, run_id: str) -> dict[str, object]:
+        """Chạy lại validator tất định; không gọi LLM hoặc sinh clarification mới."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("requirement_contract_version") or "v2") != "v2":
+            raise HarnessError(
+                "requirement_revalidation_not_supported",
+                "Requirement revalidation requires Requirement Contract V2.",
+                run_id=run_id,
+            )
+        if str(state.get("status") or "") not in {
+            "waiting_requirement_approval",
+            "waiting_requirement_clarification",
+            "waiting_requirement_clarification_continue",
+        }:
+            raise HarnessError(
+                "requirement_revalidation_not_ready",
+                f"Run cannot revalidate requirement from status {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        artifacts = self._normalized_artifacts(state)
+        model_ref = artifacts.get("requirement_model")
+        if not model_ref:
+            raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
+        model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
+        source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
+        validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
+        quality_checklist = build_requirement_quality_checklist(
+            model=validation.model,
+            validation_report=validation.report,
+        )
+        artifacts["requirement_revalidation"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_revalidation_v1_r{model.revision}.json",
+                {
+                    "artifact_version": "requirement_revalidation_v1",
+                    "run_id": run_id,
+                    "requirement_revision": model.revision,
+                    "mode": "deterministic_only",
+                    "validation_report": validation.report.to_dict(),
+                    "quality_checklist": quality_checklist,
+                },
+            )
+        )
+        artifacts["requirement_quality_checklist"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_quality_checklist_v1_r{model.revision}.json",
+                quality_checklist,
+            )
+        )
+        shadow_quality = self._write_clarification_policy_shadow(
+            model=validation.model,
+            artifact_paths=artifacts,
+        )
+        quality_reports = state.get("quality_reports")
+        reports = dict(quality_reports) if isinstance(quality_reports, dict) else {}
+        reports["requirement_model_v2"] = {
+            "action": "revalidate_requirement",
+            "mode": "deterministic_only",
+            "quality_checklist": quality_checklist,
+            "final_report": validation.report.to_dict(),
+        }
+        reports["requirement_clarification_policy_shadow"] = shadow_quality
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "latest_artifacts": artifacts,
+                "quality_reports": reports,
+                "last_error": None,
+                "summary_for_user": (
+                    "Đã kiểm tra lại Requirement V2 bằng validator tất định; "
+                    "không gọi LLM, không sinh câu hỏi mới và không đổi revision."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        last_sync = self._sync_requirement_state(state)
+        state["last_sync"] = last_sync
+        state["updated_at"] = utc_now_iso()
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def clarify_more(self, *, run_id: str) -> dict[str, object]:
+        """Mở đúng một lượt semantic clarification mới theo yêu cầu người dùng."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("requirement_contract_version") or "v2") != "v2":
+            raise HarnessError(
+                "requirement_revalidation_not_supported",
+                "Requirement revalidation requires Requirement Contract V2.",
+                run_id=run_id,
+            )
+        status = str(state.get("status") or "")
+        if status == "waiting_requirement_clarification_continue":
+            return self._continue_clarification_session(state)
+        if status != "waiting_requirement_approval":
+            raise HarnessError(
+                "requirement_clarification_not_ready",
+                f"Run cannot clarify requirement further from status {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        artifacts = self._normalized_artifacts(state)
+        model_ref = artifacts.get("requirement_model")
+        if not model_ref:
+            raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
+        model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
+        source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
+        current_validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
+        coverage = self.coverage_reviewer.review(
+            model=current_validation.model,
+            source_text_by_id=source_text_by_id,
+            validation_report=current_validation.report,
+            semantic=True,
+            question_limit=5,
+        )
+        revised_model = coverage.model
+        revised_report = coverage.validation_report
+        if revised_model.to_dict() != model.to_dict():
+            revised_payload = revised_model.to_dict()
+            revised_payload["revision"] = model.revision + 1
+            revised_validation = normalize_and_validate_requirement_model_v2(
+                RequirementModelV2.from_dict(revised_payload),
+                source_text_by_id,
+            )
+            revised_model = revised_validation.model
+            revised_report = revised_validation.report
+            artifacts.update(
+                write_requirement_v2_revision_artifacts(
+                    store=self.store,
+                    run_id=run_id,
+                    model=revised_model,
+                    validation_report=revised_report,
+                    audit={
+                        "action": "clarify_more",
+                        "coverage_analysis": coverage.analysis,
+                        "final_report": revised_report.to_dict(),
+                    },
+                )
+            )
+        analysis = dict(coverage.analysis)
+        analysis["output_requirement_revision"] = revised_model.revision
+        artifacts["requirement_clarification_analysis"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_clarification_analysis_v1_r{revised_model.revision}.json",
+                analysis,
+            )
+        )
+        quality_checklist = build_requirement_quality_checklist(
+            model=revised_model,
+            validation_report=revised_report,
+            analysis=analysis,
+        )
+        artifacts["requirement_quality_checklist"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_quality_checklist_v1_r{revised_model.revision}.json",
+                quality_checklist,
+            )
+        )
+        previous_gap_report = None
+        gap_ref = artifacts.get("requirement_gap_report")
+        if gap_ref:
+            previous_gap_report = read_requirement_gap_report(store=self.store, run_id=run_id, artifact_ref=gap_ref)
+        gap_report = build_requirement_gap_report(
+            run_id=run_id,
+            model=revised_model,
+            source_manifest_input_hash=(
+                str(previous_gap_report.get("source_manifest_input_hash") or "") or None
+                if isinstance(previous_gap_report, dict)
+                else None
+            ),
+            previous_report=previous_gap_report,
+        )
+        artifacts["requirement_gap_report"] = write_requirement_gap_report(
+            store=self.store,
+            run_id=run_id,
+            report=gap_report,
+        )
+        clarification_session = start_clarification_session(
+            revised_model,
+            previous=(
+                state.get("requirement_clarification_session")
+                if isinstance(state.get("requirement_clarification_session"), dict)
+                else None
+            ),
+        )
+        selection = select_current_requirement_question(
+            revised_model,
+            allowed_question_ids=(session_pending_ids(clarification_session) if clarification_session else None),
+        )
+        self._apply_v2_checkpoint_state(
+            state=state,
+            model=revised_model,
+            artifact_paths=artifacts,
+            current_question=selection.current_question.to_dict() if selection.current_question else None,
+            remaining_blocking_count=selection.remaining_blocking_count,
+            quality_report={
+                "action": "clarify_more",
+                "coverage_analysis": analysis,
+                "quality_checklist": quality_checklist,
+                "final_report": revised_report.to_dict(),
+            },
+            gap_report=gap_report,
+            latest_decision=(
+                state.get("latest_requirement_decision")
+                if isinstance(state.get("latest_requirement_decision"), dict)
+                else None
+            ),
+            clarification_session=clarification_session,
+        )
+        self.store.write_state(state)
+        last_sync = self._sync_requirement_state(state)
+        state["last_sync"] = last_sync
+        state["updated_at"] = utc_now_iso()
+        state["summary_for_user"] = self._v2_summary(state, last_sync)
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _continue_clarification_session(self, state: dict[str, object]) -> dict[str, object]:
+        run_id = str(state["run_id"])
+        artifacts = self._normalized_artifacts(state)
+        model_ref = artifacts.get("requirement_model")
+        if not model_ref:
+            raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
+        model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
+        previous = state.get("requirement_clarification_session")
+        session = start_clarification_session(
+            model,
+            previous=previous if isinstance(previous, dict) else None,
+        )
+        selection = select_current_requirement_question(
+            model,
+            allowed_question_ids=(session_pending_ids(session) if session else None),
+        )
+        gap_ref = artifacts.get("requirement_gap_report")
+        gap_report = (
+            read_requirement_gap_report(store=self.store, run_id=run_id, artifact_ref=gap_ref)
+            if gap_ref
+            else build_requirement_gap_report(run_id=run_id, model=model)
+        )
+        quality_reports = state.get("quality_reports")
+        quality_report = (
+            quality_reports.get("requirement_model_v2", {})
+            if isinstance(quality_reports, dict)
+            else {}
+        )
+        self._apply_v2_checkpoint_state(
+            state=state,
+            model=model,
+            artifact_paths=artifacts,
+            current_question=selection.current_question.to_dict() if selection.current_question else None,
+            remaining_blocking_count=selection.remaining_blocking_count,
+            quality_report=quality_report if isinstance(quality_report, dict) else {},
+            gap_report=gap_report,
+            latest_decision=(
+                state.get("latest_requirement_decision")
+                if isinstance(state.get("latest_requirement_decision"), dict)
+                else None
+            ),
+            clarification_session=session,
+        )
+        self.store.write_state(state)
+        last_sync = self._sync_requirement_state(state)
+        state["last_sync"] = last_sync
+        state["updated_at"] = utc_now_iso()
+        state["summary_for_user"] = self._v2_summary(state, last_sync)
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
     def answer_clarification(
         self,
         *,
@@ -264,7 +694,16 @@ class PhaseOneWorkflow:
         if not model_ref:
             raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
         model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
-        duplicate = find_clarification_submission(model, question_id, answer)
+        question_record = next(
+            (
+                item
+                for item in model.open_questions
+                if isinstance(item, dict) and str(item.get("id") or "") == question_id
+            ),
+            {},
+        )
+        normalized_submission = resolve_clarification_answer(question_record, answer)
+        duplicate = find_clarification_submission(model, question_id, normalized_submission)
         if duplicate is not None:
             return self._status_response(state, created_new_run=False)
         if state.get("status") != "waiting_requirement_clarification":
@@ -284,12 +723,13 @@ class PhaseOneWorkflow:
                 f"Question is not current: {question_id}",
                 run_id=run_id,
             )
+        resolved_answer = resolve_clarification_answer(current_question, answer)
         source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
         result = self.clarification_updater.apply(
             source_text_by_id=source_text_by_id,
             model=model,
             question_id=question_id,
-            answer=answer,
+            answer=resolved_answer,
             answered_by=answered_by,
         )
         revised_artifacts = write_requirement_v2_revision_artifacts(
@@ -300,6 +740,17 @@ class PhaseOneWorkflow:
             audit=result.to_report_dict(),
         )
         artifacts.update(revised_artifacts)
+        quality_checklist = build_requirement_quality_checklist(
+            model=result.model,
+            validation_report=result.final_report,
+        )
+        artifacts["requirement_quality_checklist"] = self.store.relative(
+            self.store.write_json_artifact(
+                run_id,
+                f"requirement_quality_checklist_v1_r{result.model.revision}.json",
+                quality_checklist,
+            )
+        )
         previous_gap_report = None
         gap_ref = artifacts.get("requirement_gap_report")
         if gap_ref:
@@ -323,16 +774,35 @@ class PhaseOneWorkflow:
             run_id=run_id,
             report=gap_report,
         )
-        selection = select_current_requirement_question(result.model)
+        session_value = state.get("requirement_clarification_session")
+        clarification_session = (
+            record_session_answer(session_value, question_id)
+            if isinstance(session_value, dict)
+            else start_clarification_session(result.model)
+        )
+        selection = select_current_requirement_question(
+            result.model,
+            allowed_question_ids=(
+                session_pending_ids(clarification_session)
+                if clarification_session is not None
+                else None
+            ),
+        )
+        if clarification_session is not None and selection.current_question is None:
+            clarification_session = close_clarification_session(
+                clarification_session,
+                exhausted=selection.remaining_blocking_count > 0,
+            )
         self._apply_v2_checkpoint_state(
             state=state,
             model=result.model,
             artifact_paths=artifacts,
             current_question=selection.current_question.to_dict() if selection.current_question else None,
             remaining_blocking_count=selection.remaining_blocking_count,
-            quality_report=result.to_report_dict(),
+            quality_report={**result.to_report_dict(), "quality_checklist": quality_checklist},
             gap_report=gap_report,
             latest_decision=result.decision,
+            clarification_session=clarification_session,
         )
         self.store.write_state(state)
         last_sync = self._sync_requirement_state(state)
@@ -353,8 +823,13 @@ class PhaseOneWorkflow:
         quality_report: dict[str, object],
         gap_report: dict[str, object],
         latest_decision: dict[str, object] | None,
+        clarification_session: dict[str, object] | None,
     ) -> None:
         run_id = str(state["run_id"])
+        shadow_quality = self._write_clarification_policy_shadow(
+            model=model,
+            artifact_paths=artifact_paths,
+        )
         if current_question is not None:
             status = "waiting_requirement_clarification"
             current_phase = "requirement_clarification"
@@ -367,6 +842,18 @@ class PhaseOneWorkflow:
                 "remaining_blocking_count": remaining_blocking_count,
             }
             allowed = ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS
+        elif remaining_blocking_count > 0:
+            status = "waiting_requirement_clarification_continue"
+            current_phase = "requirement_clarification"
+            checkpoint = {
+                "checkpoint_id": f"checkpoint_requirement_clarification_continue_{run_id}",
+                "type": "requirement_clarification_continue",
+                "artifact_ref": f"requirement_model_v2_r{model.revision}",
+                "artifact_path": artifact_paths["requirement_model"],
+                "remaining_blocking_count": remaining_blocking_count,
+                "session_limit_reached": True,
+            }
+            allowed = ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS
         else:
             status = "waiting_requirement_approval"
             current_phase = status
@@ -390,10 +877,34 @@ class PhaseOneWorkflow:
                 "quality_reports": {
                     "requirement_model_v2": quality_report,
                     "requirement_gaps": gap_report_summary(gap_report),
+                    "requirement_clarification_policy_shadow": shadow_quality,
                 },
                 "latest_requirement_decision": latest_decision,
+                "requirement_clarification_session": clarification_session,
             }
         )
+
+    def _write_clarification_policy_shadow(
+        self,
+        *,
+        model: RequirementModelV2,
+        artifact_paths: dict[str, str],
+    ) -> dict[str, object]:
+        """Ghi shadow report theo kiểu fail-open; không có decision authority."""
+
+        try:
+            report = build_clarification_policy_shadow(model)
+            artifact_paths[SHADOW_ARTIFACT_KEY] = self.store.relative(
+                self.store.write_json_artifact(
+                    model.run_id,
+                    f"{SHADOW_ARTIFACT_PREFIX}_r{model.revision}.json",
+                    report,
+                )
+            )
+            return shadow_quality_summary(report)
+        except Exception as exc:  # Shadow observability không được chặn workflow chính.
+            artifact_paths.pop(SHADOW_ARTIFACT_KEY, None)
+            return shadow_error_summary(exc)
 
     def _normalized_artifacts(self, state: dict[str, object]) -> dict[str, str]:
         value = state.get("latest_artifacts")
@@ -419,6 +930,23 @@ class PhaseOneWorkflow:
                 "status": decision.get("status"),
                 "answered_by": decision.get("answered_by"),
             }
+        quality_reports = state.get("quality_reports")
+        requirement_quality = (
+            quality_reports.get("requirement_model_v2")
+            if isinstance(quality_reports, dict)
+            else None
+        )
+        checklist = (
+            requirement_quality.get("quality_checklist")
+            if isinstance(requirement_quality, dict)
+            else None
+        )
+        if isinstance(checklist, dict):
+            context["quality_checklist"] = {
+                "status": checklist.get("status"),
+                "blocking_failure_count": checklist.get("blocking_failure_count", 0),
+                "blocking_question_ids": checklist.get("blocking_question_ids", []),
+            }
         return context
 
     def _sync_requirement_state(self, state: dict[str, object]) -> dict[str, object]:
@@ -439,6 +967,12 @@ class PhaseOneWorkflow:
             question_text = question.get("text") if isinstance(question, dict) else ""
             return (
                 f"Requirement V2 cần anh làm rõ: {question_text} "
+                f"Sync status={last_sync.get('status')}."
+            )
+        if state.get("status") == "waiting_requirement_clarification_continue":
+            return (
+                "Phiên làm rõ Requirement V2 đã đủ 5 câu; vẫn còn câu hỏi blocking. "
+                f"Chỉ dùng clarify_more khi người dùng muốn mở thêm một lượt. "
                 f"Sync status={last_sync.get('status')}."
             )
         return (
@@ -483,7 +1017,11 @@ class PhaseOneWorkflow:
                 artifact_paths=normalized_artifacts,
             )
             waiting_text = "Run vẫn đang chờ anh review design trước khi sang Phase 3."
-        elif checkpoint_type in {"requirement_approval", "requirement_clarification"} and "requirement_packet" in normalized_artifacts:
+        elif checkpoint_type in {
+            "requirement_approval",
+            "requirement_clarification",
+            "requirement_clarification_continue",
+        } and "requirement_packet" in normalized_artifacts:
             last_sync = sync_requirement_checkpoint(
                 store=self.store,
                 settings=self.settings,
@@ -494,6 +1032,8 @@ class PhaseOneWorkflow:
             )
             if checkpoint_type == "requirement_clarification":
                 waiting_text = "Run vẫn đang chờ anh trả lời câu hỏi làm rõ requirement hiện tại."
+            elif checkpoint_type == "requirement_clarification_continue":
+                waiting_text = "Phiên làm rõ đã đạt giới hạn; dùng continue_run để mở tối đa 5 câu tiếp theo."
             else:
                 waiting_text = "Run vẫn đang chờ anh duyệt requirement trước khi chuyển sang design."
         else:
@@ -519,6 +1059,8 @@ class PhaseOneWorkflow:
         allowed_next_actions = [str(action) for action in state.get("allowed_next_actions", []) if action]
         last_error = state.get("last_error")
         latest_artifacts = state.get("latest_artifacts")
+        public_artifacts = dict(latest_artifacts) if isinstance(latest_artifacts, dict) else {}
+        public_artifacts.pop("requirement_loop_session", None)
         legacy_verification_repair = (
             str(state.get("status") or "") == "blocked"
             and isinstance(last_error, dict)
@@ -566,7 +1108,7 @@ class PhaseOneWorkflow:
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
-            "latest_artifacts": latest_artifacts if isinstance(latest_artifacts, dict) else {},
+            "latest_artifacts": public_artifacts,
             "pending_checkpoint": state.get("pending_checkpoint"),
             "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
@@ -578,6 +1120,9 @@ class PhaseOneWorkflow:
             "developer_execution": state.get("developer_execution", {}),
             "traceability_diagnostics": state.get("traceability_diagnostics", []),
         }
+        requirement_execution = self._requirement_execution_summary(str(state.get("run_id") or ""))
+        if requirement_execution is not None:
+            response["requirement_execution"] = requirement_execution
         checkpoint = response.get("pending_checkpoint")
         last_sync = response.get("last_sync")
         last_error = response.get("last_error")
@@ -635,3 +1180,12 @@ class PhaseOneWorkflow:
                 "Anh có thể approve checkpoint để chuyển Draft PR thành Ready for review."
             )
         return response
+
+    def _requirement_execution_summary(self, run_id: str) -> dict[str, object] | None:
+        if not run_id or not self.store.artifact_path(run_id, SESSION_FILENAME).exists():
+            return None
+        try:
+            session = read_requirement_session(store=self.store, run_id=run_id)
+            return requirement_session_summary(session)
+        except HarnessError:
+            return {"schema_version": "requirement_loop_session_v1", "status": "invalid"}

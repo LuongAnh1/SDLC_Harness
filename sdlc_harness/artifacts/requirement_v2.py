@@ -78,6 +78,67 @@ def read_source_snapshot_v2(
     return text
 
 
+def load_source_snapshot_v2(
+    *,
+    store: RuntimeStore,
+    run_id: str,
+    artifact_ref: str,
+) -> UseCaseSource:
+    """Khôi phục source từ snapshot bất biến, không gọi lại adapter bên ngoài."""
+
+    path = (store.repo_root / artifact_ref).resolve()
+    artifacts_dir = store.artifact_path(run_id, "placeholder.json").parent.resolve()
+    if path.parent != artifacts_dir:
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            "Requirement source snapshot is outside its owning run.",
+            run_id=run_id,
+        )
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            "Requirement source snapshot is missing or unreadable.",
+            run_id=run_id,
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HarnessError("source_snapshot_corrupted", "Requirement source snapshot is invalid.", run_id=run_id)
+    source_id = str(payload.get("id") or "")
+    expected_path = _source_snapshot_path(store=store, run_id=run_id, source_id=source_id).resolve()
+    text = payload.get("text")
+    required_text = ("dataset", "use_case", "source_ref", "type", "locator", "fingerprint")
+    if (
+        path != expected_path
+        or payload.get("artifact_version") != SOURCE_SNAPSHOT_VERSION
+        or payload.get("run_id") != run_id
+        or payload.get("artifact_ref") != artifact_ref
+        or not isinstance(text, str)
+        or not source_id
+        or any(not isinstance(payload.get(name), str) for name in required_text)
+        or _fingerprint(text) != payload.get("fingerprint")
+    ):
+        raise HarnessError(
+            "source_snapshot_corrupted",
+            "Requirement source snapshot identity or fingerprint is invalid.",
+            run_id=run_id,
+        )
+    revision = payload.get("revision")
+    if revision is not None and not isinstance(revision, str):
+        raise HarnessError("source_snapshot_corrupted", "Requirement source revision is invalid.", run_id=run_id)
+    return UseCaseSource(
+        dataset=str(payload["dataset"]),
+        use_case=str(payload["use_case"]),
+        source_ref=str(payload["source_ref"]),
+        source_path=None,
+        text=text,
+        source_id=source_id,
+        source_type=str(payload["type"]),
+        locator=str(payload["locator"]),
+        revision=revision,
+    )
+
+
 def read_requirement_source_texts(
     *,
     store: RuntimeStore,

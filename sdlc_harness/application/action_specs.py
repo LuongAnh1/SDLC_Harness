@@ -28,6 +28,13 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         },
         "confirmation": "confirm",
     },
+    "clarify_more": {
+        "command": "clarify-more",
+        "required": set(),
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "standard",
+    },
     "continue_run": {
         "command": "continue-run",
         "required": set(),
@@ -47,6 +54,13 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "required": set(),
         "optional": set(),
         "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
+        "confirmation": "standard",
+    },
+    "revalidate_requirement": {
+        "command": "revalidate-requirement",
+        "required": set(),
+        "optional": set(),
+        "overrides": set(),
         "confirmation": "standard",
     },
     "revalidate_implementation_plan": {
@@ -104,6 +118,7 @@ WORKFLOW_NODES = (
 PHASE_NODES = {
     "requirement_drafting": "requirement",
     "requirement_clarification": "requirement",
+    "waiting_requirement_clarification_continue": "requirement",
     "waiting_requirement_approval": "requirement",
     "design_drafting": "design",
     "design_revalidating": "design",

@@ -544,6 +544,31 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
                 )
             self.assertEqual(invalid.exception.error_code, "requirement_model_v2_validation_failed")
 
+    def test_repair_guidance_routes_acceptance_ids_and_new_questions_correctly(self) -> None:
+        instruction = RequirementModelV2Refiner._repair_instruction(
+            {
+                "report_dict": {
+                    "issues": [
+                        {
+                            "code": "scenario_coverage_missing",
+                            "path": "scenario_contract.scenarios",
+                            "message": "Requirement behavior is not covered by a scenario: AC-6.",
+                        },
+                        {
+                            "code": "unknown_without_question",
+                            "path": "acceptance_criteria[4]",
+                            "message": "Unknown requirement must reference an open question.",
+                        },
+                    ]
+                }
+            },
+            use_delta=True,
+        )
+
+        self.assertIn("AC-* IDs go to scenario.acceptance_refs", instruction)
+        self.assertIn("scenario.open_question_refs", instruction)
+        self.assertIn("surface", instruction)
+
 
 if __name__ == "__main__":
     unittest.main()

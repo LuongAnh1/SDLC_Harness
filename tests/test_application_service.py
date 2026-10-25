@@ -273,6 +273,7 @@ class ApplicationServiceTests(unittest.TestCase):
             ("approve-checkpoint", {"run_id": "run_1"}),
             ("continue-run", {"run_id": "run_1"}),
             ("revalidate-design", {"run_id": "run_1"}),
+            ("revalidate-requirement", {"run_id": "run_1"}),
             ("revalidate-implementation-plan", {"run_id": "run_1"}),
             ("revalidate-implementation", {"run_id": "run_1"}),
             ("adopt-run-workspace", {"run_id": "run_1"}),
@@ -419,6 +420,8 @@ class ApplicationServiceTests(unittest.TestCase):
             workflow_type.return_value.start_or_get_run.return_value = {"ok": True}
             workflow_type.return_value.start_from_jira.return_value = {"ok": True}
             workflow_type.return_value.answer_clarification.return_value = {"ok": True}
+            workflow_type.return_value.revalidate_requirement.return_value = {"ok": True}
+            workflow_type.return_value.clarify_more.return_value = {"ok": True}
 
             self.service.execute(
                 self.command(
@@ -443,6 +446,8 @@ class ApplicationServiceTests(unittest.TestCase):
                     },
                 )
             )
+            self.service.execute(self.command("revalidate-requirement", {"run_id": "run_1"}))
+            self.service.execute(self.command("clarify-more", {"run_id": "run_1"}))
 
         workflow_type.return_value.start_or_get_run.assert_called_once_with(
             dataset="eTour", use_case="UC1", requested_by="owner"
@@ -456,6 +461,8 @@ class ApplicationServiceTests(unittest.TestCase):
             answer="Use the approved rule.",
             answered_by="owner",
         )
+        workflow_type.return_value.revalidate_requirement.assert_called_once_with(run_id="run_1")
+        workflow_type.return_value.clarify_more.assert_called_once_with(run_id="run_1")
 
     def test_phase_two_three_four_commands_dispatch_to_current_workflows(self) -> None:
         self.write_state()
@@ -486,6 +493,26 @@ class ApplicationServiceTests(unittest.TestCase):
             run_id="run_1"
         )
         phase_four.return_value.revalidate_implementation.assert_called_once_with(run_id="run_1")
+
+    def test_continue_run_routes_requirement_pause_to_phase_one(self) -> None:
+        self.write_state(
+            status="requirement_paused",
+            current_phase="requirement_drafting",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "waiting_requirement_approval"}
+        with (
+            patch(
+                "sdlc_harness.application.service.PhaseOneWorkflow.continue_requirement_run",
+                return_value=response,
+            ) as phase_one_continue,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four,
+        ):
+            result = self.service.execute(self.command("continue-run", {"run_id": "run_1"}))
+
+        self.assertEqual(result, response)
+        phase_one_continue.assert_called_once_with(run_id="run_1")
+        phase_four.return_value.continue_until_implementation_checkpoint.assert_not_called()
 
     def test_approval_and_workspace_commands_dispatch(self) -> None:
         self.write_state()

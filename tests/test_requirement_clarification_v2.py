@@ -130,6 +130,8 @@ class RequirementClarificationV2Test(unittest.TestCase):
         payload["open_questions"] = []
         for item in payload["flows"]["alternatives"] + payload["flows"]["exceptions"]:
             item["open_question_refs"] = []
+            item["steps"] = [f"Execute the documented {item['id']} branch behavior."]
+            item["outcome"] = f"The {item['id']} branch reaches an observable terminal state."
         payload["business_rules"][0]["open_question_refs"] = []
         resolved_acceptance = {
             "AC-1": ("The system rejects a duplicate cultural heritage record.", ["E-13"]),
@@ -298,6 +300,28 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertEqual(updated_ui["open_question_refs"], [])
         self.assertNotIn("Q-4", result.model.scenario_contract["scenarios"][4]["open_question_refs"])
 
+    def test_accepted_answer_may_refine_a_required_surface_linked_to_question(self) -> None:
+        proposal = self.accepted_q4()
+        proposal["surface_updates"] = [
+            {
+                "scenario_id": "SC-5",
+                "surface": "ui",
+                "status": "required",
+                "reason": "The operator sees the answer-backed duplicate rejection result.",
+            }
+        ]
+        result = RequirementClarificationUpdater(ScriptedClient([proposal])).apply(
+            source_text_by_id={"SRC-1": self.source_text},
+            model=self.refinement_result().model,
+            question_id="Q-4",
+            answer="Use normalized heritage name and location.",
+            answered_by="owner",
+        )
+        updated_ui = result.model.scenario_contract["scenarios"][4]["surfaces"]["ui"]
+        self.assertEqual(updated_ui["status"], "required")
+        self.assertEqual(updated_ui["reason"], "The operator sees the answer-backed duplicate rejection result.")
+        self.assertEqual(updated_ui["open_question_refs"], [])
+
     def test_missing_required_surface_update_gets_one_bounded_repair(self) -> None:
         payload = deepcopy(self.payload)
         payload["scenario_contract"]["scenarios"][4]["surfaces"]["ui"]["status"] = "clarification_required"
@@ -450,7 +474,13 @@ class RequirementClarificationV2Test(unittest.TestCase):
                         "follow_up_text": None,
                         "surface_updates": [],
                         "updates": [
-                            {"requirement_id": "AF-1", "fields": {"outcome": "Stop without saving."}},
+                            {
+                                "requirement_id": "AF-1",
+                                "fields": {
+                                    "steps": ["Stop the insertion flow."],
+                                    "outcome": "Stop without saving."
+                                },
+                            },
                             {"requirement_id": "AC-3", "fields": {"text": "Cancelling stops without saving.", "verifies": ["AF-1"]}},
                         ],
                     },
@@ -468,7 +498,13 @@ class RequirementClarificationV2Test(unittest.TestCase):
                         "follow_up_text": None,
                         "surface_updates": [],
                         "updates": [
-                            {"requirement_id": "EF-2", "fields": {"outcome": "Keep the form for retry."}},
+                            {
+                                "requirement_id": "EF-2",
+                                "fields": {
+                                    "steps": ["Report the interruption and preserve entered data."],
+                                    "outcome": "Keep the form for retry."
+                                },
+                            },
                             {"requirement_id": "AC-5", "fields": {"text": "A connection interruption keeps the form for retry.", "verifies": ["EF-2"]}},
                         ],
                     },

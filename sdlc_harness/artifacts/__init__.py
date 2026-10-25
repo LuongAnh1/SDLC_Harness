@@ -6,6 +6,7 @@ workflow sở hữu vòng đời, còn ``storage`` sở hữu state/runtime layo
 """
 
 from .requirement_v2 import (
+    load_source_snapshot_v2,
     read_requirement_model_v2,
     read_requirement_source_texts,
     read_source_snapshot_v2,
@@ -37,6 +38,7 @@ from .writers import (
 )
 
 __all__ = [
+    "load_source_snapshot_v2",
     "ApprovedRequirementInput",
     "CanonicalRequirementInput",
     "GAP_REPORT_FILENAME",

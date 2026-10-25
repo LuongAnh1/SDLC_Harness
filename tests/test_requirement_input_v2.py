@@ -134,6 +134,8 @@ class RequirementInputV2Test(unittest.TestCase):
         payload["open_questions"] = []
         for item in payload["flows"]["alternatives"] + payload["flows"]["exceptions"]:
             item["open_question_refs"] = []
+            item["steps"] = [f"Execute the approved {item['id']} branch behavior."]
+            item["outcome"] = f"The {item['id']} branch reaches an observable terminal state."
         payload["business_rules"][0]["open_question_refs"] = []
         resolved_acceptance = {
             "AC-1": ("The system rejects a duplicate cultural heritage record.", ["E-13"]),

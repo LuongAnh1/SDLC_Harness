@@ -27,6 +27,7 @@ _CATEGORY_PRIORITY = {
     "observable_behavior": 3,
     "acceptance_criteria": 4,
 }
+_LEVEL_PRIORITY = {"high": 0, "medium": 1, "low": 2}
 
 
 @dataclass(frozen=True)
@@ -36,6 +37,10 @@ class CurrentRequirementQuestion:
     category: str
     affects: list[str]
     answer_guidance: str | None
+    why_it_matters: str | None = None
+    answer_mode: str = "short"
+    options: list[dict[str, object]] | None = None
+    recommended_option: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -44,6 +49,10 @@ class CurrentRequirementQuestion:
             "category": self.category,
             "affects": list(self.affects),
             "answer_guidance": self.answer_guidance,
+            "why_it_matters": self.why_it_matters,
+            "answer_mode": self.answer_mode,
+            "options": deepcopy(self.options or []),
+            "recommended_option": self.recommended_option,
         }
 
 
@@ -92,7 +101,11 @@ class RequirementClarificationResult:
         }
 
 
-def select_current_requirement_question(model: RequirementModelV2) -> RequirementQuestionSelection:
+def select_current_requirement_question(
+    model: RequirementModelV2,
+    *,
+    allowed_question_ids: set[str] | None = None,
+) -> RequirementQuestionSelection:
     """Select one dependency-ready blocking question using stable priority rules."""
 
     questions = [item for item in model.open_questions if isinstance(item, dict)]
@@ -101,8 +114,11 @@ def select_current_requirement_question(model: RequirementModelV2) -> Requiremen
         for item in questions
         if item.get("status") == "open" and item.get("effective_blocking") is True
     ]
+    total_blocking = len(blocking)
+    if allowed_question_ids is not None:
+        blocking = [item for item in blocking if str(item.get("id") or "") in allowed_question_ids]
     if not blocking:
-        return RequirementQuestionSelection(current_question=None, remaining_blocking_count=0)
+        return RequirementQuestionSelection(current_question=None, remaining_blocking_count=total_blocking)
     statuses = {str(item.get("id")): str(item.get("status")) for item in questions}
     eligible = [
         item
@@ -127,9 +143,42 @@ def select_current_requirement_question(model: RequirementModelV2) -> Requiremen
                 if selected.get("answer_guidance") is not None
                 else None
             ),
+            why_it_matters=(
+                str(selected.get("why_it_matters"))
+                if selected.get("why_it_matters") is not None
+                else None
+            ),
+            answer_mode=str(selected.get("answer_mode") or "short"),
+            options=(
+                [deepcopy(item) for item in selected.get("options", []) if isinstance(item, dict)]
+                if isinstance(selected.get("options"), list)
+                else []
+            ),
+            recommended_option=(
+                str(selected.get("recommended_option"))
+                if selected.get("recommended_option") is not None
+                else None
+            ),
         ),
-        remaining_blocking_count=len(blocking),
+        remaining_blocking_count=total_blocking,
     )
+
+
+def resolve_clarification_answer(question: dict[str, object], answer: str) -> str:
+    """Đổi lựa chọn A/B/... thành nội dung đáp án trước khi đưa vào update loop."""
+
+    normalized = answer.strip()
+    options = question.get("options")
+    if not isinstance(options, list) or not options:
+        return normalized
+    key = normalized.rstrip(".)").strip().upper()
+    for option in options:
+        if not isinstance(option, dict) or str(option.get("key") or "").upper() != key:
+            continue
+        value = str(option.get("answer") or option.get("label") or "").strip()
+        if value:
+            return value
+    return normalized
 
 
 def normalize_clarification_answer(answer: str) -> str:
@@ -280,7 +329,9 @@ class RequirementClarificationUpdater:
             raise HarnessError("requirement_answer_update_failed", "Every clarification update must be an object.")
         if any(not isinstance(item, dict) for item in surface_updates):
             raise HarnessError("requirement_answer_update_failed", "Every surface update must be an object.")
-        expected_surface_targets = _clarification_surface_targets(model.to_dict(), question.id)
+        model_data = model.to_dict()
+        required_surface_targets = _clarification_surface_targets(model_data, question.id)
+        allowed_surface_targets = _question_surface_targets(model_data, question.id)
         if resolution == "insufficient":
             if not isinstance(follow_up, str) or not follow_up.strip():
                 raise HarnessError(
@@ -308,16 +359,18 @@ class RequirementClarificationUpdater:
                 (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
                 for item in surface_updates
             ]
+            proposed_surface_target_set = set(proposed_surface_targets)
             if (
-                len(proposed_surface_targets) != len(set(proposed_surface_targets))
-                or set(proposed_surface_targets) != expected_surface_targets
+                len(proposed_surface_targets) != len(proposed_surface_target_set)
+                or not proposed_surface_target_set.issubset(allowed_surface_targets)
+                or not required_surface_targets.issubset(proposed_surface_target_set)
             ):
                 raise HarnessError(
                     "requirement_answer_update_failed",
-                    "Accepted answer must update exactly the clarification_required surfaces linked to the current question.",
+                    "Accepted answer must update every clarification_required surface and may only update other surfaces linked to the current question.",
                 )
 
-        data = model.to_dict()
+        data = model_data
         data["revision"] = model.revision + 1
         decision_id = _next_decision_id(data.get("decisions"))
         previous = _latest_question_decision(data.get("decisions"), question.id)
@@ -471,12 +524,19 @@ class RequirementClarificationUpdater:
         return deepcopy(decision)
 
 
-def _question_sort_key(item: dict[str, Any]) -> tuple[int, str, int, str]:
+def _question_sort_key(item: dict[str, Any]) -> tuple[int, int, int, str, int, str]:
     category = str(item.get("category") or "")
     item_id = str(item.get("id") or "")
     match = re.fullmatch(r"Q-([1-9]\d*)", item_id)
     number = int(match.group(1)) if match else 2**31
-    return (_CATEGORY_PRIORITY.get(category, len(_CATEGORY_PRIORITY)), category, number, item_id)
+    return (
+        _LEVEL_PRIORITY.get(str(item.get("impact") or "high"), len(_LEVEL_PRIORITY)),
+        _LEVEL_PRIORITY.get(str(item.get("uncertainty") or "high"), len(_LEVEL_PRIORITY)),
+        _CATEGORY_PRIORITY.get(category, len(_CATEGORY_PRIORITY)),
+        category,
+        number,
+        item_id,
+    )
 
 
 def _next_decision_id(value: object) -> str:
@@ -518,6 +578,22 @@ def _clarification_surface_targets(data: dict[str, Any], question_id: str) -> se
                 and surface.get("status") == "clarification_required"
                 and question_id in _string_list(surface.get("open_question_refs"))
             ):
+                targets.add((scenario_id, str(surface_name)))
+    return targets
+
+
+def _question_surface_targets(data: dict[str, Any], question_id: str) -> set[tuple[str, str]]:
+    """Return every scenario surface explicitly linked to the current question."""
+
+    targets: set[tuple[str, str]] = set()
+    contract = data.get("scenario_contract") if isinstance(data.get("scenario_contract"), dict) else {}
+    for scenario in contract.get("scenarios", []) if isinstance(contract.get("scenarios"), list) else []:
+        if not isinstance(scenario, dict):
+            continue
+        scenario_id = str(scenario.get("id") or "")
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        for surface_name, surface in surfaces.items():
+            if isinstance(surface, dict) and question_id in _string_list(surface.get("open_question_refs")):
                 targets.add((scenario_id, str(surface_name)))
     return targets
 

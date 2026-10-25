@@ -1159,11 +1159,13 @@ def _jira_comment_body(
     question_text = str(current_question.get("text") or "") if isinstance(current_question, dict) else ""
     remaining = context.get("remaining_blocking_count")
     decision = context.get("decision_summary")
-    next_action = (
-        "answer_clarification, get_status, sync_run, or cancel_run"
-        if checkpoint_status == "waiting_requirement_clarification"
-        else "approve_checkpoint, request_change, cancel_run, or get_status"
-    )
+    checklist = context.get("quality_checklist")
+    if checkpoint_status == "waiting_requirement_clarification":
+        next_action = "answer_clarification, revalidate_requirement, get_status, sync_run, or cancel_run"
+    elif checkpoint_status == "waiting_requirement_clarification_continue":
+        next_action = "clarify_more, revalidate_requirement, get_status, sync_run, or cancel_run"
+    else:
+        next_action = "approve_checkpoint, clarify_more, revalidate_requirement, request_change, cancel_run, or get_status"
     summary_items = [
         f"Goal: {goal}",
         f"Alternative / exception flows: {len(alternative_flows)} item(s)",
@@ -1179,6 +1181,11 @@ def _jira_comment_body(
         summary_items.append(
             "Latest decision: "
             f"{decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}"
+        )
+    if isinstance(checklist, dict):
+        summary_items.append(
+            "Requirement quality gate: "
+            f"{checklist.get('status')} / blocking failures={checklist.get('blocking_failure_count', 0)}"
         )
 
     return {
@@ -1375,78 +1382,211 @@ def _confluence_storage_body(
         f"<td><strong>{escape(_artifact_label(name))}</strong></td>"
         f"<td><code>{escape(_external_artifact_ref(path))}</code></td>"
         "</tr>"
-        for name, path in artifact_paths.items()
+        for name, path in sorted(artifact_paths.items())
     )
     goal = _section_preview(requirement_text, "Goal", default="See requirement packet.")
-    alternative_flows = _section_items(requirement_text, "Alternative / Exception Flows")
+    actors = _section_items(requirement_text, "Actors")
+    preconditions = _section_items(requirement_text, "Preconditions")
+    main_flow = _section_items(requirement_text, "Main Flow")
+    alternative_flows = _section_items(requirement_text, "Alternative Flows")
+    exception_flows = _section_items(requirement_text, "Exception Flows")
+    postconditions = _section_items(requirement_text, "Postconditions")
+    business_rules = _section_items(requirement_text, "Business Rules")
     acceptance_criteria = _section_items(requirement_text, "Acceptance Criteria")
     open_questions = _section_items(requirement_text, "Open Questions")
-    alternative_lines = "\n".join(f"<li>{escape(item)}</li>" for item in alternative_flows) or "<li>None recorded.</li>"
-    acceptance_lines = "\n".join(f"<li>{escape(item)}</li>" for item in acceptance_criteria) or "<li>None recorded.</li>"
-    open_question_lines = "\n".join(f"<li>{escape(item)}</li>" for item in open_questions) or "<li>None recorded.</li>"
+    human_decisions = _section_items(requirement_text, "Human Decisions")
+    unresolved_questions = [
+        item for item in open_questions if "status: resolved" not in item.lower()
+    ]
+    main_flow_lines = _confluence_review_list(main_flow, empty_text="Chưa có luồng chính.")
+    exception_lines = _confluence_review_list(
+        [*alternative_flows, *exception_flows],
+        empty_text="Không có luồng thay thế hoặc ngoại lệ.",
+    )
+    business_rule_lines = _confluence_review_list(
+        business_rules,
+        empty_text="Không có business rule riêng.",
+    )
+    acceptance_lines = _confluence_review_list(
+        acceptance_criteria,
+        empty_text="Chưa có acceptance criteria.",
+    )
+    decision_lines = _confluence_review_list(
+        human_decisions,
+        empty_text="Chưa có quyết định bổ sung từ người dùng.",
+    )
+    open_question_lines = _confluence_review_list(
+        unresolved_questions,
+        empty_text="Không còn câu hỏi cần làm rõ.",
+    )
     requirement_body = _markdown_to_confluence_storage(requirement_text)
     context = checkpoint_context or {}
     checkpoint_status = str(context.get("status") or "waiting_requirement_approval")
     current_question = context.get("current_question")
     question_text = str(current_question.get("text") or "") if isinstance(current_question, dict) else ""
+    why_it_matters = str(current_question.get("why_it_matters") or "") if isinstance(current_question, dict) else ""
+    options = current_question.get("options") if isinstance(current_question, dict) else []
+    recommended_option = str(current_question.get("recommended_option") or "") if isinstance(current_question, dict) else ""
     remaining = context.get("remaining_blocking_count")
     decision = context.get("decision_summary")
-    question_row = (
-        f"<tr><th>Current question</th><td>{escape(question_text)}</td></tr>" if question_text else ""
-    )
-    remaining_row = (
-        f"<tr><th>Remaining blocking questions</th><td>{escape(str(remaining))}</td></tr>"
-        if remaining is not None
-        else ""
-    )
-    decision_row = ""
+    checklist = context.get("quality_checklist")
+    decision_summary = ""
     if isinstance(decision, dict):
         decision_text = f"{decision.get('id')} / {decision.get('question_id')} / {decision.get('status')}"
-        decision_row = f"<tr><th>Latest decision</th><td>{escape(decision_text)}</td></tr>"
+        decision_summary = f"<p><strong>Quyết định gần nhất:</strong> {escape(decision_text)}</p>"
+    checklist_summary = ""
+    if isinstance(checklist, dict):
+        checklist_summary = (
+            "<p><strong>Requirement quality gate:</strong> "
+            f"{escape(str(checklist.get('status') or 'unknown'))}; "
+            f"blocking failures={escape(str(checklist.get('blocking_failure_count', 0)))}</p>"
+        )
+    is_clarification = checkpoint_status in {
+        "waiting_requirement_clarification",
+        "waiting_requirement_clarification_continue",
+    }
+    is_session_pause = checkpoint_status == "waiting_requirement_clarification_continue"
+    status_title = "CHỜ MỞ PHIÊN TIẾP" if is_session_pause else ("CẦN LÀM RÕ" if is_clarification else "SẴN SÀNG DUYỆT")
+    status_colour = "Yellow" if is_clarification else "Green"
     next_action = (
-        "Answer the current clarification question, sync again, cancel the run, or ask Niko for status."
-        if checkpoint_status == "waiting_requirement_clarification"
-        else "Approve, request changes, cancel the run, or ask Niko for status."
+        "Dùng continue_run để mở phiên làm rõ tiếp theo, tối đa 5 câu."
+        if is_session_pause
+        else (
+            "Trả lời câu hỏi làm rõ hiện tại; Harness sẽ cập nhật requirement và chạy Validator lại."
+            if is_clarification
+            else "Review requirement bên dưới, sau đó duyệt checkpoint để bắt đầu Design Workflow."
+        )
+    )
+    option_items = []
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            key = str(option.get("key") or "").strip()
+            answer = str(option.get("answer") or option.get("label") or "").strip()
+            implication = str(option.get("implication") or "").strip()
+            if key and answer:
+                suffix = f" — {implication}" if implication else ""
+                option_items.append(f"<li><strong>{escape(key)}.</strong> {escape(answer + suffix)}</li>")
+    options_html = f"<ul>{''.join(option_items)}</ul>" if option_items else ""
+    why_html = f"<p><strong>Vì sao cần trả lời:</strong> {escape(why_it_matters)}</p>" if why_it_matters else ""
+    recommendation_html = (
+        f"<p><strong>Gợi ý:</strong> phương án {escape(recommended_option)}.</p>"
+        if recommended_option
+        else ""
+    )
+    clarification_panel = (
+        _confluence_panel(
+            title="Câu hỏi cần làm rõ",
+            body=(
+                f"<p>{escape(question_text)}</p>"
+                f"{why_html}{options_html}{recommendation_html}"
+                f"<p><strong>Số câu hỏi blocking còn lại:</strong> {escape(str(remaining))}</p>"
+                f"{decision_summary}"
+            ),
+            macro="warning",
+        )
+        if question_text
+        else ""
+    )
+    actors_text = ", ".join(actors) if actors else "Chưa xác định"
+    precondition_text = "; ".join(preconditions) if preconditions else "Không có"
+    postcondition_text = "; ".join(postconditions) if postconditions else "Không có"
+    status_macro = _confluence_status_macro(status_title, colour=status_colour)
+    raw_packet = _confluence_expand("Requirement Packet đầy đủ", requirement_body)
+    technical_artifacts = _confluence_expand(
+        "Artifact kỹ thuật và đường dẫn truy vết",
+        (
+            "<p>Các đường dẫn dưới đây phục vụ Harness và việc truy vết nội bộ.</p>"
+            '<table data-layout="wide"><tbody>'
+            "<tr><th>Artifact</th><th>Artifact ref</th></tr>"
+            f"{artifact_rows}"
+            "</tbody></table>"
+        ),
     )
 
     return f"""
 <!-- {escape(_checkpoint_marker(source_ref, "requirement"))} -->
 <h1>{escape(_checkpoint_title(source_ref, "requirement"))}</h1>
-<p>This page is generated by SDLC_Harness Phase 1 so the requirement packet can be reviewed before design work starts.</p>
-<table>
+<p>Trang review được SDLC_Harness Phase 1 tạo tự động trước khi chuyển sang thiết kế.</p>
+<p>{status_macro}</p>
+{_confluence_panel(title="Việc cần làm tiếp theo", body=f"<p>{escape(next_action)}</p>", macro="info")}
+{clarification_panel}
+{checklist_summary}
+<h2>Tổng quan checkpoint</h2>
+<table data-layout="wide">
 <tbody>
-<tr><th>Run</th><td><code>{escape(run_id)}</code></td></tr>
-<tr><th>Source</th><td><code>{escape(source_ref)}</code></td></tr>
-<tr><th>Status</th><td><strong>{escape(checkpoint_status)}</strong></td></tr>
-{question_row}
-{remaining_row}
-{decision_row}
-<tr><th>Next action</th><td>{escape(next_action)}</td></tr>
+<tr><th>Run</th><td><code>{escape(run_id)}</code></td><th>Nguồn</th><td><code>{escape(source_ref)}</code></td></tr>
+<tr><th>Trạng thái kỹ thuật</th><td>{escape(checkpoint_status)}</td><th>Câu hỏi blocking</th><td>{len(unresolved_questions)}</td></tr>
 </tbody>
 </table>
-<h2>Review Summary</h2>
-<ul>
-<li><strong>Goal:</strong> {escape(goal)}</li>
-<li><strong>Alternative / exception flows:</strong> {len(alternative_flows)} item(s)</li>
-<li><strong>Acceptance criteria:</strong> {len(acceptance_criteria)} item(s)</li>
-<li><strong>Open questions:</strong> {len(open_questions)} item(s)</li>
-</ul>
-<h3>Alternative / Exception Flows</h3>
-<ul>{alternative_lines}</ul>
-<h3>Acceptance Criteria</h3>
-<ul>{acceptance_lines}</ul>
-<h3>Open Questions</h3>
-<ul>{open_question_lines}</ul>
-<h2>Artifacts</h2>
-<table>
+<h2>Phạm vi nghiệp vụ</h2>
+<table data-layout="wide">
 <tbody>
-<tr><th>Artifact</th><th>Artifact ref</th></tr>
-{artifact_rows}
+<tr><th>Mục tiêu</th><td>{escape(goal)}</td></tr>
+<tr><th>Actor</th><td>{escape(actors_text)}</td></tr>
+<tr><th>Điều kiện bắt đầu</th><td>{escape(precondition_text)}</td></tr>
+<tr><th>Kết quả mong đợi</th><td>{escape(postcondition_text)}</td></tr>
 </tbody>
 </table>
-<h2>Requirement Packet</h2>
-{requirement_body}
+<h2>Luồng nghiệp vụ</h2>
+<h3>Luồng chính</h3>
+{main_flow_lines}
+<h3>Luồng thay thế và ngoại lệ</h3>
+{exception_lines}
+<h2>Quy tắc nghiệp vụ</h2>
+{business_rule_lines}
+<h2>Acceptance Criteria <small>({len(acceptance_criteria)})</small></h2>
+{acceptance_lines}
+<h2>Quyết định và câu hỏi</h2>
+<h3>Quyết định đã chốt</h3>
+{decision_lines}
+<h3>Câu hỏi chưa giải quyết</h3>
+{open_question_lines}
+<hr />
+{raw_packet}
+{technical_artifacts}
 """.strip()
+
+
+def _confluence_review_list(items: list[str], *, empty_text: str) -> str:
+    """Render danh sách review rõ ràng, giữ nội dung requirement đã escape."""
+
+    values = items or [empty_text]
+    return "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in values) + "</ul>"
+
+
+def _confluence_status_macro(title: str, *, colour: str) -> str:
+    """Render trạng thái nổi bật bằng macro chuẩn của Confluence Storage Format."""
+
+    return (
+        '<ac:structured-macro ac:name="status">'
+        f'<ac:parameter ac:name="title">{escape(title)}</ac:parameter>'
+        f'<ac:parameter ac:name="colour">{escape(colour)}</ac:parameter>'
+        '</ac:structured-macro>'
+    )
+
+
+def _confluence_panel(*, title: str, body: str, macro: str) -> str:
+    """Đóng gói thông tin quan trọng trong panel native của Confluence."""
+
+    return (
+        f'<ac:structured-macro ac:name="{escape(macro)}">'
+        f'<ac:parameter ac:name="title">{escape(title)}</ac:parameter>'
+        f'<ac:rich-text-body>{body}</ac:rich-text-body>'
+        '</ac:structured-macro>'
+    )
+
+
+def _confluence_expand(title: str, body: str) -> str:
+    """Thu gọn nội dung kỹ thuật để trang chính tập trung vào quyết định review."""
+
+    return (
+        '<ac:structured-macro ac:name="expand">'
+        f'<ac:parameter ac:name="title">{escape(title)}</ac:parameter>'
+        f'<ac:rich-text-body>{body}</ac:rich-text-body>'
+        '</ac:structured-macro>'
+    )
 
 
 def _confluence_design_storage_body(

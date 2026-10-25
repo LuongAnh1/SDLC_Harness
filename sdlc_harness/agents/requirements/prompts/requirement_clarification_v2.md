@@ -20,7 +20,9 @@ Rules:
 - Judge whether the human answer is sufficient to resolve the current question.
 - If insufficient, return a concise follow-up question and empty `updates` and `surface_updates` lists.
 - If accepted, return null follow_up_text and exactly one update entry for every ID in `affects`.
-- For an accepted answer, return exactly one `surface_updates` entry for every surface whose current status is `clarification_required` and whose `open_question_refs` contains the current question. Return an empty list when there are no such surfaces.
+- For an accepted answer, return exactly one `surface_updates` entry for every surface whose current status is `clarification_required` and whose `open_question_refs` contains the current question.
+- You may also update a `required` surface linked to the current question when the answer makes its reason more precise. Never update a surface that is not linked to the current question.
+- Return an empty list when no linked surface needs an update.
 - A surface update may set `required`, `not_applicable`, or keep `clarification_required` only when another open question still controls it. Explain the answer-backed result in `reason`.
 - Change only business fields needed to apply the answer. Never include IDs, status, decision, revision, evidence, question status, or validation fields in `fields`.
 - Use only the following editable fields and exact JSON value types:

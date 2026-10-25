@@ -8,12 +8,14 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.core.config import load_settings, repo_root
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.sources.fixtures import UseCaseSource, load_use_case
 from sdlc_harness.sources.jira import load_jira_issue_source
@@ -225,7 +227,12 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(response["requirement_contract_version"], "v2")
         self.assertIn("requirement_model", response["latest_artifacts"])
         self.assertIn("requirement_gap_report", response["latest_artifacts"])
+        self.assertIn("requirement_clarification_policy_shadow", response["latest_artifacts"])
         self.assertTrue(response["quality_reports"]["requirement_model_v2"]["final_report"]["ok"])
+        self.assertEqual(
+            response["quality_reports"]["requirement_clarification_policy_shadow"]["status"],
+            "observed",
+        )
         self.assertEqual(
             response["quality_reports"]["requirement_gaps"]["status"],
             "clear",
@@ -241,7 +248,152 @@ class PhaseOneTest(unittest.TestCase):
         self.assertTrue((run_dir / "artifacts" / "requirement_validation_v2_r1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "requirement_decisions_v2_r1.json").exists())
         self.assertTrue((run_dir / "artifacts" / "requirement_gap_report_v1.json").exists())
+        self.assertTrue(
+            (run_dir / "artifacts" / "requirement_clarification_policy_shadow_v1_r1.json").exists()
+        )
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
+
+    def test_revalidate_requirement_is_deterministic_only_and_keeps_revision(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        created = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        run_id = str(created["run_id"])
+        model_ref = str(created["latest_artifacts"]["requirement_model"])
+
+        with patch.object(workflow.coverage_reviewer, "review", wraps=workflow.coverage_reviewer.review) as review:
+            result = workflow.revalidate_requirement(run_id=run_id)
+
+        self.assertFalse(review.called)
+        self.assertEqual(result["status"], "waiting_requirement_approval")
+        self.assertEqual(result["latest_artifacts"]["requirement_model"], model_ref)
+        self.assertIn("clarify_more", result["allowed_next_actions"])
+        self.assertEqual(
+            result["quality_reports"]["requirement_model_v2"]["mode"],
+            "deterministic_only",
+        )
+        initial_shadow = json.loads(
+            (
+                self.repo_root
+                / str(created["latest_artifacts"]["requirement_clarification_policy_shadow"])
+            ).read_text(encoding="utf-8")
+        )
+        revalidated_shadow = json.loads(
+            (
+                self.repo_root
+                / str(result["latest_artifacts"]["requirement_clarification_policy_shadow"])
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(initial_shadow["report_digest"], revalidated_shadow["report_digest"])
+        self.assertTrue(
+            (self.runtime_root / "runs" / run_id / "artifacts" / "requirement_revalidation_v1_r1.json").exists()
+        )
+
+    def test_shadow_policy_failure_does_not_block_phase1(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+
+        with patch(
+            "sdlc_harness.workflows.phase1.build_clarification_policy_shadow",
+            side_effect=RuntimeError("shadow unavailable"),
+        ):
+            response = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertEqual(response["status"], "waiting_requirement_approval")
+        self.assertNotIn("requirement_clarification_policy_shadow", response["latest_artifacts"])
+        self.assertEqual(
+            response["quality_reports"]["requirement_clarification_policy_shadow"]["status"],
+            "warning",
+        )
+        self.assertIsNone(response["last_error"])
+
+    def test_clarify_more_is_the_only_action_that_runs_semantic_coverage_again(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        created = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        run_id = str(created["run_id"])
+
+        with patch.object(workflow.coverage_reviewer, "review", wraps=workflow.coverage_reviewer.review) as review:
+            result = workflow.clarify_more(run_id=run_id)
+
+        review.assert_called_once()
+        self.assertTrue(review.call_args.kwargs["semantic"])
+        self.assertEqual(review.call_args.kwargs["question_limit"], 5)
+        self.assertEqual(result["status"], "waiting_requirement_approval")
+
+    def test_clarify_more_can_open_one_bounded_semantic_question_session(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        created = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        run_id = str(created["run_id"])
+        model_ref = Path(str(created["latest_artifacts"]["requirement_model"]))
+        if not model_ref.is_absolute():
+            model_ref = self.repo_root / model_ref
+        model = json.loads(model_ref.read_text(encoding="utf-8"))
+        scenario = model["scenario_contract"]["scenarios"][0]
+        affected_ref = next(
+            ref
+            for surface in scenario["surfaces"].values()
+            for ref in surface["requirement_refs"]
+        )
+        evidence_ref = str(model["evidence"][0]["id"])
+        analysis = {
+            "schema_version": "clarification_analysis_v1",
+            "source_ref": model["source"]["source_ref"],
+            "requirement_revision": model["revision"],
+            "coverage": [
+                {
+                    "category": category,
+                    "status": "clear",
+                    "requirement_refs": [],
+                    "evidence_refs": [],
+                    "rationale": "Reviewed for this bounded clarification pass.",
+                }
+                for category in (
+                    "functional_scope",
+                    "domain_data",
+                    "interaction_ux",
+                    "quality_attributes",
+                    "integrations",
+                    "edge_failures",
+                    "constraints_tradeoffs",
+                    "terminology",
+                    "completion_signals",
+                    "placeholders",
+                )
+            ],
+            "question_candidates": [
+                {
+                    "category": "completion_signals",
+                    "question": "Which observable signal confirms this requirement is complete?",
+                    "why_it_matters": "The answer changes the acceptance assertion.",
+                    "answer_mode": "short",
+                    "options": [],
+                    "recommended_option": None,
+                    "suggested_answer": None,
+                    "impact": "high",
+                    "uncertainty": "medium",
+                    "affects": [affected_ref],
+                    "evidence_refs": [evidence_ref],
+                }
+            ],
+            "deferred": [],
+        }
+
+        class ScriptedClient:
+            settings = SimpleNamespace(llm_mode="deepseek", llm_structured_max_tokens=8192)
+
+            def __init__(self) -> None:
+                self.calls = 0
+
+            def complete_with_metadata(self, **_kwargs: object) -> LlmCompletion:
+                self.calls += 1
+                return LlmCompletion(content=json.dumps(analysis), finish_reason="stop")
+
+        client = ScriptedClient()
+        workflow.coverage_reviewer.llm_client = client  # type: ignore[assignment]
+        result = workflow.clarify_more(run_id=run_id)
+
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(result["status"], "waiting_requirement_clarification")
+        self.assertEqual(result["pending_checkpoint"]["type"], "requirement_clarification")
+        self.assertEqual(result["pending_checkpoint"]["remaining_blocking_count"], 1)
+        self.assertTrue(str(result["pending_checkpoint"]["artifact_ref"]).endswith("_r2"))
 
     def test_source_failure_keeps_failed_state_and_persists_classified_gap(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
@@ -796,7 +948,11 @@ class PhaseOneTest(unittest.TestCase):
             checkpoint_context={
                 "status": "waiting_requirement_clarification",
                 "remaining_blocking_count": 2,
-                "current_question": {"id": "Q-4", "text": "Which fields define a duplicate?"},
+                "current_question": {
+                    "id": "Q-4",
+                    "text": "Which fields define a duplicate?",
+                    "options": [{"key": "notification_only", "label": "Notification only"}],
+                },
                 "decision_summary": {"id": "D-1", "question_id": "Q-3", "status": "accepted"},
             },
             request_json=fake_request,
@@ -820,13 +976,20 @@ class PhaseOneTest(unittest.TestCase):
         confluence_body = confluence_payload["body"]["value"]
         self.assertIn("<h1>SDLC Harness - UC1 - Requirement Checkpoint</h1>", confluence_body)
         self.assertIn("SDLC-HARNESS-CHECKPOINT::requirement::dataset_use_case:eTour:UC1", confluence_body)
-        self.assertIn("<table>", confluence_body)
-        self.assertIn("<h2>Requirement Packet</h2>", confluence_body)
-        self.assertIn("<h3>Alternative / Exception Flows</h3>", confluence_body)
-        self.assertIn("<h3>Acceptance Criteria</h3>", confluence_body)
+        self.assertIn('<ac:structured-macro ac:name="status">', confluence_body)
+        self.assertIn('<ac:structured-macro ac:name="warning">', confluence_body)
+        self.assertIn('<ac:structured-macro ac:name="expand">', confluence_body)
+        self.assertIn('<table data-layout="wide">', confluence_body)
+        self.assertIn("<h2>Luồng nghiệp vụ</h2>", confluence_body)
+        self.assertIn("<h3>Luồng thay thế và ngoại lệ</h3>", confluence_body)
+        self.assertIn("<h2>Acceptance Criteria", confluence_body)
+        self.assertIn("Requirement Packet đầy đủ", confluence_body)
+        self.assertIn("Artifact kỹ thuật và đường dẫn truy vết", confluence_body)
         self.assertIn("waiting_requirement_clarification", confluence_body)
         self.assertIn("Which fields define a duplicate?", confluence_body)
-        self.assertIn("Remaining blocking questions</th><td>2", confluence_body)
+        self.assertIn("notification_only", confluence_body)
+        self.assertIn("Notification only", confluence_body)
+        self.assertIn("Số câu hỏi blocking còn lại:</strong> 2", confluence_body)
         self.assertIn("D-1 / Q-3 / accepted", confluence_body)
         self.assertNotIn("<pre>", confluence_body)
         report_path = self.repo_root / str(result["report"])

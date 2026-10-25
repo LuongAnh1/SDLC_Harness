@@ -189,6 +189,30 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertEqual(result["media_type"], "application/json")
         self.assertEqual(result["content"]["stable_id"], "UC-S2")
 
+    def test_read_clarification_policy_shadow_artifact(self) -> None:
+        shadow_path = self.store.write_json_artifact(
+            self.run_id,
+            "requirement_clarification_policy_shadow_v1_r1.json",
+            {
+                "schema_version": "requirement_clarification_policy_shadow_v1",
+                "mode": "shadow",
+                "summary": {"would_change_count": 1},
+            },
+        )
+        state = self.store.read_state(self.run_id)
+        state["latest_artifacts"]["requirement_clarification_policy_shadow"] = str(shadow_path)
+        self.store.write_state(state)
+
+        detail = self.read_service.get_run(run_id=self.run_id)
+        result = self.read_service.read_artifact(
+            run_id=self.run_id,
+            artifact_key="requirement_clarification_policy_shadow",
+        )
+
+        self.assertIn("requirement_clarification_policy_shadow", detail["latest_artifacts"])
+        self.assertEqual(result["content"]["mode"], "shadow")
+        self.assertEqual(result["content"]["summary"]["would_change_count"], 1)
+
     def test_artifact_allowlist_and_run_directory_boundary_are_fail_closed(self) -> None:
         with self.assertRaises(HarnessError) as hidden:
             self.read_service.read_artifact(
