@@ -1158,6 +1158,8 @@ def _jira_comment_body(
     current_question = context.get("current_question")
     question_text = str(current_question.get("text") or "") if isinstance(current_question, dict) else ""
     remaining = context.get("remaining_blocking_count")
+    deferred_count = context.get("deferred_to_design_count", 0)
+    deferred_ids = context.get("deferred_to_design_question_ids", [])
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     if checkpoint_status == "waiting_requirement_clarification":
@@ -1171,6 +1173,7 @@ def _jira_comment_body(
         f"Alternative / exception flows: {len(alternative_flows)} item(s)",
         f"Acceptance criteria: {len(acceptance_criteria)} item(s)",
         f"Open questions: {len(open_questions)} item(s)",
+        f"Deferred to Design: {deferred_count} item(s) ({', '.join(str(item) for item in deferred_ids) or 'none'})",
         "Full packet is available in the synced Confluence page and local artifacts.",
     ]
     if question_text:
@@ -1428,6 +1431,8 @@ def _confluence_storage_body(
     options = current_question.get("options") if isinstance(current_question, dict) else []
     recommended_option = str(current_question.get("recommended_option") or "") if isinstance(current_question, dict) else ""
     remaining = context.get("remaining_blocking_count")
+    deferred_count = context.get("deferred_to_design_count", 0)
+    deferred_ids = context.get("deferred_to_design_question_ids", [])
     decision = context.get("decision_summary")
     checklist = context.get("quality_checklist")
     decision_summary = ""
@@ -1441,6 +1446,11 @@ def _confluence_storage_body(
             f"{escape(str(checklist.get('status') or 'unknown'))}; "
             f"blocking failures={escape(str(checklist.get('blocking_failure_count', 0)))}</p>"
         )
+    deferred_summary = (
+        "<p><strong>Deferred to Design:</strong> "
+        f"{escape(str(deferred_count))}; IDs="
+        f"{escape(', '.join(str(item) for item in deferred_ids) or 'none')}</p>"
+    )
     is_clarification = checkpoint_status in {
         "waiting_requirement_clarification",
         "waiting_requirement_clarification_continue",
@@ -1513,6 +1523,7 @@ def _confluence_storage_body(
 {_confluence_panel(title="Việc cần làm tiếp theo", body=f"<p>{escape(next_action)}</p>", macro="info")}
 {clarification_panel}
 {checklist_summary}
+{deferred_summary}
 <h2>Tổng quan checkpoint</h2>
 <table data-layout="wide">
 <tbody>

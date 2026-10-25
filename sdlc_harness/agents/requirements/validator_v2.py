@@ -7,6 +7,17 @@ import hashlib
 import re
 from typing import Any, Iterable
 
+from ...core.errors import HarnessError
+from .clarification_policy_v1 import (
+    BEHAVIOR_PREFIXES,
+    CLARIFICATION_DISPOSITION_FIELD,
+    DEFERRED_TO_DESIGN,
+    HARD_BLOCKING_CATEGORIES,
+    LEGACY_BLOCKING_POLICY_VERSION,
+    SHADOW_POLICY_VERSION,
+    classify_clarification_question,
+    surface_blocking_question_ids,
+)
 from .model_v2 import (
     DecisionStatus,
     QuestionStatus,
@@ -17,13 +28,6 @@ from .model_v2 import (
 )
 
 
-HARD_BLOCKING_CATEGORIES = frozenset(
-    {
-        "business_rule", "acceptance_criteria", "data_identity", "api_contract",
-        "observable_behavior", "source_conflict",
-    }
-)
-BEHAVIOR_PREFIXES = ("MF-", "AF-", "EF-", "POST-", "BR-", "AC-", "QR-")
 SCENARIO_CONTRACT_VERSION = "requirement_scenario_surface_v1"
 SCENARIO_KINDS = frozenset({"main", "alternative", "exception"})
 SURFACE_NAMES = frozenset({"ui", "api", "business_rule", "data"})
@@ -98,12 +102,18 @@ class RequirementModelV2ValidationResult:
 def normalize_and_validate_requirement_model_v2(
     payload: RequirementModelV2 | object,
     source_text_by_id: dict[str, str],
+    *,
+    clarification_policy_version: str | None = None,
 ) -> RequirementModelV2ValidationResult:
     """Return a normalized copy and a fail-closed validation report."""
 
     model = payload if isinstance(payload, RequirementModelV2) else RequirementModelV2.from_dict(payload)
     data = model.to_dict()
-    _normalize_python_owned_fields(data)
+    policy_version = _resolve_clarification_policy_version(
+        data,
+        requested=clarification_policy_version,
+    )
+    _normalize_python_owned_fields(data, clarification_policy_version=policy_version)
 
     issues: list[RequirementModelV2Issue] = []
     _validate_schema(data, issues)
@@ -128,10 +138,13 @@ def normalize_and_validate_requirement_model_v2(
     else:
         status = ValidationStatus.VALID.value
 
-    data["validation"] = {
+    normalized_validation: dict[str, object] = {
         "status": status,
         "errors": [issue.to_dict() for issue in issues],
     }
+    if policy_version == SHADOW_POLICY_VERSION:
+        normalized_validation["clarification_policy_version"] = policy_version
+    data["validation"] = normalized_validation
     normalized = RequirementModelV2.from_dict(data)
     report = RequirementModelV2ValidationReport(
         ok=not issues,
@@ -142,13 +155,68 @@ def normalize_and_validate_requirement_model_v2(
     return RequirementModelV2ValidationResult(model=normalized, report=report)
 
 
-def _normalize_python_owned_fields(data: dict[str, Any]) -> None:
+def _resolve_clarification_policy_version(
+    data: dict[str, Any],
+    *,
+    requested: str | None,
+) -> str:
+    validation = data.get("validation")
+    embedded = (
+        str(validation.get("clarification_policy_version") or "")
+        if isinstance(validation, dict)
+        else ""
+    )
+    allowed = {LEGACY_BLOCKING_POLICY_VERSION, SHADOW_POLICY_VERSION}
+    if requested is not None and requested not in allowed:
+        raise HarnessError(
+            "requirement_clarification_policy_invalid",
+            f"Unsupported Requirement clarification policy: {requested!r}.",
+            run_id=str(data.get("run_id") or "") or None,
+        )
+    if embedded and embedded not in allowed:
+        raise HarnessError(
+            "requirement_clarification_policy_invalid",
+            f"Canonical Requirement has unsupported clarification policy: {embedded!r}.",
+            run_id=str(data.get("run_id") or "") or None,
+        )
+    if requested is not None and embedded and requested != embedded:
+        raise HarnessError(
+            "requirement_clarification_policy_mismatch",
+            "Run and canonical Requirement use different clarification policies.",
+            run_id=str(data.get("run_id") or "") or None,
+        )
+    return requested or embedded or LEGACY_BLOCKING_POLICY_VERSION
+
+
+def _normalize_python_owned_fields(
+    data: dict[str, Any],
+    *,
+    clarification_policy_version: str,
+) -> None:
+    surface_blockers = surface_blocking_question_ids(data)
     for question in _dict_list(data.get("open_questions")):
+        question.pop(CLARIFICATION_DISPOSITION_FIELD, None)
         affects = _string_list(question.get("affects"))
         category = str(question.get("category") or "")
         proposed = question.get("proposed_blocking") is True
         affects_behavior = any(ref.startswith(BEHAVIOR_PREFIXES) for ref in affects)
-        question["effective_blocking"] = proposed or category in HARD_BLOCKING_CATEGORIES or affects_behavior
+        legacy_effective = proposed or category in HARD_BLOCKING_CATEGORIES or affects_behavior
+        question["effective_blocking"] = legacy_effective
+        if (
+            clarification_policy_version == SHADOW_POLICY_VERSION
+            and question.get("status") == QuestionStatus.OPEN.value
+        ):
+            classification = classify_clarification_question(
+                question,
+                surface_blockers=surface_blockers,
+            )
+            if classification["disposition"] == DEFERRED_TO_DESIGN:
+                question["effective_blocking"] = False
+                question[CLARIFICATION_DISPOSITION_FIELD] = {
+                    "value": DEFERRED_TO_DESIGN,
+                    "policy_version": SHADOW_POLICY_VERSION,
+                    "reason_codes": list(classification["reason_codes"]),
+                }
 
 
 def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -> None:

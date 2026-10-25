@@ -12,7 +12,17 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from sdlc_harness.agents.requirements import (
+    CLARIFICATION_DISPOSITION_FIELD,
+    COVERAGE_CATEGORIES,
+    DEFERRED_TO_DESIGN,
+    RequirementCoverageResult,
+    RequirementModelV2,
+    SHADOW_POLICY_VERSION,
+    normalize_and_validate_requirement_model_v2,
+)
 from sdlc_harness.cli import main as cli_main
+from sdlc_harness.artifacts import read_approved_requirement_input
 from sdlc_harness.core.config import load_settings, repo_root
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
@@ -252,6 +262,99 @@ class PhaseOneTest(unittest.TestCase):
             (run_dir / "artifacts" / "requirement_clarification_policy_shadow_v1_r1.json").exists()
         )
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
+
+    def test_new_run_defers_terminology_only_question_and_keeps_it_in_handoff(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+
+        def review_with_terminology_question(**kwargs: object) -> RequirementCoverageResult:
+            model = kwargs["model"]
+            source_text_by_id = kwargs["source_text_by_id"]
+            assert isinstance(model, RequirementModelV2)
+            assert isinstance(source_text_by_id, dict)
+            payload = model.to_dict()
+            evidence_id = str(model.evidence[0]["id"])
+            affected_ref = str(model.use_case["id"])
+            payload["open_questions"] = [
+                {
+                    "id": "Q-1",
+                    "question": "Nên gọi actor là khách hay du khách?",
+                    "category": "terminology",
+                    "coverage_category": "terminology",
+                    "proposed_blocking": True,
+                    "effective_blocking": True,
+                    "affects": [affected_ref],
+                    "depends_on": [],
+                    "status": "open",
+                    "answer_guidance": None,
+                    "evidence_refs": [evidence_id],
+                }
+            ]
+            validated = normalize_and_validate_requirement_model_v2(
+                RequirementModelV2.from_dict(payload),
+                source_text_by_id,
+                clarification_policy_version=SHADOW_POLICY_VERSION,
+            )
+            analysis = {
+                "coverage": [
+                    {"category": category, "status": "clear", "reason": "fixture"}
+                    for category in COVERAGE_CATEGORIES
+                ],
+                "question_candidates": [],
+                "deferred": [],
+                "adopted_question_ids": ["Q-1"],
+            }
+            return RequirementCoverageResult(
+                model=validated.model,
+                validation_report=validated.report,
+                analysis=analysis,
+                added_question_ids=["Q-1"],
+            )
+
+        with patch.object(workflow.coverage_reviewer, "review", side_effect=review_with_terminology_question):
+            response = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertEqual(response["requirement_clarification_policy_version"], SHADOW_POLICY_VERSION)
+        self.assertEqual(response["status"], "waiting_requirement_approval")
+        self.assertEqual(response["pending_checkpoint"]["deferred_to_design_count"], 1)
+        self.assertEqual(response["pending_checkpoint"]["deferred_to_design_question_ids"], ["Q-1"])
+        self.assertIsNone(response["quality_reports"]["requirement_model_v2"].get("current_question"))
+        self.assertEqual(
+            response["quality_reports"]["requirement_clarification_disposition"],
+            {
+                "policy_version": SHADOW_POLICY_VERSION,
+                "deferred_to_design_count": 1,
+                "deferred_to_design_question_ids": ["Q-1"],
+            },
+        )
+        checklist = response["quality_reports"]["requirement_model_v2"]["quality_checklist"]
+        self.assertEqual(checklist["deferred_to_design_count"], 1)
+        self.assertEqual(checklist["deferred_to_design_question_ids"], ["Q-1"])
+        model_path = self.repo_root / str(response["latest_artifacts"]["requirement_model"])
+        model = json.loads(model_path.read_text(encoding="utf-8"))
+        question = model["open_questions"][0]
+        self.assertFalse(question["effective_blocking"])
+        self.assertEqual(question[CLARIFICATION_DISPOSITION_FIELD]["value"], DEFERRED_TO_DESIGN)
+        self.assertEqual(model["validation"]["clarification_policy_version"], SHADOW_POLICY_VERSION)
+        packet_path = self.repo_root / str(response["latest_artifacts"]["requirement_packet"])
+        self.assertIn("DEFERRED-TO-DESIGN", packet_path.read_text(encoding="utf-8"))
+        jira_comment = (
+            self.runtime_root
+            / "runs"
+            / str(response["run_id"])
+            / "sync"
+            / "jira-comment.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("Deferred to Design: 1 item(s) (Q-1)", jira_comment)
+        approved = read_approved_requirement_input(
+            store=workflow.store,
+            state=workflow.store.read_state(str(response["run_id"])),
+            run_id=str(response["run_id"]),
+        )
+        approved_question = approved.canonical_model.open_questions[0]
+        self.assertEqual(
+            approved_question[CLARIFICATION_DISPOSITION_FIELD]["value"],
+            DEFERRED_TO_DESIGN,
+        )
 
     def test_revalidate_requirement_is_deterministic_only_and_keeps_revision(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)

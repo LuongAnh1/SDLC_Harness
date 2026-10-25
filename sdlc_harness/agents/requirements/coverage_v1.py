@@ -12,6 +12,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
+from .clarification_policy_v1 import CLARIFICATION_DISPOSITION_FIELD, DEFERRED_TO_DESIGN
 from .model_v2 import RequirementModelV2
 from .validator_v2 import RequirementModelV2ValidationReport, normalize_and_validate_requirement_model_v2
 
@@ -150,6 +151,15 @@ def build_requirement_quality_checklist(
 
     issue_codes = {item.code for item in validation_report.issues}
     blocking_ids = list(validation_report.blocking_question_ids)
+    deferred_ids = [
+        str(item.get("id") or "")
+        for item in model.open_questions
+        if isinstance(item, dict)
+        and item.get("status") == "open"
+        and isinstance(item.get(CLARIFICATION_DISPOSITION_FIELD), dict)
+        and item[CLARIFICATION_DISPOSITION_FIELD].get("value") == DEFERRED_TO_DESIGN
+        and str(item.get("id") or "")
+    ]
     coverage = analysis.get("coverage") if isinstance(analysis, dict) else []
     covered_categories = {
         str(item.get("category") or "")
@@ -185,6 +195,8 @@ def build_requirement_quality_checklist(
         "status": "ready" if not failures and validation_report.ok else "blocked",
         "blocking_failure_count": len(failures) + len(validation_report.issues),
         "blocking_question_ids": blocking_ids,
+        "deferred_to_design_count": len(deferred_ids),
+        "deferred_to_design_question_ids": deferred_ids,
         "checks": checks,
         "validation_issue_codes": sorted(issue_codes),
     }
@@ -312,6 +324,17 @@ def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> di
         issues.append("requirement_revision must match Requirement Model V2")
     known_requirements = _identified_ids(model.to_dict())
     known_evidence = {str(item.get("id")) for item in model.evidence if isinstance(item, dict)}
+    open_question_affects = {
+        str(item.get("id")): [
+            ref
+            for ref in _string_list(item.get("affects"))
+            if ref in known_requirements
+        ]
+        for item in model.open_questions
+        if isinstance(item, dict)
+        and item.get("status") == "open"
+        and str(item.get("id") or "")
+    }
     coverage = data.get("coverage")
     if not isinstance(coverage, list):
         issues.append("coverage must be an array")
@@ -339,12 +362,22 @@ def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> di
         candidates = []
     if len(candidates) > 5:
         issues.append("question_candidates must contain at most 5 items")
+    normalizations: list[dict[str, object]] = []
     for index, item in enumerate(candidates):
+        normalization = _normalize_candidate_question_refs(
+            item,
+            index=index,
+            open_question_affects=open_question_affects,
+        )
+        if normalization:
+            normalizations.append(normalization)
         _validate_candidate(item, index, known_requirements, known_evidence, issues)
     if not isinstance(data.get("deferred"), list):
         issues.append("deferred must be an array")
     if issues:
         raise HarnessError("requirement_coverage_invalid", "; ".join(issues), run_id=model.run_id)
+    if normalizations:
+        data["normalizations"] = normalizations
     data["question_candidates"] = sorted(
         candidates,
         key=lambda item: (
@@ -355,6 +388,35 @@ def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> di
         ),
     )
     return data
+
+
+def _normalize_candidate_question_refs(
+    item: Any,
+    *,
+    index: int,
+    open_question_affects: dict[str, list[str]],
+) -> dict[str, object] | None:
+    """Mở rộng Q-* đã tồn tại về stable refs; Q-* lạ vẫn để validator chặn."""
+
+    if not isinstance(item, dict):
+        return None
+    original = _string_list(item.get("affects"))
+    question_refs = [ref for ref in original if ref in open_question_affects]
+    if not question_refs:
+        return None
+    normalized: list[str] = []
+    for ref in original:
+        replacements = open_question_affects.get(ref, [ref])
+        for replacement in replacements:
+            if replacement not in normalized:
+                normalized.append(replacement)
+    item["affects"] = normalized
+    return {
+        "kind": "existing_open_question_affects_expanded",
+        "candidate_index": index,
+        "question_refs": question_refs,
+        "requirement_refs": normalized,
+    }
 
 
 def _validate_candidate(

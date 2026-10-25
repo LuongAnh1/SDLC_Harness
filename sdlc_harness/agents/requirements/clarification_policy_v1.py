@@ -10,13 +10,26 @@ from typing import Any
 
 from ...loop import canonical_json_hash
 from .model_v2 import RequirementModelV2
-from .validator_v2 import BEHAVIOR_PREFIXES, HARD_BLOCKING_CATEGORIES
 
 
 SHADOW_SCHEMA_VERSION = "requirement_clarification_policy_shadow_v1"
 SHADOW_POLICY_VERSION = "clarification_disposition_v1"
+LEGACY_BLOCKING_POLICY_VERSION = "legacy_blocking_v1"
+CLARIFICATION_DISPOSITION_FIELD = "clarification_disposition"
 SHADOW_ARTIFACT_KEY = "requirement_clarification_policy_shadow"
 SHADOW_ARTIFACT_PREFIX = "requirement_clarification_policy_shadow_v1"
+
+HARD_BLOCKING_CATEGORIES = frozenset(
+    {
+        "business_rule",
+        "acceptance_criteria",
+        "data_identity",
+        "api_contract",
+        "observable_behavior",
+        "source_conflict",
+    }
+)
+BEHAVIOR_PREFIXES = ("MF-", "AF-", "EF-", "POST-", "BR-", "AC-", "QR-")
 
 HUMAN_REQUIRED = "human_required"
 DEFERRED_TO_DESIGN = "deferred_to_design"
@@ -28,7 +41,7 @@ def build_clarification_policy_shadow(model: RequirementModelV2) -> dict[str, ob
     """Tạo báo cáo deterministic; không mutate model hoặc quyết định workflow."""
 
     data = model.to_dict()
-    surface_blockers = _surface_blocking_question_ids(data)
+    surface_blockers = surface_blocking_question_ids(data)
     entries: list[dict[str, object]] = []
     resolved_question_count = 0
     for question in _dict_items(data.get("open_questions")):
@@ -87,6 +100,45 @@ def shadow_error_summary(exc: Exception) -> dict[str, object]:
     }
 
 
+def classify_clarification_question(
+    question: dict[str, Any],
+    *,
+    surface_blockers: set[str] | None = None,
+) -> dict[str, object]:
+    """Phân loại một open question bằng rule dùng chung cho shadow và cutover."""
+
+    question_id = str(question.get("id") or "")
+    category = str(question.get("category") or "")
+    coverage_category = str(question.get("coverage_category") or "")
+    affects = _string_items(question.get("affects"))
+    behavior_refs = [ref for ref in affects if ref.startswith(BEHAVIOR_PREFIXES)]
+    blockers = surface_blockers or set()
+
+    if category == "source_conflict":
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_source_conflict"]
+    elif category in HARD_BLOCKING_CATEGORIES:
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_hard_category"]
+    elif behavior_refs:
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_behavior_reference"]
+    elif question_id in blockers:
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_surface_clarification_required"]
+    elif category == "terminology" and coverage_category in {"", "terminology"}:
+        disposition = DEFERRED_TO_DESIGN
+        reasons = ["shadow_terminology_only", "shadow_no_hard_impact"]
+    else:
+        disposition = HUMAN_REQUIRED
+        reasons = ["shadow_fail_safe"]
+    return {
+        "disposition": disposition,
+        "effective_blocking": disposition == HUMAN_REQUIRED,
+        "reason_codes": reasons,
+    }
+
+
 def _classify_open_question(
     question: dict[str, Any],
     *,
@@ -110,27 +162,10 @@ def _classify_open_question(
     if not current_reasons:
         current_reasons.append("current_non_blocking")
 
-    shadow_reasons: list[str]
-    if category == "source_conflict":
-        disposition = HUMAN_REQUIRED
-        shadow_reasons = ["shadow_source_conflict"]
-    elif category in HARD_BLOCKING_CATEGORIES:
-        disposition = HUMAN_REQUIRED
-        shadow_reasons = ["shadow_hard_category"]
-    elif behavior_refs:
-        disposition = HUMAN_REQUIRED
-        shadow_reasons = ["shadow_behavior_reference"]
-    elif question_id in surface_blockers:
-        disposition = HUMAN_REQUIRED
-        shadow_reasons = ["shadow_surface_clarification_required"]
-    elif category == "terminology" and coverage_category in {"", "terminology"}:
-        disposition = DEFERRED_TO_DESIGN
-        shadow_reasons = ["shadow_terminology_only", "shadow_no_hard_impact"]
-    else:
-        disposition = HUMAN_REQUIRED
-        shadow_reasons = ["shadow_fail_safe"]
-
-    shadow_effective = disposition == HUMAN_REQUIRED
+    classification = classify_clarification_question(question, surface_blockers=surface_blockers)
+    disposition = str(classification["disposition"])
+    shadow_reasons = list(classification["reason_codes"])
+    shadow_effective = classification["effective_blocking"] is True
     return {
         "question_id": question_id,
         "question": str(question.get("question") or ""),
@@ -148,7 +183,7 @@ def _classify_open_question(
     }
 
 
-def _surface_blocking_question_ids(data: dict[str, Any]) -> set[str]:
+def surface_blocking_question_ids(data: dict[str, Any]) -> set[str]:
     contract = data.get("scenario_contract")
     scenarios = contract.get("scenarios") if isinstance(contract, dict) else []
     question_ids: set[str] = set()

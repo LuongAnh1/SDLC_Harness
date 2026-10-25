@@ -20,6 +20,12 @@ reference one option key. Each option must use
 Never use `label` in place of `answer`. Never mention implementation technologies
 or code layout.
 
+`question_candidates[].affects` may contain only existing stable requirement IDs
+such as `UC-*`, `GOAL-*`, `ACT-*`, `PRE-*`, `MF-*`, `AF-*`, `EF-*`, `POST-*`,
+`BR-*`, `AC-*`, or `QR-*`. Never put `Q-*`, `E-*`, `SC-*`, `SRC-*`, or `D-*`
+in `affects`. Do not return a new candidate for an ambiguity already represented
+by an open question in the canonical model.
+
 Return one JSON object with this shape and no markdown fence:
 
 {

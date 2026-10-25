@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from ..agents.requirements import (
+    LEGACY_BLOCKING_POLICY_VERSION,
     RequirementModelV2,
     normalize_and_validate_requirement_model_v2,
     require_valid_requirement_v2_projections,
@@ -93,7 +94,15 @@ def _read_requirement_input(
         _require_current_v2_checkpoint(state, model_ref=model_ref, revision=model.revision, run_id=run_id)
 
     source_text_by_id = read_requirement_source_texts(store=store, run_id=run_id, model=model)
-    validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
+    policy_version = str(
+        state.get("requirement_clarification_policy_version")
+        or LEGACY_BLOCKING_POLICY_VERSION
+    )
+    validation = normalize_and_validate_requirement_model_v2(
+        model,
+        source_text_by_id,
+        clarification_policy_version=policy_version,
+    )
     if validation.model.to_dict() != model.to_dict():
         raise HarnessError(
             "requirement_model_v2_invalid",

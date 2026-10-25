@@ -8,6 +8,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 
+import pytest
+
 from sdlc_harness.agents.requirements import (
     RequirementCoverageReviewer,
     RequirementModelV2,
@@ -19,9 +21,15 @@ from sdlc_harness.agents.requirements import (
     session_pending_ids,
     start_clarification_session,
 )
+from sdlc_harness.agents.requirements.coverage_v1 import (
+    _adopt_candidates,
+    _deterministic_analysis,
+    _merge_analysis,
+    _validate_analysis,
+)
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmClient, LlmCompletion
-from sdlc_harness.agents.requirements.coverage_v1 import _adopt_candidates, _deterministic_analysis, _merge_analysis
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -120,6 +128,50 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
 
     assert client.calls == 1
     assert result.analysis["review_mode"] == "hybrid"
+
+
+def test_semantic_candidate_expands_existing_open_question_refs_to_stable_requirements() -> None:
+    source_text = (ROOT / "fixtures/etour/UC2.txt").read_text(encoding="utf-8")
+    normalized = normalize_and_validate_requirement_model_v2(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8")),
+        {"SRC-1": source_text},
+    )
+    question = normalized.model.open_questions[0]
+    payload = _deterministic_analysis(normalized.model)
+    candidate = deepcopy(payload["question_candidates"][0])
+    candidate["affects"] = [str(question["id"])]
+    candidate["evidence_refs"] = list(question["evidence_refs"])
+    payload["question_candidates"] = [candidate]
+
+    result = _validate_analysis(payload, normalized.model)
+
+    assert result["question_candidates"][0]["affects"] == question["affects"]
+    assert result["normalizations"] == [
+        {
+            "kind": "existing_open_question_affects_expanded",
+            "candidate_index": 0,
+            "question_refs": [question["id"]],
+            "requirement_refs": question["affects"],
+        }
+    ]
+
+
+def test_semantic_candidate_keeps_unknown_question_ref_fail_closed() -> None:
+    source_text = (ROOT / "fixtures/etour/UC2.txt").read_text(encoding="utf-8")
+    normalized = normalize_and_validate_requirement_model_v2(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8")),
+        {"SRC-1": source_text},
+    )
+    payload = _deterministic_analysis(normalized.model)
+    candidate = deepcopy(payload["question_candidates"][0])
+    candidate["affects"] = ["Q-999"]
+    payload["question_candidates"] = [candidate]
+
+    with pytest.raises(HarnessError) as exc_info:
+        _validate_analysis(payload, normalized.model)
+
+    assert exc_info.value.error_code == "requirement_coverage_invalid"
+    assert "Q-999" in exc_info.value.message
 
 
 def test_clarification_session_exposes_at_most_five_questions() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from .clarification_policy_v1 import CLARIFICATION_DISPOSITION_FIELD, DEFERRED_TO_DESIGN
 from .model_v2 import RequirementModelV2
 
 
@@ -75,7 +76,7 @@ def render_formal_use_case_v2(model: RequirementModelV2) -> str:
     questions = _dict_items(data["open_questions"])
     if questions:
         for item in questions:
-            label = "BLOCKING" if item.get("effective_blocking") is True else "NON-BLOCKING"
+            label = _question_label(item)
             lines.append(f"[{item.get('id', '')}] {label} | {item.get('category', '')} | {item.get('question', '')}")
     else:
         lines.append("[NONE]")
@@ -181,12 +182,19 @@ def _packet_question_section(lines: list[str], items: Any) -> None:
     lines.extend(["## Open Questions", ""])
     values = _dict_items(items)
     for item in values:
-        label = "BLOCKING" if item.get("effective_blocking") is True else "NON-BLOCKING"
+        label = _question_label(item)
         affects = ", ".join(str(ref) for ref in item.get("affects", [])) or "none"
         lines.append(f"- [{item.get('id', '')}] {label} | {item.get('category', '')} | {item.get('question', '')} (affects: {affects}; status: {item.get('status', '')})")
     if not values:
         lines.append("- none")
     lines.append("")
+
+
+def _question_label(item: dict[str, Any]) -> str:
+    disposition = item.get(CLARIFICATION_DISPOSITION_FIELD)
+    if isinstance(disposition, dict) and disposition.get("value") == DEFERRED_TO_DESIGN:
+        return "DEFERRED-TO-DESIGN"
+    return "BLOCKING" if item.get("effective_blocking") is True else "NON-BLOCKING"
 
 
 def _packet_decision_section(lines: list[str], items: Any) -> None:

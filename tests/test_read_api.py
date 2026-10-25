@@ -16,6 +16,7 @@ from urllib.request import Request, urlopen
 from sdlc_harness.application import ApplicationReadService
 from sdlc_harness.application.action_specs import ACTION_SPECS
 from sdlc_harness.application.read_service import MAX_ARTIFACT_BYTES
+from sdlc_harness.agents.requirements import SHADOW_POLICY_VERSION
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.events import EventStore
 from sdlc_harness.interfaces.http import ApiServerConfig, create_server
@@ -155,6 +156,40 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertNotIn(self.api_token, encoded)
         self.assertNotIn("slice-2-llm-secret", encoded)
         self.assertEqual(result["workspace"]["worktree_path"], "<local-path>")
+
+    def test_get_run_exposes_deferred_requirement_handoff_metadata(self) -> None:
+        state = dict(self.state)
+        state.update(
+            {
+                "current_phase": "requirement_review",
+                "status": "waiting_requirement_approval",
+                "requirement_clarification_policy_version": SHADOW_POLICY_VERSION,
+                "pending_checkpoint": {
+                    "id": "cp-requirement",
+                    "type": "requirement_approval",
+                    "deferred_to_design_count": 1,
+                    "deferred_to_design_question_ids": ["Q-1"],
+                },
+                "quality_reports": {
+                    "requirement_clarification_disposition": {
+                        "policy_version": SHADOW_POLICY_VERSION,
+                        "deferred_to_design_count": 1,
+                        "deferred_to_design_question_ids": ["Q-1"],
+                    }
+                },
+            }
+        )
+        self.store.write_state(state)
+
+        result = self.read_service.get_run(run_id=self.run_id)
+
+        self.assertEqual(result["requirement_clarification_policy_version"], SHADOW_POLICY_VERSION)
+        self.assertEqual(result["pending_checkpoint"]["deferred_to_design_count"], 1)
+        self.assertEqual(result["pending_checkpoint"]["deferred_to_design_question_ids"], ["Q-1"])
+        self.assertEqual(
+            result["quality_reports"]["requirement_clarification_disposition"]["policy_version"],
+            SHADOW_POLICY_VERSION,
+        )
 
     def test_run_reads_expose_minimal_profile_metadata_without_target_identity(self) -> None:
         state = dict(self.state)

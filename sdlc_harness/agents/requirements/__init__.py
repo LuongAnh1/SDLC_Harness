@@ -55,17 +55,22 @@ from .coverage_v1 import (
     build_requirement_quality_checklist,
 )
 from .clarification_policy_v1 import (
+    CLARIFICATION_DISPOSITION_FIELD,
     DEFERRED_TO_DESIGN,
+    HARD_BLOCKING_CATEGORIES,
     HUMAN_REQUIRED,
     IRRELEVANT,
+    LEGACY_BLOCKING_POLICY_VERSION,
     POLICY_DEFAULT,
     SHADOW_ARTIFACT_KEY,
     SHADOW_ARTIFACT_PREFIX,
     SHADOW_POLICY_VERSION,
     SHADOW_SCHEMA_VERSION,
     build_clarification_policy_shadow,
+    classify_clarification_question,
     shadow_error_summary,
     shadow_quality_summary,
+    surface_blocking_question_ids,
 )
 from .refiner_v2 import (
     RequirementModelV2Attempt,
@@ -80,7 +85,6 @@ from .projection_v2 import (
 from .renderer_v2 import render_formal_use_case_v2, render_requirement_packet_v2
 from .source_tools import RequirementSourceCatalog
 from .validator_v2 import (
-    HARD_BLOCKING_CATEGORIES,
     RequirementModelV2Issue,
     RequirementModelV2ValidationReport,
     RequirementModelV2ValidationResult,
@@ -91,6 +95,7 @@ __all__ = [
     "ClarificationAttempt",
     "CurrentRequirementQuestion",
     "COVERAGE_CATEGORIES",
+    "CLARIFICATION_DISPOSITION_FIELD",
     "DEFERRED_TO_DESIGN",
     "DecisionStatus",
     "DELTA_SCHEMA_VERSION",
@@ -99,6 +104,7 @@ __all__ = [
     "HARD_BLOCKING_CATEGORIES",
     "HUMAN_REQUIRED",
     "IRRELEVANT",
+    "LEGACY_BLOCKING_POLICY_VERSION",
     "MISSING_EVIDENCE_CODES",
     "MAX_DELTA_OPERATIONS",
     "QuestionStatus",
@@ -130,6 +136,7 @@ __all__ = [
     "clarification_submission_hash",
     "build_requirement_gap_report",
     "build_clarification_policy_shadow",
+    "classify_clarification_question",
     "build_requirement_quality_checklist",
     "apply_requirement_delta",
     "find_clarification_submission",
@@ -148,6 +155,7 @@ __all__ = [
     "shadow_error_summary",
     "shadow_quality_summary",
     "start_clarification_session",
+    "surface_blocking_question_ids",
     "validate_requirement_v2_projections",
     "validate_requirement_gap_report",
 ]

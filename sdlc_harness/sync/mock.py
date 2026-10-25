@@ -37,6 +37,13 @@ def mock_sync_requirement_checkpoint(
     question_line = f"\nCurrent clarification question: {question_text}\n" if question_text else ""
     remaining = context.get("remaining_blocking_count")
     remaining_line = f"\nRemaining blocking questions: {remaining}\n" if remaining is not None else ""
+    deferred_ids = context.get("deferred_to_design_question_ids")
+    deferred_ids = deferred_ids if isinstance(deferred_ids, list) else []
+    deferred_count = context.get("deferred_to_design_count")
+    deferred_line = ""
+    if deferred_count is not None:
+        deferred_suffix = f" ({', '.join(str(item) for item in deferred_ids)})" if deferred_ids else ""
+        deferred_line = f"\nDeferred to Design: {deferred_count} item(s){deferred_suffix}\n"
     decision = context.get("decision_summary")
     decision_line = ""
     if isinstance(decision, dict):
@@ -48,7 +55,7 @@ def mock_sync_requirement_checkpoint(
 
 Source: `{source_ref}`
 
-Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{decision_line}
+Requirement checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{decision_line}
 
 Requirement artifact: `{artifact_paths['requirement_packet']}`
 """,
@@ -73,7 +80,7 @@ Source: `{source_ref}`
 
 Trang này giả lập nơi lưu formal use case và requirement packet để reviewer đọc trước khi chuyển sang phase design.
 
-Checkpoint status: `{status}`.{question_line}{remaining_line}{decision_line}
+Checkpoint status: `{status}`.{question_line}{remaining_line}{deferred_line}{decision_line}
 
 Artifacts:
 - Use case packet: `{artifact_paths['use_case_packet']}`

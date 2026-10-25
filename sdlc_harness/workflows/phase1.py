@@ -36,8 +36,12 @@ from ..agents.requirements import (
     RequirementModelV2,
     RequirementModelV2Refiner,
     RequirementSourceCatalog,
+    CLARIFICATION_DISPOSITION_FIELD,
+    DEFERRED_TO_DESIGN,
+    LEGACY_BLOCKING_POLICY_VERSION,
     SHADOW_ARTIFACT_KEY,
     SHADOW_ARTIFACT_PREFIX,
+    SHADOW_POLICY_VERSION,
     build_requirement_gap_report,
     build_clarification_policy_shadow,
     build_requirement_quality_checklist,
@@ -132,6 +136,7 @@ class PhaseOneWorkflow:
             "use_case": source.use_case,
             "requested_by": requested_by,
             "requirement_contract_version": self.settings.requirement_contract_version,
+            "requirement_clarification_policy_version": SHADOW_POLICY_VERSION,
             "created_at": now,
             "updated_at": now,
             "current_phase": "requirement_drafting",
@@ -242,6 +247,16 @@ class PhaseOneWorkflow:
             if resume:
                 refinement_kwargs["resume"] = True
             refinement = self.refiner_v2.refine(source, **refinement_kwargs)
+            policy_validation = normalize_and_validate_requirement_model_v2(
+                refinement.model,
+                source_catalog.source_text_by_id,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            refinement = replace(
+                refinement,
+                model=policy_validation.model,
+                final_report=policy_validation.report,
+            )
             coverage = self.coverage_reviewer.review(
                 model=refinement.model,
                 source_text_by_id=source_catalog.source_text_by_id,
@@ -426,7 +441,17 @@ class PhaseOneWorkflow:
             raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
         model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
         source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
-        validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
+        validation = normalize_and_validate_requirement_model_v2(
+            model,
+            source_text_by_id,
+            clarification_policy_version=self._clarification_policy_version(state),
+        )
+        if validation.model.to_dict() != model.to_dict():
+            raise HarnessError(
+                "requirement_model_v2_invalid",
+                "Canonical Requirement is stale for its pinned clarification policy.",
+                run_id=run_id,
+            )
         quality_checklist = build_requirement_quality_checklist(
             model=validation.model,
             validation_report=validation.report,
@@ -509,7 +534,11 @@ class PhaseOneWorkflow:
             raise HarnessError("requirement_model_v2_missing", "Canonical Requirement V2 artifact is missing.", run_id=run_id)
         model = read_requirement_model_v2(store=self.store, run_id=run_id, artifact_ref=model_ref)
         source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
-        current_validation = normalize_and_validate_requirement_model_v2(model, source_text_by_id)
+        current_validation = normalize_and_validate_requirement_model_v2(
+            model,
+            source_text_by_id,
+            clarification_policy_version=self._clarification_policy_version(state),
+        )
         coverage = self.coverage_reviewer.review(
             model=current_validation.model,
             source_text_by_id=source_text_by_id,
@@ -525,6 +554,7 @@ class PhaseOneWorkflow:
             revised_validation = normalize_and_validate_requirement_model_v2(
                 RequirementModelV2.from_dict(revised_payload),
                 source_text_by_id,
+                clarification_policy_version=self._clarification_policy_version(state),
             )
             revised_model = revised_validation.model
             revised_report = revised_validation.report
@@ -732,6 +762,16 @@ class PhaseOneWorkflow:
             answer=resolved_answer,
             answered_by=answered_by,
         )
+        policy_validation = normalize_and_validate_requirement_model_v2(
+            result.model,
+            source_text_by_id,
+            clarification_policy_version=self._clarification_policy_version(state),
+        )
+        result = replace(
+            result,
+            model=policy_validation.model,
+            final_report=policy_validation.report,
+        )
         revised_artifacts = write_requirement_v2_revision_artifacts(
             store=self.store,
             run_id=run_id,
@@ -826,6 +866,7 @@ class PhaseOneWorkflow:
         clarification_session: dict[str, object] | None,
     ) -> None:
         run_id = str(state["run_id"])
+        deferred_question_ids = self._deferred_question_ids(model)
         shadow_quality = self._write_clarification_policy_shadow(
             model=model,
             artifact_paths=artifact_paths,
@@ -840,6 +881,8 @@ class PhaseOneWorkflow:
                 "artifact_path": artifact_paths["requirement_model"],
                 "current_question": current_question,
                 "remaining_blocking_count": remaining_blocking_count,
+                "deferred_to_design_count": len(deferred_question_ids),
+                "deferred_to_design_question_ids": deferred_question_ids,
             }
             allowed = ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS
         elif remaining_blocking_count > 0:
@@ -852,6 +895,8 @@ class PhaseOneWorkflow:
                 "artifact_path": artifact_paths["requirement_model"],
                 "remaining_blocking_count": remaining_blocking_count,
                 "session_limit_reached": True,
+                "deferred_to_design_count": len(deferred_question_ids),
+                "deferred_to_design_question_ids": deferred_question_ids,
             }
             allowed = ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS
         else:
@@ -863,6 +908,8 @@ class PhaseOneWorkflow:
                 "artifact_ref": f"requirement_model_v2_r{model.revision}",
                 "artifact_path": artifact_paths["requirement_model"],
                 "review_projection_ref": artifact_paths["requirement_packet"],
+                "deferred_to_design_count": len(deferred_question_ids),
+                "deferred_to_design_question_ids": deferred_question_ids,
             }
             allowed = ALLOWED_REQUIREMENT_ACTIONS
         state.update(
@@ -878,11 +925,42 @@ class PhaseOneWorkflow:
                     "requirement_model_v2": quality_report,
                     "requirement_gaps": gap_report_summary(gap_report),
                     "requirement_clarification_policy_shadow": shadow_quality,
+                    "requirement_clarification_disposition": {
+                        "policy_version": self._clarification_policy_version(state),
+                        "deferred_to_design_count": len(deferred_question_ids),
+                        "deferred_to_design_question_ids": deferred_question_ids,
+                    },
                 },
                 "latest_requirement_decision": latest_decision,
                 "requirement_clarification_session": clarification_session,
             }
         )
+
+    @staticmethod
+    def _deferred_question_ids(model: RequirementModelV2) -> list[str]:
+        ids: list[str] = []
+        for question in model.open_questions:
+            if not isinstance(question, dict) or question.get("status") != "open":
+                continue
+            disposition = question.get(CLARIFICATION_DISPOSITION_FIELD)
+            if isinstance(disposition, dict) and disposition.get("value") == DEFERRED_TO_DESIGN:
+                question_id = str(question.get("id") or "")
+                if question_id:
+                    ids.append(question_id)
+        return ids
+
+    @staticmethod
+    def _clarification_policy_version(state: dict[str, object]) -> str:
+        value = str(state.get("requirement_clarification_policy_version") or "")
+        if not value:
+            return LEGACY_BLOCKING_POLICY_VERSION
+        if value not in {LEGACY_BLOCKING_POLICY_VERSION, SHADOW_POLICY_VERSION}:
+            raise HarnessError(
+                "requirement_clarification_policy_invalid",
+                f"Unsupported Requirement clarification policy: {value!r}.",
+                run_id=str(state.get("run_id") or "") or None,
+            )
+        return value
 
     def _write_clarification_policy_shadow(
         self,
@@ -922,6 +1000,11 @@ class PhaseOneWorkflow:
             context["checkpoint_type"] = str(checkpoint.get("type") or "")
             context["current_question"] = checkpoint.get("current_question")
             context["remaining_blocking_count"] = checkpoint.get("remaining_blocking_count", 0)
+            context["deferred_to_design_count"] = checkpoint.get("deferred_to_design_count", 0)
+            context["deferred_to_design_question_ids"] = checkpoint.get(
+                "deferred_to_design_question_ids",
+                [],
+            )
         decision = state.get("latest_requirement_decision")
         if isinstance(decision, dict):
             context["decision_summary"] = {
@@ -1105,6 +1188,10 @@ class PhaseOneWorkflow:
             "source_ref": state.get("source_ref"),
             "run_id": state.get("run_id"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
+            "requirement_clarification_policy_version": state.get(
+                "requirement_clarification_policy_version",
+                LEGACY_BLOCKING_POLICY_VERSION,
+            ),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
