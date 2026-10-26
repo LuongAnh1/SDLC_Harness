@@ -5,6 +5,7 @@ from __future__ import annotations
 from copy import deepcopy
 import json
 from pathlib import Path
+from types import SimpleNamespace
 import unittest
 
 from sdlc_harness.agents.designer import DELTA_VERSION, apply_designer_delta, new_vertical_design_graph
@@ -19,6 +20,7 @@ from sdlc_harness.agents.validator import (
 )
 from sdlc_harness.agents.designer.graph import graph_digest
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.workflows.phase2 import _vertical_trace_repair_feedback
 
 
 class VerticalTraceTest(unittest.TestCase):
@@ -214,6 +216,32 @@ class VerticalTraceTest(unittest.TestCase):
         )
         self.assertEqual(finding.subject_ref, node["id"])
         self.assertEqual(finding.snapshot_fingerprint, graph["artifact_digest"])
+
+    def test_enforce_revalidation_preflights_existing_graph_for_designer_feedback(self) -> None:
+        design = self._design_graph()
+        design["nodes"][0]["requirement_refs"] = ["UNKNOWN-L4-REF"]
+        design["artifact_digest"] = graph_digest(design)
+        feedback = _vertical_trace_repair_feedback(
+            state={
+                "vertical_trace_contract_version": VERTICAL_TRACE_GRAPH_VERSION,
+                "vertical_trace_mode": "enforce",
+            },
+            approved=SimpleNamespace(canonical_model=self.model),
+            graph=design,
+        )
+
+        self.assertIn("unknown_requirement_ref", {str(item.get("category") or "") for item in feedback})
+        self.assertEqual(
+            _vertical_trace_repair_feedback(
+                state={
+                    "vertical_trace_contract_version": VERTICAL_TRACE_GRAPH_VERSION,
+                    "vertical_trace_mode": "shadow",
+                },
+                approved=SimpleNamespace(canonical_model=self.model),
+                graph=design,
+            ),
+            [],
+        )
 
 
 if __name__ == "__main__":

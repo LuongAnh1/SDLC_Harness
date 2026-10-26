@@ -232,6 +232,14 @@ class PhaseTwoWorkflow:
                 start_version,
                 int(prior_execution.get("session_ordinal") or 0) + 1,
             )
+            initial_repair_feedback = design_bundle_findings(existing_graph)
+            initial_repair_feedback.extend(
+                _vertical_trace_repair_feedback(
+                    state=state,
+                    approved=approved,
+                    graph=existing_graph,
+                )
+            )
             return self._run_vertical_design(
                 state=state,
                 approved=approved,
@@ -239,7 +247,7 @@ class PhaseTwoWorkflow:
                 existing_versions=versions,
                 existing_graph=existing_graph,
                 session_ordinal=session_ordinal,
-                initial_repair_feedback=design_bundle_findings(existing_graph),
+                initial_repair_feedback=initial_repair_feedback,
             )
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         design_path = _required_artifact(
@@ -1648,6 +1656,30 @@ class PhaseTwoWorkflow:
             VERTICAL_TRACE_MODE_STATE_KEY: state.get(VERTICAL_TRACE_MODE_STATE_KEY),
             "designer_execution": state.get("designer_execution"),
         }
+
+
+def _vertical_trace_repair_feedback(
+    *,
+    state: dict[str, object],
+    approved: object,
+    graph: dict[str, object],
+) -> list[dict[str, object]]:
+    """Preflight the persisted graph so enforce revalidation starts with exact L4 blockers."""
+
+    if (
+        str(state.get(VERTICAL_TRACE_STATE_KEY) or "") != VERTICAL_TRACE_GRAPH_VERSION
+        or str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") != "enforce"
+    ):
+        return []
+    canonical_requirement = getattr(approved, "canonical_model", None)
+    if canonical_requirement is None:
+        return []
+    trace_graph = build_vertical_trace_graph(
+        requirement_model=canonical_requirement,
+        design_graph=graph,
+    )
+    result = validate_vertical_trace_coverage(trace_graph, mode="enforce")
+    return [item.to_dict() for item in result.blocking_findings]
 
 
 def _quality_reports(
