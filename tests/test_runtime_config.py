@@ -106,17 +106,17 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings.sync_mode, "mock")
         self.assertTrue(settings.designer_loop_enabled)
         self.assertEqual(config_field_index()["SDLC_DESIGNER_LOOP_ENABLED"]["default"], True)
-        self.assertEqual(settings.vertical_trace_mode, "shadow")
+        self.assertEqual(settings.vertical_trace_mode, "enforce")
         self.assertEqual(config_field_index()["SDLC_VERTICAL_TRACE_MODE"]["options"], ["shadow", "enforce"])
 
-    def test_invalid_vertical_trace_mode_falls_back_to_shadow(self) -> None:
+    def test_invalid_vertical_trace_mode_falls_back_to_enforce(self) -> None:
         settings = load_settings(
             root=self.root,
             runtime_root=self.runtime_root,
             overrides={"SDLC_VERTICAL_TRACE_MODE": "unexpected"},
         )
 
-        self.assertEqual(settings.vertical_trace_mode, "shadow")
+        self.assertEqual(settings.vertical_trace_mode, "enforce")
 
     def test_invalid_thinking_mode_from_non_api_source_falls_back_to_disabled(self) -> None:
         (self.root / ".env").write_text(

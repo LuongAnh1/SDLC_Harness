@@ -194,9 +194,9 @@ def load_settings(
     if llm_thinking_mode not in {"disabled", "enabled"}:
         llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    vertical_trace_mode = merged.get("SDLC_VERTICAL_TRACE_MODE", "shadow").strip().lower() or "shadow"
+    vertical_trace_mode = merged.get("SDLC_VERTICAL_TRACE_MODE", "enforce").strip().lower() or "enforce"
     if vertical_trace_mode not in {"shadow", "enforce"}:
-        vertical_trace_mode = "shadow"
+        vertical_trace_mode = "enforce"
     project_profile_id = get_project_profile(
         project_profile_raw or "typescript_fullstack_v1"
     ).profile_id

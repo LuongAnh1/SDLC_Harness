@@ -91,6 +91,11 @@ class ConfigApiTests(unittest.TestCase):
         )
         self.assertTrue(designer_loop_field["value"])
         self.assertEqual(designer_loop_field["source"], "default")
+        vertical_trace_field = next(
+            field for field in validation_section["fields"] if field["name"] == "SDLC_VERTICAL_TRACE_MODE"
+        )
+        self.assertEqual(vertical_trace_field["value"], "enforce")
+        self.assertEqual(vertical_trace_field["source"], "default")
         path_field = next(
             field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_PATH"
         )

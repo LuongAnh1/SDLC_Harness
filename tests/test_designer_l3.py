@@ -718,6 +718,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                     "SDLC_DESIGNER_LOOP_ENABLED": "1",
+                    "SDLC_VERTICAL_TRACE_MODE": "shadow",
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),

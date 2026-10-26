@@ -100,7 +100,7 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "SDLC_VERTICAL_TRACE_MODE",
                 "Vertical trace mode",
                 "enum",
-                "shadow",
+                "enforce",
                 "Shadow chỉ ghi nhận; enforce chặn checkpoint khi Requirement-to-Design trace không đạt.",
                 options=("shadow", "enforce"),
             ),
