@@ -26,6 +26,11 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from sdlc_harness.agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
 from sdlc_harness.agents.requirements import normalize_and_validate_requirement_model_v2
+from sdlc_harness.agents.validator import (
+    VERTICAL_TRACE_GRAPH_VERSION,
+    VERTICAL_TRACE_MODE_STATE_KEY,
+    VERTICAL_TRACE_STATE_KEY,
+)
 from sdlc_harness.artifacts import write_requirement_v2_revision_artifacts, write_source_snapshot_v2
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
@@ -72,6 +77,7 @@ def main() -> int:
             "SDLC_LLM_CONTEXT_WINDOW_TOKENS": str(base.llm_context_window_tokens),
             "SDLC_SYNC_MODE": "mock",
             "SDLC_DESIGNER_LOOP_ENABLED": "1",
+            "SDLC_VERTICAL_TRACE_MODE": "shadow",
             "SDLC_DESIGN_VALIDATION_TRIALS": "1",
             "SDLC_DESIGN_LLM_CALL_BUDGET": str(max(4, args.design_call_budget)),
             "SDLC_DESIGN_REPAIR_LIMIT": str(max(0, args.design_repair_limit)),
@@ -162,6 +168,8 @@ def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) ->
         "requirement_contract_version": "v2",
         REPO_DISCOVERY_CONTRACT_STATE_KEY: REPO_DISCOVERY_CONTRACT_VERSION,
         DESIGNER_CONTRACT_STATE_KEY: GRAPH_VERSION,
+        VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
+        VERTICAL_TRACE_MODE_STATE_KEY: "shadow",
         "profile_snapshot": build_profile_snapshot(
             project_profile_id=str(getattr(settings, "project_profile_id")),
             target_remote=str(getattr(settings, "target_repo_remote")),
@@ -256,6 +264,9 @@ def _shadow_report(
         "quality": state.get("quality_reports", {}).get("design_validation", {})
         if isinstance(state.get("quality_reports"), dict)
         else {},
+        "vertical_trace": state.get("quality_reports", {}).get("vertical_trace", {})
+        if isinstance(state.get("quality_reports"), dict)
+        else {},
         "last_error": state.get("last_error"),
         "published_artifacts": sorted(
             key
@@ -271,6 +282,8 @@ def _shadow_report(
                 "class_diagram_graph",
                 "sequence_diagram_graph",
                 "requirement_design_trace",
+                "vertical_trace_graph",
+                "vertical_trace_validation",
             }
         ),
     }
