@@ -201,6 +201,8 @@ không dùng nó làm đầu vào.
 | `design_component_view_v<N>.json`, `design_surface_view_v<N>.json` | Deterministic projection renderer | Read-only views nhóm canonical node theo component/surface | Human review và public Read API |
 | `design_projection_manifest_v<N>.json` | Deterministic projection renderer | Graph digest/revision và refs của compatibility projections | Checkpoint/sync, integrity audit và downstream handoff |
 | `design_finding_ledger_v<N>.json` | L3 validation workflow | Blocker/warning/disputed findings đã sanitize theo Design version | Human review, revalidation và L4 finding interface |
+| `vertical_trace_graph_v<N>.json` | L4 trace builder | Canonical Requirement-to-Design graph, bound to frozen Requirement and vertical Design digest | Shadow/enforce validation and Phase 3 handoff |
+| `vertical_trace_validation_v<N>.json` | L4 deterministic validator | Coverage, blockers and mode for the same trace graph digest | Human review and enforce-mode Phase 3 admission |
 | `designer_analysis_v<N>.md` | Designer Agent | Phân tích thiết kế và bối cảnh của version | Repair vòng sau, human review và audit |
 | `design_artifact_v<N>.md` | Designer Agent | TO-BE design hiện hành, gồm PlantUML/class/sequence theo phạm vi use case | Parser, Design Validator, Design checkpoint và Implementation Plan Agent |
 | `class_diagram_graph_v<N>.json` | Deterministic PlantUML parser | Graph class/interface/entity và quan hệ đã parse | Traceability Validator, Plan Validator và Code Trace Validator |

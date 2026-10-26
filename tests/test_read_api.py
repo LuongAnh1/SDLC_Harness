@@ -256,12 +256,20 @@ class ApplicationReadServiceTests(ReadApiFixture):
             "design_surface_view",
             "design_projection_manifest",
             "design_finding_ledger",
+            "vertical_trace_graph",
+            "vertical_trace_validation",
         )
         for key in keys:
             path = self.store.write_json_artifact(
                 self.run_id,
                 f"{key}_v1.json",
-                {"schema_version": "vertical_design_graph_v1" if key == "vertical_design_graph" else f"{key}_v1"},
+                {
+                    "schema_version": (
+                        "vertical_design_graph_v1"
+                        if key == "vertical_design_graph"
+                        else ("vertical_trace_graph_v1" if key == "vertical_trace_graph" else f"{key}_v1")
+                    )
+                },
             )
             state["latest_artifacts"][key] = str(path)
         self.store.write_state(state)

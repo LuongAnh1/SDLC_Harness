@@ -39,6 +39,10 @@ class DesignFinding:
     support_count: int = 1
     trial_ids: list[str] = field(default_factory=list)
     origin: str = "semantic"
+    repair_owner: str = "designer"
+    repairability: str = "repairable"
+    confidence: float = 1.0
+    snapshot_fingerprint: str = ""
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -57,6 +61,10 @@ class DesignFinding:
             "support_count": self.support_count,
             "trial_ids": self.trial_ids,
             "origin": self.origin,
+            "repair_owner": self.repair_owner,
+            "repairability": self.repairability,
+            "confidence": self.confidence,
+            "snapshot_fingerprint": self.snapshot_fingerprint,
         }
 
     @property
@@ -158,6 +166,7 @@ class DesignValidator:
         sequence_graph: dict[str, object],
         traceability: TraceabilityResult,
         canonical_requirement: object | None = None,
+        vertical_trace: dict[str, object] | None = None,
         repair_iterations: int = 0,
         validation_trials: int = 1,
     ) -> DesignValidationResult:
@@ -183,6 +192,7 @@ class DesignValidator:
                     sequence_graph=sequence_graph,
                     traceability=traceability,
                     canonical_requirement=canonical_requirement,
+                    vertical_trace=vertical_trace,
                     rule_review=rule_payload,
                 )
                 normalized = _normalize_llm_findings(payload)
@@ -256,6 +266,7 @@ class DesignValidator:
         sequence_graph: dict[str, object],
         traceability: TraceabilityResult,
         canonical_requirement: object | None,
+        vertical_trace: dict[str, object] | None,
         rule_review: dict[str, object],
     ) -> dict[str, object]:
         canonical = (
@@ -314,6 +325,9 @@ Sequence graph:
 
 Traceability:
 {json.dumps({"class_trace": traceability.class_trace, "sequence_trace": traceability.sequence_trace}, ensure_ascii=False, separators=(",", ":"))}
+
+Canonical vertical Requirement-to-Design trace (bounded, deterministic):
+{json.dumps(vertical_trace or {}, ensure_ascii=False, separators=(",", ":"))}
 
 Deterministic review:
 {json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"))}

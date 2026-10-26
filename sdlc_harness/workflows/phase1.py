@@ -73,6 +73,7 @@ from ..agents.requirements.session_v1 import (
     requirement_session_summary,
 )
 from ..agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
+from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
 from .repo_discovery import REPO_DISCOVERY_CONTRACT_STATE_KEY, REPO_DISCOVERY_CONTRACT_VERSION
@@ -167,6 +168,8 @@ class PhaseOneWorkflow:
         }
         if self.settings.designer_loop_enabled:
             state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
+            state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
+            state["vertical_trace_mode"] = self.settings.vertical_trace_mode
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,
@@ -1464,6 +1467,8 @@ class PhaseOneWorkflow:
             ),
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
+            VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
+            "vertical_trace_mode": state.get("vertical_trace_mode"),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),

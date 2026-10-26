@@ -14,6 +14,7 @@ def build_human_design_review(
     component_view: dict[str, object],
     surface_view: dict[str, object],
     validation_report: dict[str, object],
+    trace_validation_report: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Project machine-oriented artifacts into a short reviewer narrative."""
 
@@ -134,6 +135,7 @@ def build_human_design_review(
         ]
     ]
 
+    trace_status = _dict(trace_validation_report or {})
     return {
         "schema_version": HUMAN_DESIGN_REVIEW_VERSION,
         "use_case": {
@@ -145,6 +147,10 @@ def build_human_design_review(
         "status": {
             "blocking_count": int(validation_report.get("blocking_count") or 0),
             "warning_count": int(validation_report.get("warning_count") or 0),
+            "vertical_trace_mode": str(trace_status.get("mode") or "legacy"),
+            "vertical_trace_ok": bool(trace_status.get("ok")) if trace_status else None,
+            "vertical_trace_would_block": bool(trace_status.get("would_block")),
+            "vertical_trace_blocking_count": int(trace_status.get("blocking_count") or 0),
         },
         "scope": {
             "component_count": len(component_changes),

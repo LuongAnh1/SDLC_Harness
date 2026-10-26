@@ -13,6 +13,19 @@ from .traceability import (
     build_requirement_graph_v2,
     compute_missing_links,
 )
+from .vertical_trace import (
+    VERTICAL_TRACE_MODE_STATE_KEY,
+    VERTICAL_TRACE_GRAPH_VERSION,
+    VERTICAL_TRACE_MODES,
+    VERTICAL_TRACE_STATE_KEY,
+    VERTICAL_TRACE_VALIDATION_VERSION,
+    VerticalTraceValidationResult,
+    bounded_trace_view,
+    build_vertical_trace_graph,
+    validate_vertical_trace_coverage,
+    validate_vertical_trace_graph,
+    validate_vertical_trace_report,
+)
 from .plan_review import ImplementationPlanReview, ImplementationPlanValidator
 from .typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 
@@ -31,4 +44,15 @@ __all__ = [
     "build_requirement_graph",
     "build_requirement_graph_v2",
     "compute_missing_links",
+    "VERTICAL_TRACE_GRAPH_VERSION",
+    "VERTICAL_TRACE_MODE_STATE_KEY",
+    "VERTICAL_TRACE_MODES",
+    "VERTICAL_TRACE_STATE_KEY",
+    "VERTICAL_TRACE_VALIDATION_VERSION",
+    "VerticalTraceValidationResult",
+    "bounded_trace_view",
+    "build_vertical_trace_graph",
+    "validate_vertical_trace_coverage",
+    "validate_vertical_trace_graph",
+    "validate_vertical_trace_report",
 ]

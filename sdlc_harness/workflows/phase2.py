@@ -27,8 +27,15 @@ from ..agents.validator import (
     DesignValidationResult,
     DesignValidator,
     TraceabilityResult,
+    VERTICAL_TRACE_GRAPH_VERSION,
+    VERTICAL_TRACE_MODE_STATE_KEY,
+    VERTICAL_TRACE_MODES,
+    VERTICAL_TRACE_STATE_KEY,
     ValidatorAgent,
+    bounded_trace_view,
     build_requirement_graph_v2,
+    build_vertical_trace_graph,
+    validate_vertical_trace_coverage,
 )
 from ..artifacts import read_approved_requirement_input, read_frozen_requirement_input
 from ..artifacts.writers import write_phase2_design_artifacts, write_phase2_traceability_attempt
@@ -390,6 +397,7 @@ class PhaseTwoWorkflow:
         prior_digest = str((existing_graph or {}).get("artifact_digest") or "")
         repair_feedback = list(initial_repair_feedback or [])
         validation: DesignValidationResult | None = None
+        trace_validation = None
         design_paths: dict[str, str] = {}
         graph = existing_graph
         base_ordinal = session_ordinal or start_version
@@ -551,16 +559,41 @@ class PhaseTwoWorkflow:
                 missing_links=missing_links,
                 mode="traceability_v2",
             )
+            trace_mode = str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "")
+            trace_enabled = (
+                str(state.get(VERTICAL_TRACE_STATE_KEY) or "") == VERTICAL_TRACE_GRAPH_VERSION
+                and trace_mode in VERTICAL_TRACE_MODES
+            )
+            trace_graph = (
+                build_vertical_trace_graph(
+                    requirement_model=approved.canonical_model,
+                    design_graph=graph,
+                )
+                if trace_enabled
+                else None
+            )
+            trace_validation = (
+                validate_vertical_trace_coverage(trace_graph, mode=trace_mode)
+                if trace_graph is not None
+                else None
+            )
             bundle_blockers = _bundle_design_findings(design_bundle_findings(graph))
-            if bundle_blockers:
+            trace_blockers = list(trace_validation.blocking_findings) if trace_validation is not None else []
+            enforced_trace_blockers = trace_blockers if trace_mode == "enforce" else []
+            deterministic_blockers = [*bundle_blockers, *enforced_trace_blockers]
+            if deterministic_blockers:
                 validation = DesignValidationResult(
                     traceability=traceability,
-                    blocking_findings=bundle_blockers,
+                    blocking_findings=deterministic_blockers,
                     warnings=[],
-                    rule_review={"ok": False, "findings": [item.to_dict() for item in bundle_blockers]},
-                    llm_review={"ok": True, "skipped": True, "summary": "Semantic review waits for complete bundle contracts."},
+                    rule_review={"ok": False, "findings": [item.to_dict() for item in deterministic_blockers]},
+                    llm_review={
+                        "ok": True,
+                        "skipped": True,
+                        "summary": "Semantic review waits for deterministic Design/trace blockers to be repaired.",
+                    },
                     repair_iterations=repair_iteration,
-                    mode="design_bundle_preflight_v1",
+                    mode="vertical_trace_preflight_v1" if enforced_trace_blockers else "design_bundle_preflight_v1",
                 )
             else:
                 validation = self.design_validator.review(
@@ -570,6 +603,7 @@ class PhaseTwoWorkflow:
                     sequence_graph=projections["sequence_graph"],
                     traceability=traceability,
                     canonical_requirement=approved.canonical_model,
+                    vertical_trace=bounded_trace_view(trace_graph) if trace_graph is not None else None,
                     repair_iterations=repair_iteration,
                     validation_trials=self.settings.design_validation_trials,
                 )
@@ -616,6 +650,30 @@ class PhaseTwoWorkflow:
                 "design_component_view": self.store.relative(component_path),
                 "design_surface_view": self.store.relative(surface_path),
             }
+            if trace_graph is not None and trace_validation is not None:
+                trace_graph_path = self.store.write_json_artifact(
+                    run_id,
+                    f"vertical_trace_graph_v{version}.json",
+                    trace_graph,
+                )
+                trace_validation_payload = trace_validation.to_dict()
+                trace_validation_payload.update(
+                    {
+                        "design_version": f"v{version}",
+                        "requirement_revision": approved.canonical_model.revision,
+                    }
+                )
+                trace_validation_path = self.store.write_json_artifact(
+                    run_id,
+                    f"vertical_trace_validation_v{version}.json",
+                    trace_validation_payload,
+                )
+                vertical_paths.update(
+                    {
+                        "vertical_trace_graph": self.store.relative(trace_graph_path),
+                        "vertical_trace_validation": self.store.relative(trace_validation_path),
+                    }
+                )
             candidate_artifacts = {**design_paths, **vertical_paths}
             manifest = projection_manifest(graph=graph, artifacts=candidate_artifacts)
             manifest_path = self.store.write_json_artifact(
@@ -630,6 +688,11 @@ class PhaseTwoWorkflow:
                 "blocking_findings": [item.to_dict() for item in validation.blocking_findings],
                 "warnings": [item.to_dict() for item in validation.warnings],
                 "disputed_findings": [item.to_dict() for item in validation.disputed_findings],
+                "vertical_trace_findings": (
+                    [item.to_dict() for item in trace_validation.blocking_findings]
+                    if trace_validation is not None
+                    else []
+                ),
             }
             ledger_path = self.store.write_json_artifact(
                 run_id,
@@ -667,6 +730,12 @@ class PhaseTwoWorkflow:
                 "business_rule_count": len(_dict_items(projections["surface_view"].get("business_rules"))),
                 "data_count": len(_dict_items(projections["surface_view"].get("data"))),
             }
+            if trace_validation is not None:
+                quality_reports["vertical_trace"] = {
+                    **trace_validation.to_dict(),
+                    "graph": design_paths["vertical_trace_graph"],
+                    "report": design_paths["vertical_trace_validation"],
+                }
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -737,6 +806,16 @@ class PhaseTwoWorkflow:
                     "vertical_design_graph": design_paths["vertical_design_graph"],
                     "projection_manifest": design_paths["design_projection_manifest"],
                     "design_bundle_contract_version": DESIGN_BUNDLE_VERSION,
+                    **(
+                        {
+                            "vertical_trace_graph": design_paths["vertical_trace_graph"],
+                            "vertical_trace_validation": design_paths["vertical_trace_validation"],
+                            "vertical_trace_contract_version": VERTICAL_TRACE_GRAPH_VERSION,
+                            "vertical_trace_mode": str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or ""),
+                        }
+                        if "vertical_trace_graph" in design_paths
+                        else {}
+                    ),
                 },
                 DESIGN_BUNDLE_STATE_KEY: DESIGN_BUNDLE_VERSION,
                 "allowed_next_actions": ALLOWED_DESIGN_ACTIONS,
@@ -1565,6 +1644,8 @@ class PhaseTwoWorkflow:
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
             DESIGN_BUNDLE_STATE_KEY: state.get(DESIGN_BUNDLE_STATE_KEY),
+            VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
+            VERTICAL_TRACE_MODE_STATE_KEY: state.get(VERTICAL_TRACE_MODE_STATE_KEY),
             "designer_execution": state.get("designer_execution"),
         }
 

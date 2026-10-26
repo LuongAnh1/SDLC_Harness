@@ -65,6 +65,8 @@ PUBLIC_ARTIFACT_KEYS = frozenset(
         "design_surface_view",
         "design_projection_manifest",
         "design_finding_ledger",
+        "vertical_trace_graph",
+        "vertical_trace_validation",
         "implementation_plan",
         "implementation_plan_structured",
         "implementation_plan_review",

@@ -26,6 +26,11 @@ from sdlc_harness.agents.designer.tools import DesignerToolRegistry
 from sdlc_harness.agents.designer.execution import _active_partition, _active_repair_task, _repair_targets
 from sdlc_harness.agents.designer.graph import graph_digest
 from sdlc_harness.agents.designer.projections import render_design_projections
+from sdlc_harness.agents.validator import (
+    VERTICAL_TRACE_GRAPH_VERSION,
+    VERTICAL_TRACE_MODE_STATE_KEY,
+    VERTICAL_TRACE_STATE_KEY,
+)
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
@@ -722,6 +727,8 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             )
             created = PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
             self.assertEqual(created["designer_contract_version"], GRAPH_VERSION)
+            self.assertEqual(created[VERTICAL_TRACE_STATE_KEY], VERTICAL_TRACE_GRAPH_VERSION)
+            self.assertEqual(created[VERTICAL_TRACE_MODE_STATE_KEY], "shadow")
 
             designed = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
 
@@ -739,6 +746,8 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                 "requirement_design_trace",
                 "design_component_view",
                 "design_surface_view",
+                "vertical_trace_graph",
+                "vertical_trace_validation",
             ):
                 self.assertIn(key, designed["latest_artifacts"])
             graph_path = root / str(designed["latest_artifacts"]["vertical_design_graph"])
@@ -751,6 +760,13 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             sync_report = json.loads(sync_report_path.read_text(encoding="utf-8"))
             self.assertIn("vertical_design_graph_ref", sync_report["checkpoint"])
             self.assertIn("projection_manifest_ref", sync_report["checkpoint"])
+            self.assertIn("vertical_trace_graph_ref", sync_report["checkpoint"])
+            self.assertIn("vertical_trace_validation_ref", sync_report["checkpoint"])
+            trace_report = json.loads(
+                (root / str(designed["latest_artifacts"]["vertical_trace_validation"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(trace_report["mode"], "shadow")
+            self.assertIn("vertical_trace", designed["quality_reports"])
             component_view = json.loads((root / str(designed["latest_artifacts"]["design_component_view"])).read_text(encoding="utf-8"))
             surface_view = json.loads((root / str(designed["latest_artifacts"]["design_surface_view"])).read_text(encoding="utf-8"))
             self.assertEqual(component_view["schema_version"], "design_component_view_v2")
@@ -845,9 +861,57 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             revalidated_graph = json.loads((root / str(revalidated["latest_artifacts"]["vertical_design_graph"])).read_text(encoding="utf-8"))
             self.assertTrue(all(node.get("surface_contract") for node in revalidated_graph["nodes"]))
 
-            planned = PhaseThreeWorkflow(settings).approve_design_checkpoint(
+            workflow = PhaseThreeWorkflow(settings)
+            state = workflow.store.read_state(str(created["run_id"]))
+            state[VERTICAL_TRACE_MODE_STATE_KEY] = "enforce"
+            workflow.store.write_state(state)
+            with self.assertRaises(HarnessError) as stale_trace:
+                workflow.approve_design_checkpoint(
+                    run_id=str(created["run_id"]),
+                    checkpoint_id=str(revalidated["pending_checkpoint"]["checkpoint_id"]),
+                )
+            self.assertEqual(stale_trace.exception.error_code, "requirement_v2_phase3_input_invalid")
+            state = workflow.store.read_state(str(created["run_id"]))
+            state[VERTICAL_TRACE_MODE_STATE_KEY] = "shadow"
+            workflow.store.write_state(state)
+            planned = workflow.approve_design_checkpoint(
                 run_id=str(created["run_id"]),
                 checkpoint_id=str(revalidated["pending_checkpoint"]["checkpoint_id"]),
+            )
+            self.assertEqual(planned["status"], "waiting_implementation_plan_review", planned)
+
+    def test_vertical_trace_enforce_passes_and_admits_phase3(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(__file__).resolve().parents[1]
+            temp_path = Path(temp)
+            target = self.template.materialize(temp_path / "target")
+            settings = load_settings(
+                root=root,
+                runtime_root=temp_path / ".runtime",
+                overrides={
+                    "SDLC_LLM_MODE": "fake",
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                    "SDLC_DESIGNER_LOOP_ENABLED": "1",
+                    "SDLC_VERTICAL_TRACE_MODE": "enforce",
+                    "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
+                    "SDLC_TARGET_REPO_PATH": str(target.canonical),
+                    "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
+                    "SDLC_TARGET_BASE_BRANCH": "main",
+                    "SDLC_TARGET_WORKTREE_ROOT": str(temp_path / "worktrees"),
+                },
+            )
+            created = PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+            designed = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+            self.assertEqual(designed[VERTICAL_TRACE_MODE_STATE_KEY], "enforce")
+            self.assertEqual(designed["status"], "waiting_design_approval", designed)
+            self.assertTrue(designed["quality_reports"]["vertical_trace"]["ok"])
+            self.assertEqual(designed["quality_reports"]["vertical_trace"]["blocking_count"], 0)
+
+            planned = PhaseThreeWorkflow(settings).approve_design_checkpoint(
+                run_id=str(created["run_id"]),
+                checkpoint_id=str(designed["pending_checkpoint"]["checkpoint_id"]),
             )
             self.assertEqual(planned["status"], "waiting_implementation_plan_review", planned)
 

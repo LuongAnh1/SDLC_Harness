@@ -154,12 +154,15 @@ def mock_sync_design_checkpoint(
         component_view=_read_json_artifact(store, artifact_paths.get("design_component_view", "")),
         surface_view=_read_json_artifact(store, artifact_paths.get("design_surface_view", "")),
         validation_report=_read_json_artifact(store, artifact_paths.get("design_validation_report", "")),
+        trace_validation_report=_read_json_artifact(store, artifact_paths.get("vertical_trace_validation", "")),
     )
     human_review_section = _human_design_review_markdown(human_review)
     landscape_ref = _artifact_ref(artifact_paths["repo_landscape"]) if artifact_paths.get("repo_landscape") else ""
     vertical_graph = artifact_paths.get("vertical_design_graph", "")
     projection_manifest = artifact_paths.get("design_projection_manifest", "")
     finding_ledger = artifact_paths.get("design_finding_ledger", "")
+    trace_graph = artifact_paths.get("vertical_trace_graph", "")
+    trace_validation = artifact_paths.get("vertical_trace_validation", "")
     vertical_section = ""
     if vertical_graph:
         vertical_section = (
@@ -167,10 +170,12 @@ def mock_sync_design_checkpoint(
             f"- Canonical graph: `{vertical_graph}`\n"
             f"- Projection manifest: `{projection_manifest}`\n"
             f"- Finding ledger: `{finding_ledger}`"
+            + (f"\n- Vertical trace graph: `{trace_graph}`" if trace_graph else "")
+            + (f"\n- Vertical trace validation: `{trace_validation}`" if trace_validation else "")
         )
     vertical_refs = [
         _artifact_ref(path)
-        for path in (vertical_graph, projection_manifest, finding_ledger)
+        for path in (vertical_graph, projection_manifest, finding_ledger, trace_graph, trace_validation)
         if path
     ]
     previous_targets = _previous_targets(report_path)
@@ -272,6 +277,8 @@ Trang này ưu tiên cho người duyệt. Chi tiết máy đọc và kỹ thu�
             "artifact_path": design_artifact,
             **({"vertical_design_graph_ref": _artifact_ref(vertical_graph)} if vertical_graph else {}),
             **({"projection_manifest_ref": _artifact_ref(projection_manifest)} if projection_manifest else {}),
+            **({"vertical_trace_graph_ref": _artifact_ref(trace_graph)} if trace_graph else {}),
+            **({"vertical_trace_validation_ref": _artifact_ref(trace_validation)} if trace_validation else {}),
         },
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -696,6 +703,8 @@ def _human_design_review_markdown(review: dict[str, object]) -> str:
     scope = _dict_value(review.get("scope"))
     blockers = int(status.get("blocking_count") or 0)
     warnings = int(status.get("warning_count") or 0)
+    trace_mode = str(status.get("vertical_trace_mode") or "legacy")
+    trace_blockers = int(status.get("vertical_trace_blocking_count") or 0)
     gate = f"BLOCKED - {blockers} blocker(s)" if blockers else (f"READY WITH {warnings} WARNING(S)" if warnings else "READY FOR APPROVAL")
     lines = [
         "## 1. Tóm tắt dành cho người duyệt",
@@ -705,6 +714,7 @@ def _human_design_review_markdown(review: dict[str, object]) -> str:
         f"- **Use case:** {use_case.get('name') or use_case.get('id') or ''}",
         f"- **Mục tiêu:** {use_case.get('goal') or ''}",
         f"- **Người sử dụng:** {', '.join(_string_list(use_case.get('actors'))) or 'Chưa xác định'}",
+        f"- **Vertical trace:** mode `{trace_mode}`, {trace_blockers} blocker(s) được ghi nhận.",
         (
             f"- **Phạm vi:** {scope.get('scenario_count', 0)} scenario, {scope.get('component_count', 0)} component; "
             f"{scope.get('ui_count', 0)} UI flow, {scope.get('api_count', 0)} API contract, "

@@ -48,6 +48,8 @@ _DESIGN_ARTIFACT_KEYS = {
     "design_surface_view",
     "design_projection_manifest",
     "design_finding_ledger",
+    "vertical_trace_graph",
+    "vertical_trace_validation",
 }
 _IMPLEMENTATION_PLAN_ARTIFACT_KEYS = {
     "implementation_plan",
@@ -292,6 +294,16 @@ def real_sync_design_checkpoint(
             **(
                 {"projection_manifest_ref": _artifact_ref(artifact_paths["design_projection_manifest"])}
                 if artifact_paths.get("design_projection_manifest")
+                else {}
+            ),
+            **(
+                {"vertical_trace_graph_ref": _artifact_ref(artifact_paths["vertical_trace_graph"])}
+                if artifact_paths.get("vertical_trace_graph")
+                else {}
+            ),
+            **(
+                {"vertical_trace_validation_ref": _artifact_ref(artifact_paths["vertical_trace_validation"])}
+                if artifact_paths.get("vertical_trace_validation")
                 else {}
             ),
         },
@@ -1686,11 +1698,13 @@ def _confluence_design_storage_body(
     trace_view = _read_json_artifact(store, artifact_paths, "requirement_design_trace")
     requirement_model = _read_json_artifact(store, artifact_paths, "requirement_model")
     validation_report = _read_json_artifact(store, artifact_paths, "design_validation_report")
+    trace_validation_report = _read_json_artifact(store, artifact_paths, "vertical_trace_validation")
     human_review = build_human_design_review(
         requirement_model=requirement_model,
         component_view=component_view,
         surface_view=surface_view,
         validation_report=validation_report,
+        trace_validation_report=trace_validation_report,
     )
     human_review_section = _confluence_human_design_review_sections(human_review)
     design_bundle_section = _confluence_system_design_bundle_sections(
@@ -1769,6 +1783,8 @@ def _confluence_human_design_review_sections(review: dict[str, object]) -> str:
     scope = _dict_value(review.get("scope"))
     blockers = int(status.get("blocking_count") or 0)
     warnings = int(status.get("warning_count") or 0)
+    trace_mode = str(status.get("vertical_trace_mode") or "legacy")
+    trace_blockers = int(status.get("vertical_trace_blocking_count") or 0)
     gate_title = (
         f"BLOCKED - {blockers} blocker(s)"
         if blockers
@@ -1786,6 +1802,8 @@ def _confluence_human_design_review_sections(review: dict[str, object]) -> str:
         f"{escape(str(scope.get('api_count') or 0))} API contract, "
         f"{escape(str(scope.get('business_rule_count') or 0))} business rule và "
         f"{escape(str(scope.get('data_count') or 0))} data operation.</p>"
+        f"<p><strong>Vertical trace:</strong> mode <code>{escape(trace_mode)}</code>, "
+        f"{trace_blockers} blocker(s) được ghi nhận.</p>"
     )
     sections = [
         "<h2>1. Tóm tắt dành cho người duyệt</h2>",

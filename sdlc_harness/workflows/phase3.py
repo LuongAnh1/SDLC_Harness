@@ -17,7 +17,16 @@ from pathlib import Path
 import re
 
 from ..agents.developer import DeveloperPlanAgent
-from ..agents.validator import ImplementationPlanValidator, build_requirement_graph_v2
+from ..agents.validator import (
+    ImplementationPlanValidator,
+    VERTICAL_TRACE_GRAPH_VERSION,
+    VERTICAL_TRACE_MODE_STATE_KEY,
+    VERTICAL_TRACE_STATE_KEY,
+    build_requirement_graph_v2,
+    build_vertical_trace_graph,
+    validate_vertical_trace_graph,
+    validate_vertical_trace_report,
+)
 from ..artifacts import CanonicalRequirementInput, read_frozen_requirement_input
 from ..artifacts.writers import write_phase3_implementation_plan, write_phase3_plan_review_report
 from ..core.config import Settings
@@ -383,6 +392,9 @@ class PhaseThreeWorkflow:
                     "class_diagram_graph": class_graph_path,
                     "sequence_diagram_graph": sequence_graph_path,
                     **_optional_artifacts(artifact_paths, "requirement_graph"),
+                    **_optional_artifacts(artifact_paths, "vertical_design_graph"),
+                    **_optional_artifacts(artifact_paths, "vertical_trace_graph"),
+                    **_optional_artifacts(artifact_paths, "vertical_trace_validation"),
                 },
                 "allowed_next_actions": ["get_status", "cancel_run"],
                 "summary_for_user": "Đã duyệt design checkpoint, đang tạo implementation plan Phase 3.",
@@ -662,6 +674,46 @@ class PhaseThreeWorkflow:
                 trace=trace,
                 run_id=run_id,
             )
+            if (
+                str(state.get(VERTICAL_TRACE_STATE_KEY) or "") == VERTICAL_TRACE_GRAPH_VERSION
+                and str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") == "enforce"
+            ):
+                design_graph_ref = _required_artifact(artifact_paths, "vertical_design_graph", run_id=run_id)
+                vertical_trace_ref = _required_artifact(artifact_paths, "vertical_trace_graph", run_id=run_id)
+                vertical_report_ref = _required_artifact(artifact_paths, "vertical_trace_validation", run_id=run_id)
+                design_graph = _read_json_artifact(
+                    self._existing_artifact_path(design_graph_ref, run_id=run_id),
+                    run_id=run_id,
+                )
+                vertical_trace = _read_json_artifact(
+                    self._existing_artifact_path(vertical_trace_ref, run_id=run_id),
+                    run_id=run_id,
+                )
+                expected_trace = build_vertical_trace_graph(
+                    requirement_model=frozen.canonical_model,
+                    design_graph=design_graph,
+                )
+                validate_vertical_trace_graph(
+                    vertical_trace,
+                    expected_run_id=run_id,
+                    expected_requirement_digest=str(expected_trace["binding"]["requirement_digest"]),
+                    expected_design_digest=str(expected_trace["binding"]["design_graph_digest"]),
+                )
+                if vertical_trace.get("artifact_digest") != expected_trace.get("artifact_digest"):
+                    raise HarnessError(
+                        "vertical_trace_binding_stale",
+                        "Vertical trace graph does not match the frozen Requirement and latest Design graph.",
+                        run_id=run_id,
+                    )
+                vertical_report = _read_json_artifact(
+                    self._existing_artifact_path(vertical_report_ref, run_id=run_id),
+                    run_id=run_id,
+                )
+                validate_vertical_trace_report(
+                    vertical_report,
+                    graph=vertical_trace,
+                    expected_mode="enforce",
+                )
             return frozen, saved_graph
         except HarnessError as exc:
             raise HarnessError(
