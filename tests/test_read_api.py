@@ -224,6 +224,30 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertEqual(result["media_type"], "application/json")
         self.assertEqual(result["content"]["stable_id"], "UC-S2")
 
+    def test_read_repo_landscape_artifact(self) -> None:
+        landscape_path = self.store.write_json_artifact(
+            self.run_id,
+            "repo_landscape_v1.json",
+            {
+                "schema_version": "repo_landscape_v1",
+                "run_id": self.run_id,
+                "summary": {"component_count": 5, "blocking_count": 0},
+            },
+        )
+        state = self.store.read_state(self.run_id)
+        state["latest_artifacts"]["repo_landscape"] = str(landscape_path)
+        self.store.write_state(state)
+
+        detail = self.read_service.get_run(run_id=self.run_id)
+        result = self.read_service.read_artifact(
+            run_id=self.run_id,
+            artifact_key="repo_landscape",
+        )
+
+        self.assertIn("repo_landscape", detail["latest_artifacts"])
+        self.assertEqual(result["content"]["schema_version"], "repo_landscape_v1")
+        self.assertEqual(result["content"]["summary"]["blocking_count"], 0)
+
     def test_read_clarification_policy_shadow_artifact(self) -> None:
         shadow_path = self.store.write_json_artifact(
             self.run_id,

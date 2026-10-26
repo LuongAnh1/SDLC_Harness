@@ -28,6 +28,11 @@ from .design_experiment import (
     SemanticCandidate,
     _missing_link_findings,
 )
+from .repo_discovery import (
+    REPO_DISCOVERY_CONTRACT_STATE_KEY,
+    REPO_DISCOVERY_CONTRACT_VERSION,
+    RepoDiscoveryWorkflow,
+)
 
 ALLOWED_DESIGN_ACTIONS = [
     "approve_checkpoint",
@@ -53,6 +58,7 @@ class PhaseTwoWorkflow:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+        self.repo_discovery = RepoDiscoveryWorkflow(settings)
         self._reset_progressive_engine()
 
     def _reset_progressive_engine(self) -> None:
@@ -71,6 +77,47 @@ class PhaseTwoWorkflow:
         state = self.store.read_state(run_id)
         self._require_requirement_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
         approved = read_approved_requirement_input(store=self.store, state=state, run_id=run_id)
+        if str(state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY) or "") == REPO_DISCOVERY_CONTRACT_VERSION:
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "approved_artifacts": approved.approved_artifacts,
+                    "pending_checkpoint": None,
+                }
+            )
+            self.store.write_state(state)
+            landscape = self.repo_discovery.run(
+                run_id=run_id,
+                requirement_model=approved.canonical_model.to_dict(),
+            )
+            if landscape is None:
+                return self._status_response(self.store.read_state(run_id), created_new_run=False)
+            state = self.store.read_state(run_id)
+        return self._start_design(state=state, approved=approved)
+
+    def continue_repo_discovery(self, *, run_id: str) -> dict[str, object]:
+        """Resume một L2 environment failure trên cùng frozen workspace/input."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") != "repo_discovery_paused":
+            raise HarnessError(
+                "repo_discovery_not_resumable",
+                f"Repo discovery cannot continue from status {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+        landscape = self.repo_discovery.run(
+            run_id=run_id,
+            requirement_model=approved.canonical_model.to_dict(),
+        )
+        if landscape is None:
+            return self._status_response(self.store.read_state(run_id), created_new_run=False)
+        return self._start_design(state=self.store.read_state(run_id), approved=approved)
+
+    def _start_design(self, *, state: dict[str, object], approved: object) -> dict[str, object]:
+        """Chạy Designer hiện hành sau legacy handoff hoặc L2 discovery thành công."""
+
+        run_id = str(state.get("run_id") or "")
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         state.update(
             {
@@ -1002,6 +1049,7 @@ class PhaseTwoWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
+            REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
         }
 
 

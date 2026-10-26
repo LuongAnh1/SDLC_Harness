@@ -250,6 +250,8 @@ class ApplicationService:
                 "requirement_paused",
             }:
                 return phase_one.continue_requirement_run(run_id=run_id)
+            if str(state.get("status") or "") == "repo_discovery_paused":
+                return PhaseTwoWorkflow(settings).continue_repo_discovery(run_id=run_id)
             return PhaseFourWorkflow(settings).continue_until_implementation_checkpoint(
                 run_id=run_id
             )

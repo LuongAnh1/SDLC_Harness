@@ -74,6 +74,7 @@ from ..agents.requirements.session_v1 import (
 )
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
+from .repo_discovery import REPO_DISCOVERY_CONTRACT_STATE_KEY, REPO_DISCOVERY_CONTRACT_VERSION
 
 ALLOWED_REQUIREMENT_ACTIONS = [
     "approve_checkpoint",
@@ -147,6 +148,7 @@ class PhaseOneWorkflow:
             "requested_by": requested_by,
             "requirement_contract_version": self.settings.requirement_contract_version,
             "requirement_clarification_policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
+            REPO_DISCOVERY_CONTRACT_STATE_KEY: REPO_DISCOVERY_CONTRACT_VERSION,
             "created_at": now,
             "updated_at": now,
             "current_phase": "requirement_drafting",
@@ -1457,6 +1459,7 @@ class PhaseOneWorkflow:
                 "requirement_clarification_policy_version",
                 LEGACY_BLOCKING_POLICY_VERSION,
             ),
+            REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),

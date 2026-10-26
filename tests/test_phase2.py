@@ -6,9 +6,11 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import DesignDraft, DesignerAgent, parse_design_model
@@ -27,7 +29,7 @@ from sdlc_harness.sync.atlassian import real_sync_design_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
-from tests._support import RuntimeDirectoryTemplate
+from tests._support import GitRepositoryTemplate, RuntimeDirectoryTemplate, populate_typescript_target
 
 
 class StaticLlmClient:
@@ -191,7 +193,11 @@ def design_finding(name: str, *, excerpt: str = "") -> DesignFinding:
 class PhaseTwoTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.target_repo_template = GitRepositoryTemplate(populate_typescript_target)
         cls.runtime_template_temp = tempfile.TemporaryDirectory()
+        cls.phase1_target = cls.target_repo_template.materialize(
+            Path(cls.runtime_template_temp.name) / "target"
+        )
         runtime_root = Path(cls.runtime_template_temp.name) / ".runtime"
         settings = load_settings(
             root=Path(__file__).resolve().parents[1],
@@ -203,6 +209,10 @@ class PhaseTwoTest(unittest.TestCase):
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
                 "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
+                "SDLC_TARGET_REPO_PATH": str(cls.phase1_target.canonical),
+                "SDLC_TARGET_REPO_REMOTE": str(cls.phase1_target.remote.resolve()),
+                "SDLC_TARGET_BASE_BRANCH": "main",
+                "SDLC_TARGET_WORKTREE_ROOT": str(Path(cls.runtime_template_temp.name) / "worktrees"),
             },
         )
         created = PhaseOneWorkflow(settings).start_or_get_run(
@@ -217,11 +227,13 @@ class PhaseTwoTest(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.phase1_runtime_template.close()
         cls.runtime_template_temp.cleanup()
+        cls.target_repo_template.close()
 
     def setUp(self) -> None:
         self.repo_root = Path(__file__).resolve().parents[1]
         self.temp_dir = tempfile.TemporaryDirectory()
         self.runtime_root = Path(self.temp_dir.name) / ".runtime"
+        self.target = self.target_repo_template.materialize(Path(self.temp_dir.name) / "target")
         suffix = hashlib.sha256(self._testMethodName.encode("utf-8")).hexdigest()[:8]
         self.run_id = f"run_20261020_000000_{suffix}"
         self.settings = load_settings(
@@ -234,6 +246,10 @@ class PhaseTwoTest(unittest.TestCase):
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
                 "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
+                "SDLC_TARGET_REPO_PATH": str(self.target.canonical),
+                "SDLC_TARGET_REPO_REMOTE": str(self.target.remote.resolve()),
+                "SDLC_TARGET_BASE_BRANCH": "main",
+                "SDLC_TARGET_WORKTREE_ROOT": str(Path(self.temp_dir.name) / "worktrees"),
             },
         )
 
@@ -243,7 +259,13 @@ class PhaseTwoTest(unittest.TestCase):
     def _create_phase1_run(self) -> dict[str, object]:
         self.phase1_runtime_template.materialize(
             self.runtime_root,
-            replacements={self.phase1_run_id: self.run_id},
+            replacements={
+                self.phase1_run_id: self.run_id,
+                str(self.phase1_target.canonical): str(self.target.canonical),
+                self.phase1_target.canonical.as_posix(): self.target.canonical.as_posix(),
+                str(self.phase1_target.remote.resolve()): str(self.target.remote.resolve()),
+                self.phase1_target.remote.resolve().as_posix(): self.target.remote.resolve().as_posix(),
+            },
         )
         return PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
 
@@ -253,6 +275,14 @@ class PhaseTwoTest(unittest.TestCase):
             use_case="UC1",
             requested_by="test",
         )
+
+    def _target_overrides(self) -> dict[str, str]:
+        return {
+            "SDLC_TARGET_REPO_PATH": str(self.target.canonical),
+            "SDLC_TARGET_REPO_REMOTE": str(self.target.remote.resolve()),
+            "SDLC_TARGET_BASE_BRANCH": "main",
+            "SDLC_TARGET_WORKTREE_ROOT": str(Path(self.temp_dir.name) / "worktrees"),
+        }
 
     def test_settings_reads_design_repair_limit(self) -> None:
         self.assertEqual(self.settings.design_repair_limit, 2)
@@ -309,6 +339,7 @@ class PhaseTwoTest(unittest.TestCase):
             root=self.repo_root,
             runtime_root=self.runtime_root,
             overrides={
+                **self._target_overrides(),
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
@@ -775,6 +806,9 @@ class OnlyClass {
         self.assertTrue((run_dir / "artifacts" / "design_quality_report_v1.md").exists())
         self.assertTrue((run_dir / "sync" / "design-jira-comment.md").exists())
         self.assertTrue((run_dir / "sync" / "design-confluence-page.md").exists())
+        mock_jira = (run_dir / "sync" / "design-jira-comment.md").read_text(encoding="utf-8")
+        self.assertIn("## Repository Landscape", mock_jira)
+        self.assertIn("Inventory: 5 component(s)", mock_jira)
         class_graph = json.loads((run_dir / "artifacts" / "class_diagram_graph_v1.json").read_text(encoding="utf-8"))
         class_names = {node["className"] for node in class_graph["nodes"]}
         self.assertIn("DeleteCulturalHeritageBoundary", class_names)
@@ -795,6 +829,50 @@ class OnlyClass {
         self.assertEqual(report["version"], "tool_sync_report_v2")
         self.assertEqual(report["phase"], "design_checkpoint")
         self.assertEqual(report["checkpoint"]["type"], "design_approval")
+
+    def test_repo_discovery_pause_can_resume_before_design(self) -> None:
+        created = self._create_phase1_run_fresh()
+        run_id = str(created["run_id"])
+        workflow = PhaseTwoWorkflow(self.settings)
+        real_create = workflow.repo_discovery.workspace_manager.create_for_run
+        attempts = 0
+
+        def flaky_create(current_run_id: str):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise HarnessError("workspace_fetch_failed", "temporary fetch failure", run_id=current_run_id)
+            return real_create(current_run_id)
+
+        with patch.object(
+            workflow.repo_discovery.workspace_manager,
+            "create_for_run",
+            side_effect=flaky_create,
+        ):
+            paused = workflow.approve_checkpoint(run_id=run_id)
+            resumed = workflow.continue_repo_discovery(run_id=run_id)
+
+        self.assertEqual(paused["status"], "repo_discovery_paused")
+        self.assertEqual(paused["allowed_next_actions"], ["continue_run", "get_status"])
+        self.assertEqual(paused["last_error"]["error_code"], "workspace_fetch_failed")
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+        self.assertIn("repo_landscape", resumed["latest_artifacts"])
+        self.assertIn("run_workspace", resumed["latest_artifacts"])
+        self.assertEqual(resumed["quality_reports"]["repo_discovery"]["status"], "passed")
+
+    def test_legacy_run_without_discovery_marker_keeps_old_handoff(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        store = PhaseTwoWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        state.pop("repo_discovery_contract_version", None)
+        store.write_state(state)
+
+        response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertNotIn("repo_landscape", response["latest_artifacts"])
+        self.assertNotIn("run_workspace", response["latest_artifacts"])
 
     def test_repair_loop_passes_after_one_repair(self) -> None:
         created = self._create_phase1_run()
@@ -893,6 +971,7 @@ class OnlyClass {
             root=self.repo_root,
             runtime_root=self.runtime_root,
             overrides={
+                **self._target_overrides(),
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
                 "SDLC_DESIGN_REPAIR_LIMIT": "0",
@@ -975,6 +1054,12 @@ class OnlyClass {
         self.assertTrue(any(block["type"] == "codeBlock" for block in jira_blocks))
         self.assertTrue(
             any(
+                block["type"] == "heading" and block["content"][0]["text"] == "Repository landscape"
+                for block in jira_blocks
+            )
+        )
+        self.assertTrue(
+            any(
                 block["type"] == "heading" and block["content"][0]["text"] == "Diagrams"
                 for block in jira_blocks
             )
@@ -985,6 +1070,7 @@ class OnlyClass {
         self.assertIn("<h1>SDLC Harness - UC1 - Design Checkpoint</h1>", confluence_body)
         self.assertIn("SDLC-HARNESS-CHECKPOINT::design::dataset_use_case:eTour:UC1", confluence_body)
         self.assertIn("<h2>Design Diagrams</h2>", confluence_body)
+        self.assertIn("<h2>Repository Landscape</h2>", confluence_body)
         self.assertIn("<h3>Class Diagram</h3>", confluence_body)
         self.assertIn("<h3>Sequence Diagram</h3>", confluence_body)
         self.assertIn("<ac:adf-extension>", confluence_body)
@@ -1177,7 +1263,7 @@ class OnlyClass {
         PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
         stdout = io.StringIO()
 
-        with contextlib.redirect_stdout(stdout):
+        with patch.dict(os.environ, self._target_overrides()), contextlib.redirect_stdout(stdout):
             code = cli_main(
                 [
                     "revalidate-design",
@@ -1250,7 +1336,7 @@ class OnlyClass {
     def test_cli_approve_checkpoint_returns_json(self) -> None:
         created = self._create_phase1_run()
         stdout = io.StringIO()
-        with contextlib.redirect_stdout(stdout):
+        with patch.dict(os.environ, self._target_overrides()), contextlib.redirect_stdout(stdout):
             code = cli_main(
                 [
                     "approve-checkpoint",

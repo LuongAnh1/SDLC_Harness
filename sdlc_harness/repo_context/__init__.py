@@ -7,5 +7,13 @@ workspace và không quyết định file nào Developer được phép ghi.
 
 from .codegraph import CodeGraphContextProvider, RepoContext
 from .discovery import discover_profile_source_files
+from .landscape import REPO_LANDSCAPE_VERSION, build_repo_landscape, validate_repo_landscape
 
-__all__ = ["CodeGraphContextProvider", "RepoContext", "discover_profile_source_files"]
+__all__ = [
+    "CodeGraphContextProvider",
+    "REPO_LANDSCAPE_VERSION",
+    "RepoContext",
+    "build_repo_landscape",
+    "discover_profile_source_files",
+    "validate_repo_landscape",
+]

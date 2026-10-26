@@ -32,6 +32,7 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 JsonRequester = Callable[[str, str, dict[str, Any] | None], dict[str, Any]]
 
 _DESIGN_ARTIFACT_KEYS = {
+    "repo_landscape",
     "designer_analysis",
     "design_artifact",
     "requirement_graph",
@@ -1253,6 +1254,7 @@ def _jira_design_comment_body(
         "Confluence page contains dedicated diagram sections for review.",
     ]
     diagram_blocks = _adf_design_diagram_blocks(class_diagram, sequence_diagrams)
+    landscape_items = _repo_landscape_summary_items(store, artifact_paths)
 
     return {
         "type": "doc",
@@ -1277,6 +1279,11 @@ def _jira_design_comment_body(
                     f"Trace report: {_artifact_ref(artifact_paths.get('requirement_design_trace', ''))}",
                     f"Quality report: {_artifact_ref(artifact_paths.get('design_quality_report', ''))}",
                 ]
+            ),
+            *(
+                [_adf_heading("Repository landscape", level=3), _adf_bullet_list(landscape_items)]
+                if landscape_items
+                else []
             ),
             _adf_heading("Diagrams", level=3),
             _adf_bullet_list(diagram_items),
@@ -1658,6 +1665,12 @@ def _confluence_design_storage_body(
     quality_text = _read_artifact(store, artifact_paths, "design_quality_report")
     analysis_text = _read_artifact(store, artifact_paths, "designer_analysis")
     class_diagram, sequence_diagrams = _extract_design_diagrams(design_text)
+    landscape_items = _repo_landscape_summary_items(store, artifact_paths)
+    landscape_section = ""
+    if landscape_items:
+        landscape_section = "<h2>Repository Landscape</h2><ul>" + "".join(
+            f"<li>{escape(item)}</li>" for item in landscape_items
+        ) + "</ul>"
     artifact_rows = "\n".join(
         "<tr>"
         f"<td><strong>{escape(_artifact_label(name))}</strong></td>"
@@ -1686,6 +1699,7 @@ def _confluence_design_storage_body(
 {artifact_rows}
 </tbody>
 </table>
+{landscape_section}
 <h2>Designer Analysis</h2>
 {_markdown_to_confluence_storage(analysis_text)}
 <h2>Design Diagrams</h2>
@@ -1697,6 +1711,37 @@ def _confluence_design_storage_body(
 <h2>Quality Report</h2>
 {_markdown_to_confluence_storage(quality_text)}
 """.strip()
+
+
+def _repo_landscape_summary_items(
+    store: RuntimeStore,
+    artifact_paths: dict[str, str],
+) -> list[str]:
+    if not artifact_paths.get("repo_landscape"):
+        return []
+    landscape = _read_json_artifact(store, artifact_paths, "repo_landscape")
+    summary = landscape.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    discovery = landscape.get("discovery")
+    discovery = discovery if isinstance(discovery, dict) else {}
+    snapshot = landscape.get("snapshot")
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    base_sha = str(snapshot.get("base_sha") or "")
+    return [
+        f"Mode: {discovery.get('mode') or 'unknown'}",
+        f"Frozen base SHA: {base_sha[:12] if base_sha else 'unknown'}",
+        (
+            f"Inventory: {int(summary.get('component_count') or 0)} component(s), "
+            f"{int(summary.get('file_count') or 0)} file(s), "
+            f"{int(summary.get('anchor_count') or 0)} anchor(s)"
+        ),
+        (
+            f"Conformance: {int(summary.get('blocking_count') or 0)} blocker(s), "
+            f"{int(summary.get('warning_count') or 0)} warning(s), "
+            f"{int(summary.get('unmatched_surface_count') or 0)} unmatched surface(s)"
+        ),
+        f"Artifact: {_artifact_ref(artifact_paths['repo_landscape'])}",
+    ]
 
 
 def _confluence_implementation_plan_storage_body(

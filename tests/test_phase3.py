@@ -381,6 +381,13 @@ class PhaseThreeTest(unittest.TestCase):
         )
         approved = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
         cls.phase2_run_id = str(approved["run_id"])
+        phase2_workspace_ref = Path(str(approved["latest_artifacts"]["run_workspace"]))
+        if not phase2_workspace_ref.is_absolute():
+            phase2_workspace_ref = Path(__file__).resolve().parents[1] / phase2_workspace_ref
+        phase2_workspace_payload = json.loads(phase2_workspace_ref.read_text(encoding="utf-8"))
+        cls.phase2_template_canonical = str(phase2_workspace_payload["canonical_repo"])
+        cls.phase2_template_remote = str(phase2_workspace_payload["remote"])
+        cls.phase2_template_worktree = str(phase2_workspace_payload["worktree_path"])
         cls.phase2_runtime_template = RuntimeDirectoryTemplate(runtime_root)
         phase3 = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=cls.phase2_run_id)
         cls.phase3_run_id = str(phase3["run_id"])
@@ -488,14 +495,20 @@ class PhaseThreeTest(unittest.TestCase):
         self._git(self.target_repo, "push", "origin", "main")
 
     def _create_phase2_run(self) -> dict[str, object]:
+        manager = RunWorkspaceManager(self.settings)
+        worktree_path = manager.expected_worktree_path(self.run_id)
         self.phase2_runtime_template.materialize(
             self.runtime_root,
             replacements={
                 self.phase2_run_id: self.run_id,
-                str(self.shared_topology.canonical.resolve()): str(self.target_repo.resolve()),
-                str(self.shared_topology.remote.resolve()): self.remote_url,
+                self.phase2_run_id[-8:]: self.run_id[-8:],
+                self.phase2_template_canonical: str(self.target_repo.resolve()),
+                self.phase2_template_remote: self.remote_url,
+                self.phase2_template_worktree: str(worktree_path),
             },
         )
+        state = manager.store.read_state(self.run_id)
+        create_fast_run_workspace(manager, run_id=self.run_id, state=state)
         approved = PhaseOneWorkflow(self.settings).get_status(run_id=self.run_id)
         self.assertEqual(approved["status"], "waiting_design_approval")
         return approved
@@ -626,18 +639,15 @@ class PhaseThreeTest(unittest.TestCase):
             use_case="UC1",
             requested_by="test",
         )
-        approved = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
-        self.assertEqual(approved["status"], "waiting_design_approval")
-
         with (
-            patch("sdlc_harness.workflows.phase3.CodeGraphContextProvider.prepare_index") as prepare_index,
+            patch("sdlc_harness.repo_context.codegraph.CodeGraphContextProvider.query_readonly") as query_readonly,
             patch.object(DeveloperPlanAgent, "plan") as developer_plan,
         ):
             response = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
 
-        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["status"], "repo_discovery_blocked")
         self.assertEqual(response["last_error"]["error_code"], "target_profile_manifest_mismatch")
-        prepare_index.assert_not_called()
+        query_readonly.assert_not_called()
         developer_plan.assert_not_called()
 
     def test_profiled_phase3_discovers_typescript_for_plan_and_revalidation(self) -> None:
@@ -1487,21 +1497,29 @@ Thanks."""
         self.assertTrue((self.repo_root / str(phase3["latest_artifacts"]["implementation_plan"])).exists())
 
     def test_target_repo_guard_blocks_when_path_points_to_harness_repo(self) -> None:
-        approved = self._create_phase2_run()
         settings = self._settings(SDLC_TARGET_REPO_PATH=str(self.repo_root))
+        created = PhaseOneWorkflow(settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
 
-        response = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(approved["run_id"]))
+        response = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
 
-        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["status"], "repo_discovery_blocked")
         self.assertEqual(response["last_error"]["error_code"], "target_repo_is_harness")
 
     def test_target_repo_guard_blocks_dirty_worktree(self) -> None:
-        approved = self._create_phase2_run()
+        created = PhaseOneWorkflow(self.settings).start_or_get_run(
+            dataset="eTour",
+            use_case="UC1",
+            requested_by="test",
+        )
         (self.target_repo / "dirty.txt").write_text("dirty", encoding="utf-8")
 
-        response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
+        response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
 
-        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["status"], "repo_discovery_blocked")
         self.assertEqual(response["last_error"]["error_code"], "workspace_dirty")
 
     def test_phase3_initializes_codegraph_inside_run_workspace(self) -> None:

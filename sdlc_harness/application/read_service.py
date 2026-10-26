@@ -50,6 +50,7 @@ PUBLIC_ARTIFACT_KEYS = frozenset(
         "requirement_clarification_policy_shadow",
         "requirement_reasonable_defaults",
         "requirement_assumption_challenge",
+        "repo_landscape",
         "designer_analysis",
         "design_artifact",
         "requirement_graph",

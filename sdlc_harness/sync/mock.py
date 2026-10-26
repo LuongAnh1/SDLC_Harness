@@ -9,6 +9,7 @@ ownership vẫn giữ ở SDLC_Harness, Niko chỉ đọc report trả về.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from ..storage.runtime import RuntimeStore, utc_now_iso
 
@@ -144,6 +145,8 @@ def mock_sync_design_checkpoint(
     quality_ref = _artifact_ref(quality_report)
     analysis_ref = _artifact_ref(artifact_paths["designer_analysis"])
     missing_ref = _artifact_ref(artifact_paths["missing_design_links"])
+    landscape_section = _repo_landscape_markdown(store, artifact_paths)
+    landscape_ref = _artifact_ref(artifact_paths["repo_landscape"]) if artifact_paths.get("repo_landscape") else ""
     previous_targets = _previous_targets(report_path)
     previous_jira = previous_targets.get("jira", {})
     previous_confluence = previous_targets.get("confluence", {})
@@ -161,6 +164,8 @@ Artifacts:
 - Design artifact: `{design_artifact}`
 - Requirement-design trace: `{trace_artifact}`
 - Quality report: `{quality_report}`
+
+{landscape_section}
 
 Next action: approve design hoặc request change.
 """,
@@ -184,6 +189,8 @@ Trang này giả lập bản review thiết kế sau khi requirement checkpoint 
 - Missing design links: `{artifact_paths['missing_design_links']}`
 - Quality report: `{quality_report}`
 
+{landscape_section}
+
 ## Human Checkpoint
 
 Review design trước khi cho phép Phase 3 sinh code/test.
@@ -199,7 +206,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": previous_jira.get("url", ""),
             "status": "synced",
             "path": store.relative(jira_comment_path),
-            "artifact_refs": [design_ref, trace_ref, quality_ref],
+            "artifact_refs": [design_ref, trace_ref, quality_ref, *([landscape_ref] if landscape_ref else [])],
             "error": None,
         },
         {
@@ -209,7 +216,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": previous_confluence.get("url", ""),
             "status": "synced",
             "path": store.relative(confluence_page_path),
-            "artifact_refs": [analysis_ref, design_ref, missing_ref],
+            "artifact_refs": [analysis_ref, design_ref, missing_ref, *([landscape_ref] if landscape_ref else [])],
             "error": None,
         },
     ]
@@ -529,6 +536,40 @@ def _previous_targets(report_path) -> dict[str, dict[str, str]]:
             "url": str(target.get("url", "")),
         }
     return result
+
+
+def _repo_landscape_markdown(store: RuntimeStore, artifact_paths: dict[str, str]) -> str:
+    reference = artifact_paths.get("repo_landscape", "")
+    if not reference:
+        return ""
+    path = Path(reference)
+    resolved = path.resolve() if path.is_absolute() else (store.repo_root / path).resolve()
+    try:
+        landscape = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return "## Repository Landscape\n\n- Summary unavailable; inspect the landscape artifact."
+    summary = landscape.get("summary") if isinstance(landscape, dict) else {}
+    summary = summary if isinstance(summary, dict) else {}
+    discovery = landscape.get("discovery") if isinstance(landscape, dict) else {}
+    discovery = discovery if isinstance(discovery, dict) else {}
+    return "\n".join(
+        [
+            "## Repository Landscape",
+            "",
+            f"- Mode: `{discovery.get('mode') or 'unknown'}`",
+            (
+                f"- Inventory: {int(summary.get('component_count') or 0)} component(s), "
+                f"{int(summary.get('file_count') or 0)} file(s), "
+                f"{int(summary.get('anchor_count') or 0)} anchor(s)"
+            ),
+            (
+                f"- Conformance: {int(summary.get('blocking_count') or 0)} blocker(s), "
+                f"{int(summary.get('warning_count') or 0)} warning(s), "
+                f"{int(summary.get('unmatched_surface_count') or 0)} unmatched surface(s)"
+            ),
+            f"- Artifact: `{reference}`",
+        ]
+    )
 
 
 def _artifact_ref(path: str) -> str:

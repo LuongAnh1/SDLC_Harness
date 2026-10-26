@@ -323,7 +323,8 @@ def create_fast_run_workspace(manager: object, *, run_id: str, state: dict[str, 
         created_at=now,
         updated_at=now,
     )
+    profile_changed = manager._bind_or_validate_profile(record, state=state, allow_bind=True)
     manager._write_record_locked(record)
-    manager._reconcile_state(record, state=state)
+    manager._reconcile_state(record, state=state, force_write=profile_changed)
     return record
 

@@ -35,6 +35,7 @@ from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
+from tests._support import GitRepositoryTemplate, populate_typescript_target
 
 
 class ScriptedClient:
@@ -419,12 +420,19 @@ class RequirementClarificationV2Test(unittest.TestCase):
 
     def test_phase1_v2_answer_is_idempotent_and_updates_checkpoint(self) -> None:
         with TemporaryDirectory() as directory:
+            template = GitRepositoryTemplate(populate_typescript_target)
+            self.addCleanup(template.close)
+            topology = template.materialize(Path(directory) / "target-fixture")
             settings = load_settings(
                 root=self.root,
-                runtime_root=Path(directory),
+                runtime_root=Path(directory) / ".runtime",
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                    "SDLC_TARGET_REPO_PATH": str(topology.canonical),
+                    "SDLC_TARGET_REPO_REMOTE": str(topology.remote.resolve()),
+                    "SDLC_TARGET_WORKTREE_ROOT": str(Path(directory) / "worktrees"),
                 },
             )
             workflow = PhaseOneWorkflow(settings)
@@ -435,7 +443,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
             self.assertEqual(start["requirement_contract_version"], "v2")
             self.assertEqual(start["pending_checkpoint"]["current_question"]["id"], "Q-4")
             mock_comment = (
-                Path(directory) / "runs" / str(start["run_id"]) / "sync" / "jira-comment.md"
+                Path(directory) / ".runtime" / "runs" / str(start["run_id"]) / "sync" / "jira-comment.md"
             ).read_text(encoding="utf-8")
             self.assertIn("Current clarification question", mock_comment)
             self.assertIn("Remaining blocking questions: 4", mock_comment)

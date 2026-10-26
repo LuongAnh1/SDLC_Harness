@@ -514,6 +514,26 @@ class ApplicationServiceTests(unittest.TestCase):
         phase_one_continue.assert_called_once_with(run_id="run_1")
         phase_four.return_value.continue_until_implementation_checkpoint.assert_not_called()
 
+    def test_continue_run_routes_repo_discovery_pause_to_phase_two(self) -> None:
+        self.write_state(
+            status="repo_discovery_paused",
+            current_phase="repo_discovery",
+            allowed_next_actions=["continue_run", "get_status"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "waiting_design_approval"}
+        with (
+            patch(
+                "sdlc_harness.application.service.PhaseTwoWorkflow.continue_repo_discovery",
+                return_value=response,
+            ) as phase_two_continue,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four,
+        ):
+            result = self.service.execute(self.command("continue-run", {"run_id": "run_1"}))
+
+        self.assertEqual(result, response)
+        phase_two_continue.assert_called_once_with(run_id="run_1")
+        phase_four.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
     def test_approval_and_workspace_commands_dispatch(self) -> None:
         self.write_state()
         with (

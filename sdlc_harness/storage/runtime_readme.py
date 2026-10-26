@@ -10,11 +10,11 @@ from uuid import uuid4
 from ..core.errors import HarnessError
 
 
-RUNTIME_LAYOUT_VERSION = "runtime_layout_v3"
+RUNTIME_LAYOUT_VERSION = "runtime_layout_v4"
 _README_LOCK = RLock()
 RUNTIME_README = """# Dữ liệu runtime của SDLC Harness
 
-Phiên bản bố cục: `runtime_layout_v3`
+Phiên bản bố cục: `runtime_layout_v4`
 
 Thư mục `.runtime/` là kho trạng thái vận hành cục bộ của SDLC Harness. Nó chứa
 trạng thái workflow, artifact trung gian và cuối cùng, nhật ký thực thi, kết quả
@@ -187,10 +187,12 @@ Artifact `requirement_policy_defaults_v1_r<N>.json` nếu còn trong run cũ là
 liệu lịch sử của cơ chế registry V2 đã bị loại bỏ. Code hiện tại không sinh và
 không dùng nó làm đầu vào.
 
-## 7. Artifact Phase 2 - Design
+## 7. Artifact L2/Phase 2 - Repo Discovery và Design
 
 | File/pattern | Nguồn sinh | Nội dung và mục đích | Đầu vào cho bước sau |
 | --- | --- | --- | --- |
+| `run_workspace_v1.json` | Workspace Manager ngay sau Requirement Approval của run L2 mới | Identity worktree/branch và base/head SHA đã freeze; bind target profile snapshot trước khi đọc code | Repo Discovery, Design, Plan và toàn bộ execution; các run cũ không có marker L2 vẫn giữ flow cũ |
+| `repo_landscape_v1.json` | Repo Discovery từ worktree đã freeze, profile roots và CodeGraph có sẵn hoặc bounded fallback | Inventory component/file, AS-IS anchor, candidate mapping theo scenario surface, conformance finding, uncertainty và digest; không chứa raw source hoặc absolute path | Designer hiện hành, Read API, human audit và Phase 3 planning |
 | `designer_analysis_v<N>.md` | Designer Agent | Phân tích thiết kế và bối cảnh của version | Repair vòng sau, human review và audit |
 | `design_artifact_v<N>.md` | Designer Agent | TO-BE design hiện hành, gồm PlantUML/class/sequence theo phạm vi use case | Parser, Design Validator, Design checkpoint và Implementation Plan Agent |
 | `class_diagram_graph_v<N>.json` | Deterministic PlantUML parser | Graph class/interface/entity và quan hệ đã parse | Traceability Validator, Plan Validator và Code Trace Validator |
@@ -208,9 +210,12 @@ không dùng nó làm đầu vào.
 `sequence_graph_v<N>.json` và `traceability_v<N>.json` chỉ xuất hiện ở luồng
 thử nghiệm Design Validator. Chúng không thay thế artifact production ở bảng trên.
 
-Hiện tại repo context/CodeGraph của bước lập plan được thu thập trực tiếp từ
-run worktree và được tóm tắt vào structured plan; chưa có file
-`repo_landscape_v1.json` riêng trong runtime production.
+Run có `repo_discovery_contract_version=repo_landscape_v1` phải hoàn tất L2 trước
+khi Designer chạy. L2 chỉ dùng index `.codegraph/` đã tồn tại và không tự khởi tạo
+hay sửa target repo; khi CodeGraph không sẵn sàng, bounded profile scan vẫn tạo
+artifact và ghi uncertainty. Lỗi môi trường retry được dừng ở
+`repo_discovery_paused`; lỗi identity, path, artifact hoặc conformance dừng đóng ở
+`repo_discovery_blocked`.
 
 ## 8. Artifact Phase 3 - Implementation Plan
 
@@ -228,7 +233,7 @@ plan; không coi canonical checkout bên ngoài worktree là nguồn sự thật
 
 | File/pattern | Nguồn sinh | Nội dung và mục đích | Đầu vào cho bước sau |
 | --- | --- | --- | --- |
-| `run_workspace_v1.json` | Workspace Manager khi Design/Plan chuyển sang execution | Identity worktree, branch, base/head, target profile snapshot và lifecycle cleanup | Mọi thao tác Developer, Verification, Validator, QA và GitHub; local path không công khai qua API |
+| `run_workspace_v1.json` | Workspace Manager; run L2 mới tạo ngay sau Requirement Approval, run legacy có thể tạo muộn hơn | Identity worktree, branch, base/head, target profile snapshot và lifecycle cleanup | Mọi thao tác Repo Discovery, Developer, Verification, Validator, QA và GitHub; local path không công khai qua API |
 | `effective_design_contract_v<N>.json` | Harness sau khi plan được duyệt | Design contract hiệu lực sau các design adjustment hợp lệ trong plan | Developer Work Packet và Code Trace Validator |
 | `developer_work_packet_v<N>.json` | Harness từ structured plan đã duyệt + effective design + workspace/profile | Phạm vi file, execution unit, test intent, mapping và policy mà Developer được phép thực hiện | Developer tool-loop, Verification Runner, Code Trace và QA context |
 | `developer_<action>_raw_response_v<N>.txt` | Developer Agent call | Raw structured response cho `act` hoặc repair | Debug parse/convergence; không phải artifact checkpoint |

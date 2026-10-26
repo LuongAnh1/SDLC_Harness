@@ -94,6 +94,18 @@ class CodeGraphContextProvider:
             evidence=_truncate(evidence, limit=MAX_EVIDENCE_CHARS),
         )
 
+    def query_readonly(self, target_path: Path, query: str) -> str:
+        """Query một index đã tồn tại; không tự tạo generated state cho L2."""
+
+        self.require_index(target_path)
+        if self.fake_mode:
+            return _fake_repo_evidence(target_path=target_path, target_files=[])
+        return _run_codegraph_explore(
+            target_path=target_path,
+            query=query,
+            timeout_seconds=self.timeout_seconds,
+        )
+
     def prepare_index(self, target_path: Path) -> dict[str, object]:
         """Khởi tạo index cho đúng snapshot worktree trước khi thu context."""
 
