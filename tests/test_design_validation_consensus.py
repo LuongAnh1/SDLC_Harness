@@ -28,17 +28,23 @@ def finding(
     *,
     severity: str = "blocking",
     subject_ref: str = "sequence_diagram_1:msg-4",
+    category: str = "behavior_order",
+    requirement_ids: list[str] | None = None,
+    diagram_ids: list[str] | None = None,
+    evidence: list[dict[str, str]] | None = None,
 ) -> dict[str, object]:
     return {
         "id": "SEM-001",
-        "category": "behavior_order",
+        "category": category,
         "severity": severity,
         "message": message,
         "expected_change": "Move the guard before the destructive call.",
-        "requirement_ids": ["MAIN-1"],
-        "diagram_ids": ["sequence_diagram_1"],
+        "requirement_ids": requirement_ids if requirement_ids is not None else ["MAIN-1"],
+        "diagram_ids": diagram_ids if diagram_ids is not None else ["sequence_diagram_1"],
         "subject_ref": subject_ref,
-        "evidence": [{"source": "design", "ref": subject_ref, "excerpt": "delete before guard"}],
+        "evidence": evidence
+        if evidence is not None
+        else [{"source": "design", "ref": subject_ref, "excerpt": "delete before guard"}],
     }
 
 
@@ -111,6 +117,95 @@ def test_paraphrases_share_vote_through_stable_subject_ref() -> None:
 
     assert len(result.blocking_findings) == 1
     assert result.blocking_findings[0].canonical_key.endswith("sequence_diagram_1:msg-4")
+
+
+def test_reference_sets_are_audit_metadata_not_consensus_identity() -> None:
+    result = review(
+        [
+            semantic_response(
+                finding(
+                    "Duplicate branch is implicit.",
+                    severity="warning",
+                    requirement_ids=["AC-1", "BR-1"],
+                    diagram_ids=["sequence_sc_1", "sequence_sc_5"],
+                    subject_ref="sequence_sc_1:fragment:0008",
+                )
+            ),
+            semantic_response(
+                finding(
+                    "Duplicate result has no explicit alternative.",
+                    severity="warning",
+                    requirement_ids=["AC-1", "BR-1", "MF-4"],
+                    diagram_ids=["sequence_sc_1"],
+                    subject_ref="sequence_sc_1:fragment:0008",
+                )
+            ),
+            semantic_response(),
+        ]
+    )
+
+    assert len(result.warnings) == 1
+    consensus = result.warnings[0]
+    assert consensus.support_count == 2
+    assert consensus.canonical_key == "behavior_order|sequence_sc_1:fragment:0008"
+    assert consensus.requirement_ids == ["AC-1", "BR-1", "MF-4"]
+    assert consensus.diagram_ids == ["sequence_sc_1", "sequence_sc_5"]
+    assert consensus.evidence_signature.startswith("sha256:")
+
+
+def test_same_location_with_different_category_does_not_reach_consensus() -> None:
+    result = review(
+        [
+            semantic_response(
+                finding(
+                    "Terminal outcome is ambiguous.",
+                    category="terminal_state",
+                    subject_ref="sequence_sc_1:message:0011",
+                )
+            ),
+            semantic_response(
+                finding(
+                    "The flow assumes a terminal outcome.",
+                    category="unsupported_assumption",
+                    subject_ref="sequence_sc_1:message:0011",
+                )
+            ),
+            semantic_response(),
+        ]
+    )
+
+    assert not result.blocking_findings
+    assert not result.warnings
+    assert len(result.disputed_findings) == 2
+
+
+def test_same_category_at_different_locations_does_not_reach_consensus() -> None:
+    result = review(
+        [
+            semantic_response(finding("First location.", subject_ref="sequence_sc_1:message:0001")),
+            semantic_response(finding("Second location.", subject_ref="sequence_sc_1:message:0002")),
+            semantic_response(),
+        ]
+    )
+
+    assert not result.blocking_findings
+    assert not result.warnings
+    assert len(result.disputed_findings) == 2
+
+
+def test_unlocated_findings_cannot_vote_across_trials() -> None:
+    unlocated = finding(
+        "No stable location.",
+        subject_ref="",
+        requirement_ids=["MAIN-1"],
+        diagram_ids=[],
+        evidence=[],
+    )
+    result = review([semantic_response(unlocated), semantic_response(unlocated), semantic_response()])
+
+    assert not result.blocking_findings
+    assert not result.warnings
+    assert len(result.disputed_findings) == 2
 
 
 def test_invalid_trial_makes_result_inconclusive() -> None:

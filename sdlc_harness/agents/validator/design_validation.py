@@ -9,6 +9,7 @@ transaction có điều kiện.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
 import json
 from itertools import combinations
 import re
@@ -17,6 +18,9 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
 from .traceability import TraceabilityResult
+
+
+FINDING_IDENTITY_VERSION = "design_finding_identity_v2"
 
 
 @dataclass(frozen=True)
@@ -39,6 +43,9 @@ class DesignFinding:
     def to_dict(self) -> dict[str, object]:
         return {
             "id": self.finding_id,
+            "identity_version": FINDING_IDENTITY_VERSION,
+            "canonical_key": self.canonical_key,
+            "evidence_signature": self.evidence_signature,
             "category": self.category,
             "severity": self.severity,
             "message": self.message,
@@ -55,6 +62,10 @@ class DesignFinding:
     @property
     def canonical_key(self) -> str:
         return _canonical_finding_key(self)
+
+    @property
+    def evidence_signature(self) -> str:
+        return _finding_evidence_signature(self)
 
 
 @dataclass(frozen=True)
@@ -488,6 +499,11 @@ def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) ->
         severity = finding.severity
         if severity == "blocking" and (not finding.requirement_ids or not finding.subject_ref):
             severity = "warning"
+        subject_ref = finding.subject_ref
+        if not _normalize_reference(subject_ref):
+            # An unlocated observation cannot vote with another trial. Preserve it
+            # as disputed evidence under a trial-local identity instead.
+            subject_ref = f"unlocated:{trial_id}:{finding.finding_id}"
         prepared.append(
             DesignFinding(
                 finding_id=finding.finding_id,
@@ -498,7 +514,7 @@ def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) ->
                 requirement_ids=finding.requirement_ids,
                 diagram_ids=finding.diagram_ids,
                 evidence=finding.evidence,
-                subject_ref=finding.subject_ref,
+                subject_ref=subject_ref,
                 support_count=1,
                 trial_ids=[trial_id],
                 origin="semantic",
@@ -550,12 +566,12 @@ def _aggregate_semantic_trials(
                 severity=severity,
                 message=representative.message,
                 expected_change=representative.expected_change,
-                requirement_ids=representative.requirement_ids,
-                diagram_ids=representative.diagram_ids,
-                evidence=representative.evidence,
+                requirement_ids=_merged_string_values(item.requirement_ids for _trial, item in votes),
+                diagram_ids=_merged_string_values(item.diagram_ids for _trial, item in votes),
+                evidence=_merged_evidence(item.evidence for _trial, item in votes),
                 subject_ref=representative.subject_ref,
-                support_count=len(votes),
-                trial_ids=[trial_id for trial_id, _item in votes],
+                support_count=len({trial_id for trial_id, _item in votes}),
+                trial_ids=sorted({trial_id for trial_id, _item in votes}),
                 origin="semantic",
             )
         )
@@ -602,13 +618,66 @@ def _subject_ref_from_evidence(evidence: list[dict[str, str]], diagram_ids: list
 
 
 def _canonical_finding_key(finding: DesignFinding) -> str:
-    values = [
-        finding.category.strip().casefold(),
-        ",".join(sorted(item.strip().casefold() for item in finding.requirement_ids)),
-        ",".join(sorted(item.strip().casefold() for item in finding.diagram_ids)),
-        _normalize_reference(finding.subject_ref),
-    ]
-    return "|".join(values)
+    """Stable issue identity: exact semantic category plus exact Design location."""
+
+    return "|".join(
+        [
+            finding.category.strip().casefold(),
+            _normalize_reference(finding.subject_ref),
+        ]
+    )
+
+
+def _finding_evidence_signature(finding: DesignFinding) -> str:
+    payload = {
+        "requirement_ids": sorted({item.strip().casefold() for item in finding.requirement_ids if item.strip()}),
+        "diagram_ids": sorted({item.strip().casefold() for item in finding.diagram_ids if item.strip()}),
+        "message": finding.message.strip(),
+        "expected_change": finding.expected_change.strip(),
+        "evidence": sorted(
+            (
+                {
+                    "source": str(item.get("source") or "").strip(),
+                    "ref": str(item.get("ref") or "").strip(),
+                    "excerpt": str(item.get("excerpt") or "").strip(),
+                }
+                for item in finding.evidence
+            ),
+            key=lambda item: (item["source"], item["ref"], item["excerpt"]),
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"sha256:{digest}"
+
+
+def _merged_string_values(values: Any) -> list[str]:
+    merged: dict[str, str] = {}
+    for group in values:
+        for item in group:
+            text = str(item).strip()
+            if text:
+                merged.setdefault(text.casefold(), text)
+    return [merged[key] for key in sorted(merged)]
+
+
+def _merged_evidence(values: Any) -> list[dict[str, str]]:
+    merged: dict[tuple[str, str, str], dict[str, str]] = {}
+    for group in values:
+        for item in group:
+            normalized = {
+                "source": str(item.get("source") or "").strip(),
+                "ref": str(item.get("ref") or "").strip(),
+                "excerpt": str(item.get("excerpt") or "").strip(),
+            }
+            key = (
+                normalized["source"].casefold(),
+                normalized["ref"].casefold(),
+                normalized["excerpt"].casefold(),
+            )
+            merged.setdefault(key, normalized)
+    return [merged[key] for key in sorted(merged)]
 
 
 def _normalize_reference(value: str) -> str:

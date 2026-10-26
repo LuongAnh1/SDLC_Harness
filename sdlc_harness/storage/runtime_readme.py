@@ -208,7 +208,7 @@ không dùng nó làm đầu vào.
 | `requirement_graph_v<N>.json` | Traceability builder từ Requirement Model/packet | Graph requirement ổn định dùng để nối sang design | Requirement-to-design trace, Plan review và Code Trace |
 | `requirement_design_trace_v<N>.json` | Traceability Validator | Các cạnh Requirement -> Class/Sequence cùng input refs | Design gate, Implementation Plan và mở rộng thành Requirement-Design-Code trace |
 | `missing_design_links_v<N>.json` | Traceability Validator | Danh sách requirement chưa có class/sequence link | Designer repair và Design quality report |
-| `design_validation_report_v<N>.json` | Hybrid Design Validator | Rule findings, semantic findings/consensus, blocker, warning và repair count | Quyết định repair hoặc mở Design Approval Checkpoint; Plan chỉ nhận design đã pass |
+| `design_validation_report_v<N>.json` | Hybrid Design Validator | Rule findings, semantic findings/consensus, blocker, warning và repair count | Blocker quyết định repair; warning chỉ đi vào review. Plan chỉ nhận design có 0 blocker đã được duyệt |
 | `design_quality_report_v<N>.md` | Artifact writer từ kết quả validator | Bản tóm tắt dễ đọc cho người review | Design checkpoint và sync Jira/Confluence |
 | `traceability_<class|sequence>_v<N>_attempt<M>_raw.txt` | Mỗi lần gọi LLM traceability | Raw response trước parse | Chỉ debug khi parse/retry có vấn đề |
 | `traceability_<class|sequence>_v<N>_attempt<M>_metadata.json` | Traceability attempt recorder | finish reason, token usage, parse status, error và ref đến raw response | Retry diagnostics và audit; normalized graph/trace mới là đầu vào nghiệp vụ |
