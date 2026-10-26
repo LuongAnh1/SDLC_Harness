@@ -104,6 +104,8 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_model, "deepseek-flash")
         self.assertEqual(settings.llm_thinking_mode, "disabled")
         self.assertEqual(settings.sync_mode, "mock")
+        self.assertTrue(settings.designer_loop_enabled)
+        self.assertEqual(config_field_index()["SDLC_DESIGNER_LOOP_ENABLED"]["default"], True)
 
     def test_invalid_thinking_mode_from_non_api_source_falls_back_to_disabled(self) -> None:
         (self.root / ".env").write_text(

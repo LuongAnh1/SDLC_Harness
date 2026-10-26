@@ -429,6 +429,7 @@ class RequirementClarificationV2Test(unittest.TestCase):
                 overrides={
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
+                    "SDLC_DESIGNER_LOOP_ENABLED": "0",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                     "SDLC_TARGET_REPO_PATH": str(topology.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(topology.remote.resolve()),

@@ -72,6 +72,7 @@ from ..agents.requirements.session_v1 import (
     read_requirement_session,
     requirement_session_summary,
 )
+from ..agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
 from .repo_discovery import REPO_DISCOVERY_CONTRACT_STATE_KEY, REPO_DISCOVERY_CONTRACT_VERSION
@@ -164,6 +165,8 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
+        if self.settings.designer_loop_enabled:
+            state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,
@@ -1460,6 +1463,7 @@ class PhaseOneWorkflow:
                 LEGACY_BLOCKING_POLICY_VERSION,
             ),
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
+            DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),
             "status": state.get("status"),
@@ -1473,6 +1477,7 @@ class PhaseOneWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "developer_execution": state.get("developer_execution", {}),
+            "designer_execution": state.get("designer_execution", {}),
             "traceability_diagnostics": state.get("traceability_diagnostics", []),
         }
         requirement_execution = self._requirement_execution_summary(str(state.get("run_id") or ""))
@@ -1494,6 +1499,7 @@ class PhaseOneWorkflow:
         if response.get("current_phase") == "implementation_planning" and response.get("status") in {
             "waiting_implementation_plan_review",
             "blocked",
+            "design_blocked",
         }:
             allowed_actions = [str(action) for action in response["allowed_next_actions"]]
             if "revalidate_implementation_plan" not in allowed_actions:

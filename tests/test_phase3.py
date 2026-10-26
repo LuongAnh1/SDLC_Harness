@@ -367,6 +367,7 @@ class PhaseThreeTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_PROJECT_PROFILE": "",
@@ -448,6 +449,7 @@ class PhaseThreeTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
+            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),

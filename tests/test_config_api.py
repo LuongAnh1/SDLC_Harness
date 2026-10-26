@@ -85,6 +85,12 @@ class ConfigApiTests(unittest.TestCase):
         self.assertEqual(profile_field["value"], "typescript_fullstack_v1")
         self.assertEqual(profile_field["source"], "default")
         self.assertEqual(profile_field["options"], ["typescript_fullstack_v1"])
+        validation_section = next(section for section in payload["sections"] if section["id"] == "validation")
+        designer_loop_field = next(
+            field for field in validation_section["fields"] if field["name"] == "SDLC_DESIGNER_LOOP_ENABLED"
+        )
+        self.assertTrue(designer_loop_field["value"])
+        self.assertEqual(designer_loop_field["source"], "default")
         path_field = next(
             field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_PATH"
         )

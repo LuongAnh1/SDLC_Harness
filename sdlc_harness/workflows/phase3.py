@@ -689,6 +689,7 @@ class PhaseThreeWorkflow:
         accepted_validation_modes = {
             "design_validation_hybrid_v2",
             "design_validation_progressive_v1",
+            "vertical_design_graph_v1",
         }
         if (
             not bool(design_validation.get("ok"))

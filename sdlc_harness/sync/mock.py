@@ -12,6 +12,7 @@ import json
 from pathlib import Path
 
 from ..storage.runtime import RuntimeStore, utc_now_iso
+from .design_review import HUMAN_DESIGN_REVIEW_VERSION, build_human_design_review
 
 
 def mock_sync_requirement_checkpoint(
@@ -146,7 +147,32 @@ def mock_sync_design_checkpoint(
     analysis_ref = _artifact_ref(artifact_paths["designer_analysis"])
     missing_ref = _artifact_ref(artifact_paths["missing_design_links"])
     landscape_section = _repo_landscape_markdown(store, artifact_paths)
+    bundle_section = _design_bundle_markdown(store, artifact_paths)
+    compatibility_section = _compatibility_uml_markdown(store, design_artifact) if bundle_section else ""
+    human_review = build_human_design_review(
+        requirement_model=_read_json_artifact(store, artifact_paths.get("requirement_model", "")),
+        component_view=_read_json_artifact(store, artifact_paths.get("design_component_view", "")),
+        surface_view=_read_json_artifact(store, artifact_paths.get("design_surface_view", "")),
+        validation_report=_read_json_artifact(store, artifact_paths.get("design_validation_report", "")),
+    )
+    human_review_section = _human_design_review_markdown(human_review)
     landscape_ref = _artifact_ref(artifact_paths["repo_landscape"]) if artifact_paths.get("repo_landscape") else ""
+    vertical_graph = artifact_paths.get("vertical_design_graph", "")
+    projection_manifest = artifact_paths.get("design_projection_manifest", "")
+    finding_ledger = artifact_paths.get("design_finding_ledger", "")
+    vertical_section = ""
+    if vertical_graph:
+        vertical_section = (
+            "Vertical Design bundle:\n"
+            f"- Canonical graph: `{vertical_graph}`\n"
+            f"- Projection manifest: `{projection_manifest}`\n"
+            f"- Finding ledger: `{finding_ledger}`"
+        )
+    vertical_refs = [
+        _artifact_ref(path)
+        for path in (vertical_graph, projection_manifest, finding_ledger)
+        if path
+    ]
     previous_targets = _previous_targets(report_path)
     previous_jira = previous_targets.get("jira", {})
     previous_confluence = previous_targets.get("confluence", {})
@@ -165,19 +191,16 @@ Artifacts:
 - Requirement-design trace: `{trace_artifact}`
 - Quality report: `{quality_report}`
 
+{vertical_section}
+
 {landscape_section}
 
 Next action: approve design hoặc request change.
 """,
         encoding="utf-8",
     )
-    confluence_page_path.write_text(
-        f"""# Mock Confluence Page - Design Checkpoint
-
-Source: `{source_ref}`
-Run: `{run_id}`
-
-Trang này giả lập bản review thiết kế sau khi requirement checkpoint đã được duyệt.
+    technical_appendix = f"""<details>
+<summary>Mở phụ lục kỹ thuật: contracts, trace, artifacts và quality report</summary>
 
 ## Design Artifacts
 
@@ -189,11 +212,28 @@ Trang này giả lập bản review thiết kế sau khi requirement checkpoint 
 - Missing design links: `{artifact_paths['missing_design_links']}`
 - Quality report: `{quality_report}`
 
+{vertical_section}
+
 {landscape_section}
 
-## Human Checkpoint
+{bundle_section}
 
-Review design trước khi cho phép Phase 3 sinh code/test.
+</details>"""
+    confluence_page_path.write_text(
+        f"""# Mock Confluence Page - Design Checkpoint
+
+Source: `{source_ref}`
+Run: `{run_id}`
+
+Trang này ưu tiên cho người duyệt. Chi tiết máy đọc và kỹ thuật nằm trong phụ lục thu gọn ở cuối trang.
+
+{human_review_section}
+
+## Phụ lục kỹ thuật
+
+{technical_appendix}
+
+{compatibility_section}
 """,
         encoding="utf-8",
     )
@@ -206,7 +246,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": previous_jira.get("url", ""),
             "status": "synced",
             "path": store.relative(jira_comment_path),
-            "artifact_refs": [design_ref, trace_ref, quality_ref, *([landscape_ref] if landscape_ref else [])],
+            "artifact_refs": [design_ref, trace_ref, quality_ref, *vertical_refs, *([landscape_ref] if landscape_ref else [])],
             "error": None,
         },
         {
@@ -216,7 +256,7 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "url": previous_confluence.get("url", ""),
             "status": "synced",
             "path": store.relative(confluence_page_path),
-            "artifact_refs": [analysis_ref, design_ref, missing_ref, *([landscape_ref] if landscape_ref else [])],
+            "artifact_refs": [analysis_ref, design_ref, missing_ref, *vertical_refs, *([landscape_ref] if landscape_ref else [])],
             "error": None,
         },
     ]
@@ -230,6 +270,8 @@ Review design trước khi cho phép Phase 3 sinh code/test.
             "type": "design_approval",
             "artifact_ref": design_ref,
             "artifact_path": design_artifact,
+            **({"vertical_design_graph_ref": _artifact_ref(vertical_graph)} if vertical_graph else {}),
+            **({"projection_manifest_ref": _artifact_ref(projection_manifest)} if projection_manifest else {}),
         },
         "created_at": utc_now_iso(),
         "updated_at": utc_now_iso(),
@@ -570,6 +612,232 @@ def _repo_landscape_markdown(store: RuntimeStore, artifact_paths: dict[str, str]
             f"- Artifact: `{reference}`",
         ]
     )
+
+
+def _design_bundle_markdown(store: RuntimeStore, artifact_paths: dict[str, str]) -> str:
+    component_view = _read_json_artifact(store, artifact_paths.get("design_component_view", ""))
+    surface_view = _read_json_artifact(store, artifact_paths.get("design_surface_view", ""))
+    trace_view = _read_json_artifact(store, artifact_paths.get("requirement_design_trace", ""))
+    if component_view.get("schema_version") != "design_component_view_v2":
+        return ""
+    lines = ["## System Architecture", ""]
+    component_diagram = str(component_view.get("plantuml") or "")
+    if component_diagram:
+        lines.extend(["```plantuml", component_diagram, "```", ""])
+    lines.extend(["| Component | Elements | Surfaces | Decisions |", "| --- | ---: | --- | --- |"])
+    for component in _dict_list(component_view.get("components")):
+        nodes = _dict_list(component.get("nodes"))
+        surfaces = sorted({str(item.get("surface") or "") for item in nodes if str(item.get("surface") or "")})
+        decisions = sorted({str(item.get("disposition") or "") for item in nodes if str(item.get("disposition") or "")})
+        lines.append(f"| {component.get('component_id', '')} | {len(nodes)} | {', '.join(surfaces)} | {', '.join(decisions)} |")
+
+    lines.extend(["", "## UI States and Interactions", ""])
+    for diagram in _dict_list(surface_view.get("ui_state_diagrams")):
+        lines.extend([f"### {diagram.get('scenario_id', 'UI flow')}", "", "```plantuml", str(diagram.get("plantuml") or ""), "```", ""])
+    lines.extend(["| Scenario | Element | Entrypoint | States | Actions / outcomes |", "| --- | --- | --- | --- | --- |"])
+    for item in _dict_list(surface_view.get("ui")):
+        contract = _dict_value(item.get("surface_contract"))
+        transitions = "; ".join(
+            f"{entry.get('from', '')} --{entry.get('action', '')}--> {entry.get('to', '')}: {entry.get('outcome', '')}"
+            for entry in _dict_list(contract.get("transitions"))
+        )
+        lines.append(f"| {item.get('scenario_id', '')} | {item.get('name', '')} | {contract.get('entrypoint', '')} | {', '.join(_string_list(contract.get('states')))} | {transitions} |")
+
+    lines.extend(["", "## API Contracts", "", "| Scenario | Operation | Endpoint | Request | Responses | Authorization |", "| --- | --- | --- | --- | --- | --- |"])
+    for item in _dict_list(surface_view.get("api")):
+        contract = _dict_value(item.get("surface_contract"))
+        responses = "; ".join(f"{entry.get('status', '')}: {entry.get('outcome', '')}" for entry in _dict_list(contract.get("responses")))
+        request = "; ".join(
+            f"{entry.get('name', '')}: {entry.get('type', '')} ({entry.get('location', '')})"
+            for entry in _dict_list(contract.get("request_fields"))
+        )
+        lines.append(f"| {item.get('scenario_id', '')} | {item.get('name', '')} | {contract.get('method', '')} {contract.get('path', '')} | {request} | {responses} | {contract.get('authorization', '')} |")
+
+    lines.extend(["", "## Business Rules", "", "| Scenario | Rule | Inputs | Decision | Outcomes |", "| --- | --- | --- | --- | --- |"])
+    for item in _dict_list(surface_view.get("business_rules")):
+        contract = _dict_value(item.get("surface_contract"))
+        lines.append(f"| {item.get('scenario_id', '')} | {item.get('name', '')} | {', '.join(_string_list(contract.get('inputs')))} | {contract.get('decision', '')} | {', '.join(_string_list(contract.get('outcomes')))} |")
+
+    lines.extend(["", "## Data Model and Operations", ""])
+    data_diagram = str(surface_view.get("data_model_plantuml") or "")
+    if data_diagram:
+        lines.extend(["```plantuml", data_diagram, "```", ""])
+    lines.extend(["| Scenario | Entity | Operation | Fields | Constraints | Migration |", "| --- | --- | --- | --- | --- | --- |"])
+    for item in _dict_list(surface_view.get("data")):
+        contract = _dict_value(item.get("surface_contract"))
+        fields = ", ".join(f"{entry.get('name', '')}: {entry.get('type', '')}" for entry in _dict_list(contract.get("fields")))
+        constraints = ", ".join(_string_list(contract.get("constraints"))) or "none"
+        lines.append(f"| {item.get('scenario_id', '')} | {contract.get('entity', '')} | {contract.get('operation', '')} | {fields} | {constraints} | {contract.get('migration_intent', '')} |")
+
+    lines.extend(["", "## AS-IS / GAP / TO-BE Impact", "", "| Scenario | Surface | Element | Decision | AS-IS evidence / gap | TO-BE contract |", "| --- | --- | --- | --- | --- | --- |"])
+    for item in _dict_list(surface_view.get("change_impact")):
+        evidence = ", ".join(_string_list(item.get("evidence_refs"))) or str(item.get("evidence_reason") or "")
+        lines.append(f"| {item.get('scenario_id', '')} | {item.get('surface', '')} | {item.get('name', '')} | {item.get('disposition', '')} | {evidence} | {item.get('contract', '')} |")
+
+    lines.extend(["", "## Requirement to Design Trace", "", "| Requirement | Approved behavior | Design elements |", "| --- | --- | --- |"])
+    for item in _dict_list(trace_view.get("class_trace")):
+        targets = [str(link.get("target") or "") for link in _dict_list(item.get("links")) if str(link.get("target") or "")]
+        preview = targets[:4]
+        suffix = f" (+{len(targets) - len(preview)} more)" if len(targets) > len(preview) else ""
+        lines.append(f"| {item.get('requirement', '')} | {item.get('content', '')} | {', '.join(preview)}{suffix} |")
+    not_applicable = _dict_list(surface_view.get("not_applicable"))
+    if not_applicable:
+        lines.extend(["", "## Not Applicable Surfaces", "", "| Scenario | Surface | Reason |", "| --- | --- | --- |"])
+        for item in not_applicable:
+            lines.append(f"| {item.get('scenario_id', '')} | {item.get('surface', '')} | {item.get('reason', '')} |")
+    return "\n".join(lines)
+
+
+def _human_design_review_markdown(review: dict[str, object]) -> str:
+    if review.get("schema_version") != HUMAN_DESIGN_REVIEW_VERSION:
+        return ""
+    use_case = _dict_value(review.get("use_case"))
+    status = _dict_value(review.get("status"))
+    scope = _dict_value(review.get("scope"))
+    blockers = int(status.get("blocking_count") or 0)
+    warnings = int(status.get("warning_count") or 0)
+    gate = f"BLOCKED - {blockers} blocker(s)" if blockers else (f"READY WITH {warnings} WARNING(S)" if warnings else "READY FOR APPROVAL")
+    lines = [
+        "## 1. Tóm tắt dành cho người duyệt",
+        "",
+        f"**Trạng thái:** {gate}",
+        "",
+        f"- **Use case:** {use_case.get('name') or use_case.get('id') or ''}",
+        f"- **Mục tiêu:** {use_case.get('goal') or ''}",
+        f"- **Người sử dụng:** {', '.join(_string_list(use_case.get('actors'))) or 'Chưa xác định'}",
+        (
+            f"- **Phạm vi:** {scope.get('scenario_count', 0)} scenario, {scope.get('component_count', 0)} component; "
+            f"{scope.get('ui_count', 0)} UI flow, {scope.get('api_count', 0)} API contract, "
+            f"{scope.get('business_rule_count', 0)} business rule, {scope.get('data_count', 0)} data operation."
+        ),
+        "",
+        "## 2. Tính năng sẽ hoạt động như thế nào?",
+        "",
+        "### Luồng chính",
+        "",
+    ]
+    for index, item in enumerate(_dict_list(review.get("main_flow")), start=1):
+        lines.append(f"{index}. **{item.get('actor', '')}:** {item.get('action', '')}")
+    lines.extend(
+        [
+            "",
+            "### Các trường hợp khác luồng chính",
+            "",
+            "| Tình huống | Loại | Hệ thống xử lý | Kết quả nhìn thấy |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for item in _dict_list(review.get("exception_scenarios")):
+        lines.append(
+            f"| {_md_cell(str(item.get('id') or ''))} - {_md_cell(str(item.get('name') or ''))} | "
+            f"{_md_cell(str(item.get('kind') or ''))} | {_md_cell(str(item.get('summary') or ''))} | "
+            f"{_md_cell('; '.join(_string_list(item.get('outcomes'))))} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## 3. Hệ thống sẽ thay đổi ở đâu?",
+            "",
+            "| Khu vực | Mức thay đổi | Các phần chính |",
+            "| --- | --- | --- |",
+        ]
+    )
+    for item in _dict_list(review.get("component_changes")):
+        lines.append(
+            f"| {_md_cell(str(item.get('label') or item.get('component_id') or ''))} | "
+            f"{_md_cell(str(item.get('change_summary') or ''))} | "
+            f"{_md_cell(', '.join(_string_list(item.get('elements'))))} |"
+        )
+    lines.extend(["", "## 4. Các hợp đồng chính cần biết", "", "### API", "", "| Tình huống | Endpoint | Kết quả chính | Quyền truy cập |", "| --- | --- | --- | --- |"])
+    for item in _dict_list(review.get("api_contracts")):
+        lines.append(
+            f"| {_md_cell(str(item.get('scenario_id') or ''))} | {_md_cell(str(item.get('endpoint') or ''))} | "
+            f"{_md_cell('; '.join(_string_list(item.get('outcomes'))))} | {_md_cell(str(item.get('authorization') or ''))} |"
+        )
+    lines.extend(["", "### Quy tắc nghiệp vụ", "", "| Tình huống | Quy tắc | Quyết định |", "| --- | --- | --- |"])
+    for item in _dict_list(review.get("business_rules")):
+        lines.append(f"| {_md_cell(str(item.get('scenario_id') or ''))} | {_md_cell(str(item.get('name') or ''))} | {_md_cell(str(item.get('decision') or ''))} |")
+    lines.extend(["", "### Dữ liệu", "", "| Tình huống | Đối tượng | Thao tác | Ảnh hưởng migration |", "| --- | --- | --- | --- |"])
+    for item in _dict_list(review.get("data_changes")):
+        lines.append(
+            f"| {_md_cell(str(item.get('scenario_id') or ''))} | {_md_cell(str(item.get('entity') or ''))} | "
+            f"{_md_cell(str(item.get('operation') or ''))} | {_md_cell(str(item.get('migration') or ''))} |"
+        )
+    findings = _dict_list(review.get("review_findings"))
+    lines.extend(["", "## 5. Điểm cần review trước khi duyệt", ""])
+    if findings:
+        lines.extend(["| ID | Mức độ | Vấn đề | Nếu muốn xử lý |", "| --- | --- | --- | --- |"])
+        for item in findings:
+            lines.append(
+                f"| {_md_cell(str(item.get('id') or ''))} | {_md_cell(str(item.get('severity') or ''))} | "
+                f"{_md_cell(str(item.get('message') or ''))} | {_md_cell(str(item.get('expected_change') or ''))} |"
+            )
+    else:
+        lines.append("Không còn blocker hoặc warning; Design sẵn sàng để duyệt.")
+    lines.extend(["", "**Quyết định cần từ anh:** approve nếu luồng và phạm vi thay đổi đã đúng; request change nếu cần sửa trước khi sang Phase 3."])
+    return "\n".join(lines)
+
+
+def _compatibility_uml_markdown(store: RuntimeStore, path: str) -> str:
+    design_text = _read_text_artifact(store, path)
+    start = design_text.find("## Class Diagram")
+    end = design_text.find("## AS-IS / GAP / TO-BE")
+    if start < 0:
+        return ""
+    diagrams = design_text[start : end if end > start else len(design_text)].strip()
+    return "\n".join(
+        [
+            "## Compatibility UML",
+            "",
+            "<details>",
+            "<summary>Class and sequence diagrams</summary>",
+            "",
+            diagrams,
+            "",
+            "</details>",
+        ]
+    )
+
+
+def _read_json_artifact(store: RuntimeStore, path: str) -> dict[str, object]:
+    if not path:
+        return {}
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = store.repo_root / resolved
+    try:
+        value = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _read_text_artifact(store: RuntimeStore, path: str) -> str:
+    if not path:
+        return ""
+    resolved = Path(path)
+    if not resolved.is_absolute():
+        resolved = store.repo_root / resolved
+    try:
+        return resolved.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _dict_list(value: object) -> list[dict[str, object]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _dict_value(value: object) -> dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _string_list(value: object) -> list[str]:
+    return [str(item) for item in value if str(item)] if isinstance(value, list) else []
+
+
+def _md_cell(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def _artifact_ref(path: str) -> str:

@@ -205,6 +205,7 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
@@ -242,6 +243,7 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
@@ -278,6 +280,7 @@ class PhaseTwoTest(unittest.TestCase):
 
     def _target_overrides(self) -> dict[str, str]:
         return {
+            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_TARGET_REPO_PATH": str(self.target.canonical),
             "SDLC_TARGET_REPO_REMOTE": str(self.target.remote.resolve()),
             "SDLC_TARGET_BASE_BRANCH": "main",
@@ -997,6 +1000,8 @@ class OnlyClass {
     def test_sync_run_resyncs_design_checkpoint(self) -> None:
         created = self._create_phase1_run()
         approved = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertIn("sync_run", approved["allowed_next_actions"])
 
         synced = PhaseOneWorkflow(self.settings).sync_run(run_id=str(approved["run_id"]))
 

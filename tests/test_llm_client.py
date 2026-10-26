@@ -52,7 +52,8 @@ class LlmClientPayloadTests(unittest.TestCase):
                 return _FakeResponse()
 
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                result = LlmClient(self._settings(root, mode="deepseek")).complete(
+                client = LlmClient(self._settings(root, mode="deepseek"))
+                result = client.complete(
                     system="system",
                     prompt="prompt",
                 )
@@ -60,6 +61,15 @@ class LlmClientPayloadTests(unittest.TestCase):
         self.assertEqual(result, "ok")
         self.assertEqual(captured["model"], "deepseek-flash")
         self.assertEqual(captured["thinking"], {"type": "disabled"})
+        self.assertEqual(
+            client.usage_summary(),
+            {
+                "prompt_tokens": 2,
+                "completion_tokens": 1,
+                "total_tokens": 3,
+                "reported_calls": 1,
+            },
+        )
 
     def test_generic_openai_compatible_payload_omits_deepseek_extension(self) -> None:
         with TemporaryDirectory() as temp_dir:

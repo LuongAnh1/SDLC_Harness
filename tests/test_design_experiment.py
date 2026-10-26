@@ -328,6 +328,29 @@ class ProgressiveDesignExperimentTest(unittest.TestCase):
             client.complete(system="Designer.analysis", prompt="three")
         self.assertEqual(caught.exception.error_code, "design_llm_budget_exhausted")
 
+    def test_budget_summary_aggregates_provider_token_usage(self) -> None:
+        class UsageClient:
+            settings = self.settings
+
+            def complete_with_metadata(self, **_kwargs: object) -> LlmCompletion:
+                return LlmCompletion(
+                    content="ok",
+                    finish_reason="stop",
+                    usage={"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14},
+                )
+
+        client = BudgetedLlmClient(UsageClient(), limit=2)
+
+        client.complete_with_metadata(system="Designer.analysis", prompt="one")
+        client.complete_with_metadata(system="Validator.semantic", prompt="two")
+
+        summary = client.summary()
+        self.assertEqual(summary["usage_reported_calls"], 2)
+        self.assertEqual(
+            summary["token_usage"],
+            {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+        )
+
 
 def _assessment(claim_id: str, category: str) -> dict[str, object]:
     return {

@@ -248,6 +248,30 @@ class ApplicationReadServiceTests(ReadApiFixture):
         self.assertEqual(result["content"]["schema_version"], "repo_landscape_v1")
         self.assertEqual(result["content"]["summary"]["blocking_count"], 0)
 
+    def test_read_l3_design_bundle_artifacts(self) -> None:
+        state = self.store.read_state(self.run_id)
+        keys = (
+            "vertical_design_graph",
+            "design_component_view",
+            "design_surface_view",
+            "design_projection_manifest",
+            "design_finding_ledger",
+        )
+        for key in keys:
+            path = self.store.write_json_artifact(
+                self.run_id,
+                f"{key}_v1.json",
+                {"schema_version": "vertical_design_graph_v1" if key == "vertical_design_graph" else f"{key}_v1"},
+            )
+            state["latest_artifacts"][key] = str(path)
+        self.store.write_state(state)
+
+        detail = self.read_service.get_run(run_id=self.run_id)
+        self.assertTrue(set(keys).issubset(detail["latest_artifacts"]))
+        for key in keys:
+            result = self.read_service.read_artifact(run_id=self.run_id, artifact_key=key)
+            self.assertIn("schema_version", result["content"])
+
     def test_read_clarification_policy_shadow_artifact(self) -> None:
         shadow_path = self.store.write_json_artifact(
             self.run_id,

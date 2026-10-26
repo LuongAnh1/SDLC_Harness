@@ -373,6 +373,7 @@ class PhaseFourTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -716,6 +717,7 @@ class PhaseFourTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
+            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",

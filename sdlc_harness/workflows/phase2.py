@@ -3,10 +3,25 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import shutil
 
-from ..agents.designer import DesignerAgent, parse_design_model
+from ..agents.designer import (
+    DESIGN_BUNDLE_STATE_KEY,
+    DESIGN_BUNDLE_VERSION,
+    DESIGNER_CONTRACT_STATE_KEY,
+    GRAPH_VERSION,
+    DesignerAgent,
+    DesignerExecutionError,
+    DesignerToolLoopExecutor,
+    build_deterministic_trace,
+    design_bundle_findings,
+    projection_manifest,
+    render_design_projections,
+    validate_vertical_design_graph,
+    parse_design_model,
+)
 from ..agents.validator import (
     DesignFinding,
     DesignValidationResult,
@@ -23,6 +38,7 @@ from ..llm.client import LlmClient
 from ..profiles import build_planning_path_policy, read_profile_snapshot
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
+from ..workspaces import RunWorkspaceManager
 from .design_experiment import (
     ProgressiveDesignReviewEngine,
     SemanticCandidate,
@@ -37,6 +53,7 @@ from .repo_discovery import (
 ALLOWED_DESIGN_ACTIONS = [
     "approve_checkpoint",
     "revalidate_design",
+    "sync_run",
     "request_change",
     "cancel_run",
     "get_status",
@@ -70,6 +87,11 @@ class PhaseTwoWorkflow:
         self.designer = self.progressive.designer
         self.validator = self.progressive.trace_validator
         self.design_validator = self.progressive.design_validator
+        self.designer_tool_loop = DesignerToolLoopExecutor(
+            settings=self.settings,
+            store=self.store,
+            llm_client=self.progressive.llm,
+        )
 
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
         """Approve the requirement checkpoint and create a validated design."""
@@ -118,6 +140,13 @@ class PhaseTwoWorkflow:
         """Chạy Designer hiện hành sau legacy handoff hoặc L2 discovery thành công."""
 
         run_id = str(state.get("run_id") or "")
+        if str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION:
+            return self._run_vertical_design(
+                state=state,
+                approved=approved,
+                start_version=1,
+                existing_versions=[],
+            )
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         state.update(
             {
@@ -173,13 +202,37 @@ class PhaseTwoWorkflow:
             and phase == "implementation_planning"
             and str(last_error.get("error_code") or "") in DESIGN_ROUTING_ERROR_CODES
         )
-        if not recoverable_trace_failure and not recoverable_routing_failure and (
+        recoverable_vertical_design_block = (
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION
+            and status == "design_blocked"
+            and phase.startswith("design_")
+        )
+        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_vertical_design_block and (
             phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
         ):
             raise HarnessError(
                 "design_revalidation_not_allowed",
                 f"Run is not waiting on a design checkpoint: {run_id}",
                 run_id=run_id,
+            )
+        if str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION:
+            approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+            versions = _design_versions(state)
+            existing_graph = self._latest_vertical_graph(state, run_id=run_id)
+            start_version = _next_design_version(self.store.run_dir(run_id) / "artifacts")
+            prior_execution = _dict_value(state.get("designer_execution"))
+            session_ordinal = max(
+                start_version,
+                int(prior_execution.get("session_ordinal") or 0) + 1,
+            )
+            return self._run_vertical_design(
+                state=state,
+                approved=approved,
+                start_version=start_version,
+                existing_versions=versions,
+                existing_graph=existing_graph,
+                session_ordinal=session_ordinal,
+                initial_repair_feedback=design_bundle_findings(existing_graph),
             )
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         design_path = _required_artifact(
@@ -225,6 +278,33 @@ class PhaseTwoWorkflow:
         except HarnessError as exc:
             return self._handle_error(state, run_id=run_id, error=exc)
 
+    def continue_design(self, *, run_id: str) -> dict[str, object]:
+        """Resume đúng persisted L3 Designer session sau transport/environment pause."""
+
+        self._reset_progressive_engine()
+        state = self.store.read_state(run_id)
+        if (
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") != GRAPH_VERSION
+            or str(state.get("status") or "") != "design_paused"
+        ):
+            raise HarnessError(
+                "designer_session_not_resumable",
+                f"Design run cannot continue from status {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+        execution = _dict_value(state.get("designer_execution"))
+        return self._run_vertical_design(
+            state=state,
+            approved=approved,
+            start_version=int(execution.get("design_version") or _next_design_version(self.store.run_dir(run_id) / "artifacts")),
+            existing_versions=_design_versions(state),
+            existing_graph=self._latest_vertical_graph(state, run_id=run_id, required=False),
+            session_ordinal=int(execution.get("session_ordinal") or 1),
+            initial_repair_iteration=int(execution.get("repair_iteration") or 0),
+            initial_repair_feedback=_dict_items(state.get("designer_repair_feedback")),
+        )
+
     def experiment_design_consensus(
         self,
         *,
@@ -269,6 +349,439 @@ class PhaseTwoWorkflow:
             shutil.copy2(source, target)
             copied[key] = self.store.relative(target)
         return copied
+
+    def _run_vertical_design(
+        self,
+        *,
+        state: dict[str, object],
+        approved: object,
+        start_version: int,
+        existing_versions: list[str],
+        existing_graph: dict[str, object] | None = None,
+        session_ordinal: int | None = None,
+        initial_repair_iteration: int = 0,
+        initial_repair_feedback: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        """Run the repo-aware Designer loop and publish compatibility projections."""
+
+        run_id = str(state.get("run_id") or "")
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
+        landscape = self.repo_discovery.run(
+            run_id=run_id,
+            requirement_model=approved.canonical_model.to_dict(),
+        )
+        if landscape is None:
+            return self._status_response(self.store.read_state(run_id), created_new_run=False)
+        workspace = RunWorkspaceManager(self.settings).resolve(run_id)
+        snapshot_binding = _vertical_snapshot_binding(
+            state=state,
+            approved=approved,
+            landscape=landscape,
+            workspace=workspace,
+        )
+        if existing_graph is not None:
+            existing_graph = validate_vertical_design_graph(
+                existing_graph,
+                expected_run_id=run_id,
+                expected_binding=snapshot_binding,
+            )
+        versions = list(existing_versions)
+        merged_artifacts = dict(artifact_paths)
+        prior_digest = str((existing_graph or {}).get("artifact_digest") or "")
+        repair_feedback = list(initial_repair_feedback or [])
+        validation: DesignValidationResult | None = None
+        design_paths: dict[str, str] = {}
+        graph = existing_graph
+        base_ordinal = session_ordinal or start_version
+
+        for repair_iteration in range(initial_repair_iteration, self.settings.design_repair_limit + 1):
+            relative_iteration = repair_iteration - initial_repair_iteration
+            version = start_version + relative_iteration
+            ordinal = base_ordinal + relative_iteration
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_investigating" if repair_iteration == 0 else "design_repairing",
+                    "status": "design_investigating" if repair_iteration == 0 else "design_repairing",
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["get_status", "cancel_run"],
+                    "last_error": None,
+                    "summary_for_user": (
+                        "Designer đang khảo sát frozen repository evidence và dựng vertical Design graph."
+                        if repair_iteration == 0
+                        else f"Designer đang sửa partition bị chặn, vòng {repair_iteration}/{self.settings.design_repair_limit}."
+                    ),
+                    "designer_execution": {
+                        "contract_version": GRAPH_VERSION,
+                        "status": "running",
+                        "session_ordinal": ordinal,
+                        "design_version": version,
+                        "repair_iteration": repair_iteration,
+                    },
+                    "designer_repair_feedback": repair_feedback,
+                }
+            )
+            self.store.write_state(state)
+
+            def on_progress(progress: dict[str, object], **metadata: object) -> None:
+                current = self.store.read_state(run_id)
+                current["updated_at"] = utc_now_iso()
+                tool_id = str(metadata.get("tool_id") or "")
+                current["current_phase"] = (
+                    "design_applying_delta" if tool_id == "design.propose_delta" else "design_investigating"
+                )
+                current["status"] = current["current_phase"]
+                current["designer_execution"] = {
+                    "contract_version": GRAPH_VERSION,
+                    "status": "running",
+                    "session_ordinal": ordinal,
+                    "design_version": version,
+                    **progress,
+                    "repair_iteration": repair_iteration,
+                }
+                current["summary_for_user"] = (
+                    f"Designer đã áp dụng graph revision {progress.get('graph_revision', 0)}; "
+                    f"action budget còn { _dict_value(progress.get('action_budget')).get('remaining', 0)}."
+                )
+                self.store.write_state(current)
+
+            try:
+                execution = self.designer_tool_loop.execute(
+                    run_id=run_id,
+                    requirement_model=approved.canonical_model.to_dict(),
+                    landscape=landscape,
+                    target_path=Path(workspace.worktree_path),
+                    snapshot_binding=snapshot_binding,
+                    existing_graph=graph,
+                    repair_feedback=repair_feedback,
+                    session_ordinal=ordinal,
+                    on_progress=on_progress,
+                )
+            except DesignerExecutionError as exc:
+                state = self.store.read_state(run_id)
+                human_required = exc.error_code == "designer_human_required"
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "current_phase": "design_review" if human_required else "design_investigating",
+                        "status": (
+                            "design_human_required"
+                            if human_required
+                            else ("design_paused" if exc.retriable else "design_blocked")
+                        ),
+                        "pending_checkpoint": None,
+                        "allowed_next_actions": (
+                            ["continue_run", "get_status", "cancel_run"]
+                            if exc.retriable
+                            else (
+                                ["get_status", "cancel_run"]
+                                if human_required
+                                else ["revalidate_design", "get_status", "cancel_run"]
+                            )
+                        ),
+                        "last_error": exc.to_response(),
+                        "designer_execution": {
+                            "contract_version": GRAPH_VERSION,
+                            "status": "human_required" if human_required else ("paused" if exc.retriable else "blocked"),
+                            "session_ordinal": ordinal,
+                            "design_version": version,
+                            **exc.progress,
+                            "repair_iteration": repair_iteration,
+                        },
+                        "summary_for_user": (
+                            f"Designer tạm dừng và có thể tiếp tục: {exc.message}"
+                            if exc.retriable
+                            else (
+                                f"Designer cần quyết định của human/Requirement owner: {exc.message}"
+                                if human_required
+                                else f"Designer bị chặn: {exc.message}"
+                            )
+                        ),
+                    }
+                )
+                self.store.write_state(state)
+                return self._status_response(state, created_new_run=False)
+
+            graph = execution.graph
+            state = self.store.read_state(run_id)
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_validating",
+                    "status": "design_validating",
+                    "designer_execution": {
+                        "contract_version": GRAPH_VERSION,
+                        "status": "validating",
+                        "session_ordinal": ordinal,
+                        "design_version": version,
+                        **execution.progress,
+                        "repair_iteration": repair_iteration,
+                    },
+                    "summary_for_user": f"Đang kiểm tra vertical Design graph V{version}.",
+                }
+            )
+            self.store.write_state(state)
+            projections = render_design_projections(
+                graph,
+                requirement_model=approved.canonical_model.to_dict(),
+            )
+            requirement_graph = build_requirement_graph_v2(approved.canonical_model)
+            class_trace, sequence_trace = build_deterministic_trace(
+                requirement_graph=requirement_graph,
+                graph=graph,
+                class_graph=projections["class_graph"],
+                sequence_graph=projections["sequence_graph"],
+            )
+            missing_links = {
+                "class_diagram": [
+                    {"requirement": str(item.get("requirement") or ""), "content": str(item.get("content") or "")}
+                    for item in class_trace
+                    if not item.get("links")
+                ],
+                "sequence_diagram": [
+                    {"requirement": str(item.get("requirement") or ""), "content": str(item.get("content") or "")}
+                    for item in sequence_trace
+                    if not item.get("links")
+                ],
+            }
+            traceability = TraceabilityResult(
+                requirement_graph=requirement_graph,
+                class_trace=class_trace,
+                sequence_trace=sequence_trace,
+                missing_links=missing_links,
+                mode="traceability_v2",
+            )
+            bundle_blockers = _bundle_design_findings(design_bundle_findings(graph))
+            if bundle_blockers:
+                validation = DesignValidationResult(
+                    traceability=traceability,
+                    blocking_findings=bundle_blockers,
+                    warnings=[],
+                    rule_review={"ok": False, "findings": [item.to_dict() for item in bundle_blockers]},
+                    llm_review={"ok": True, "skipped": True, "summary": "Semantic review waits for complete bundle contracts."},
+                    repair_iterations=repair_iteration,
+                    mode="design_bundle_preflight_v1",
+                )
+            else:
+                validation = self.design_validator.review(
+                    requirement_packet=approved.requirement_packet,
+                    design_artifact=str(projections["design_markdown"]),
+                    class_graph=projections["class_graph"],
+                    sequence_graph=projections["sequence_graph"],
+                    traceability=traceability,
+                    canonical_requirement=approved.canonical_model,
+                    repair_iterations=repair_iteration,
+                    validation_trials=self.settings.design_validation_trials,
+                )
+            validation_payload = validation.to_dict()
+            validation_payload["version"] = "design_validation_report_v4_vertical_graph"
+            validation_payload["mode"] = "vertical_design_graph_v1"
+            graph_path = self.store.write_json_artifact(run_id, f"vertical_design_graph_v{version}.json", graph)
+            component_path = self.store.write_json_artifact(
+                run_id,
+                f"design_component_view_v{version}.json",
+                projections["component_view"],
+            )
+            surface_path = self.store.write_json_artifact(
+                run_id,
+                f"design_surface_view_v{version}.json",
+                projections["surface_view"],
+            )
+            design_paths = write_phase2_design_artifacts(
+                store=self.store,
+                run_id=run_id,
+                designer_analysis=(
+                    "Repo-aware Designer investigated frozen AS-IS evidence and produced a bounded "
+                    "AS-IS/GAP/TO-BE graph delta."
+                ),
+                design_model=str(projections["design_markdown"]),
+                requirement_graph=requirement_graph,
+                class_graph=projections["class_graph"],
+                sequence_graph=projections["sequence_graph"],
+                class_trace=class_trace,
+                sequence_trace=sequence_trace,
+                missing_links=missing_links,
+                requirement_packet=approved.requirement_packet,
+                formal_use_case=approved.formal_use_case,
+                version=version,
+                repair_iterations=repair_iteration,
+                traceability_mode=traceability.mode,
+                requirement_contract_version=approved.contract_version,
+                requirement_artifact_refs=approved.approved_artifacts,
+                requirement_revision=approved.canonical_model.revision,
+                design_validation=validation_payload,
+            )
+            vertical_paths = {
+                "vertical_design_graph": self.store.relative(graph_path),
+                "design_component_view": self.store.relative(component_path),
+                "design_surface_view": self.store.relative(surface_path),
+            }
+            candidate_artifacts = {**design_paths, **vertical_paths}
+            manifest = projection_manifest(graph=graph, artifacts=candidate_artifacts)
+            manifest_path = self.store.write_json_artifact(
+                run_id,
+                f"design_projection_manifest_v{version}.json",
+                manifest,
+            )
+            finding_ledger = {
+                "schema_version": "design_finding_ledger_v1",
+                "graph_digest": graph.get("artifact_digest"),
+                "design_version": f"v{version}",
+                "blocking_findings": [item.to_dict() for item in validation.blocking_findings],
+                "warnings": [item.to_dict() for item in validation.warnings],
+                "disputed_findings": [item.to_dict() for item in validation.disputed_findings],
+            }
+            ledger_path = self.store.write_json_artifact(
+                run_id,
+                f"design_finding_ledger_v{version}.json",
+                finding_ledger,
+            )
+            design_paths = {
+                **candidate_artifacts,
+                "design_projection_manifest": self.store.relative(manifest_path),
+                "design_finding_ledger": self.store.relative(ledger_path),
+            }
+            version_label = f"v{version}"
+            if version_label not in versions:
+                versions.append(version_label)
+            merged_artifacts = {**merged_artifacts, **design_paths}
+            quality_reports = _quality_reports(state, validation, versions, design_paths)
+            vertical_validation_summary = _dict_value(quality_reports.get("design_validation"))
+            vertical_validation_summary["mode"] = GRAPH_VERSION
+            quality_reports["design_validation"] = vertical_validation_summary
+            quality_reports["design_vertical_graph"] = {
+                "ok": validation.ok,
+                "mode": GRAPH_VERSION,
+                "graph_revision": graph.get("revision"),
+                "graph_digest": graph.get("artifact_digest"),
+                "graph": design_paths["vertical_design_graph"],
+                "projection_manifest": design_paths["design_projection_manifest"],
+                "finding_ledger": design_paths["design_finding_ledger"],
+            }
+            quality_reports["design_bundle"] = {
+                "ok": validation.ok and not bundle_blockers,
+                "contract_version": DESIGN_BUNDLE_VERSION,
+                "component_count": len(_dict_items(projections["component_view"].get("components"))),
+                "ui_count": len(_dict_items(projections["surface_view"].get("ui"))),
+                "api_count": len(_dict_items(projections["surface_view"].get("api"))),
+                "business_rule_count": len(_dict_items(projections["surface_view"].get("business_rules"))),
+                "data_count": len(_dict_items(projections["surface_view"].get("data"))),
+            }
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "latest_artifacts": merged_artifacts,
+                    "quality_reports": quality_reports,
+                    "designer_execution": {
+                        "contract_version": GRAPH_VERSION,
+                        "status": "validated" if validation.ok else "repair_needed",
+                        "session_ordinal": ordinal,
+                        "design_version": version,
+                        **execution.progress,
+                        "blocking_count": len(validation.blocking_findings),
+                        "warning_count": len(validation.warnings),
+                    },
+                }
+            )
+            self.store.write_state(state)
+            if validation.ok:
+                break
+            current_digest = str(graph.get("artifact_digest") or "")
+            if repair_iteration >= self.settings.design_repair_limit or (prior_digest and current_digest == prior_digest):
+                break
+            prior_digest = current_digest
+            repair_feedback = [item.to_dict() for item in validation.blocking_findings]
+
+        if validation is None or graph is None:
+            raise HarnessError("designer_failed", "L3 Designer did not produce a validated graph.", run_id=run_id)
+        if not validation.ok:
+            error = HarnessError(
+                "design_repair_stalled" if prior_digest == str(graph.get("artifact_digest") or "") else "design_repair_exhausted",
+                f"Vertical Design graph still has {len(validation.blocking_findings)} blocker(s).",
+                run_id=run_id,
+            )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "design_review",
+                    "status": "design_blocked",
+                    "latest_artifacts": merged_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ["revalidate_design", "get_status", "cancel_run"],
+                    "last_error": error.to_response(),
+                    "summary_for_user": error.message,
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
+        last_sync = sync_design_checkpoint(
+            store=self.store,
+            settings=self.settings,
+            run_id=run_id,
+            source_ref=str(state.get("source_ref") or ""),
+            artifact_paths=merged_artifacts,
+        )
+        checkpoint_id = f"checkpoint_design_{run_id}"
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "design_review",
+                "status": "waiting_design_approval",
+                "latest_artifacts": merged_artifacts,
+                "pending_checkpoint": {
+                    "checkpoint_id": checkpoint_id,
+                    "type": "design_approval",
+                    "artifact_ref": _artifact_ref(design_paths["design_artifact"]),
+                    "artifact_path": design_paths["design_artifact"],
+                    "vertical_design_graph": design_paths["vertical_design_graph"],
+                    "projection_manifest": design_paths["design_projection_manifest"],
+                    "design_bundle_contract_version": DESIGN_BUNDLE_VERSION,
+                },
+                DESIGN_BUNDLE_STATE_KEY: DESIGN_BUNDLE_VERSION,
+                "allowed_next_actions": ALLOWED_DESIGN_ACTIONS,
+                "last_error": None,
+                "last_sync": last_sync,
+                "designer_execution": {
+                    **_dict_value(state.get("designer_execution")),
+                    "contract_version": GRAPH_VERSION,
+                    "status": "completed",
+                    "graph_revision": graph.get("revision"),
+                    "graph_digest": graph.get("artifact_digest"),
+                },
+                "summary_for_user": (
+                    f"System Design Bundle {versions[-1]} đã pass: 0 blocker, "
+                    f"{len(validation.warnings)} warning; đang chờ review Design checkpoint."
+                ),
+                "designer_repair_feedback": [],
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def _latest_vertical_graph(
+        self,
+        state: dict[str, object],
+        *,
+        run_id: str,
+        required: bool = True,
+    ) -> dict[str, object] | None:
+        reference = _string_dict(state.get("latest_artifacts")).get("vertical_design_graph", "")
+        if not reference:
+            if required:
+                raise HarnessError("vertical_design_graph_missing", "Run has no canonical vertical Design graph.", run_id=run_id)
+            return None
+        path = Path(reference)
+        resolved = path.resolve() if path.is_absolute() else (self.store.repo_root / path).resolve()
+        try:
+            resolved.relative_to(self.store.run_dir(run_id).resolve())
+        except ValueError as exc:
+            raise HarnessError("vertical_design_graph_invalid", "Vertical Design graph escapes its run directory.", run_id=run_id) from exc
+        try:
+            payload = json.loads(resolved.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError("vertical_design_graph_invalid", "Vertical Design graph is not valid JSON.", run_id=run_id) from exc
+        return validate_vertical_design_graph(payload, expected_run_id=run_id)
 
     def _run_progressive_validation_loop(
         self,
@@ -1050,6 +1563,9 @@ class PhaseTwoWorkflow:
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
+            DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
+            DESIGN_BUNDLE_STATE_KEY: state.get(DESIGN_BUNDLE_STATE_KEY),
+            "designer_execution": state.get("designer_execution"),
         }
 
 
@@ -1093,6 +1609,41 @@ def _quality_reports(
             "summary": summary,
             "report": paths["design_validation_report"],
         },
+    }
+
+
+def _vertical_snapshot_binding(
+    *,
+    state: dict[str, object],
+    approved: object,
+    landscape: dict[str, object],
+    workspace: object,
+) -> dict[str, object]:
+    requirement_payload = approved.canonical_model.to_dict()
+    requirement_digest = "sha256:" + hashlib.sha256(
+        json.dumps(
+            requirement_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    profile = _dict_value(state.get("profile_snapshot"))
+    artifacts = _string_dict(state.get("latest_artifacts"))
+    return {
+        "requirement_contract_version": approved.contract_version,
+        "requirement_revision": approved.canonical_model.revision,
+        "requirement_artifact_ref": approved.approved_artifacts.get("requirement_model"),
+        "requirement_digest": requirement_digest,
+        "repo_landscape_artifact_ref": artifacts.get("repo_landscape"),
+        "repo_landscape_digest": landscape.get("artifact_digest"),
+        "project_profile_id": profile.get("project_profile_id"),
+        "project_profile_schema": profile.get("project_profile_schema"),
+        "language_profile_id": profile.get("language_profile_id"),
+        "language_profile_schema": profile.get("language_profile_schema"),
+        "target_manifest_digest": profile.get("target_manifest_digest"),
+        "workspace_ref": "run_workspace_v1",
+        "base_sha": getattr(workspace, "base_sha", ""),
     }
 
 
@@ -1305,6 +1856,28 @@ def _progressive_validation_result(
         disputed_findings=disputed,
         inconclusive=inconclusive,
     )
+
+
+def _bundle_design_findings(items: list[dict[str, object]]) -> list[DesignFinding]:
+    return [
+        DesignFinding(
+            finding_id=str(item.get("id") or "BUNDLE"),
+            category=str(item.get("category") or "surface_contract_missing"),
+            severity="blocking",
+            message=str(item.get("message") or "System Design bundle contract is incomplete."),
+            expected_change=str(item.get("expected_change") or "Complete the structured surface contract."),
+            requirement_ids=[str(value) for value in item.get("requirement_ids", []) if str(value)] if isinstance(item.get("requirement_ids"), list) else [],
+            diagram_ids=[str(value) for value in item.get("diagram_ids", []) if str(value)] if isinstance(item.get("diagram_ids"), list) else [],
+            evidence=[dict(value) for value in item.get("evidence", []) if isinstance(value, dict)] if isinstance(item.get("evidence"), list) else [],
+            subject_ref=str(item.get("subject_ref") or ""),
+            origin="deterministic",
+        )
+        for item in items
+    ]
+
+
+def _dict_items(value: object) -> list[dict[str, object]]:
+    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _dict_value(value: object) -> dict[str, object]:

@@ -34,6 +34,20 @@ class LlmClient:
 
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._usage_totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        self._usage_reported_calls = 0
+
+    def usage_summary(self) -> dict[str, object]:
+        """Return aggregate provider usage without retaining prompts or completions."""
+
+        return {
+            **self._usage_totals,
+            "reported_calls": self._usage_reported_calls,
+        }
 
     def complete(self, *, system: str, prompt: str) -> str:
         """Sinh text từ LLM hoặc fake output dùng cho unit/smoke test."""
@@ -108,6 +122,10 @@ class LlmClient:
             )
             raise
         usage = completion.usage
+        if usage:
+            self._usage_reported_calls += 1
+            for key in self._usage_totals:
+                self._usage_totals[key] += int(usage.get(key) or 0)
         emit_current(
             category="llm",
             event_type="llm_call_completed",

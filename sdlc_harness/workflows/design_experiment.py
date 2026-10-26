@@ -72,7 +72,10 @@ class BudgetedLlmClient:
 
     def complete(self, *, system: str, prompt: str) -> str:
         self._reserve(system)
-        return self.base.complete(system=system, prompt=prompt)
+        before = self._base_usage_summary()
+        result = self.base.complete(system=system, prompt=prompt)
+        self._record_usage_delta(before, self._base_usage_summary())
+        return result
 
     def complete_with_metadata(
         self,
@@ -83,12 +86,14 @@ class BudgetedLlmClient:
         max_tokens: int | None = None,
     ) -> Any:
         self._reserve(system)
-        return self.base.complete_with_metadata(
+        completion = self.base.complete_with_metadata(
             system=system,
             prompt=prompt,
             json_mode=json_mode,
             max_tokens=max_tokens,
         )
+        self._record_usage(completion)
+        return completion
 
     def complete_messages(
         self,
@@ -99,15 +104,23 @@ class BudgetedLlmClient:
     ) -> Any:
         system = next((str(item.get("content") or "") for item in messages if item.get("role") == "system"), "")
         self._reserve(system)
-        return self.base.complete_messages(messages=messages, json_mode=json_mode, max_tokens=max_tokens)
+        completion = self.base.complete_messages(messages=messages, json_mode=json_mode, max_tokens=max_tokens)
+        self._record_usage(completion)
+        return completion
 
     def summary(self) -> dict[str, object]:
         counts = Counter(str(item["category"]) for item in self.calls)
+        usage = {
+            key: sum(int(_dict(item.get("usage")).get(key) or 0) for item in self.calls)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
         return {
             "limit": self.limit,
             "used": self.used,
             "remaining": self.remaining,
             "by_category": dict(sorted(counts.items())),
+            "token_usage": usage,
+            "usage_reported_calls": sum(1 for item in self.calls if _dict(item.get("usage"))),
             "calls": self.calls,
         }
 
@@ -119,6 +132,39 @@ class BudgetedLlmClient:
             )
         category = _call_category(system)
         self.calls.append({"ordinal": self.used + 1, "category": category})
+
+    def _record_usage(self, completion: object) -> None:
+        usage = getattr(completion, "usage", None)
+        if not isinstance(usage, dict) or not self.calls:
+            return
+        self.calls[-1]["usage"] = {
+            key: int(usage.get(key) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+
+    def _base_usage_summary(self) -> dict[str, int] | None:
+        summary = getattr(self.base, "usage_summary", None)
+        if not callable(summary):
+            return None
+        value = summary()
+        if not isinstance(value, dict):
+            return None
+        return {
+            key: int(value.get(key) or 0)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
+
+    def _record_usage_delta(
+        self,
+        before: dict[str, int] | None,
+        after: dict[str, int] | None,
+    ) -> None:
+        if before is None or after is None or not self.calls:
+            return
+        self.calls[-1]["usage"] = {
+            key: max(0, after[key] - before[key])
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+        }
 
 
 @dataclass(frozen=True)

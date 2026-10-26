@@ -193,6 +193,14 @@ không dùng nó làm đầu vào.
 | --- | --- | --- | --- |
 | `run_workspace_v1.json` | Workspace Manager ngay sau Requirement Approval của run L2 mới | Identity worktree/branch và base/head SHA đã freeze; bind target profile snapshot trước khi đọc code | Repo Discovery, Design, Plan và toàn bộ execution; các run cũ không có marker L2 vẫn giữ flow cũ |
 | `repo_landscape_v1.json` | Repo Discovery từ worktree đã freeze, profile roots và CodeGraph có sẵn hoặc bounded fallback | Inventory component/file, AS-IS anchor, candidate mapping theo scenario surface, conformance finding, uncertainty và digest; không chứa raw source hoặc absolute path | Designer hiện hành, Read API, human audit và Phase 3 planning |
+| `designer_execution/design_v<N>/designer_loop_session_v1.json` | L3 Designer executor | Frozen authority, cursor, pending call, budgets và canonical graph đang chạy | Private resume/reconciliation; không mở qua Read API |
+| `designer_execution/design_v<N>/designer_loop_manifest_v1.json` | L3 Designer executor | Input digest, tool policy và workspace binding của session | Input-drift guard; private runtime evidence |
+| `designer_execution/design_v<N>/designer_loop_journal_v1.jsonl` | L3 Designer executor | Sanitized tool result/evidence refs theo call ID | Private audit/idempotency; không phải public artifact |
+| `designer_execution/design_v<N>/designer_delta_designer-<call>.json` | `design.propose_delta` | Delta input, apply result và graph revision đã persist | Reconcile ambiguous mutation khi resume; private runtime evidence |
+| `vertical_design_graph_v<N>.json` | L3 Designer graph engine | Canonical scenario/component graph bind frozen Requirement/landscape/workspace | Design checkpoint, deterministic projections và L4/B1 handoff |
+| `design_component_view_v<N>.json`, `design_surface_view_v<N>.json` | Deterministic projection renderer | Read-only views nhóm canonical node theo component/surface | Human review và public Read API |
+| `design_projection_manifest_v<N>.json` | Deterministic projection renderer | Graph digest/revision và refs của compatibility projections | Checkpoint/sync, integrity audit và downstream handoff |
+| `design_finding_ledger_v<N>.json` | L3 validation workflow | Blocker/warning/disputed findings đã sanitize theo Design version | Human review, revalidation và L4 finding interface |
 | `designer_analysis_v<N>.md` | Designer Agent | Phân tích thiết kế và bối cảnh của version | Repair vòng sau, human review và audit |
 | `design_artifact_v<N>.md` | Designer Agent | TO-BE design hiện hành, gồm PlantUML/class/sequence theo phạm vi use case | Parser, Design Validator, Design checkpoint và Implementation Plan Agent |
 | `class_diagram_graph_v<N>.json` | Deterministic PlantUML parser | Graph class/interface/entity và quan hệ đã parse | Traceability Validator, Plan Validator và Code Trace Validator |
