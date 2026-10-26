@@ -125,6 +125,7 @@ def build_vertical_trace_graph(
                 "id": scenario_id,
                 "layer": "requirement",
                 "kind": "scenario",
+                "scenario_kind": str(scenario.get("kind") or ""),
                 "label": str(scenario.get("name") or scenario_id),
                 "scenario_id": scenario_id,
                 "component_id": "",
@@ -191,14 +192,23 @@ def build_vertical_trace_graph(
         kind = str(item.get("kind") or "")
         if kind not in TRACE_EDGE_KINDS:
             kind = "depends_on"
-        edges.append(
-            _edge(
-                str(item.get("from") or ""),
-                str(item.get("to") or ""),
-                kind,
-                scenario_id=str(item.get("scenario_id") or ""),
-            )
+        trace_edge = _edge(
+            str(item.get("from") or ""),
+            str(item.get("to") or ""),
+            kind,
+            scenario_id=str(item.get("scenario_id") or ""),
         )
+        trace_edge.update(
+            {
+                "source_edge_id": str(item.get("id") or ""),
+                "label": str(item.get("label") or ""),
+                "guard": str(item.get("guard") or ""),
+                "branch_group": str(item.get("branch_group") or ""),
+                "terminal": bool(item.get("terminal")),
+                "order": int(item.get("order") or 0),
+            }
+        )
+        edges.append(trace_edge)
 
     partitions = [
         {
@@ -357,11 +367,32 @@ def validate_vertical_trace_coverage(
                 blockers.append(_finding("acceptance_trace_missing", ref, f"Acceptance criterion {ref} is not realized by a Design element in {scenario_id}.", requirement_ids=[ref]))
 
     design_edges = [edge for edge in edges if by_id.get(str(edge.get("from") or ""), {}).get("layer") == "design" and by_id.get(str(edge.get("to") or ""), {}).get("layer") == "design"]
+    allowed_cross_scenario_count = 0
     for edge in design_edges:
         source = by_id[str(edge.get("from") or "")]
         target = by_id[str(edge.get("to") or "")]
         if source.get("scenario_id") != target.get("scenario_id"):
-            blockers.append(_finding("cross_scenario_design_edge", str(edge.get("id") or ""), "Design interaction edge crosses scenario partitions.", design_ids=[str(source.get("id") or ""), str(target.get("id") or "")]))
+            source_scenario = by_id.get(str(source.get("scenario_id") or ""), {})
+            target_scenario = by_id.get(str(target.get("scenario_id") or ""), {})
+            endpoint_kinds = {
+                str(source_scenario.get("scenario_kind") or ""),
+                str(target_scenario.get("scenario_kind") or ""),
+            }
+            declared_scenario = str(edge.get("scenario_id") or "")
+            declared_matches_endpoint = declared_scenario in {
+                str(source.get("scenario_id") or ""),
+                str(target.get("scenario_id") or ""),
+            }
+            main_branch_link = (
+                "main" in endpoint_kinds
+                and bool(endpoint_kinds.intersection({"alternative", "exception"}))
+                and declared_matches_endpoint
+                and str(edge.get("kind") or "") in {"depends_on", "calls", "returns"}
+            )
+            if main_branch_link:
+                allowed_cross_scenario_count += 1
+                continue
+            blockers.append(_finding("cross_scenario_design_edge", str(edge.get("id") or ""), "Design interaction edge crosses unrelated scenario partitions.", design_ids=[str(source.get("id") or ""), str(target.get("id") or "")]))
 
     blockers = [
         replace(item, snapshot_fingerprint=str(graph.get("artifact_digest") or ""))
@@ -373,6 +404,7 @@ def validate_vertical_trace_coverage(
         "covered_surface_count": covered_surface_count,
         "design_node_count": len(design_nodes),
         "edge_count": len(edges),
+        "allowed_cross_scenario_count": allowed_cross_scenario_count,
     }
     return VerticalTraceValidationResult(graph=graph, blocking_findings=blockers, coverage=coverage, mode=mode)
 

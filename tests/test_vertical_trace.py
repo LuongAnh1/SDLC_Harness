@@ -142,8 +142,8 @@ class VerticalTraceTest(unittest.TestCase):
 
     def test_cross_scenario_design_edge_is_blocked(self) -> None:
         design = self._design_graph()
-        sc1 = next(item for item in design["nodes"] if item["scenario_id"] == "SC-1")
-        sc2 = next(item for item in design["nodes"] if item["scenario_id"] == "SC-2")
+        sc1 = next(item for item in design["nodes"] if item["scenario_id"] == "SC-2")
+        sc2 = next(item for item in design["nodes"] if item["scenario_id"] == "SC-3")
         design["edges"].append(
             {
                 "id": "VDE-cross",
@@ -154,7 +154,7 @@ class VerticalTraceTest(unittest.TestCase):
                 "branch_group": "",
                 "guard": "",
                 "terminal": False,
-                "scenario_id": "SC-1",
+                "scenario_id": "SC-2",
                 "order": 1,
             }
         )
@@ -162,6 +162,31 @@ class VerticalTraceTest(unittest.TestCase):
         graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
         categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings}
         self.assertIn("cross_scenario_design_edge", categories)
+
+    def test_main_to_exception_branch_edge_is_allowed(self) -> None:
+        design = self._design_graph()
+        main = next(item for item in design["nodes"] if item["scenario_id"] == "SC-1")
+        exception = next(item for item in design["nodes"] if item["scenario_id"] == "SC-3")
+        design["edges"].append(
+            {
+                "id": "VDE-main-exception",
+                "from": main["id"],
+                "to": exception["id"],
+                "kind": "depends_on",
+                "label": "invalid input branch",
+                "branch_group": "",
+                "guard": "",
+                "terminal": False,
+                "scenario_id": "SC-1",
+                "order": 1,
+            }
+        )
+        design["artifact_digest"] = graph_digest(design)
+        graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
+        result = validate_vertical_trace_coverage(graph, mode="enforce")
+
+        self.assertNotIn("cross_scenario_design_edge", {item.category for item in result.blocking_findings})
+        self.assertEqual(result.coverage["allowed_cross_scenario_count"], 1)
 
     def test_enforce_report_must_match_graph_and_pass(self) -> None:
         graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=self._design_graph())
