@@ -26,6 +26,14 @@ from ...profiles import (
     get_language_profile,
     resolve_language_prompt_directive,
 )
+from .component_plan import (
+    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    build_component_work_units,
+    canonicalize_work_unit_dependencies,
+    component_plan_projections,
+    merge_work_unit_updates,
+    rebind_legacy_mappings_to_work_units,
+)
 
 
 @dataclass(frozen=True)
@@ -139,6 +147,11 @@ class DeveloperPlanAgent:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        contract_version: str = PROFILED_IMPLEMENTATION_PLAN_VERSION,
+        vertical_design_graph: dict[str, object] | None = None,
+        vertical_trace_graph: dict[str, object] | None = None,
+        repo_landscape: dict[str, object] | None = None,
+        component_plan_inputs: dict[str, object] | None = None,
     ) -> ImplementationPlanDraft:
         """Tạo plan V1 từ graph đã duyệt để checkpoint không còn prose mơ hồ."""
 
@@ -148,6 +161,35 @@ class DeveloperPlanAgent:
         )
         assert planning_policy is not None
         repo_context = repo_context or {}
+        if contract_version == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
+            return self._plan_component_aware(
+                run_id=run_id,
+                source_ref=source_ref,
+                issue_key=issue_key,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                requirement_design_trace=requirement_design_trace,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                target_repo_path=target_repo_path,
+                target_repo_remote=target_repo_remote,
+                target_base_branch=target_base_branch,
+                planned_branch=planned_branch,
+                target_files=target_files,
+                repo_context=repo_context,
+                workspace_mode=workspace_mode,
+                workspace_ref=workspace_ref,
+                base_sha=base_sha,
+                requirement_graph=requirement_graph or {},
+                requirement_artifact_refs=requirement_artifact_refs or {},
+                planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
+                vertical_design_graph=vertical_design_graph or {},
+                vertical_trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+                component_plan_inputs=component_plan_inputs or {},
+            )
         mappings = _design_mappings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -346,6 +388,11 @@ class DeveloperPlanAgent:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        contract_version: str = PROFILED_IMPLEMENTATION_PLAN_VERSION,
+        vertical_design_graph: dict[str, object] | None = None,
+        vertical_trace_graph: dict[str, object] | None = None,
+        repo_landscape: dict[str, object] | None = None,
+        component_plan_inputs: dict[str, object] | None = None,
     ) -> ImplementationPlanDraft:
         """Apply a repair patch to the previous candidate without rebuilding it from scratch."""
 
@@ -355,6 +402,39 @@ class DeveloperPlanAgent:
         )
         assert planning_policy is not None
         previous = dict(previous_draft.structured)
+        if contract_version == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
+            return self._repair_component_aware(
+                previous=previous,
+                review_report=review_report,
+                developer_feedback=developer_feedback,
+                iteration=iteration,
+                run_id=run_id,
+                source_ref=source_ref,
+                issue_key=issue_key,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                requirement_design_trace=requirement_design_trace,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                target_repo_path=target_repo_path,
+                target_repo_remote=target_repo_remote,
+                target_base_branch=target_base_branch,
+                planned_branch=planned_branch,
+                target_files=target_files,
+                repo_context=repo_context or {},
+                workspace_mode=workspace_mode,
+                workspace_ref=workspace_ref,
+                base_sha=base_sha,
+                requirement_graph=requirement_graph or {},
+                requirement_artifact_refs=requirement_artifact_refs or {},
+                planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
+                vertical_design_graph=vertical_design_graph or {},
+                vertical_trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+                component_plan_inputs=component_plan_inputs or {},
+            )
         previous_mappings = _dict_items(previous.get("design_mappings"))
         previous_tests = _dict_items(previous.get("test_intents"))
         compact_review = _compact_review(review_report)
@@ -497,6 +577,566 @@ class DeveloperPlanAgent:
             f"- Validator feedback: {developer_feedback or 'No free-form feedback provided.'}\n"
         )
         return ImplementationPlanDraft(markdown=markdown, structured=structured)
+
+    def _plan_component_aware(
+        self,
+        *,
+        run_id: str,
+        source_ref: str,
+        issue_key: str,
+        requirement_packet: str,
+        design_artifact: str,
+        requirement_design_trace: dict[str, object],
+        class_graph: dict[str, object],
+        sequence_graph: dict[str, object],
+        target_repo_path: str,
+        target_repo_remote: str,
+        target_base_branch: str,
+        planned_branch: str,
+        target_files: list[str],
+        repo_context: dict[str, object],
+        workspace_mode: str,
+        workspace_ref: str,
+        base_sha: str,
+        requirement_graph: dict[str, object],
+        requirement_artifact_refs: dict[str, str],
+        planning_policy: PlanningPathPolicy,
+        prompt_directive: LanguagePromptDirective | None,
+        verification_policy: VerificationStagePolicy,
+        vertical_design_graph: dict[str, object],
+        vertical_trace_graph: dict[str, object],
+        repo_landscape: dict[str, object],
+        component_plan_inputs: dict[str, object],
+    ) -> ImplementationPlanDraft:
+        skeleton = build_component_work_units(
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
+            repo_landscape=repo_landscape,
+            planning_policy=planning_policy,
+        )
+        llm_payload = self._component_plan_llm(
+            run_id=run_id,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+            units=skeleton,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            repo_context=repo_context,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
+            repair_feedback="",
+            previous_review={},
+        )
+        units = merge_work_unit_updates(
+            units=skeleton,
+            updates=llm_payload.get("work_unit_updates"),
+            planning_policy=planning_policy,
+        )
+        units = canonicalize_work_unit_dependencies(units)
+        legacy_mappings = _design_mappings(
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            target_files=target_files,
+            target_repo_path=target_repo_path,
+            requirement_design_trace={},
+            planning_policy=planning_policy,
+        )
+        legacy_mappings = rebind_legacy_mappings_to_work_units(
+            units=units,
+            design_graph=vertical_design_graph,
+            legacy_mappings=legacy_mappings,
+            planning_policy=planning_policy,
+            signature_entries=_dict_items(
+                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
+            ),
+        )
+        projections = component_plan_projections(
+            units=units,
+            design_graph=vertical_design_graph,
+            requirement_graph=requirement_graph,
+            legacy_mappings=legacy_mappings,
+            planning_policy=planning_policy,
+        )
+        projections["requirement_coverage"] = _merge_requirement_coverage(
+            projections["requirement_coverage"],
+            _requirement_coverage(
+                requirement_graph=requirement_graph,
+                requirement_design_trace=requirement_design_trace,
+                mappings=projections["design_mappings"],
+            ),
+        )
+        signature_contract = build_implementation_signature_contract(
+            planning_policy=planning_policy,
+            mappings=projections["design_mappings"],
+            class_graph=class_graph,
+            candidate=llm_payload.get("implementation_signature_contract"),
+            bind_to_mapped_symbol=True,
+        )
+        parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
+        structured: dict[str, object] = {
+            "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+            "planning_mode": (
+                "llm_component_aware_plan_v1"
+                if self.llm_client and not parse_error
+                else "deterministic_component_plan_after_llm_parse_error_v1"
+                if self.llm_client
+                else "deterministic_component_plan_v1"
+            ),
+            "run_id": run_id,
+            "source_ref": source_ref,
+            "issue_key": issue_key,
+            "target_repository": {
+                "local_path": target_repo_path,
+                "remote": target_repo_remote,
+                "base_branch": target_base_branch,
+                "planned_branch": planned_branch,
+                "workspace_mode": workspace_mode,
+                "workspace_ref": workspace_ref,
+                "base_sha": base_sha,
+            },
+            "planning_profile": planning_policy.metadata(),
+            "verification_stage_ids": list(verification_policy.stage_ids),
+            "inputs": dict(component_plan_inputs),
+            "requirement_contract": {
+                "version": "v2",
+                "revision": int(component_plan_inputs.get("requirement_revision") or 0),
+                "artifact_refs": requirement_artifact_refs,
+            },
+            "repo_context": _repo_context_summary(repo_context),
+            "repo_evidence": _string_items(llm_payload.get("repo_evidence"))
+            or _repo_context_evidence_lines(repo_context),
+            "work_units": units,
+            **projections,
+            "implementation_signature_contract": signature_contract,
+            "design_adjustments": [],
+            "assumptions": [
+                "Phase 3 only plans approved full-stack work; Phase 4 owns source mutation.",
+                "Compatibility fields are rendered from work_units for the current Phase 4 executor.",
+            ],
+            "open_questions": [],
+            "developer_llm": {
+                "used": bool(self.llm_client),
+                "summary": str(llm_payload.get("summary") or "").strip(),
+                "parse_error": parse_error,
+                "repair_feedback_attached": False,
+            },
+            "out_of_scope": [
+                "No source/test mutation or command execution in Phase 3.",
+                "Per-unit Developer execution remains L5.2.",
+            ],
+        }
+        return ImplementationPlanDraft(
+            markdown=_markdown_plan(
+                structured=structured,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+            ),
+            structured=structured,
+        )
+
+    def _repair_component_aware(
+        self,
+        *,
+        previous: dict[str, object],
+        review_report: dict[str, object],
+        developer_feedback: str,
+        iteration: int,
+        run_id: str,
+        source_ref: str,
+        issue_key: str,
+        requirement_packet: str,
+        design_artifact: str,
+        requirement_design_trace: dict[str, object],
+        class_graph: dict[str, object],
+        sequence_graph: dict[str, object],
+        target_repo_path: str,
+        target_repo_remote: str,
+        target_base_branch: str,
+        planned_branch: str,
+        target_files: list[str],
+        repo_context: dict[str, object],
+        workspace_mode: str,
+        workspace_ref: str,
+        base_sha: str,
+        requirement_graph: dict[str, object],
+        requirement_artifact_refs: dict[str, str],
+        planning_policy: PlanningPathPolicy,
+        prompt_directive: LanguagePromptDirective | None,
+        verification_policy: VerificationStagePolicy,
+        vertical_design_graph: dict[str, object],
+        vertical_trace_graph: dict[str, object],
+        repo_landscape: dict[str, object],
+        component_plan_inputs: dict[str, object],
+    ) -> ImplementationPlanDraft:
+        skeleton = build_component_work_units(
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
+            repo_landscape=repo_landscape,
+            planning_policy=planning_policy,
+        )
+        preserved = merge_work_unit_updates(
+            units=skeleton,
+            updates=previous.get("work_units"),
+            planning_policy=planning_policy,
+        )
+        preserved = canonicalize_work_unit_dependencies(preserved)
+        llm_payload = self._component_plan_llm(
+            run_id=run_id,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+            units=preserved,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            repo_context=repo_context,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
+            repair_feedback=developer_feedback,
+            previous_review=_compact_review(review_report),
+        )
+        affected_unit_ids = set(_affected_unit_ids(review_report))
+        proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
+        if affected_unit_ids:
+            proposed_updates = [
+                item
+                for item in proposed_updates
+                if str(item.get("unit_id") or "") in affected_unit_ids
+            ]
+        units = merge_work_unit_updates(
+            units=preserved,
+            updates=proposed_updates,
+            planning_policy=planning_policy,
+        )
+        units = canonicalize_work_unit_dependencies(units)
+        legacy_mappings = _design_mappings(
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            target_files=target_files,
+            target_repo_path=target_repo_path,
+            requirement_design_trace={},
+            planning_policy=planning_policy,
+        )
+        legacy_mappings = rebind_legacy_mappings_to_work_units(
+            units=units,
+            design_graph=vertical_design_graph,
+            legacy_mappings=legacy_mappings,
+            planning_policy=planning_policy,
+            signature_entries=_dict_items(
+                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
+            ),
+        )
+        projections = component_plan_projections(
+            units=units,
+            design_graph=vertical_design_graph,
+            requirement_graph=requirement_graph,
+            legacy_mappings=legacy_mappings,
+            planning_policy=planning_policy,
+        )
+        projections["requirement_coverage"] = _merge_requirement_coverage(
+            projections["requirement_coverage"],
+            _requirement_coverage(
+                requirement_graph=requirement_graph,
+                requirement_design_trace=requirement_design_trace,
+                mappings=projections["design_mappings"],
+            ),
+        )
+        signature_contract = _merge_implementation_signature_contract(
+            planning_policy=planning_policy,
+            mappings=projections["design_mappings"],
+            class_graph=class_graph,
+            previous=previous.get("implementation_signature_contract"),
+            patch=llm_payload.get("implementation_signature_contract"),
+            bind_to_mapped_symbol=True,
+        )
+        history = _dict_items(previous.get("repair_history"))
+        history.append(
+            {
+                "iteration": iteration,
+                "source": "validator_review_plan",
+                "affected_unit_ids": sorted(affected_unit_ids),
+                "feedback": developer_feedback,
+            }
+        )
+        parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
+        structured = {
+            **previous,
+            "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+            "planning_mode": "llm_component_plan_repair_v1" if not parse_error else "deterministic_component_repair_after_llm_parse_error_v1",
+            "run_id": run_id,
+            "source_ref": source_ref,
+            "issue_key": issue_key,
+            "target_repository": {
+                "local_path": target_repo_path,
+                "remote": target_repo_remote,
+                "base_branch": target_base_branch,
+                "planned_branch": planned_branch,
+                "workspace_mode": workspace_mode,
+                "workspace_ref": workspace_ref,
+                "base_sha": base_sha,
+            },
+            "inputs": dict(component_plan_inputs),
+            "requirement_contract": {
+                "version": "v2",
+                "revision": int(component_plan_inputs.get("requirement_revision") or 0),
+                "artifact_refs": requirement_artifact_refs,
+            },
+            "repo_context": _repo_context_summary(repo_context),
+            "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
+            "work_units": units,
+            **projections,
+            "implementation_signature_contract": signature_contract,
+            "verification_stage_ids": list(verification_policy.stage_ids),
+            "repair_iteration": iteration,
+            "repair_source": "validator_review_plan",
+            "repair_history": history,
+            "developer_llm": {
+                "used": bool(self.llm_client),
+                "summary": str(llm_payload.get("summary") or "").strip(),
+                "parse_error": parse_error,
+                "repair_feedback_attached": True,
+            },
+        }
+        markdown = _markdown_plan(
+            structured=structured,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+        )
+        markdown += (
+            "\n\n## Repair Feedback Addressed\n\n"
+            f"- Repair iteration: {iteration}\n"
+            f"- Affected units: {', '.join(_affected_unit_ids(review_report)) or 'not classified'}\n"
+            f"- Validator feedback: {developer_feedback or 'No free-form feedback provided.'}\n"
+        )
+        return ImplementationPlanDraft(markdown=markdown, structured=structured)
+
+    def _component_plan_llm(
+        self,
+        *,
+        run_id: str,
+        requirement_packet: str,
+        design_artifact: str,
+        units: list[dict[str, object]],
+        vertical_design_graph: dict[str, object],
+        vertical_trace_graph: dict[str, object],
+        class_graph: dict[str, object],
+        sequence_graph: dict[str, object],
+        repo_context: dict[str, object],
+        planning_policy: PlanningPathPolicy,
+        prompt_directive: LanguagePromptDirective | None,
+        verification_policy: VerificationStagePolicy,
+        repair_feedback: str,
+        previous_review: dict[str, object],
+    ) -> dict[str, object]:
+        if not self.llm_client:
+            return {}
+        prompt = _component_plan_prompt(
+            run_id=run_id,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+            units=units,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            repo_context=repo_context,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
+            repair_feedback=repair_feedback,
+            previous_review=previous_review,
+        )
+        raw = self.llm_client.complete(
+            system=(
+                "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
+                "Return JSON only and never change Harness-owned work-unit identity."
+            ),
+            prompt=prompt,
+        )
+        try:
+            return _parse_component_plan_payload(raw)
+        except HarnessError as exc:
+            return {"_developer_llm_parse_error": exc.message}
+
+
+def _component_plan_prompt(
+    *,
+    run_id: str,
+    requirement_packet: str,
+    design_artifact: str,
+    units: list[dict[str, object]],
+    vertical_design_graph: dict[str, object],
+    vertical_trace_graph: dict[str, object],
+    class_graph: dict[str, object],
+    sequence_graph: dict[str, object],
+    repo_context: dict[str, object],
+    planning_policy: PlanningPathPolicy,
+    prompt_directive: LanguagePromptDirective | None,
+    verification_policy: VerificationStagePolicy,
+    repair_feedback: str,
+    previous_review: dict[str, object],
+) -> str:
+    node_ids = {node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))}
+    design_slice = {
+        "schema_version": vertical_design_graph.get("schema_version"),
+        "artifact_digest": vertical_design_graph.get("artifact_digest"),
+        "nodes": [
+            item for item in _dict_items(vertical_design_graph.get("nodes"))
+            if str(item.get("id") or "") in node_ids
+        ],
+        "edges": [
+            item for item in _dict_items(vertical_design_graph.get("edges"))
+            if str(item.get("from") or "") in node_ids or str(item.get("to") or "") in node_ids
+        ],
+    }
+    trace_node_ids = node_ids | {
+        ref
+        for unit in units
+        for ref in [*_string_items(unit.get("requirement_refs")), *_string_items(unit.get("acceptance_refs"))]
+    }
+    trace_slice = {
+        "schema_version": vertical_trace_graph.get("schema_version"),
+        "artifact_digest": vertical_trace_graph.get("artifact_digest"),
+        "nodes": [
+            item for item in _dict_items(vertical_trace_graph.get("nodes"))
+            if str(item.get("id") or "") in trace_node_ids
+        ],
+        "edges": [
+            item for item in _dict_items(vertical_trace_graph.get("edges"))
+            if str(item.get("from") or "") in trace_node_ids
+            and str(item.get("to") or "") in trace_node_ids
+        ],
+    }
+    language = prompt_directive.developer_plan_context() if prompt_directive else {}
+    repair = (
+        "\nRepair feedback:\n"
+        + repair_feedback
+        + "\nPrevious review:\n"
+        + json.dumps(previous_review, ensure_ascii=False, indent=2)
+        if repair_feedback.strip()
+        else ""
+    )
+    return f"""Component-aware Implementation Plan V4
+
+Enrich the Harness-owned work units. Do not add, delete, merge, split or reorder units.
+Return JSON only:
+{{
+  "summary": "short human summary",
+  "repo_evidence": ["bounded evidence"],
+  "work_unit_updates": [
+    {{
+      "unit_id": "one existing WU id",
+      "title": "short title",
+      "objective": "concrete implementation objective",
+      "planned_code_targets": [
+        {{"path": "profile-approved repo-relative path", "symbol": "optional qualified symbol"}}
+      ],
+      "migration_impact": {{
+        "status": "required|not_required",
+        "reason": "decision grounded in the approved data contract",
+        "targets": ["packages/db/prisma/... only when required"]
+      }},
+      "test_intents": [
+        {{
+          "stage_id": "one approved stage",
+          "intent": "verification intent",
+          "acceptance_refs": ["AC-..."],
+          "target_paths": ["exact profile-approved test path"]
+        }}
+      ],
+      "repo_evidence_refs": ["evidence refs used for this unit"]
+    }}
+  ],
+  "implementation_signature_contract": {{
+    "entries": [
+      {{
+        "design_element_id": "method:Owner.operation",
+        "symbol_kind": "method",
+        "owner_kind": "class|interface|abstract",
+        "qualified_name": "Owner.operation",
+        "parameters": [
+          {{"name": "value", "type": "string", "optional": false, "rest": false}}
+        ],
+        "return_type": "Promise<OperationResult>",
+        "type_parameters": [],
+        "async": true
+      }}
+    ]
+  }}
+}}
+
+Rules:
+- Update every work unit that lacks an exact target or test intent.
+- Never return command, argv, cwd, env or timeout fields.
+- Use only paths allowed by the immutable planning policy.
+- Keep every acceptance ref covered by at least one test intent in its owning unit.
+- A `unit` test intent must target an exact test file. A `typecheck` intent must
+  target an exact non-test source file already listed in that work unit's
+  planned_code_targets.
+- Add explicit test intent for every negative, exception, cancellation, duplicate,
+  interruption, and confirmation gate stated by the owning unit's approved contract.
+- Data units must decide migration impact. Non-data units may omit migration_impact.
+- When migration is `required`, include a concrete
+  `packages/db/prisma/migrations/<id>_<name>/migration.sql` target. Include
+  `packages/db/prisma/schema.prisma` in planned_code_targets when the model changes.
+- When another data unit already owns the same schema migration, mark a read-only
+  consumer `not_required` and explain that it uses the approved shared schema.
+- Do not invent Requirement, Design, component, dependency or work-unit IDs.
+- Do not propose a new work unit. Supporting files in an existing repository component
+  may belong to the nearest approved unit: an API-surface unit may own shared contract
+  files, and a web unit may own its API client adapter. Follow repository evidence and
+  include existing barrel exports when a new shared contract requires them.
+- Do not change dependency or order in prose. Harness serializes units that share code,
+  test, contract, schema, or migration artifacts.
+- For a repair, return only affected unit updates.
+- Include one exact signature entry for every approved method in the legacy Class graph.
+- The legacy Class graph supplies trace identity only. Derive callable parameter and
+  return types from Vertical Design contracts, Requirement behavior, repository types,
+  and the selected code target. Do not copy placeholder `(): void` signatures when the
+  operation must accept input, return data/status, or render UI.
+- Planned target symbols are exact code bindings: use `Owner.method` for a TypeScript
+  class/interface method and a simple symbol for an exported function/component.
+- Use that exact work-unit target symbol in qualified_name; the Harness binds the final
+  qualified symbol and rejects two approved methods sharing one binding.
+- Every signature qualified_name must also appear as a symbol in the owning work unit's
+  planned_code_targets. To repair a collision, add the distinct symbols to the work unit;
+  changing only the signature entry is ignored by the Harness.
+- Never emit source_path or contract_id in signature entries; the Harness binds them.
+
+Run id: {run_id}
+Planning policy:
+{json.dumps(planning_policy.prompt_context(), ensure_ascii=False, indent=2)}
+Verification policy:
+{json.dumps(verification_policy.prompt_context(), ensure_ascii=False, indent=2)}
+Language directive:
+{json.dumps(language, ensure_ascii=False, indent=2)}
+Harness-owned work units:
+{json.dumps(units, ensure_ascii=False, indent=2)}
+Vertical Design slice:
+{json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
+Vertical Trace slice:
+{json.dumps(trace_slice, ensure_ascii=False, separators=(",", ":"))}
+Legacy Class graph (signature contract only):
+{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}
+
+Legacy Sequence graph (signature contract only):
+{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))}
+
+Repository context:
+{json.dumps(_repo_context_summary(repo_context), ensure_ascii=False, indent=2)}
+Repository evidence:
+{_excerpt(str(repo_context.get("evidence") or ""), limit=6000)}
+Approved Requirement summary:
+{_excerpt(requirement_packet, limit=3000)}
+Approved Design human context:
+{_excerpt(design_artifact, limit=2000)}
+{repair}
+""".strip()
+
 
 def _developer_plan_prompt(
     *,
@@ -796,6 +1436,27 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
     }
 
 
+def _parse_component_plan_payload(raw: str) -> dict[str, object]:
+    try:
+        parsed = _parse_first_json_object(
+            raw,
+            expected_keys={"summary", "work_unit_updates"},
+        )
+    except json.JSONDecodeError as exc:
+        raise HarnessError(
+            "implementation_plan_developer_failed",
+            "Developer.plan V4 LLM did not return valid component-plan JSON.",
+        ) from exc
+    return {
+        "summary": str(parsed.get("summary") or "").strip(),
+        "repo_evidence": _string_items(parsed.get("repo_evidence")),
+        "work_unit_updates": _dict_items(parsed.get("work_unit_updates")),
+        "implementation_signature_contract": _object_dict(
+            parsed.get("implementation_signature_contract")
+        ),
+    }
+
+
 def _merge_implementation_signature_contract(
     *,
     planning_policy: PlanningPathPolicy,
@@ -803,6 +1464,7 @@ def _merge_implementation_signature_contract(
     class_graph: dict[str, object],
     previous: object,
     patch: object,
+    bind_to_mapped_symbol: bool = False,
 ) -> dict[str, object]:
     """Merge a valid signature patch without dropping untouched prior entries."""
 
@@ -811,12 +1473,14 @@ def _merge_implementation_signature_contract(
         mappings=mappings,
         class_graph=class_graph,
         candidate=previous,
+        bind_to_mapped_symbol=bind_to_mapped_symbol,
     )
     patch_contract = build_implementation_signature_contract(
         planning_policy=planning_policy,
         mappings=mappings,
         class_graph=class_graph,
         candidate=patch,
+        bind_to_mapped_symbol=bind_to_mapped_symbol,
     )
     merged_entries = {
         str(entry.get("design_element_id") or ""): entry
@@ -832,6 +1496,7 @@ def _merge_implementation_signature_contract(
         mappings=mappings,
         class_graph=class_graph,
         candidate={"entries": list(merged_entries.values())},
+        bind_to_mapped_symbol=bind_to_mapped_symbol,
     )
 
 
@@ -1316,6 +1981,29 @@ def _compact_review(review: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _affected_unit_ids(review: dict[str, object]) -> list[str]:
+    direct = _string_items(review.get("affected_unit_ids"))
+    if direct:
+        return sorted(set(direct))
+    text = "\n".join(
+        _string_items(review.get("issues"))
+        + [
+            issue
+            for key in (
+                "coverage_issues",
+                "requirement_coverage_issues",
+                "traceability_issues",
+                "executability_issues",
+                "scope_issues",
+                "implementation_quality_issues",
+                "test_issues",
+            )
+            for issue in _string_items(review.get(key))
+        ]
+    )
+    return sorted(set(re.findall(r"\bWU-[A-F0-9]{12}\b", text)))
+
+
 def _repair_candidate(plan: dict[str, object]) -> dict[str, object]:
     return {
         "implementation_steps": _dict_items(plan.get("implementation_steps")),
@@ -1433,6 +2121,45 @@ def _requirement_coverage(
             }
         )
     return coverage
+
+
+def _merge_requirement_coverage(
+    component_coverage: list[dict[str, object]],
+    canonical_coverage: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep direct Vertical refs and backfill canonical IDs needed by Phase 4."""
+
+    direct = {
+        str(item.get("requirement_id") or ""): item
+        for item in component_coverage
+        if str(item.get("requirement_id") or "")
+    }
+    result: list[dict[str, object]] = []
+    for item in canonical_coverage:
+        requirement_id = str(item.get("requirement_id") or "")
+        vertical = direct.get(requirement_id)
+        result.append(
+            {
+                **item,
+                **(
+                    {
+                        "vertical_design_node_ids": _string_items(
+                            vertical.get("design_element_ids")
+                        ),
+                        "work_unit_ids": _string_items(vertical.get("work_unit_ids")),
+                    }
+                    if vertical
+                    else {}
+                ),
+            }
+        )
+    known = {str(item.get("requirement_id") or "") for item in result}
+    result.extend(
+        item
+        for item in component_coverage
+        if str(item.get("requirement_id") or "") not in known
+    )
+    return result
 
 
 def _mappings_for_trace_target(
@@ -1757,6 +2484,7 @@ def _markdown_plan(
     test_intents = _dict_items(structured.get("test_intents"))
     verification_stage_ids = _string_items(structured.get("verification_stage_ids"))
     implementation_steps = _dict_items(structured.get("implementation_steps"))
+    work_units = _dict_items(structured.get("work_units"))
     proposed_files = _dict_items(structured.get("proposed_files"))
     repo_evidence = [str(item) for item in structured.get("repo_evidence", []) if str(item).strip()]
     assumptions = [str(item) for item in structured.get("assumptions", []) if str(item).strip()]
@@ -1765,7 +2493,15 @@ def _markdown_plan(
     signature_contract = _object_dict(structured.get("implementation_signature_contract"))
     signature_entries = _dict_items(signature_contract.get("entries"))
     version_text = str(structured.get("version") or "")
-    plan_label = "V3" if version_text.endswith("_v3") else "V2" if version_text.endswith("_v2") else "V1"
+    plan_label = (
+        "V4"
+        if version_text.endswith("_v4")
+        else "V3"
+        if version_text.endswith("_v3")
+        else "V2"
+        if version_text.endswith("_v2")
+        else "V1"
+    )
 
     lines = [
         f"# Implementation Plan {plan_label}",
@@ -1793,6 +2529,44 @@ def _markdown_plan(
             lines.append(f"- {item}")
     else:
         lines.append("- No CodeGraph evidence was attached.")
+
+    if work_units:
+        lines.extend(["", "## Component Work Units", ""])
+        for unit in work_units:
+            targets = ", ".join(
+                f"`{item.get('path')}`"
+                + (f"#{item.get('symbol')}" if str(item.get("symbol") or "") else "")
+                for item in _dict_items(unit.get("planned_code_targets"))
+                if str(item.get("path") or "")
+            )
+            dependencies = ", ".join(
+                f"`{item}`" for item in _string_items(unit.get("depends_on"))
+            )
+            acceptance = ", ".join(
+                f"`{item}`" for item in _string_items(unit.get("acceptance_refs"))
+            )
+            lines.extend(
+                [
+                    f"### {unit.get('order', '-')}. {unit.get('title') or unit.get('unit_id')}",
+                    "",
+                    f"- Unit: `{unit.get('unit_id', '')}`",
+                    f"- Scenario / component: `{unit.get('scenario_id', '')}` / `{unit.get('component_id', '')}`",
+                    f"- Objective: {unit.get('objective') or 'n/a'}",
+                    f"- Depends on: {dependencies or 'none'}",
+                    f"- Acceptance coverage: {acceptance or 'none'}",
+                    f"- Code targets: {targets or 'n/a'}",
+                ]
+            )
+            migration = _object_dict(unit.get("migration_impact"))
+            if migration:
+                lines.append(
+                    f"- Migration: `{migration.get('status') or 'undecided'}` — "
+                    f"{migration.get('reason') or 'no reason supplied'}"
+                )
+            for test in _dict_items(unit.get("test_intents")):
+                lines.append(
+                    f"- Test `{test.get('stage_id', '')}`: {test.get('intent', '')}"
+                )
 
     lines.extend(
         [
@@ -1941,10 +2715,13 @@ def _markdown_plan(
         )
     for item in test_intents:
         stage_id = str(item.get("stage_id") or "").strip()
+        target_label = ", ".join(
+            f"`{path}`" for path in _string_items(item.get("target_paths"))
+        ) or str(item.get("scope") or "Unbound target")
         if stage_id:
-            lines.append(f"- {item.get('scope')}: {item.get('intent')} Stage `{stage_id}`.")
+            lines.append(f"- {target_label}: {item.get('intent')} Stage `{stage_id}`.")
         else:
-            lines.append(f"- {item.get('scope')}: {item.get('intent')} Run `{item.get('command')}`.")
+            lines.append(f"- {target_label}: {item.get('intent')} Run `{item.get('command')}`.")
 
     lines.extend(["", "## Assumptions / Open Questions", ""])
     for item in assumptions:

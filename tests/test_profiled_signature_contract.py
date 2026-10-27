@@ -116,6 +116,182 @@ def _contract(planning) -> dict[str, object]:
     )
 
 
+def test_signature_contract_binds_qualified_name_to_mapping_symbol(policies) -> None:
+    planning, _ = policies
+    mapping = {**_mapping(), "planned_code_target": f"{SOURCE_PATH}#actualCheck"}
+
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=[mapping],
+        class_graph=_class_graph(),
+        candidate=_candidate(),
+    )
+
+    assert contract["entries"][0]["qualified_name"] == "HealthService.actualCheck"
+    assert implementation_signature_contract_issues(
+        contract,
+        planning_policy=planning,
+        mappings=[mapping],
+        class_graph=_class_graph(),
+    ) == []
+
+
+def test_component_plan_signature_uses_vertical_contract_shape_not_legacy_arity(
+    policies,
+) -> None:
+    planning, _ = policies
+    legacy_graph = {
+        "nodes": [
+            {
+                "type": "class",
+                "className": "HealthService",
+                "methods": [{"name": "check", "parameters": [], "returnType": "void"}],
+            }
+        ]
+    }
+    candidate = _candidate()
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=[_mapping()],
+        class_graph=legacy_graph,
+        candidate=candidate,
+    )
+
+    assert implementation_signature_contract_issues(
+        contract,
+        planning_policy=planning,
+        mappings=[_mapping()],
+        class_graph=legacy_graph,
+        enforce_design_method_arity=False,
+        reject_placeholder_only=True,
+    ) == []
+    assert any(
+        "identity/arity" in issue
+        for issue in implementation_signature_contract_issues(
+            contract,
+            planning_policy=planning,
+            mappings=[_mapping()],
+            class_graph=legacy_graph,
+        )
+    )
+
+
+def test_component_plan_rejects_placeholder_only_signature_contract(policies) -> None:
+    planning, _ = policies
+    mappings = [
+        _mapping(),
+        {
+            **_mapping(),
+            "design_element_id": "method:HealthService.ping",
+            "design_element_name": "HealthService.ping",
+            "planned_code_target": f"{SOURCE_PATH}#ping",
+        },
+    ]
+    graph = {
+        "nodes": [
+            {
+                "type": "class",
+                "className": "HealthService",
+                "methods": [
+                    {"name": "check", "parameters": [], "returnType": "void"},
+                    {"name": "ping", "parameters": [], "returnType": "void"},
+                ],
+            }
+        ]
+    }
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=mappings,
+        class_graph=graph,
+        candidate={
+            "entries": [
+                {
+                    "design_element_id": item["design_element_id"],
+                    "symbol_kind": "method",
+                    "owner_kind": "class",
+                    "qualified_name": item["design_element_name"],
+                    "parameters": [],
+                    "return_type": "void",
+                    "type_parameters": [],
+                    "async": False,
+                }
+                for item in mappings
+            ]
+        },
+    )
+
+    issues = implementation_signature_contract_issues(
+        contract,
+        planning_policy=planning,
+        mappings=mappings,
+        class_graph=graph,
+        enforce_design_method_arity=False,
+        reject_placeholder_only=True,
+    )
+
+    assert any("placeholder-only" in issue for issue in issues)
+
+
+def test_component_plan_binds_exact_work_unit_symbol_and_rejects_shared_method_binding(
+    policies,
+) -> None:
+    planning, _ = policies
+    first = {**_mapping(), "planned_code_target": f"{SOURCE_PATH}#RuntimeHealth.check"}
+    second = {
+        **_mapping(),
+        "design_element_id": "method:HealthService.ping",
+        "design_element_name": "HealthService.ping",
+        "planned_code_target": f"{SOURCE_PATH}#RuntimeHealth.check",
+    }
+    graph = {
+        "nodes": [
+            {
+                "type": "class",
+                "className": "HealthService",
+                "methods": [
+                    {"name": "check", "parameters": [], "returnType": "void"},
+                    {"name": "ping", "parameters": [], "returnType": "void"},
+                ],
+            }
+        ]
+    }
+    candidate = {
+        "entries": [
+            {
+                "design_element_id": item["design_element_id"],
+                "symbol_kind": "method",
+                "owner_kind": "class",
+                "qualified_name": "IgnoredOwner.ignored",
+                "parameters": [{"name": "input", "type": "unknown"}],
+                "return_type": "unknown",
+                "type_parameters": [],
+                "async": False,
+            }
+            for item in (first, second)
+        ]
+    }
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=[first, second],
+        class_graph=graph,
+        candidate=candidate,
+        bind_to_mapped_symbol=True,
+    )
+
+    assert {item["qualified_name"] for item in contract["entries"]} == {
+        "RuntimeHealth.check"
+    }
+    issues = implementation_signature_contract_issues(
+        contract,
+        planning_policy=planning,
+        mappings=[first, second],
+        class_graph=graph,
+        enforce_design_method_arity=False,
+        bind_to_mapped_symbol=True,
+    )
+    assert any("share one implementation signature binding" in issue for issue in issues)
+
+
 def _actual_symbol() -> dict[str, object]:
     return {
         "kind": "method",

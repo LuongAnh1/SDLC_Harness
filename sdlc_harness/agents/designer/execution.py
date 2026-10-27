@@ -340,7 +340,7 @@ class DesignerToolLoopExecutor:
                                 "name": str((anchor or {}).get("symbol") or f"{scenario_id} {surface}"),
                                 "kind": _kind_for_surface(surface),
                                 "surface": surface,
-                                "disposition": "reuse" if anchor else "add",
+                                "disposition": "modify" if anchor else "add",
                                 "requirement_refs": requirement_refs,
                                 "evidence_refs": [str(anchor["anchor_id"])] if anchor else [],
                                 "evidence_reason": "Required surface has no existing anchor; add within the frozen component root." if not anchor else "",

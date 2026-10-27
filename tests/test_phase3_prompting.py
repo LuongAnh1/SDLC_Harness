@@ -15,6 +15,7 @@ from sdlc_harness.agents.validator.plan_review import (
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import fake_completion
 from sdlc_harness.profiles import (
+    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     build_planning_path_policy,
     build_verification_stage_policy,
     build_profile_snapshot,
@@ -109,7 +110,11 @@ def test_active_typescript_developer_prompt_has_no_java_assumptions(repair_feedb
 def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     policy, directive, verification_policy = _typescript_prompt_context()
     prompt = _llm_review_prompt(
-        structured_plan={"planning_profile": policy.metadata(), "design_mappings": []},
+        structured_plan={
+            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+            "planning_profile": policy.metadata(),
+            "design_mappings": [],
+        },
         requirement_packet="Delete one approved record.",
         design_artifact="Approved service and repository design.",
         requirement_design_trace={},
@@ -125,6 +130,12 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     assert '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     assert "TypeScript" in prompt
     assert '"policy_version": "verification_stage_policy_v1"' in prompt
+    assert "Work-unit identity, membership, dependency, and order are Harness-owned" in prompt
+    assert "Do not invent a new business component or work unit" in prompt
+    assert "A `typecheck` intent targets a non-test source" in prompt
+    assert "legacy Class graph supplies signature trace identity" in prompt
+    assert "shared-contract, client-adapter, or migration" in prompt
+    assert "concrete migration artifact" in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 

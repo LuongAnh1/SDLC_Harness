@@ -27,8 +27,11 @@ from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_e
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..agents.developer import (
+    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     developer_transport_retry_allowed,
     repair_scope_mismatch_retry_allowed,
+    resolve_implementation_plan_contract,
 )
 from ..agents.requirements import (
     RequirementClarificationUpdater,
@@ -168,6 +171,9 @@ class PhaseOneWorkflow:
         }
         state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
+        state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
+            COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
+        )
         state["vertical_trace_mode"] = self.settings.vertical_trace_mode
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
@@ -1467,6 +1473,7 @@ class PhaseOneWorkflow:
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
             VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
+            IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: resolve_implementation_plan_contract(state),
             "vertical_trace_mode": state.get("vertical_trace_mode"),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),

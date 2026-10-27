@@ -235,7 +235,27 @@ class RuntimeDirectoryTemplate:
                 content = path.read_text(encoding="utf-8")
                 path.write_text(self._rewrite_text(content, substitutions), encoding="utf-8")
         self._refresh_implementation_plan_bindings(destination)
+        self._refresh_repo_landscape_bindings(destination)
         self._refresh_vertical_design_bindings(destination)
+
+    @staticmethod
+    def _refresh_repo_landscape_bindings(destination: Path) -> None:
+        """Recompute repo-landscape digests after run/path substitution."""
+
+        for path in destination.glob("runs/*/artifacts/repo_landscape_v1.json"):
+            landscape = json.loads(path.read_text(encoding="utf-8"))
+            payload = {key: value for key, value in landscape.items() if key != "artifact_digest"}
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            landscape["artifact_digest"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+            path.write_text(
+                json.dumps(landscape, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
 
     @staticmethod
     def _refresh_implementation_plan_bindings(destination: Path) -> None:
@@ -282,14 +302,27 @@ class RuntimeDirectoryTemplate:
 
             design_path = artifact("vertical_design_graph")
             requirement_path = artifact("requirement_model")
+            landscape_path = artifact("repo_landscape")
             trace_path = artifact("vertical_trace_graph")
             report_path = artifact("vertical_trace_validation")
             if not all(path and path.is_file() for path in (design_path, requirement_path, trace_path, report_path)):
                 continue
             design = json.loads(design_path.read_text(encoding="utf-8"))
+            requirement = RequirementModelV2.from_dict(json.loads(requirement_path.read_text(encoding="utf-8")))
+            binding = design.get("snapshot_binding")
+            if isinstance(binding, dict):
+                requirement_bytes = json.dumps(
+                    requirement.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                binding["requirement_digest"] = "sha256:" + hashlib.sha256(requirement_bytes).hexdigest()
+                if landscape_path and landscape_path.is_file():
+                    landscape = json.loads(landscape_path.read_text(encoding="utf-8"))
+                    binding["repo_landscape_digest"] = landscape.get("artifact_digest")
             design["artifact_digest"] = graph_digest(design)
             design_path.write_text(json.dumps(design, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            requirement = RequirementModelV2.from_dict(json.loads(requirement_path.read_text(encoding="utf-8")))
             trace = build_vertical_trace_graph(requirement_model=requirement, design_graph=design)
             trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             report = validate_vertical_trace_coverage(

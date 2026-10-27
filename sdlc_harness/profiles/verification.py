@@ -21,6 +21,8 @@ if TYPE_CHECKING:
 VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v1"
 LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
 PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
+PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VERSION
+COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v4"
 LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
 PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v2"
 _ACTIVE_STAGE_IDS_BY_PROJECT = {
@@ -71,11 +73,16 @@ def profiled_plan_contract_issues(
     if verification_policy.project_profile_id != planning_policy.project_profile_id:
         issues.append("Verification stages do not belong to the planning project profile.")
     plan_version = structured_plan.get("version")
-    legacy = plan_version == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    if plan_version != PROFILED_IMPLEMENTATION_PLAN_VERSION and not (allow_legacy and legacy):
+    current = plan_version in {
+        PROFILED_IMPLEMENTATION_PLAN_VERSION,
+        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    }
+    compatible = plan_version == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    if not current and not (allow_legacy and compatible):
         issues.append(
             "Profiled implementation plan version must be "
-            f"`{PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
+            f"`{PROFILED_IMPLEMENTATION_PLAN_VERSION}` or "
+            f"`{COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
         )
     planning_profile = structured_plan.get("planning_profile")
     if not isinstance(planning_profile, dict) or planning_profile != planning_policy.metadata():
@@ -99,13 +106,22 @@ def profiled_plan_contract_issues(
             issues.append("A profiled test intent is missing stage_id.")
         elif stage_id not in allowed_stage_ids:
             issues.append(f"Test intent references an unsupported verification stage: {stage_id}")
-    if not legacy:
+    if plan_version != LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION:
         issues.extend(
             implementation_signature_contract_issues(
                 structured_plan.get("implementation_signature_contract"),
                 planning_policy=planning_policy,
                 mappings=_dict_items(structured_plan.get("design_mappings")),
                 class_graph=class_graph,
+                enforce_design_method_arity=(
+                    plan_version != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+                ),
+                reject_placeholder_only=(
+                    plan_version == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+                ),
+                bind_to_mapped_symbol=(
+                    plan_version == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+                ),
             )
         )
     return issues

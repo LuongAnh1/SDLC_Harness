@@ -16,7 +16,11 @@ import json
 from pathlib import Path
 import re
 
-from ..agents.developer import DeveloperPlanAgent
+from ..agents.developer import (
+    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    DeveloperPlanAgent,
+    resolve_implementation_plan_contract,
+)
 from ..agents.validator import (
     ImplementationPlanValidator,
     VERTICAL_TRACE_GRAPH_VERSION,
@@ -38,7 +42,11 @@ from ..profiles import (
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
-from ..repo_context import CodeGraphContextProvider, discover_profile_source_files
+from ..repo_context import (
+    CodeGraphContextProvider,
+    discover_profile_source_files,
+    validate_repo_landscape,
+)
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..workspaces import RunWorkspaceManager
@@ -56,6 +64,8 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
         "implementation_target_conflict",
         "implementation_target_ambiguous",
         "implementation_target_component_invalid",
+        "implementation_plan_component_invalid",
+        "implementation_plan_dependency_cycle",
     }
 )
 
@@ -133,6 +143,19 @@ class PhaseThreeWorkflow:
         sequence_graph = _read_json_artifact(
             self._existing_artifact_path(sequence_graph_path, run_id=run_id), run_id=run_id
         )
+        (
+            plan_contract_version,
+            vertical_design_graph,
+            vertical_trace_graph,
+            repo_landscape,
+            component_plan_inputs,
+        ) = self._component_plan_context(
+            state=state,
+            run_id=run_id,
+            artifact_paths=artifact_paths,
+            requirement_revision=frozen_requirement.canonical_model.revision,
+            requirement_contract_version=frozen_requirement.contract_version,
+        )
         workspace = self.workspace_manager.resolve(run_id)
         target_path = Path(workspace.worktree_path)
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
@@ -175,6 +198,11 @@ class PhaseThreeWorkflow:
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            contract_version=plan_contract_version,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            repo_landscape=repo_landscape,
+            component_plan_inputs=component_plan_inputs,
         )
         start_version = _next_implementation_plan_version(self.store.run_dir(run_id) / "artifacts")
         versions = list(
@@ -217,6 +245,10 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                component_plan_inputs=component_plan_inputs,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -289,6 +321,11 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
+                contract_version=plan_contract_version,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                component_plan_inputs=component_plan_inputs,
             )
         if review is None or not review.ok:
             error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
@@ -395,6 +432,7 @@ class PhaseThreeWorkflow:
                     **_optional_artifacts(artifact_paths, "vertical_design_graph"),
                     **_optional_artifacts(artifact_paths, "vertical_trace_graph"),
                     **_optional_artifacts(artifact_paths, "vertical_trace_validation"),
+                    **_optional_artifacts(artifact_paths, "repo_landscape"),
                 },
                 "allowed_next_actions": ["get_status", "cancel_run"],
                 "summary_for_user": "Đã duyệt design checkpoint, đang tạo implementation plan Phase 3.",
@@ -407,6 +445,19 @@ class PhaseThreeWorkflow:
         requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
         class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
         sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
+        (
+            plan_contract_version,
+            vertical_design_graph,
+            vertical_trace_graph,
+            repo_landscape,
+            component_plan_inputs,
+        ) = self._component_plan_context(
+            state=state,
+            run_id=run_id,
+            artifact_paths=artifact_paths,
+            requirement_revision=frozen_requirement.canonical_model.revision,
+            requirement_contract_version=frozen_requirement.contract_version,
+        )
         issue_key = _issue_key_from_state(state)
         repo_context = self.repo_context_provider.collect(
             target_path=target_path,
@@ -441,6 +492,11 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
+                contract_version=plan_contract_version,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                component_plan_inputs=component_plan_inputs,
             )
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -496,6 +552,10 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                component_plan_inputs=component_plan_inputs,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -577,6 +637,11 @@ class PhaseThreeWorkflow:
                     planning_policy=planning_policy,
                     prompt_directive=prompt_directive,
                     verification_policy=verification_policy,
+                    contract_version=plan_contract_version,
+                    vertical_design_graph=vertical_design_graph,
+                    vertical_trace_graph=vertical_trace_graph,
+                    repo_landscape=repo_landscape,
+                    component_plan_inputs=component_plan_inputs,
                 )
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
@@ -651,6 +716,66 @@ class PhaseThreeWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _component_plan_context(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        artifact_paths: dict[str, str],
+        requirement_revision: int,
+        requirement_contract_version: str,
+    ) -> tuple[
+        str,
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+        dict[str, object],
+    ]:
+        """Load the immutable Vertical Design inputs only for V4 runs."""
+
+        contract_version = resolve_implementation_plan_contract(state)
+        if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
+            return contract_version, {}, {}, {}, {}
+        if (
+            str(state.get(VERTICAL_TRACE_STATE_KEY) or "") != VERTICAL_TRACE_GRAPH_VERSION
+            or str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") != "enforce"
+        ):
+            raise HarnessError(
+                "implementation_plan_contract_invalid",
+                "Component-aware Plan V4 requires enforced Vertical Design traceability.",
+                run_id=run_id,
+            )
+        design_ref = _required_artifact(artifact_paths, "vertical_design_graph", run_id=run_id)
+        trace_ref = _required_artifact(artifact_paths, "vertical_trace_graph", run_id=run_id)
+        landscape_ref = _required_artifact(artifact_paths, "repo_landscape", run_id=run_id)
+        design_graph = _read_json_artifact(
+            self._existing_artifact_path(design_ref, run_id=run_id), run_id=run_id
+        )
+        trace_graph = _read_json_artifact(
+            self._existing_artifact_path(trace_ref, run_id=run_id), run_id=run_id
+        )
+        landscape = validate_repo_landscape(
+            _read_json_artifact(
+                self._existing_artifact_path(landscape_ref, run_id=run_id), run_id=run_id
+            ),
+            expected_run_id=run_id,
+        )
+        profile = _dict_value(state.get("profile_snapshot"))
+        inputs = {
+            "requirement_contract_version": requirement_contract_version,
+            "requirement_revision": requirement_revision,
+            "vertical_design_schema_version": str(design_graph.get("schema_version") or ""),
+            "vertical_design_digest": str(design_graph.get("artifact_digest") or ""),
+            "vertical_trace_schema_version": str(trace_graph.get("schema_version") or ""),
+            "vertical_trace_digest": str(trace_graph.get("artifact_digest") or ""),
+            "repo_landscape_schema_version": str(landscape.get("schema_version") or ""),
+            "repo_landscape_digest": str(landscape.get("artifact_digest") or ""),
+            "profile_snapshot_version": str(profile.get("version") or ""),
+            "target_manifest_digest": str(profile.get("target_manifest_digest") or ""),
+            "base_sha": str(profile.get("base_sha") or ""),
+        }
+        return contract_version, design_graph, trace_graph, landscape, inputs
 
     def _read_phase3_inputs(
         self,
@@ -836,6 +961,7 @@ class PhaseThreeWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
+            "implementation_plan_contract_version": resolve_implementation_plan_contract(state),
         }
 
 
@@ -885,6 +1011,7 @@ def _next_implementation_plan_version(artifact_dir: Path) -> int:
 
 def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[str]) -> str:
     payload = {
+        "work_units": structured_plan.get("work_units", []),
         "implementation_steps": structured_plan.get("implementation_steps", []),
         "proposed_files": structured_plan.get("proposed_files", []),
         "design_mappings": structured_plan.get("design_mappings", []),

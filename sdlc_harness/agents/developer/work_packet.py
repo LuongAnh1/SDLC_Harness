@@ -13,6 +13,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
+    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
@@ -94,7 +95,10 @@ def build_developer_work_packet(
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
     required_fields = ["path", "content"]
-    current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
+    current_profiled_contract = structured_plan.get("version") in {
+        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+        PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    }
     legacy_profiled_contract = (
         structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
     )

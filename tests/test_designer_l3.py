@@ -872,11 +872,14 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                 )
             self.assertEqual(stale_trace.exception.error_code, "requirement_v2_phase3_input_invalid")
             state = workflow.store.read_state(str(created["run_id"]))
-            state[VERTICAL_TRACE_MODE_STATE_KEY] = "shadow"
+            state[VERTICAL_TRACE_MODE_STATE_KEY] = "enforce"
             workflow.store.write_state(state)
+            enforced = PhaseTwoWorkflow(settings).revalidate_design(run_id=str(created["run_id"]))
+            self.assertEqual(enforced["status"], "waiting_design_approval", enforced)
+            self.assertEqual(enforced[VERTICAL_TRACE_MODE_STATE_KEY], "enforce")
             planned = workflow.approve_design_checkpoint(
                 run_id=str(created["run_id"]),
-                checkpoint_id=str(revalidated["pending_checkpoint"]["checkpoint_id"]),
+                checkpoint_id=str(enforced["pending_checkpoint"]["checkpoint_id"]),
             )
             self.assertEqual(planned["status"], "waiting_implementation_plan_review", planned)
 

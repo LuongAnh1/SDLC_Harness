@@ -15,6 +15,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
+    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     LanguagePromptDirective,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -141,6 +142,55 @@ def _requirement_coverage_issues(
                 issues.append(f"Requirement {requirement_id} omits approved design targets: {missing}")
         if not _string_items(item.get("design_element_ids")):
             issues.append(f"Requirement {requirement_id} has no resolved design element IDs.")
+        if not _string_items(item.get("planned_code_targets")):
+            issues.append(f"Requirement {requirement_id} has no planned code target.")
+        if not _string_items(item.get("test_intents")):
+            issues.append(f"Requirement {requirement_id} has no test intent.")
+    return issues
+
+
+def _component_requirement_coverage_issues(
+    *,
+    structured_plan: dict[str, object],
+    requirement_graph: dict[str, object],
+) -> list[str]:
+    """Validate exact canonical IDs while Vertical Trace owns V4 design identity."""
+
+    issues: list[str] = []
+    contract = structured_plan.get("requirement_contract")
+    contract = contract if isinstance(contract, dict) else {}
+    if contract.get("version") != "v2":
+        issues.append("Structured plan requirement contract version must be v2.")
+    if contract.get("revision") != requirement_graph.get("revision"):
+        issues.append("Structured plan requirement revision does not match the canonical graph.")
+    artifact_refs = contract.get("artifact_refs")
+    artifact_refs = artifact_refs if isinstance(artifact_refs, dict) else {}
+    for key in ("requirement_model", "requirement_packet", "formal_use_case"):
+        if not str(artifact_refs.get(key) or "").strip():
+            issues.append(f"Structured plan requirement contract is missing artifact ref: {key}")
+    expected = {
+        str(item.get("id") or "").strip(): str(item.get("content") or "").strip()
+        for item in _dict_items(requirement_graph.get("requirements"))
+        if str(item.get("id") or "").strip()
+    }
+    coverage = _dict_items(structured_plan.get("requirement_coverage"))
+    actual_ids = [str(item.get("requirement_id") or "").strip() for item in coverage]
+    if len(actual_ids) != len(set(actual_ids)) or set(actual_ids) != set(expected):
+        issues.append("Component-aware plan must cover each canonical requirement ID exactly once.")
+    allowed_design_ids = {
+        str(item.get("design_element_id") or "")
+        for item in _dict_items(structured_plan.get("design_mappings"))
+        if str(item.get("design_element_id") or "")
+    }
+    for item in coverage:
+        requirement_id = str(item.get("requirement_id") or "").strip()
+        if requirement_id not in expected:
+            continue
+        if str(item.get("content") or "").strip() != expected[requirement_id]:
+            issues.append(f"Requirement {requirement_id} coverage content is stale.")
+        design_ids = set(_string_items(item.get("design_element_ids")))
+        if not design_ids or not design_ids.issubset(allowed_design_ids):
+            issues.append(f"Requirement {requirement_id} has missing or unapproved design element IDs.")
         if not _string_items(item.get("planned_code_targets")):
             issues.append(f"Requirement {requirement_id} has no planned code target.")
         if not _string_items(item.get("test_intents")):
@@ -493,6 +543,10 @@ class ImplementationPlanValidator:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        vertical_design_graph: dict[str, object] | None = None,
+        vertical_trace_graph: dict[str, object] | None = None,
+        repo_landscape: dict[str, object] | None = None,
+        component_plan_inputs: dict[str, object] | None = None,
     ) -> ImplementationPlanReview:
         """Đối chiếu structured plan với graph, rồi kiểm ngữ nghĩa bằng LLM nếu có."""
 
@@ -505,6 +559,10 @@ class ImplementationPlanValidator:
             requirement_contract_version=requirement_contract_version,
             planning_policy=planning_policy,
             verification_policy=verification_policy,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            repo_landscape=repo_landscape,
+            component_plan_inputs=component_plan_inputs,
         )
         client = llm_client or self.llm_client
         if not client or not requirement_packet.strip() or not design_artifact.strip():
@@ -529,6 +587,8 @@ class ImplementationPlanValidator:
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
         )
         return _hybrid_review(
             rule_review=rule_review,
@@ -547,6 +607,10 @@ class ImplementationPlanValidator:
         requirement_contract_version: str = "v2",
         planning_policy: PlanningPathPolicy | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        vertical_design_graph: dict[str, object] | None = None,
+        vertical_trace_graph: dict[str, object] | None = None,
+        repo_landscape: dict[str, object] | None = None,
+        component_plan_inputs: dict[str, object] | None = None,
     ) -> ImplementationPlanReview:
         """Hard gate: kiểm coverage/traceability/executability/scope bằng graph."""
 
@@ -554,6 +618,61 @@ class ImplementationPlanValidator:
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )
+        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
+            requirement_coverage_issues = (
+                _component_requirement_coverage_issues(
+                    structured_plan=structured_plan,
+                    requirement_graph=requirement_graph or {},
+                )
+                if requirement_contract_version == "v2"
+                else []
+            )
+            if planning_policy is None or verification_policy is None:
+                issues = ["Component-aware plan requires frozen planning and verification policies."]
+            else:
+                from ..developer.component_plan import (
+                    build_component_work_units,
+                    component_plan_issues,
+                )
+
+                expected_units = build_component_work_units(
+                    design_graph=vertical_design_graph or {},
+                    trace_graph=vertical_trace_graph or {},
+                    repo_landscape=repo_landscape or {},
+                    planning_policy=planning_policy,
+                )
+                issues = component_plan_issues(
+                    structured_plan=structured_plan,
+                    expected_units=expected_units,
+                    expected_inputs=component_plan_inputs or {},
+                    planning_policy=planning_policy,
+                    verification_stage_ids=list(verification_policy.stage_ids),
+                )
+                issues.extend(
+                    profiled_plan_contract_issues(
+                        structured_plan,
+                        planning_policy=planning_policy,
+                        verification_policy=verification_policy,
+                        class_graph=class_graph,
+                    )
+                )
+            repo = structured_plan.get("target_repository")
+            if not isinstance(repo, dict):
+                issues.append("Target repository block is missing.")
+            else:
+                for key in ("local_path", "remote", "base_branch", "planned_branch"):
+                    if not str(repo.get(key) or "").strip():
+                        issues.append(f"Target repository `{key}` is missing.")
+            issues = list(dict.fromkeys(issues))
+            ok = not issues and not requirement_coverage_issues
+            return ImplementationPlanReview(
+                ok=ok,
+                mode="implementation_plan_rule_review_v4",
+                requirement_coverage_issues=requirement_coverage_issues,
+                executability_issues=issues,
+                summary="Rule review passed." if ok else "Rule review found blocking issues.",
+                requirement_contract_version=requirement_contract_version,
+            )
         expected = _expected_design_elements(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -637,6 +756,8 @@ class ImplementationPlanValidator:
         planning_policy: PlanningPathPolicy | None = None,
         prompt_directive: LanguagePromptDirective | None = None,
         verification_policy: VerificationStagePolicy | None = None,
+        vertical_design_graph: dict[str, object] | None = None,
+        vertical_trace_graph: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Nhờ LLM đánh giá plan theo ngữ nghĩa requirement/design đã duyệt."""
 
@@ -658,6 +779,8 @@ class ImplementationPlanValidator:
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
         )
         raw = client.complete(
             system=(
@@ -754,6 +877,8 @@ def _llm_review_prompt(
     planning_policy: PlanningPathPolicy | None = None,
     prompt_directive: LanguagePromptDirective | None = None,
     verification_policy: VerificationStagePolicy | None = None,
+    vertical_design_graph: dict[str, object] | None = None,
+    vertical_trace_graph: dict[str, object] | None = None,
 ) -> str:
     verification_policy = _resolve_verification_policy(
         planning_policy=planning_policy,
@@ -774,6 +899,16 @@ def _llm_review_prompt(
         key: requirement_design_trace.get(key, [])
         for key in ("version", "class_trace", "sequence_trace")
     }
+    vertical_context = {
+        "design": {
+            key: (vertical_design_graph or {}).get(key)
+            for key in ("schema_version", "artifact_digest", "nodes", "edges")
+        },
+        "trace": {
+            key: (vertical_trace_graph or {}).get(key)
+            for key in ("schema_version", "artifact_digest", "nodes", "edges")
+        },
+    }
     if planning_policy:
         if prompt_directive is None:
             prompt_directive = resolve_language_prompt_directive(
@@ -791,6 +926,36 @@ def _llm_review_prompt(
         verification_policy.prompt_context()
         if verification_policy
         else {"policy_version": "legacy_command_compatibility_v1"}
+    )
+    v4_boundaries = (
+        """
+Component-aware V4 boundaries:
+- Vertical Design nodes define the complete approved work-unit/component scope.
+  Do not invent a new business component or work unit. Supporting artifacts in an
+  existing repository component are allowed when repo evidence makes them necessary
+  for an executable approved flow.
+- Work-unit identity, membership, dependency, and order are Harness-owned. Do not
+  ask Developer.plan to change them. Review only Planner-owned objectives, targets,
+  migration decisions, tests, evidence, and signature content.
+- Compatibility fields are projections, not a second plan. Fail them only when they
+  contradict canonical work-unit targets or signatures; feedback must be repairable
+  through Planner-owned fields.
+- A `unit` intent targets a test file. A `typecheck` intent targets a non-test source
+  file already owned by the same work unit.
+- The legacy Class graph supplies signature trace identity, not callable type authority.
+  Require parameters and returns that make the approved Vertical Design behavior
+  callable and testable; reject placeholder-only `(): void` contracts when the flow
+  accepts input, returns data/status, persists identity, or renders UI.
+- When repo evidence shows an existing shared-contract, client-adapter, or migration
+  convention, require the plan to use it if otherwise Web/API/data boundaries would
+  have to invent incompatible shapes. Attach supporting files to an approved unit;
+  require upstream Design change only when no approved unit can own them.
+- A required migration needs a concrete migration artifact, not only a schema file.
+  Only approved Requirement/Vertical Design behavior and established repo conventions
+  may create a blocker.
+""".strip()
+        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+        else ""
     )
     return f"""Implementation Plan LLM Review v1
 
@@ -826,6 +991,8 @@ Review boundaries:
   when the approved requirement/design explicitly defines those semantics. Do not
   invent a broader system contract as a reason to reject the plan.
 
+{v4_boundaries}
+
 Language prompt directive:
 {json.dumps(language_context, ensure_ascii=False, indent=2)}
 
@@ -842,6 +1009,9 @@ Approved design artifact:
 
 Requirement-design trace JSON:
 {json.dumps(compact_trace, ensure_ascii=False, separators=(",", ":"))}
+
+Vertical Design/Trace JSON (authoritative for V4 plans):
+{json.dumps(vertical_context, ensure_ascii=False, separators=(",", ":"))}
 
 Class graph JSON:
 {json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}

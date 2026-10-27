@@ -21,6 +21,7 @@ def build_implementation_signature_contract(
     mappings: list[dict[str, object]],
     class_graph: dict[str, object],
     candidate: object = None,
+    bind_to_mapped_symbol: bool = False,
 ) -> dict[str, object]:
     """Canonicalize đề xuất Phase 3; không tự suy luận type từ design graph."""
 
@@ -43,6 +44,7 @@ def build_implementation_signature_contract(
             raw,
             mapping=mapping,
             planning_policy=planning_policy,
+            bind_to_mapped_symbol=bind_to_mapped_symbol,
         )
         if entry:
             entries.append(entry)
@@ -73,6 +75,9 @@ def implementation_signature_contract_issues(
     planning_policy: PlanningPathPolicy,
     mappings: list[dict[str, object]],
     class_graph: dict[str, object] | None = None,
+    enforce_design_method_arity: bool = True,
+    reject_placeholder_only: bool = False,
+    bind_to_mapped_symbol: bool = False,
 ) -> list[str]:
     """Validate contract identity, mapping binding và approved design signature."""
 
@@ -99,6 +104,7 @@ def implementation_signature_contract_issues(
     }
     covered_methods: set[str] = set()
     seen_ids: set[str] = set()
+    seen_method_bindings: dict[tuple[str, str], str] = {}
     for index, raw in enumerate(raw_entries):
         label = f"Signature contract entry {index + 1}"
         if not isinstance(raw, dict):
@@ -109,7 +115,12 @@ def implementation_signature_contract_issues(
         if not mapping:
             issues.append(f"{label} does not reference an approved executable design mapping: {design_id}")
             continue
-        canonical = _canonical_entry(raw, mapping=mapping, planning_policy=planning_policy)
+        canonical = _canonical_entry(
+            raw,
+            mapping=mapping,
+            planning_policy=planning_policy,
+            bind_to_mapped_symbol=bind_to_mapped_symbol,
+        )
         if not canonical or canonical != raw:
             issues.append(f"{label} is not canonical or does not match its approved mapping.")
             continue
@@ -119,7 +130,19 @@ def implementation_signature_contract_issues(
         seen_ids.add(contract_id)
         if str(mapping.get("design_element_type") or "") == "method":
             covered_methods.add(design_id)
-        if class_graph is not None and design_id.startswith("method:"):
+            binding = (
+                str(raw.get("source_path") or ""),
+                str(raw.get("qualified_name") or ""),
+            )
+            previous_design_id = seen_method_bindings.get(binding)
+            if previous_design_id and previous_design_id != design_id:
+                issues.append(
+                    "Approved methods share one implementation signature binding: "
+                    f"{previous_design_id}, {design_id} -> {binding[0]}#{binding[1]}"
+                )
+            else:
+                seen_method_bindings[binding] = design_id
+        if enforce_design_method_arity and class_graph is not None and design_id.startswith("method:"):
             if not _matches_design_method(raw, class_graph=class_graph):
                 issues.append(
                     f"{label} does not match the approved method identity/arity: {design_id}"
@@ -132,6 +155,26 @@ def implementation_signature_contract_issues(
     }
     for design_id in sorted(required_methods - covered_methods):
         issues.append(f"Missing implementation signature contract for approved method: {design_id}")
+    entries = [item for item in raw_entries if isinstance(item, dict)]
+    if reject_placeholder_only and len(entries) > 1 and all(
+        not _dict_items(item.get("parameters"))
+        and normalize_typescript_type(item.get("return_type")) in {"void", "Promise<void>"}
+        for item in entries
+    ):
+        issues.append(
+            "Implementation signature contract is placeholder-only; derive callable inputs and outputs "
+            "from the approved vertical contracts and repository evidence."
+        )
+    if reject_placeholder_only:
+        for item in entries:
+            if (
+                str(item.get("source_path") or "").endswith(".tsx")
+                and normalize_typescript_type(item.get("return_type")) in {"void", "Promise<void>"}
+            ):
+                issues.append(
+                    "TSX component signature must return a renderable value: "
+                    f"{item.get('qualified_name') or item.get('design_element_id')}"
+                )
     return issues
 
 
@@ -168,6 +211,7 @@ def _canonical_entry(
     *,
     mapping: dict[str, object],
     planning_policy: PlanningPathPolicy,
+    bind_to_mapped_symbol: bool = False,
 ) -> dict[str, object] | None:
     target = str(mapping.get("planned_code_target") or "").strip().replace("\\", "/")
     source_path, _, mapped_symbol = target.partition("#")
@@ -187,7 +231,6 @@ def _canonical_entry(
         or owner_kind not in _ALLOWED_OWNER_KINDS
         or not qualified_name
         or not mapped_symbol
-        or qualified_name.split(".")[-1] != mapped_symbol
         or not isinstance(parameters, list)
         or not isinstance(type_parameters, list)
         or not return_type
@@ -210,12 +253,27 @@ def _canonical_entry(
                 "rest": parameter.get("rest") is True,
             }
         )
+    design_owner = (
+        design_id.removeprefix("method:").rsplit(".", 1)[0]
+        if design_id.startswith("method:") and "." in design_id
+        else ""
+    )
+    if bind_to_mapped_symbol:
+        bound_qualified_name = mapped_symbol
+        symbol_kind = "method" if "." in mapped_symbol else "function"
+        owner_kind = owner_kind if symbol_kind == "method" else ""
+    else:
+        bound_qualified_name = (
+            f"{design_owner}.{mapped_symbol}"
+            if owner_kind in {"class", "interface", "abstract"} and design_owner
+            else mapped_symbol
+        )
     entry: dict[str, object] = {
         "design_element_id": design_id,
         "source_path": source_path,
         "symbol_kind": symbol_kind,
         "owner_kind": owner_kind,
-        "qualified_name": qualified_name,
+        "qualified_name": bound_qualified_name,
         "parameters": normalized_parameters,
         "return_type": return_type,
         "type_parameters": [str(item).strip() for item in type_parameters],

@@ -31,6 +31,8 @@ def fake_completion(prompt: str) -> str:
         return fake_progressive_targeted_review(prompt)
     if "Progressive Bounded Semantic Adjudication" in prompt:
         return fake_progressive_adjudication(prompt)
+    if "Component-aware Implementation Plan V4" in prompt:
+        return fake_component_aware_implementation_plan(prompt)
     if "Implementation Plan LLM Review v1" in prompt:
         return fake_implementation_plan_review()
     if "Developer Implementation Plan v1" in prompt:
@@ -626,7 +628,117 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
     )
 
 
-def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str, object]:
+def fake_component_aware_implementation_plan(prompt: str) -> str:
+    """Enrich Harness-owned V4 units without changing their identity."""
+
+    units = _fake_json_prompt_value(
+        prompt=prompt,
+        start="Harness-owned work units:",
+        end="Vertical Design slice:",
+    )
+    policy = _fake_json_prompt_value(
+        prompt=prompt,
+        start="Planning policy:",
+        end="Verification policy:",
+    )
+    components = {
+        str(item.get("component_id") or ""): item
+        for item in policy.get("components", [])
+        if isinstance(item, dict)
+    } if isinstance(policy, dict) else {}
+    unit_items = (
+        [item for item in units if isinstance(item, dict)]
+        if isinstance(units, list)
+        else []
+    )
+    needs_shared_contract = (
+        "contracts" in components
+        and any(
+            str(item.get("component_id") or "") == "web"
+            and "ui" in item.get("surfaces", [])
+            for item in unit_items
+        )
+        and any(
+            str(item.get("component_id") or "") == "api"
+            and "api" in item.get("surfaces", [])
+            for item in unit_items
+        )
+    )
+    contract_owner = next(
+        (
+            str(item.get("unit_id") or "")
+            for item in unit_items
+            if str(item.get("component_id") or "") == "api"
+            and "api" in item.get("surfaces", [])
+        ),
+        "",
+    )
+    updates: list[dict[str, object]] = []
+    for unit in unit_items:
+        if not isinstance(unit, dict):
+            continue
+        unit_id = str(unit.get("unit_id") or "")
+        component_id = str(unit.get("component_id") or "")
+        component = components.get(component_id, {})
+        targets = [item for item in unit.get("planned_code_targets", []) if isinstance(item, dict)]
+        if not targets:
+            root = str(component.get("source_root") or "apps/api/src").rstrip("/")
+            suffix = str(component.get("source_suffix") or ".ts")
+            symbol = f"Planned{component_id.title()}Change{unit_id[-4:]}"
+            targets = [{"path": f"{root}/{symbol}{suffix}", "symbol": symbol}]
+        if needs_shared_contract and unit_id == contract_owner:
+            targets.append(
+                {
+                    "path": "packages/contracts/src/planned-contract.ts",
+                    "symbol": "PlannedContract",
+                }
+            )
+        acceptance_refs = [str(item) for item in unit.get("acceptance_refs", []) if str(item)]
+        test_root = str(component.get("source_root") or "apps/api/src").rstrip("/")
+        test_suffix = str(component.get("test_suffix") or ".test.ts")
+        test_path = f"{test_root}/DeleteCulturalHeritageFlow{test_suffix}"
+        update: dict[str, object] = {
+            "unit_id": unit_id,
+            "title": str(unit.get("title") or f"Implement {component_id} change"),
+            "objective": str(unit.get("objective") or "Implement the approved Vertical Design contract."),
+            "planned_code_targets": targets,
+            "test_intents": [
+                {
+                    "stage_id": "unit",
+                    "intent": f"Verify the approved behavior for {unit_id}.",
+                    "acceptance_refs": acceptance_refs,
+                    "target_paths": [test_path],
+                }
+            ],
+            "repo_evidence_refs": list(unit.get("repo_evidence_refs", [])),
+        }
+        if "data" in unit.get("surfaces", []):
+            update["migration_impact"] = {
+                "status": "not_required",
+                "reason": "The approved data contract does not require a schema migration in fake mode.",
+                "targets": [],
+            }
+        updates.append(update)
+    return json.dumps(
+        {
+            "summary": "Fake component-aware plan enriched every Harness-owned work unit.",
+            "repo_evidence": ["Fake mode uses the frozen planning policy and approved graph bindings."],
+            "work_unit_updates": updates,
+            "implementation_signature_contract": _fake_typescript_implementation_signature_contract(
+                prompt,
+                unit_updates=updates,
+            ),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def _fake_typescript_implementation_signature_contract(
+    prompt: str,
+    *,
+    unit_updates: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
     """Mô phỏng Phase 3 producer; builder không được tự suy luận type từ Phase 2."""
 
     class_graph = _fake_json_prompt_section(
@@ -634,6 +746,14 @@ def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str,
         start="Class graph:",
         end="Sequence graph:",
     )
+    if not class_graph:
+        class_graph = _fake_json_prompt_section(
+            prompt,
+            start="Legacy Class graph (signature contract only):",
+            end="Legacy Sequence graph (signature contract only):",
+        )
+    component_symbols = _fake_component_symbols(prompt, unit_updates=unit_updates)
+    component_aware = "Component-aware Implementation Plan V4" in prompt
     entries: list[dict[str, object]] = []
     nodes = class_graph.get("nodes") if isinstance(class_graph, dict) else []
     for node in nodes if isinstance(nodes, list) else []:
@@ -650,6 +770,7 @@ def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str,
             name = str(method.get("name") or "").strip()
             if not name:
                 continue
+            implementation_symbol = component_symbols.get(owner, name)
             parameters = []
             raw_parameters = method.get("parameters")
             for parameter in raw_parameters if isinstance(raw_parameters, list) else []:
@@ -664,14 +785,26 @@ def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str,
                         "rest": raw_name.startswith("..."),
                     }
                 )
+            if component_aware and not parameters:
+                parameters.append(
+                    {
+                        "name": "input",
+                        "type": "unknown",
+                        "optional": False,
+                        "rest": False,
+                    }
+                )
+            return_type = _fake_typescript_type(method.get("returnType") or "void")
+            if component_aware and return_type in {"void", "Promise<void>"}:
+                return_type = "unknown"
             entries.append(
                 {
                     "design_element_id": f"method:{owner}.{name}",
                     "symbol_kind": "method",
                     "owner_kind": owner_kind,
-                    "qualified_name": f"{owner}.{name}",
+                    "qualified_name": f"{owner}.{implementation_symbol}",
                     "parameters": parameters,
-                    "return_type": _fake_typescript_type(method.get("returnType") or "void"),
+                    "return_type": return_type,
                     "type_parameters": [],
                     "async": False,
                 }
@@ -680,6 +813,67 @@ def _fake_typescript_implementation_signature_contract(prompt: str) -> dict[str,
         "version": "implementation_signature_contract_v1",
         "entries": entries,
     }
+
+
+def _fake_component_symbols(
+    prompt: str,
+    *,
+    unit_updates: list[dict[str, object]] | None,
+) -> dict[str, str]:
+    units = _fake_json_prompt_value(
+        prompt=prompt,
+        start="Harness-owned work units:",
+        end="Vertical Design slice:",
+    )
+    design = _fake_json_prompt_value(
+        prompt=prompt,
+        start="Vertical Design slice:",
+        end="Vertical Trace slice:",
+    )
+    if not isinstance(units, list) or not isinstance(design, dict):
+        return {}
+    updates_by_id = {
+        str(item.get("unit_id") or ""): item
+        for item in unit_updates or []
+        if str(item.get("unit_id") or "")
+    }
+    unit_by_node = {
+        str(node_id): unit
+        for unit in units
+        if isinstance(unit, dict)
+        for node_id in unit.get("design_node_ids", [])
+    }
+    result: dict[str, str] = {}
+    for node in design.get("nodes", []):
+        if not isinstance(node, dict):
+            continue
+        name = str(node.get("name") or "").strip()
+        unit = unit_by_node.get(str(node.get("id") or ""))
+        targets = unit.get("planned_code_targets", []) if isinstance(unit, dict) else []
+        if isinstance(unit, dict):
+            patch = updates_by_id.get(str(unit.get("unit_id") or ""), {})
+            targets = patch.get("planned_code_targets") or targets
+        candidates = [item for item in targets if isinstance(item, dict) and str(item.get("symbol") or "")]
+        if not name or not candidates:
+            continue
+        name_tokens = set(_fake_identifier_tokens(name))
+
+        def rank(target: dict[str, object]) -> tuple[int, int, str]:
+            path = str(target.get("path") or "")
+            symbol = str(target.get("symbol") or "")
+            stem = path.rsplit("/", 1)[-1].split(".", 1)[0]
+            tokens = set(_fake_identifier_tokens(stem)) | set(_fake_identifier_tokens(symbol))
+            generic_penalty = 1 if stem.lower() in {"app", "index", "main", "server"} else 0
+            return len(name_tokens & tokens), -generic_penalty, path
+
+        selected = max(candidates, key=rank)
+        result[name] = str(selected.get("symbol") or "")
+    return result
+
+
+def _fake_identifier_tokens(value: object) -> list[str]:
+    text = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(value or ""))
+    return [item.lower() for item in re.findall(r"[A-Za-z0-9]+", text)]
 
 
 def _fake_json_prompt_section(
@@ -698,6 +892,18 @@ def _fake_json_prompt_section(
     except json.JSONDecodeError:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _fake_json_prompt_value(*, prompt: str, start: str, end: str) -> object:
+    start_marker = f"{start}\n"
+    end_marker = f"\n{end}"
+    if start_marker not in prompt:
+        return {}
+    raw = prompt.split(start_marker, 1)[1].split(end_marker, 1)[0].strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
 
 
 def _fake_typescript_type(value: object) -> str:

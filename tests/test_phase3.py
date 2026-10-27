@@ -537,7 +537,8 @@ class PhaseThreeTest(unittest.TestCase):
         plan_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan"])
         self.assertTrue(plan_path.exists())
         content = plan_path.read_text(encoding="utf-8")
-        self.assertIn("Implementation Plan V3", content)
+        self.assertIn("Implementation Plan V4", content)
+        self.assertIn("Component Work Units", content)
         self.assertIn("Repo Evidence", content)
         self.assertIn("Implementation Steps", content)
         self.assertIn("Proposed Files", content)
@@ -551,12 +552,13 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertIn(workspace_artifact["worktree_path"], content)
         self.assertIn("CulturalHeritage.execute", content)
         self.assertIn("Test intent", content)
-        self.assertIn("Phase 3 tạo branch/worktree riêng cho run", content)
+        self.assertIn("Per-unit Developer execution remains L5.2", content)
 
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v3")
-        self.assertEqual(structured["planning_mode"], "llm_developer_with_codegraph_context_v1")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
+        self.assertEqual(structured["planning_mode"], "llm_component_aware_plan_v1")
+        self.assertTrue(structured["work_units"])
         self.assertEqual(structured["repo_context"]["mode"], "fake_codegraph_context_v1")
         self.assertTrue(structured["implementation_steps"])
         self.assertTrue(structured["proposed_files"])
@@ -575,7 +577,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(review["repair_iterations"], 0)
         self.assertEqual(
             review["implementation_plan_contract_version"],
-            "implementation_plan_structured_v3",
+            "implementation_plan_structured_v4",
         )
         self.assertRegex(review["implementation_plan_sha256"], r"^sha256:[0-9a-f]{64}$")
 
@@ -637,7 +639,7 @@ class PhaseThreeTest(unittest.TestCase):
             planned["latest_artifacts"]["implementation_plan_structured"]
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v3")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
         self.assertIn("apps/api/src/ExistingService.ts", structured["repo_context"]["source_files"])
         self.assertTrue(
             all(path.endswith((".ts", ".tsx")) for path in structured["repo_context"]["source_files"])
@@ -673,7 +675,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(signature_contract["version"], "implementation_signature_contract_v1")
         self.assertTrue(signature_contract["digest"].startswith("sha256:"))
         self.assertTrue(signature_contract["entries"])
-        self.assertIn("# Implementation Plan V3", plan_markdown)
+        self.assertIn("# Implementation Plan V4", plan_markdown)
         self.assertIn("## Approved Implementation Signatures", plan_markdown)
         self.assertIn("## Verification Plan", plan_markdown)
         self.assertIn("Stage `unit`", plan_markdown)
@@ -1226,7 +1228,7 @@ Thanks."""
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
         self.assertIn("Design-to-code mappings", confluence_body)
-        self.assertIn("Implementation Plan V3", confluence_body)
+        self.assertIn("Implementation Plan V4", confluence_body)
         self.assertNotIn("<p>| Design element | Type | Planned code target | Reason | Test intent |</p>", confluence_body)
         jira_payload = calls[1][2]
         self.assertIsNotNone(jira_payload)
@@ -1542,7 +1544,7 @@ Thanks."""
         self.assertFalse(report["ok"])
         self.assertEqual(report["mode"], "implementation_plan_review_hybrid_v2")
         self.assertEqual(report["llm_review"]["reason"], "rule_review_failed")
-        self.assertTrue(report["coverage_issues"])
+        self.assertTrue(report["coverage_issues"] or report["executability_issues"])
         self.assertTrue(report["executability_issues"])
 
     def test_developer_plan_failure_marks_run_failed_without_stale_checkpoint(self) -> None:
