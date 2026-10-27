@@ -54,6 +54,7 @@ class ReadApiFixture(unittest.TestCase):
             "run_id": self.run_id,
             "source_ref": "jira:SDLC-42",
             "requirement_contract_version": "v2",
+            "designer_contract_version": "vertical_design_graph_v1",
             "created_at": "2026-10-18T01:00:00Z",
             "updated_at": "2026-10-18T02:00:00Z",
             "current_phase": "design_review",

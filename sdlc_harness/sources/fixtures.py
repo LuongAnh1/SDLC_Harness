@@ -10,11 +10,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
+import re
 
 from ..core.errors import HarnessError
 
 
 _SUPPORTED_DATASETS = {"etour": "etour"}
+_SAFE_USE_CASE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,8 @@ def load_use_case(*, dataset: str, use_case: str, repo_root: Path) -> UseCaseSou
             "source_not_supported",
             f"Dataset is not supported in Phase 1: {dataset}",
         )
+    if not _SAFE_USE_CASE.fullmatch(use_case):
+        raise HarnessError("invalid_path_parameter", "Invalid use case identifier.")
 
     fixture_dir = repo_root / "fixtures" / _SUPPORTED_DATASETS[dataset_key]
     fixture_path = fixture_dir / f"{use_case}.txt"

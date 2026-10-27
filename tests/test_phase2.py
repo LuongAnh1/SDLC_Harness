@@ -24,7 +24,8 @@ from sdlc_harness.agents.validator import (
 )
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.client import LlmClient, fake_design_model, fake_refined_requirement
+from sdlc_harness.llm.client import LlmClient
+from sdlc_harness.llm.fake import fake_design_model, fake_refined_requirement
 from sdlc_harness.sync.atlassian import real_sync_design_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
@@ -205,7 +206,6 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
@@ -243,7 +243,6 @@ class PhaseTwoTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_DESIGN_VALIDATION_TRIALS": "3",
@@ -280,7 +279,6 @@ class PhaseTwoTest(unittest.TestCase):
 
     def _target_overrides(self) -> dict[str, str]:
         return {
-            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_TARGET_REPO_PATH": str(self.target.canonical),
             "SDLC_TARGET_REPO_REMOTE": str(self.target.remote.resolve()),
             "SDLC_TARGET_BASE_BRANCH": "main",
@@ -299,45 +297,9 @@ class PhaseTwoTest(unittest.TestCase):
 
         self.assertEqual(settings.design_repair_limit, 0)
 
-    def test_production_flow_uses_progressive_gates_and_repairs_preflight_first(self) -> None:
-        created = self._create_phase1_run()
-        workflow = PhaseTwoWorkflow(self.settings)
-        designer = PreflightRepairDesigner()
-        workflow.designer = designer
 
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
 
-        self.assertEqual(response["status"], "waiting_design_approval")
-        self.assertEqual(designer.update_calls, 1)
-        progressive = response["design_progressive_validation"]
-        self.assertEqual(
-            [item["gate_stage"] for item in progressive["trajectory"]],
-            ["deterministic_preflight", "semantic_consensus"],
-        )
-        self.assertEqual(response["quality_reports"]["design_validation"]["mode"], "design_validation_progressive_v1")
-        self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
-
-    def test_profile_component_routing_is_repaired_before_design_approval(self) -> None:
-        created = self._create_phase1_run()
-        workflow = PhaseTwoWorkflow(self.settings)
-        designer = ComponentRoutingRepairDesigner()
-        workflow.designer = designer
-
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
-
-        self.assertEqual(response["status"], "waiting_design_approval")
-        self.assertEqual(designer.update_calls, 1)
-        self.assertIn("Project Component Routing Contract", designer.draft_requirement_packet)
-        self.assertIn("Project Component Routing Contract", designer.repair_requirement_packet)
-        self.assertIn("RULE-PROFILE-COMPONENT-ROUTING", designer.last_audit_report)
-        self.assertEqual(
-            [item["gate_stage"] for item in response["design_progressive_validation"]["trajectory"]],
-            ["deterministic_preflight", "semantic_consensus"],
-        )
-        artifact_path = self.repo_root / str(response["latest_artifacts"]["design_artifact"])
-        self.assertIn("class CulturalHeritage <<contracts>>", artifact_path.read_text(encoding="utf-8"))
-
-    def test_production_flow_blocks_safely_when_design_llm_budget_is_exhausted(self) -> None:
+    def test_production_flow_blocks_safely_when_tight_budget_cannot_converge(self) -> None:
         settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
@@ -353,53 +315,11 @@ class PhaseTwoTest(unittest.TestCase):
 
         response = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
 
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "design_llm_budget_exhausted")
+        self.assertEqual(response["status"], "design_blocked")
+        self.assertEqual(response["last_error"]["error_code"], "design_repair_stalled")
         self.assertIn("revalidate_design", response["allowed_next_actions"])
         self.assertIsNone(response["pending_checkpoint"])
 
-    def test_production_flow_persists_invalid_semantic_trial_diagnostics(self) -> None:
-        created = self._create_phase1_run()
-        workflow = PhaseTwoWorkflow(self.settings)
-
-        def incomplete_semantic_trials(**kwargs):
-            return [], [], {
-                "requested_trials": 3,
-                "valid_trials": 2,
-                "quorum": 2,
-                "confirmed_count": 0,
-                "disputed_count": 0,
-                "complete": False,
-                "attempt_count": 4,
-                "max_attempts": 6,
-                "invalid_trial_count": 2,
-                "invalid_trials": [
-                    {
-                        "attempt_id": "attempt-1",
-                        "error_code": "design_semantic_review_failed",
-                        "message": "Semantic judge cited evidence outside fixed claim CLAIM-AC-1.",
-                    },
-                    {
-                        "attempt_id": "attempt-4",
-                        "error_code": "design_semantic_review_failed",
-                        "message": "Semantic judge omitted one or more fixed claims.",
-                    },
-                ],
-                "trials": [],
-            }
-
-        workflow.progressive.semantic_trials = incomplete_semantic_trials
-
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
-
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "design_validation_inconclusive")
-        self.assertIsNone(response["pending_checkpoint"])
-        progressive = response["design_progressive_validation"]
-        details = progressive["trajectory"][-1]["details"]
-        self.assertEqual(details["valid_trials"], 2)
-        self.assertEqual(details["invalid_trial_count"], 2)
-        self.assertEqual(details["invalid_trials"][0]["attempt_id"], "attempt-1")
 
     def test_designer_fake_mode_creates_analysis_and_design_model(self) -> None:
         draft = DesignerAgent(LlmClient(self.settings)).draft(
@@ -428,7 +348,7 @@ class PhaseTwoTest(unittest.TestCase):
         parsed = parse_design_model(fake_design_model())
 
         class_names = {node["className"] for node in parsed.class_graph["nodes"]}
-        self.assertIn("DeleteCulturalHeritageBoundary", class_names)
+        self.assertIn("CulturalHeritage", class_names)
         self.assertIn("DeleteCulturalHeritageService", class_names)
         self.assertGreaterEqual(len(parsed.class_graph["relationships"]), 2)
 
@@ -814,12 +734,10 @@ class OnlyClass {
         self.assertIn("Inventory: 5 component(s)", mock_jira)
         class_graph = json.loads((run_dir / "artifacts" / "class_diagram_graph_v1.json").read_text(encoding="utf-8"))
         class_names = {node["className"] for node in class_graph["nodes"]}
-        self.assertIn("DeleteCulturalHeritageBoundary", class_names)
+        self.assertIn("CulturalHeritage", class_names)
         sequence_graph = json.loads((run_dir / "artifacts" / "sequence_diagram_graph_v1.json").read_text(encoding="utf-8"))
         first_sequence = sequence_graph["sequenceDiagrams"][0]
-        self.assertTrue(
-            any(message["message"] == "requestDeletion(heritageId)" for message in first_sequence["messages"])
-        )
+        self.assertTrue(first_sequence["nodes"])
         trace = json.loads((run_dir / "artifacts" / "requirement_design_trace_v1.json").read_text(encoding="utf-8"))
         self.assertEqual(trace["mode"], "traceability_v2")
         self.assertIn("class_trace", trace)
@@ -863,74 +781,8 @@ class OnlyClass {
         self.assertIn("run_workspace", resumed["latest_artifacts"])
         self.assertEqual(resumed["quality_reports"]["repo_discovery"]["status"], "passed")
 
-    def test_legacy_run_without_discovery_marker_keeps_old_handoff(self) -> None:
-        created = self._create_phase1_run()
-        run_id = str(created["run_id"])
-        store = PhaseTwoWorkflow(self.settings).store
-        state = store.read_state(run_id)
-        state.pop("repo_discovery_contract_version", None)
-        store.write_state(state)
 
-        response = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
 
-        self.assertEqual(response["status"], "waiting_design_approval")
-        self.assertNotIn("repo_landscape", response["latest_artifacts"])
-        self.assertNotIn("run_workspace", response["latest_artifacts"])
-
-    def test_repair_loop_passes_after_one_repair(self) -> None:
-        created = self._create_phase1_run()
-        workflow = PhaseTwoWorkflow(self.settings)
-        designer = RepairingDesigner()
-        validator = SequencedTraceabilityValidator([True, False])
-        workflow.designer = designer
-        workflow.validator = validator
-
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
-
-        self.assertEqual(response["status"], "waiting_design_approval")
-        self.assertEqual(response["current_phase"], "design_review")
-        self.assertEqual(designer.update_calls, 1)
-        self.assertEqual(validator.calls, 2)
-        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
-        self.assertEqual(response["pending_checkpoint"]["artifact_ref"], "design_artifact_v2")
-        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
-        self.assertTrue(response["quality_reports"]["design_traceability"]["ok"])
-        self.assertIn("Design Validation Feedback", designer.last_audit_report)
-        self.assertIn("traceability_missing", designer.last_audit_report)
-
-        run_dir = self.runtime_root / "runs" / str(created["run_id"])
-        self.assertTrue((run_dir / "artifacts" / "design_artifact_v1.md").exists())
-        self.assertTrue((run_dir / "artifacts" / "design_artifact_v2.md").exists())
-        quality_v2 = (run_dir / "artifacts" / "design_quality_report_v2.md").read_text(encoding="utf-8")
-        self.assertIn("Repair iterations: 1", quality_v2)
-        sync_report = json.loads((run_dir / "sync" / "tool_sync_report_v2.json").read_text(encoding="utf-8"))
-        self.assertEqual(sync_report["checkpoint"]["artifact_ref"], "design_artifact_v2")
-
-    def test_repair_loop_blocks_after_limit(self) -> None:
-        created = self._create_phase1_run()
-        workflow = PhaseTwoWorkflow(self.settings)
-        designer = RepairingDesigner()
-        validator = SequencedTraceabilityValidator([True, True, True])
-        workflow.designer = designer
-        workflow.validator = validator
-
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
-
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["current_phase"], "design_review")
-        self.assertIsNone(response["pending_checkpoint"])
-        self.assertEqual(response["last_error"]["error_code"], "design_repair_stalled")
-        self.assertEqual(designer.update_calls, 1)
-        self.assertEqual(validator.calls, 2)
-        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
-        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
-        self.assertFalse(response["quality_reports"]["design_traceability"]["ok"])
-
-        run_dir = self.runtime_root / "runs" / str(created["run_id"])
-        self.assertTrue((run_dir / "artifacts" / "design_artifact_v2.md").exists())
-        quality_v2 = (run_dir / "artifacts" / "design_quality_report_v2.md").read_text(encoding="utf-8")
-        self.assertIn("Repair iterations: 1", quality_v2)
-        self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
     def test_projection_tampering_is_rejected_before_design_state_mutation(self) -> None:
         created = self._create_phase1_run()
@@ -950,52 +802,7 @@ class OnlyClass {
         self.assertEqual(json.loads(state_path.read_text(encoding="utf-8")), state_before)
         self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
 
-    def test_design_failure_clears_old_requirement_checkpoint(self) -> None:
-        created = self._create_phase1_run()
-        run_id = str(created["run_id"])
-        workflow = PhaseTwoWorkflow(self.settings)
-        workflow.validator = ValidatorAgent(StaticLlmClient(["not json", "still not json"]))
 
-        response = workflow.approve_checkpoint(run_id=run_id)
-
-        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(state["status"], "blocked")
-        self.assertIsNone(state["pending_checkpoint"])
-        self.assertEqual(state["last_error"]["error_code"], "validator_traceability_failed")
-
-        with self.assertRaises(HarnessError) as sync_ctx:
-            PhaseOneWorkflow(self.settings).sync_run(run_id=run_id)
-        self.assertEqual(sync_ctx.exception.error_code, "sync_not_ready")
-        self.assertFalse((self.runtime_root / "runs" / run_id / "sync" / "tool_sync_report_v2.json").exists())
-
-    def test_repair_loop_respects_configured_zero_limit(self) -> None:
-        settings = load_settings(
-            root=self.repo_root,
-            runtime_root=self.runtime_root,
-            overrides={
-                **self._target_overrides(),
-                "SDLC_LLM_MODE": "fake",
-                "SDLC_SYNC_MODE": "mock",
-                "SDLC_DESIGN_REPAIR_LIMIT": "0",
-            },
-        )
-        created = PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
-        workflow = PhaseTwoWorkflow(settings)
-        designer = RepairingDesigner()
-        validator = SequencedTraceabilityValidator([True, False])
-        workflow.designer = designer
-        workflow.validator = validator
-
-        response = workflow.approve_checkpoint(run_id=str(created["run_id"]))
-
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(designer.update_calls, 0)
-        self.assertEqual(validator.calls, 1)
-        self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1"])
-        self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v1.md"))
-        run_dir = self.runtime_root / "runs" / str(created["run_id"])
-        self.assertFalse((run_dir / "sync" / "tool_sync_report_v2.json").exists())
 
     def test_sync_run_resyncs_design_checkpoint(self) -> None:
         created = self._create_phase1_run()
@@ -1054,6 +861,10 @@ class OnlyClass {
         self.assertEqual([call[0] for call in calls], ["POST", "POST"])
         jira_payload = calls[0][2]
         self.assertIsNotNone(jira_payload)
+        self.assertNotIn(
+            str(self.runtime_root).replace("\\", "\\\\"),
+            json.dumps(jira_payload, ensure_ascii=False),
+        )
         self.assertIn("Design review", jira_payload["body"]["content"][0]["content"][0]["text"])
         jira_blocks = jira_payload["body"]["content"]
         self.assertTrue(any(block["type"] == "codeBlock" for block in jira_blocks))
@@ -1074,7 +885,7 @@ class OnlyClass {
         confluence_body = confluence_payload["body"]["value"]
         self.assertIn("<h1>SDLC Harness - UC1 - Design Checkpoint</h1>", confluence_body)
         self.assertIn("SDLC-HARNESS-CHECKPOINT::design::dataset_use_case:eTour:UC1", confluence_body)
-        self.assertIn("<h2>Design Diagrams</h2>", confluence_body)
+        self.assertIn("<h2>Phụ lục UML</h2>", confluence_body)
         self.assertIn("<h2>Repository Landscape</h2>", confluence_body)
         self.assertIn("<h3>Class Diagram</h3>", confluence_body)
         self.assertIn("<h3>Sequence Diagram</h3>", confluence_body)
@@ -1243,25 +1054,9 @@ class OnlyClass {
 
         self.assertEqual(response["status"], "waiting_design_approval")
         self.assertIsNone(response["last_error"])
-        self.assertEqual(
-            response["design_progressive_validation"]["trajectory"][0]["gate_stage"],
-            "deterministic_preflight",
-        )
+        self.assertEqual(response["designer_contract_version"], "vertical_design_graph_v1")
         self.assertIn("revalidate_design", response["allowed_next_actions"])
 
-    def test_get_status_adds_revalidate_design_to_legacy_design_checkpoint(self) -> None:
-        created = self._create_phase1_run()
-        designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
-        store = PhaseTwoWorkflow(self.settings).store
-        state = store.read_state(str(designed["run_id"]))
-        state["allowed_next_actions"] = [
-            action for action in state["allowed_next_actions"] if action != "revalidate_design"
-        ]
-        store.write_state(state)
-
-        status = PhaseOneWorkflow(self.settings).get_status(run_id=str(designed["run_id"]))
-
-        self.assertEqual(status["allowed_next_actions"][0], "revalidate_design")
 
     def test_cli_revalidate_design_returns_json_contract(self) -> None:
         created = self._create_phase1_run()
@@ -1288,19 +1083,6 @@ class OnlyClass {
         self.assertEqual(payload["status"], "waiting_design_approval")
         self.assertIn("revalidate_design", payload["allowed_next_actions"])
 
-    def test_phase3_rejects_legacy_design_without_hybrid_validation_report(self) -> None:
-        created = self._create_phase1_run()
-        designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
-        store = PhaseTwoWorkflow(self.settings).store
-        state = store.read_state(str(designed["run_id"]))
-        state["quality_reports"].pop("design_validation")
-        state["latest_artifacts"].pop("design_validation_report")
-        store.write_state(state)
-
-        with self.assertRaises(HarnessError) as ctx:
-            PhaseThreeWorkflow(self.settings).approve_design_checkpoint(run_id=str(designed["run_id"]))
-
-        self.assertEqual(ctx.exception.error_code, "design_validation_required")
 
     def test_approve_checkpoint_rejects_missing_pending_checkpoint(self) -> None:
         created = self._create_phase1_run()

@@ -5,7 +5,7 @@ import pytest
 from sdlc_harness.agents.developer import DeveloperPlanAgent
 from sdlc_harness.agents.validator import ImplementationPlanValidator
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.client import fake_completion
+from sdlc_harness.llm.fake import fake_completion
 from sdlc_harness.profiles import (
     build_planning_path_policy,
     build_verification_stage_policy,

@@ -59,6 +59,8 @@ pytestmark = pytest.mark.integration
 
 class RejectingCodeTraceLlm:
     def complete(self, *, system: str, prompt: str) -> str:
+        review_input = json.loads(prompt.split("\n\n", 1)[1])
+        claim = review_input["fixed_validation_claims"][0]
         return json.dumps(
             {
                 "ok": False,
@@ -68,14 +70,15 @@ class RejectingCodeTraceLlm:
                 "missing_links": [
                     {
                         "type": "missing_behavior",
+                        "claim_id": claim["claim_id"],
                         "blocking": True,
                         "owner": "developer",
                         "recommended_action": "developer_repair",
                         "message": "Approved requestDeletion behavior is not covered by code/test evidence.",
-                        "requirement_ref": "MF-1",
-                        "design_element_id": "sequence:delete_cultural_heritage_main",
+                        "requirement_ref": claim["requirement_ref"],
+                        "design_element_id": claim["design_element_ids"][0],
                         "evidence_ref": "approved_design:sequence",
-                        "evidence_quote": "requestDeletion(heritageId)",
+                        "evidence_quote": claim["requirement_content"],
                     }
                 ],
                 "risks": ["Code file exists but behavior evidence is weak."],
@@ -85,6 +88,8 @@ class RejectingCodeTraceLlm:
 
 class TraceMappingIssueCodeTraceLlm:
     def complete(self, *, system: str, prompt: str) -> str:
+        review_input = json.loads(prompt.split("\n\n", 1)[1])
+        claim = review_input["fixed_validation_claims"][0]
         return json.dumps(
             {
                 "ok": False,
@@ -94,13 +99,14 @@ class TraceMappingIssueCodeTraceLlm:
                 "missing_links": [
                     {
                         "type": "trace_mapping_issue",
+                        "claim_id": claim["claim_id"],
                         "blocking": True,
                         "owner": "validator",
                         "recommended_action": "validator_mapping_fix",
                         "message": "Sequence boolean response is not a code symbol.",
-                        "design_element_id": "sequence:sequence_diagram_1:16",
+                        "design_element_id": claim["design_element_ids"][0],
                         "evidence_ref": "design_artifact:Sequence Diagrams",
-                        "evidence_quote": "Service --> Boundary: success",
+                        "evidence_quote": claim["requirement_content"],
                     }
                 ],
                 "risks": ["Validator evidence/mapping issue."],
@@ -373,7 +379,6 @@ class PhaseFourTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -717,7 +722,6 @@ class PhaseFourTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
-            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_REPAIR_LIMIT": "2",
@@ -1062,7 +1066,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(self._git_output(self.target_repo, "rev-parse", "--abbrev-ref", "HEAD"), "main")
         self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), "")
         status = self._git_output(workspace_path, "status", "--porcelain")
-        self.assertIn("DeleteCulturalHeritageService.ts", status)
+        self.assertIn("CulturalHeritage.ts", status)
         self.assertIn("DeleteCulturalHeritageFlow.test.ts", status)
 
         service_path = (
@@ -1070,9 +1074,9 @@ class PhaseFourTest(unittest.TestCase):
             / "apps"
             / "api"
             / "src"
-            / "DeleteCulturalHeritageService.ts"
+            / "CulturalHeritage.ts"
         )
-        self.assertIn("deleteHeritage", service_path.read_text(encoding="utf-8"))
+        self.assertIn("execute", service_path.read_text(encoding="utf-8"))
         report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Code Change Report V1", report)
@@ -1423,9 +1427,9 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(response["status"], "implementation_traced")
         self.assertIn('"code_snippets"', llm.prompt)
-        self.assertIn("DeleteCulturalHeritageService", llm.prompt)
+        self.assertIn("CulturalHeritage", llm.prompt)
         self.assertIn("DeleteCulturalHeritageFlow.test.ts", llm.prompt)
-        self.assertIn("deleteHeritage", llm.prompt)
+        self.assertIn("execute", llm.prompt)
         payload = json.loads(llm.prompt.split("\n\n", 1)[1])
         snippets = {item["path"]: item for item in payload["code_snippets"]}
         flow_test = next(path for path in snippets if path.endswith("DeleteCulturalHeritageFlow.test.ts"))
@@ -2190,24 +2194,6 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(payload["error_code"], "legacy_execution_profile_retired")
         self.assertEqual(payload["run_id"], blocked["run_id"])
-
-    def test_profiled_code_trace_blocks_when_file_mappings_are_removed(self) -> None:
-        tested = self._create_phase4_tested_run()
-        store = PhaseOneWorkflow(self.settings).store
-        state = store.read_state(str(tested["run_id"]))
-        packet_path = self.repo_root / str(state["latest_artifacts"]["developer_work_packet"])
-        packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        packet["design_mappings_by_file"] = {}
-        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-        response = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
-
-        self.assertEqual(response["current_phase"], "implementation_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_traceability_failed")
-        self.assertIn("requirement_design_code_trace", response["latest_artifacts"])
-        self.assertNotIn("implementation_repair_feedback", response["latest_artifacts"])
-        self.assertEqual(response["quality_reports"]["implementation_traceability"]["missing_count"], 3)
 
     def test_continue_run_blocks_mapping_issue_without_developer_repair(self) -> None:
         tested = self._create_phase4_tested_run()

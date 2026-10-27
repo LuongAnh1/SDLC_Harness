@@ -115,14 +115,6 @@ class ApplicationService:
             state = store.read_state(run_id)
             response = self._execute_unlocked(command, settings=settings)
             return self._project_run_response(state=state, response=response)
-        if name == "experiment-design-consensus":
-            source_run_id = self._required_text(command, "source_run_id")
-            state = store.read_state(source_run_id)
-            require_run_command_allowed(
-                state,
-                command_name=name,
-                run_id=source_run_id,
-            )
         return self._execute_unlocked(command, settings=settings)
 
     @staticmethod
@@ -283,12 +275,6 @@ class ApplicationService:
                 assumption_id=self._required_text(command, "assumption_id"),
                 instruction=self._required_text(command, "instruction"),
                 challenged_by=self._required_text(command, "challenged_by"),
-            )
-        if name == "experiment-design-consensus":
-            return PhaseTwoWorkflow(settings).experiment_design_consensus(
-                source_run_id=self._required_text(command, "source_run_id"),
-                experiment_root=Path(self._required_text(command, "experiment_root")),
-                llm_call_budget=int(self._required_text(command, "llm_call_budget")),
             )
         if name == "approve-checkpoint":
             return CheckpointApprovalWorkflow(settings).approve_checkpoint(

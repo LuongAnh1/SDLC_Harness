@@ -92,16 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_sync_mode_argument(clarify_more)
     clarify_more.add_argument("--runtime-root", default=None)
 
-    experiment_design = subparsers.add_parser("experiment-design-consensus")
-    experiment_design.add_argument("--source-run-id", required=True)
-    experiment_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
-    experiment_design.add_argument("--design-repair-limit", default="3")
-    experiment_design.add_argument("--design-validation-trials", default="3")
-    experiment_design.add_argument("--llm-call-budget", default="16")
-    experiment_design.add_argument("--sync-mode", choices=["none"], default="none")
-    experiment_design.add_argument("--source-runtime-root", default=None)
-    experiment_design.add_argument("--experiment-root", default=".experiments/design-validator")
-
     approve = subparsers.add_parser("approve-checkpoint")
     approve.add_argument("--run-id", required=True)
     approve.add_argument("--checkpoint-id", default=None)
@@ -156,7 +146,6 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "revalidate-design": ("run_id",),
     "revalidate-requirement": ("run_id",),
     "clarify-more": ("run_id",),
-    "experiment-design-consensus": ("source_run_id", "experiment_root", "llm_call_budget"),
     "approve-checkpoint": ("run_id", "checkpoint_id"),
     "answer-clarification": ("run_id", "question_id", "answer", "answered_by"),
     "prepare-target-repo": ("init_codegraph",),

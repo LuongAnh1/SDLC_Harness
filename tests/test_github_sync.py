@@ -371,7 +371,7 @@ class GitHubSyncTest(unittest.TestCase):
         workflow = PhaseFourWorkflow(settings)
         workflow.github_publisher = publisher
 
-        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+        with patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target"):
             response = workflow.continue_run(run_id=run_id)
 
         self.assertEqual(response["status"], "code_review_published")
@@ -400,7 +400,7 @@ class GitHubSyncTest(unittest.TestCase):
         workflow = PhaseFourWorkflow(settings)
         workflow.github_publisher = FailingPublisher()
 
-        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+        with patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target"):
             response = workflow.continue_run(run_id=run_id)
 
         self.assertEqual(response["status"], "code_review_publish_failed")
@@ -421,7 +421,7 @@ class GitHubSyncTest(unittest.TestCase):
         workspace_before = RunWorkspaceManager(settings).resolve(run_id)
 
         with patch("sdlc_harness.workflows.approval.PhaseFourWorkflow", return_value=workflow):
-            with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+            with patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target"):
                 response = CheckpointApprovalWorkflow(settings).approve_checkpoint(
                     run_id=run_id,
                     checkpoint_id=ready["pending_checkpoint"]["checkpoint_id"],
@@ -467,14 +467,14 @@ class GitHubSyncTest(unittest.TestCase):
             "targets": [],
         }
 
-        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=failed_sync):
+        with patch("sdlc_harness.workflows.phase4_publication.sync_code_review_checkpoint", return_value=failed_sync):
             with patch("sdlc_harness.workflows.approval.PhaseFourWorkflow", return_value=workflow):
-                with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+                with patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target"):
                     failed = CheckpointApprovalWorkflow(settings).approve_checkpoint(
                         run_id=run_id,
                         checkpoint_id=ready["pending_checkpoint"]["checkpoint_id"],
                     )
-        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=passed_sync):
+        with patch("sdlc_harness.workflows.phase4_publication.sync_code_review_checkpoint", return_value=passed_sync):
             approved = workflow.sync_code_review(run_id=run_id)
 
         self.assertEqual(failed["status"], "code_review_approval_sync_failed")
@@ -500,7 +500,7 @@ class GitHubSyncTest(unittest.TestCase):
         settings, store, run_id = self._workflow_fixture()
         workflow = PhaseFourWorkflow(settings)
         workflow.github_publisher = RecordingPublisher()
-        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+        with patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target"):
             workflow.continue_run(run_id=run_id)
         ready = workflow.continue_run(run_id=run_id)
         self.assertEqual(ready["status"], "code_review_ready")

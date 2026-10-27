@@ -14,7 +14,8 @@ from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import _settings_from_args, build_parser
 from sdlc_harness.storage.runtime import RuntimeStore
-from sdlc_harness.sync.atlassian import _find_remote_confluence_checkpoint, real_sync_code_review_checkpoint
+from sdlc_harness.sync.atlassian import real_sync_code_review_checkpoint
+from sdlc_harness.sync.atlassian_transport import _find_remote_confluence_checkpoint
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
 
@@ -120,6 +121,7 @@ class CodeReviewSyncTest(unittest.TestCase):
             self.assertEqual(ids["github"], "7")
         self.assertFalse(any(method == "POST" for method, _, _ in calls))
         rendered = json.dumps([payload for _, _, payload in calls if payload], ensure_ascii=False)
+        self.assertNotIn(str(self.runtime_root).replace("\\", "\\\\"), rendered)
         self.assertIn("v2 revision 3", rendered)
         self.assertIn("2/2 stable IDs", rendered)
         self.assertIn("REQ-1, REQ-2", rendered)
@@ -327,9 +329,9 @@ class CodeReviewSyncTest(unittest.TestCase):
             "targets": [],
         }
 
-        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=failed_sync):
+        with patch("sdlc_harness.workflows.phase4_publication.sync_code_review_checkpoint", return_value=failed_sync):
             failed = workflow.continue_run(run_id=run_id)
-        with patch("sdlc_harness.workflows.phase4.sync_code_review_checkpoint", return_value=passed_sync):
+        with patch("sdlc_harness.workflows.phase4_publication.sync_code_review_checkpoint", return_value=passed_sync):
             ready = workflow.sync_code_review(run_id=run_id)
 
         self.assertEqual(failed["status"], "code_review_sync_failed")

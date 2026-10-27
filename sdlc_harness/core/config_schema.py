@@ -95,7 +95,6 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 3, "Số vòng Designer sửa design.", minimum=0),
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
             _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call budget", "integer", 28, "Ngân sách call LLM cho design validation và repo-aware Designer loop.", minimum=1),
-            _field("SDLC_DESIGNER_LOOP_ENABLED", "Enable repo-aware Designer", "boolean", True, "Pin vertical_design_graph_v1 cho run mới; run hiện hữu không đổi executor."),
             _field(
                 "SDLC_VERTICAL_TRACE_MODE",
                 "Vertical trace mode",

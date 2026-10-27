@@ -35,7 +35,7 @@ from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.storage.runtime import RuntimeStore
-from sdlc_harness.sync.atlassian import _confluence_design_storage_body
+from sdlc_harness.sync.atlassian_rendering import _confluence_design_storage_body
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
@@ -717,7 +717,6 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                    "SDLC_DESIGNER_LOOP_ENABLED": "1",
                     "SDLC_VERTICAL_TRACE_MODE": "shadow",
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
@@ -893,7 +892,6 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                    "SDLC_DESIGNER_LOOP_ENABLED": "1",
                     "SDLC_VERTICAL_TRACE_MODE": "enforce",
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
@@ -916,62 +914,32 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             )
             self.assertEqual(planned["status"], "waiting_implementation_plan_review", planned)
 
-    def test_persisted_marker_pins_executor_across_runtime_flag_changes(self) -> None:
+    def test_new_runs_always_pin_the_vertical_designer_contract(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(__file__).resolve().parents[1]
             temp_path = Path(temp)
             target = self.template.materialize(temp_path / "target")
-            common_overrides = {
-                "SDLC_LLM_MODE": "fake",
-                "SDLC_SYNC_MODE": "mock",
-                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
-                "SDLC_TARGET_REPO_PATH": str(target.canonical),
-                "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
-                "SDLC_TARGET_BASE_BRANCH": "main",
-            }
-
-            l3_settings = load_settings(
+            settings = load_settings(
                 root=root,
-                runtime_root=temp_path / ".runtime-l3",
+                runtime_root=temp_path / ".runtime",
                 overrides={
-                    **common_overrides,
-                    "SDLC_DESIGNER_LOOP_ENABLED": "1",
-                    "SDLC_TARGET_WORKTREE_ROOT": str(temp_path / "worktrees-l3"),
+                    "SDLC_LLM_MODE": "fake",
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                    "SDLC_TARGET_REPO_PATH": str(target.canonical),
+                    "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
+                    "SDLC_TARGET_BASE_BRANCH": "main",
+                    "SDLC_TARGET_WORKTREE_ROOT": str(temp_path / "worktrees"),
                 },
             )
-            l3_created = PhaseOneWorkflow(l3_settings).start_or_get_run(
+
+            created = PhaseOneWorkflow(settings).start_or_get_run(
                 dataset="eTour",
                 use_case="UC1",
                 requested_by="test",
             )
-            l3_after_rollback = PhaseTwoWorkflow(
-                replace(l3_settings, designer_loop_enabled=False)
-            ).approve_checkpoint(run_id=str(l3_created["run_id"]))
 
-            self.assertEqual(l3_after_rollback["designer_contract_version"], GRAPH_VERSION)
-            self.assertIn("vertical_design_graph", l3_after_rollback["latest_artifacts"])
-
-            legacy_settings = load_settings(
-                root=root,
-                runtime_root=temp_path / ".runtime-legacy",
-                overrides={
-                    **common_overrides,
-                    "SDLC_DESIGNER_LOOP_ENABLED": "0",
-                    "SDLC_TARGET_WORKTREE_ROOT": str(temp_path / "worktrees-legacy"),
-                },
-            )
-            legacy_created = PhaseOneWorkflow(legacy_settings).start_or_get_run(
-                dataset="eTour",
-                use_case="UC2",
-                requested_by="test",
-            )
-            legacy_after_cutover = PhaseTwoWorkflow(
-                replace(legacy_settings, designer_loop_enabled=True)
-            ).approve_checkpoint(run_id=str(legacy_created["run_id"]))
-
-            self.assertIsNone(legacy_after_cutover["designer_contract_version"])
-            self.assertNotIn("vertical_design_graph", legacy_after_cutover["latest_artifacts"])
+            self.assertEqual(created["designer_contract_version"], GRAPH_VERSION)
 
 
 if __name__ == "__main__":

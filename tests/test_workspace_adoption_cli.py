@@ -25,6 +25,7 @@ class WorkspaceAdoptionCliTests(unittest.TestCase):
         RuntimeStore(repo_root=repo_root, runtime_root=runtime_root).write_state(
             {
                 "run_id": run_id,
+                "designer_contract_version": "vertical_design_graph_v1",
                 "profile_snapshot": build_profile_snapshot(
                     project_profile_id="typescript_fullstack_v1",
                     target_remote="https://github.com/example/target.git",

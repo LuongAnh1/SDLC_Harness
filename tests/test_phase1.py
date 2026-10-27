@@ -83,6 +83,16 @@ class PhaseOneTest(unittest.TestCase):
             load_use_case(dataset="eTour", use_case="missing", repo_root=self.repo_root)
         self.assertEqual(ctx.exception.error_code, "source_not_found")
 
+    def test_fixture_loader_rejects_use_case_path_traversal(self) -> None:
+        fixture_root = Path(self.temp_dir.name) / "fixture-repo"
+        (fixture_root / "fixtures" / "etour").mkdir(parents=True)
+        (fixture_root / "fixtures" / "secret.txt").write_text("private", encoding="utf-8")
+
+        with self.assertRaises(HarnessError) as ctx:
+            load_use_case(dataset="eTour", use_case="../secret", repo_root=fixture_root)
+
+        self.assertEqual(ctx.exception.error_code, "invalid_path_parameter")
+
     def test_jira_source_loader_reads_issue_context(self) -> None:
         settings = load_settings(
             root=self.repo_root,
@@ -606,6 +616,19 @@ class PhaseOneTest(unittest.TestCase):
         self.assertFalse(second["created_new_run"])
         self.assertEqual(first["run_id"], second["run_id"])
 
+    def test_start_or_get_run_replaces_active_run_without_current_designer_contract(self) -> None:
+        workflow = PhaseOneWorkflow(self.settings)
+        first = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+        state = workflow.store.read_state(str(first["run_id"]))
+        state.pop("designer_contract_version", None)
+        workflow.store.write_state(state)
+
+        second = workflow.start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertTrue(second["created_new_run"])
+        self.assertNotEqual(first["run_id"], second["run_id"])
+        self.assertEqual(second["designer_contract_version"], "vertical_design_graph_v1")
+
     def test_clean_default_start_snapshots_typescript_profile_in_fake_mock_mode(self) -> None:
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -903,7 +926,11 @@ class PhaseOneTest(unittest.TestCase):
     def test_cli_code_review_approval_success_is_json_with_zero_exit(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
         PhaseOneWorkflow(self.settings).store.write_state(
-            {"run_id": run_id, "profile_snapshot": self.profile_snapshot()}
+            {
+                "run_id": run_id,
+                "profile_snapshot": self.profile_snapshot(),
+                "designer_contract_version": "vertical_design_graph_v1",
+            }
         )
         response = {
             "ok": True,
@@ -937,7 +964,11 @@ class PhaseOneTest(unittest.TestCase):
     def test_cli_code_review_approval_business_error_keeps_json_contract(self) -> None:
         run_id = "run_20261015_150000_c0decafe"
         PhaseOneWorkflow(self.settings).store.write_state(
-            {"run_id": run_id, "profile_snapshot": self.profile_snapshot()}
+            {
+                "run_id": run_id,
+                "profile_snapshot": self.profile_snapshot(),
+                "designer_contract_version": "vertical_design_graph_v1",
+            }
         )
         stdout = io.StringIO()
         failure = HarnessError(
@@ -1077,6 +1108,7 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIn("Requirement review", jira_body["content"][0]["content"][0]["text"])
         self.assertTrue(any(block["type"] == "bulletList" for block in jira_body["content"]))
         jira_text = json.dumps(jira_body, ensure_ascii=False)
+        self.assertNotIn(str(self.runtime_root).replace("\\", "\\\\"), jira_text)
         self.assertIn("waiting_requirement_clarification", jira_text)
         self.assertIn("Which fields define a duplicate?", jira_text)
         self.assertIn("Remaining blocking questions: 2", jira_text)

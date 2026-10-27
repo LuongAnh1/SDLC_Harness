@@ -133,7 +133,6 @@ PHASE_NODES = {
     "design_validating": "design",
     "design_repairing": "design",
     "design_review": "design",
-    "design_experiment": "design",
     "implementation_planning": "plan",
     "implementation_plan_revalidating": "plan",
     "implementation_plan_validating": "plan",

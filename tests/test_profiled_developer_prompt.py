@@ -9,7 +9,7 @@ from sdlc_harness.agents.developer.execution import _action_prompt, _build_manif
 from sdlc_harness.agents.developer.fake_generation import fake_developer_files
 from sdlc_harness.agents.developer.profile_context import developer_generation_context
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.client import (
+from sdlc_harness.llm.fake import (
     fake_code_trace_review,
     fake_qa_generated_tests,
 )

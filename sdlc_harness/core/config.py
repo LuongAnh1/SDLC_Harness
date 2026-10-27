@@ -40,7 +40,6 @@ class Settings:
     design_repair_limit: int
     design_validation_trials: int
     design_llm_call_budget: int
-    designer_loop_enabled: bool
     vertical_trace_mode: str
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
@@ -228,7 +227,6 @@ def load_settings(
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
         design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=28, minimum=1),
-        designer_loop_enabled=_bool_value(merged.get("SDLC_DESIGNER_LOOP_ENABLED")),
         vertical_trace_mode=vertical_trace_mode,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),

@@ -20,7 +20,7 @@ from sdlc_harness.artifacts import (
 )
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
-from sdlc_harness.llm.client import fake_design_model
+from sdlc_harness.llm.fake import fake_design_model
 from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
@@ -351,52 +351,6 @@ class RequirementInputV2Test(unittest.TestCase):
             self.assertTrue(trace.ok)
             self.assertEqual(trace.mode, "traceability_v2")
             self.assertEqual(trace.class_trace[0]["requirement"], "PRE-1")
-
-    def test_phase2_v2_repair_keeps_canonical_model_and_stable_ids(self) -> None:
-        with TemporaryDirectory() as directory:
-            store, _, _, model = self._v2_bundle(directory)
-            settings = load_settings(
-                root=self.root,
-                runtime_root=store.runtime_root,
-                overrides={
-                    "SDLC_LLM_MODE": "fake",
-                    "SDLC_SYNC_MODE": "mock",
-                    "SDLC_DESIGN_REPAIR_LIMIT": "1",
-                },
-            )
-            workflow = PhaseTwoWorkflow(settings)
-            designer = CanonicalRepairingDesigner()
-            validator = CanonicalRepairValidator()
-            workflow.designer = designer
-            workflow.validator = validator
-
-            response = workflow.approve_checkpoint(run_id=model.run_id)
-
-            self.assertEqual(response["status"], "waiting_design_approval")
-            self.assertTrue(response["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
-            self.assertEqual(response["quality_reports"]["design_traceability"]["mode"], "traceability_v2")
-            self.assertEqual(response["quality_reports"]["design_traceability"]["versions"], ["v1", "v2"])
-            self.assertEqual(validator.calls, 2)
-            self.assertEqual(validator.requirement_ids_by_call[0], validator.requirement_ids_by_call[1])
-            self.assertIn("MF-1", validator.requirement_ids_by_call[1])
-            self.assertIs(designer.draft_models[0], designer.repair_models[0])
-            self.assertEqual(designer.draft_models[0].to_dict(), model.to_dict())
-
-            first_trace = json.loads(
-                (store.run_dir(model.run_id) / "artifacts" / "requirement_design_trace_v1.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            repaired_trace = json.loads(
-                (store.run_dir(model.run_id) / "artifacts" / "requirement_design_trace_v2.json").read_text(
-                    encoding="utf-8"
-                )
-            )
-            self.assertEqual(first_trace["mode"], "traceability_v2")
-            self.assertEqual(repaired_trace["mode"], "traceability_v2")
-            self.assertEqual(first_trace["requirement_revision"], 1)
-            self.assertEqual(repaired_trace["requirement_revision"], 1)
-
 
 if __name__ == "__main__":
     unittest.main()

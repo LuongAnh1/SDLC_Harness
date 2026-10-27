@@ -235,6 +235,7 @@ class RuntimeDirectoryTemplate:
                 content = path.read_text(encoding="utf-8")
                 path.write_text(self._rewrite_text(content, substitutions), encoding="utf-8")
         self._refresh_implementation_plan_bindings(destination)
+        self._refresh_vertical_design_bindings(destination)
 
     @staticmethod
     def _refresh_implementation_plan_bindings(destination: Path) -> None:
@@ -257,6 +258,45 @@ class RuntimeDirectoryTemplate:
                 json.dumps(review, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",
             )
+
+    @staticmethod
+    def _refresh_vertical_design_bindings(destination: Path) -> None:
+        """Recompute immutable graph digests after test fixture run/path substitution."""
+
+        from sdlc_harness.agents.designer.graph import graph_digest
+        from sdlc_harness.agents.requirements import RequirementModelV2
+        from sdlc_harness.agents.validator import build_vertical_trace_graph, validate_vertical_trace_coverage
+
+        for state_path in destination.glob("runs/*/state.json"):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            artifacts = state.get("latest_artifacts")
+            if not isinstance(artifacts, dict):
+                continue
+
+            def artifact(key: str) -> Path | None:
+                value = str(artifacts.get(key) or "")
+                if not value:
+                    return None
+                path = Path(value)
+                return path if path.is_absolute() else Path(__file__).resolve().parents[1] / path
+
+            design_path = artifact("vertical_design_graph")
+            requirement_path = artifact("requirement_model")
+            trace_path = artifact("vertical_trace_graph")
+            report_path = artifact("vertical_trace_validation")
+            if not all(path and path.is_file() for path in (design_path, requirement_path, trace_path, report_path)):
+                continue
+            design = json.loads(design_path.read_text(encoding="utf-8"))
+            design["artifact_digest"] = graph_digest(design)
+            design_path.write_text(json.dumps(design, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            requirement = RequirementModelV2.from_dict(json.loads(requirement_path.read_text(encoding="utf-8")))
+            trace = build_vertical_trace_graph(requirement_model=requirement, design_graph=design)
+            trace_path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            report = validate_vertical_trace_coverage(
+                trace,
+                mode=str(state.get("vertical_trace_mode") or "shadow"),
+            ).to_dict()
+            report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def _rewrite_value(self, value: object, substitutions: dict[str, str]) -> object:
         if isinstance(value, dict):

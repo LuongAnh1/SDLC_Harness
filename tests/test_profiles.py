@@ -318,10 +318,10 @@ class ProfileRegistryTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            public_allowed_actions(state, ["approve_checkpoint", "continue_run"]),
-            ["approve_checkpoint", "continue_run"],
+            public_allowed_actions(state, ["approve_checkpoint", "continue_run", "sync_run"]),
+            ["sync_run"],
         )
-        self.assertEqual(public_run_summary(state, "Continue this run."), "Continue this run.")
+        self.assertIn("Vertical Design contract", str(public_run_summary(state, "Continue this run.")))
 
 
 if __name__ == "__main__":

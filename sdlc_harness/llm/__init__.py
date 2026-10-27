@@ -6,14 +6,18 @@ workflow, profile dự án hay tự diễn giải artifact nghiệp vụ.
 """
 
 from .client import (
+    BudgetedLlmClient,
     LlmClient,
+    strip_code_fence,
+)
+from .fake import (
     fake_completion,
     fake_refined_requirement,
     fake_requirement_model_v2,
-    strip_code_fence,
 )
 
 __all__ = [
+    "BudgetedLlmClient",
     "LlmClient",
     "fake_completion",
     "fake_refined_requirement",

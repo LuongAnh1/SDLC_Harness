@@ -104,8 +104,7 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_model, "deepseek-flash")
         self.assertEqual(settings.llm_thinking_mode, "disabled")
         self.assertEqual(settings.sync_mode, "mock")
-        self.assertTrue(settings.designer_loop_enabled)
-        self.assertEqual(config_field_index()["SDLC_DESIGNER_LOOP_ENABLED"]["default"], True)
+        self.assertNotIn("SDLC_DESIGNER_LOOP_ENABLED", config_field_index())
         self.assertEqual(settings.vertical_trace_mode, "enforce")
         self.assertEqual(config_field_index()["SDLC_VERTICAL_TRACE_MODE"]["options"], ["shadow", "enforce"])
 

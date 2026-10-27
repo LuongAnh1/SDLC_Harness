@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import re
 from uuid import uuid4
 
 from ..core.errors import HarnessError
@@ -19,6 +20,7 @@ from .locks import RuntimeActionLock
 from .runtime_readme import ensure_runtime_readme
 
 TERMINAL_STATUSES = {"done", "cancelled", "failed", "code_review_approved"}
+_SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 class RuntimeStore:
@@ -48,7 +50,7 @@ class RuntimeStore:
         return f"run_{stamp}_{uuid4().hex[:8]}"
 
     def run_dir(self, run_id: str) -> Path:
-        return self.runs_dir / run_id
+        return self.runs_dir / _validated_run_id(run_id)
 
     def state_path(self, run_id: str) -> Path:
         return self.run_dir(run_id) / "state.json"
@@ -56,6 +58,7 @@ class RuntimeStore:
     def run_lock(self, run_id: str) -> RuntimeActionLock:
         """Serialize state/artifact mutations belonging to one workflow run."""
 
+        run_id = _validated_run_id(run_id)
         return RuntimeActionLock(self.runtime_root / "locks" / f"run-{run_id}.lock", run_id=run_id)
 
     def source_lock(self, source_ref: str) -> RuntimeActionLock:
@@ -341,6 +344,13 @@ class RuntimeStore:
                     temp_path.unlink()
                 except OSError:
                     pass
+
+
+def _validated_run_id(run_id: str) -> str:
+    value = str(run_id).strip()
+    if not value or not _SAFE_RUN_ID.fullmatch(value):
+        raise HarnessError("invalid_path_parameter", "Invalid run id.")
+    return value
 
 
 def utc_now_iso() -> str:

@@ -31,10 +31,8 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.verification import VerificationResult
-from sdlc_harness.sync.atlassian import (
-    _confluence_implementation_plan_storage_body,
-    real_sync_implementation_plan_checkpoint,
-)
+from sdlc_harness.sync.atlassian import real_sync_implementation_plan_checkpoint
+from sdlc_harness.sync.atlassian_rendering import _confluence_implementation_plan_storage_body
 from sdlc_harness.sync.github import GitHubCodeReviewResult
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
@@ -168,48 +166,6 @@ class WorkPacketTypeScriptAstExtractor:
             extractor_id=policy.symbol_extractor_id,
             profile=policy.metadata(),
             files=files,
-        )
-
-
-class PartialSignaturePatchLlm:
-    def __init__(self) -> None:
-        self.calls = 0
-
-    def complete(self, *, system: str, prompt: str) -> str:
-        del system, prompt
-        method_name = "requestDeletion" if self.calls == 0 else "showConfirmation"
-        parameters = (
-            [{"name": "heritageId", "type": "string", "optional": False, "rest": False}]
-            if method_name == "requestDeletion"
-            else []
-        )
-        self.calls += 1
-        return json.dumps(
-            {
-                "summary": "Add one validated signature patch.",
-                "repo_evidence": [],
-                "implementation_steps": [],
-                "proposed_files": [],
-                "design_mappings": [],
-                "implementation_signature_contract": {
-                    "version": "implementation_signature_contract_v1",
-                    "entries": [
-                        {
-                            "design_element_id": f"method:DeleteCulturalHeritageBoundary.{method_name}",
-                            "symbol_kind": "method",
-                            "owner_kind": "class",
-                            "qualified_name": f"DeleteCulturalHeritageBoundary.{method_name}",
-                            "parameters": parameters,
-                            "return_type": "void",
-                            "type_parameters": [],
-                            "async": False,
-                        }
-                    ],
-                },
-                "test_intents": [],
-                "assumptions": [],
-                "open_questions": [],
-            }
         )
 
 
@@ -367,7 +323,6 @@ class PhaseThreeTest(unittest.TestCase):
             overrides={
                 "SDLC_LLM_MODE": "fake",
                 "SDLC_SYNC_MODE": "mock",
-                "SDLC_DESIGNER_LOOP_ENABLED": "0",
                 "SDLC_DESIGN_REPAIR_LIMIT": "2",
                 "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
                 "SDLC_PROJECT_PROFILE": "",
@@ -449,7 +404,6 @@ class PhaseThreeTest(unittest.TestCase):
         overrides = {
             "SDLC_LLM_MODE": "fake",
             "SDLC_SYNC_MODE": "mock",
-            "SDLC_DESIGNER_LOOP_ENABLED": "0",
             "SDLC_DESIGN_REPAIR_LIMIT": "2",
             "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
             "SDLC_TARGET_REPO_PATH": str(self.target_repo),
@@ -595,7 +549,7 @@ class PhaseThreeTest(unittest.TestCase):
         )
         self.assertIn(workspace_artifact["branch"], content)
         self.assertIn(workspace_artifact["worktree_path"], content)
-        self.assertIn("DeleteCulturalHeritageService.deleteHeritage", content)
+        self.assertIn("CulturalHeritage.execute", content)
         self.assertIn("Test intent", content)
         self.assertIn("Phase 3 tạo branch/worktree riêng cho run", content)
 
@@ -608,7 +562,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertTrue(structured["proposed_files"])
         self.assertTrue(structured["design_mappings"])
         self.assertIn(
-            "method:DeleteCulturalHeritageService.deleteHeritage",
+            "method:CulturalHeritage.execute",
             {item["design_element_id"] for item in structured["design_mappings"]},
         )
 
@@ -778,36 +732,6 @@ class PhaseThreeTest(unittest.TestCase):
             "implementation_signature_contract_v1",
         )
         self.assertTrue(all("command" not in item for item in revalidated_plan["test_intents"]))
-
-    def test_profiled_plan_repair_merges_partial_signature_patch(self) -> None:
-        self._install_profile_manifest()
-        settings = self._settings(SDLC_PROJECT_PROFILE="typescript_fullstack_v1")
-        created = PhaseOneWorkflow(settings).start_or_get_run(
-            dataset="eTour",
-            use_case="UC1",
-            requested_by="test",
-        )
-        designed = CheckpointApprovalWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
-        workflow = PhaseThreeWorkflow(settings)
-        developer_llm = PartialSignaturePatchLlm()
-        workflow.developer = DeveloperPlanAgent(developer_llm)
-        workflow.validator = SequencedImplementationPlanValidator([False, True])
-
-        response = workflow.approve_design_checkpoint(run_id=str(designed["run_id"]))
-
-        self.assertEqual(response["status"], "waiting_implementation_plan_review")
-        self.assertEqual(developer_llm.calls, 2)
-        structured = json.loads(
-            (self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])).read_text(
-                encoding="utf-8"
-            )
-        )
-        design_ids = {
-            str(entry["design_element_id"])
-            for entry in structured["implementation_signature_contract"]["entries"]
-        }
-        self.assertIn("method:DeleteCulturalHeritageBoundary.requestDeletion", design_ids)
-        self.assertIn("method:DeleteCulturalHeritageBoundary.showConfirmation", design_ids)
 
     def test_v2_phase3_creates_canonical_requirement_coverage(self) -> None:
         approved = self._create_v2_phase2_run()
@@ -1003,11 +927,17 @@ class PhaseThreeTest(unittest.TestCase):
         )
 
         workflow.github_publisher = RecordingPublisher()
-        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+        with patch(
+            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
+            return_value="example/target",
+        ):
             published = workflow.continue_run(run_id=run_id)
         ready = workflow.continue_run(run_id=run_id)
         workflow.github_approver = RecordingApprover()
-        with patch("sdlc_harness.workflows.phase4.github_repository_from_remote", return_value="example/target"):
+        with patch(
+            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
+            return_value="example/target",
+        ):
             final = workflow.approve_code_review_checkpoint(
                 run_id=run_id,
                 checkpoint_id=str(ready["pending_checkpoint"]["checkpoint_id"]),
@@ -1272,6 +1202,12 @@ Thanks."""
         self.assertEqual(result["status"], "synced")
         self.assertEqual(result["phase"], "implementation_plan_review")
         self.assertEqual([call[0] for call in calls], ["POST", "POST"])
+        jira_payload = calls[1][2]
+        self.assertIsNotNone(jira_payload)
+        self.assertNotIn(
+            str(self.runtime_root).replace("\\", "\\\\"),
+            json.dumps(jira_payload, ensure_ascii=False),
+        )
         confluence_payload = calls[0][2]
         self.assertIsNotNone(confluence_payload)
         confluence_body = confluence_payload["body"]["value"]
@@ -1286,7 +1222,7 @@ Thanks."""
         self.assertIn("<th>Code target</th>", confluence_body)
         self.assertNotIn("target_repo-worktrees", confluence_body)
         self.assertNotIn("<th>Local path</th>", confluence_body)
-        self.assertIn("Implement class/method behavior and wire flow interactions.", confluence_body)
+        self.assertIn("Implement or update methods from the class diagram.", confluence_body)
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
         self.assertIn("Design-to-code mappings", confluence_body)

@@ -65,27 +65,6 @@ class ApplicationCommandTests(unittest.TestCase):
             },
         )
 
-    def test_experiment_keeps_source_runtime_and_cli_only_arguments(self) -> None:
-        args = build_parser().parse_args(
-            [
-                "experiment-design-consensus",
-                "--source-run-id",
-                "run_source",
-                "--source-runtime-root",
-                ".source-runtime",
-                "--experiment-root",
-                ".experiments/custom",
-                "--llm-call-budget",
-                "12",
-            ]
-        )
-
-        command = command_from_args(args)
-
-        self.assertEqual(command.runtime_root, Path(".source-runtime"))
-        self.assertEqual(command.arguments["source_run_id"], "run_source")
-        self.assertEqual(command.arguments["experiment_root"], ".experiments/custom")
-        self.assertEqual(command.arguments["llm_call_budget"], "12")
 
     def test_cli_sync_default_remains_mock_when_environment_is_real(self) -> None:
         args = build_parser().parse_args(
@@ -135,6 +114,8 @@ class ApplicationServiceTests(unittest.TestCase):
             "run_id": run_id,
             "status": "waiting_design_approval",
             "latest_artifacts": {},
+            "designer_contract_version": "vertical_design_graph_v1",
+            "designer_contract_version": "vertical_design_graph_v1",
         }
         if profiled:
             state["profile_snapshot"] = build_profile_snapshot(
@@ -157,6 +138,18 @@ class ApplicationServiceTests(unittest.TestCase):
         workflow_type.return_value.get_status.assert_called_once_with(run_id="run_1")
         settings = workflow_type.call_args.args[0]
         self.assertEqual(settings.runtime_root, self.runtime_root.resolve())
+
+    def test_get_status_rejects_run_id_path_traversal_before_reading_state(self) -> None:
+        escaped = self.runtime_root / "escaped" / "state.json"
+        escaped.parent.mkdir(parents=True)
+        escaped.write_text('{"run_id":"escaped","status":"waiting_design_approval"}', encoding="utf-8")
+
+        with patch("sdlc_harness.application.service.PhaseOneWorkflow") as workflow_type:
+            with self.assertRaises(HarnessError) as context:
+                self.service.execute(self.command("get-status", {"run_id": "../escaped"}))
+
+        self.assertEqual(context.exception.error_code, "invalid_path_parameter")
+        workflow_type.assert_not_called()
 
     def test_get_status_projects_legacy_retirement_without_mutating_state(self) -> None:
         self.write_state(
@@ -211,27 +204,6 @@ class ApplicationServiceTests(unittest.TestCase):
 
         phase_one.sync_run.assert_called_once_with(run_id="run_1")
 
-    def test_experiment_dispatch_preserves_path_and_budget(self) -> None:
-        self.write_state(run_id="run_source")
-        with patch("sdlc_harness.application.service.PhaseTwoWorkflow") as workflow_type:
-            workflow_type.return_value.experiment_design_consensus.return_value = {"ok": True}
-
-            self.service.execute(
-                self.command(
-                    "experiment-design-consensus",
-                    {
-                        "source_run_id": "run_source",
-                        "experiment_root": ".experiments/custom",
-                        "llm_call_budget": "12",
-                    },
-                )
-            )
-
-        workflow_type.return_value.experiment_design_consensus.assert_called_once_with(
-            source_run_id="run_source",
-            experiment_root=Path(".experiments/custom"),
-            llm_call_budget=12,
-        )
 
     def test_start_blank_profile_uses_typescript_default_before_dispatch(self) -> None:
         command = self.command(
@@ -296,24 +268,6 @@ class ApplicationServiceTests(unittest.TestCase):
         for workflow_type in (phase_one, phase_two, phase_three, phase_four, approval, adoption):
             workflow_type.assert_not_called()
 
-    def test_legacy_design_experiment_is_retired(self) -> None:
-        self.write_state(run_id="run_source", profiled=False)
-
-        with patch("sdlc_harness.application.service.PhaseTwoWorkflow") as workflow_type:
-            with self.assertRaises(HarnessError) as context:
-                self.service.execute(
-                    self.command(
-                        "experiment-design-consensus",
-                        {
-                            "source_run_id": "run_source",
-                            "experiment_root": ".experiments/custom",
-                            "llm_call_budget": "12",
-                        },
-                    )
-                )
-
-        self.assertEqual(context.exception.error_code, "legacy_execution_profile_retired")
-        workflow_type.assert_not_called()
 
     def test_legacy_non_code_review_sync_remains_available(self) -> None:
         self.write_state(profiled=False)

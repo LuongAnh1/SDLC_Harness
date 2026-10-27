@@ -136,7 +136,7 @@ class PhaseOneWorkflow:
         """Chạy Phase 1 từ source đã được load, bất kể source là fixture hay Jira."""
 
         active_state = self.store.find_active_run(source.source_ref)
-        if active_state:
+        if active_state and str(active_state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION:
             return self._status_response(active_state, created_new_run=False)
 
         run_id = self.store.new_run_id()
@@ -166,10 +166,9 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
-        if self.settings.designer_loop_enabled:
-            state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
-            state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
-            state["vertical_trace_mode"] = self.settings.vertical_trace_mode
+        state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
+        state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
+        state["vertical_trace_mode"] = self.settings.vertical_trace_mode
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,
