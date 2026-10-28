@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import replace
 import hashlib
 import io
 import json
@@ -1050,6 +1051,35 @@ class OnlyClass {
         self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
         self.assertNotEqual(initial["pending_checkpoint"]["artifact_ref"], response["pending_checkpoint"]["artifact_ref"])
 
+    def test_design_validator_step_review_pauses_and_replays_approved_output(self) -> None:
+        settings = replace(self.settings, design_validation_trials=1)
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        PhaseTwoWorkflow(settings).approve_checkpoint(run_id=run_id)
+
+        paused = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={"enabled": True},
+        ).revalidate_design(run_id=run_id)
+
+        self.assertEqual(paused["status"], "design_paused", paused)
+        self.assertEqual(paused["last_error"]["error_code"], "design_validator_step_review_required")
+        state = PhaseTwoWorkflow(settings).store.read_state(run_id)
+        pending = state["designer_execution"]["validator_step_review"]
+        self.assertEqual(pending["call_id"], "design-validator-0001-a01")
+        resumed = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={
+                "enabled": True,
+                "call_id": pending["call_id"],
+                "decision": "approve",
+                "note": "",
+            },
+        ).continue_design(run_id=run_id)
+
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+        self.assertTrue(resumed["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
+
     def test_revalidate_design_recovers_feedback_from_latest_finding_ledger(self) -> None:
         created = self._create_phase1_run()
         PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
@@ -1108,6 +1138,107 @@ class OnlyClass {
         self.assertIsNone(response["last_error"])
         self.assertEqual(response["designer_contract_version"], self.settings.designer_contract_version)
         self.assertIn("revalidate_design", response["allowed_next_actions"])
+
+    def test_revalidate_design_supersedes_pending_phase3_exchange(self) -> None:
+        created = self._create_phase1_run()
+        PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        workflow = PhaseTwoWorkflow(self.settings)
+        run_id = str(created["run_id"])
+        state = workflow.store.read_state(run_id)
+        state.update(
+            {
+                "current_phase": "implementation_planning",
+                "status": "implementation_plan_step_review_required",
+                "pending_checkpoint": None,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+            }
+        )
+        workflow.store.write_state(state)
+        execution_root = workflow.store.run_dir(run_id) / "implementation_plan_execution"
+        call = {
+            "call_id": "implementation-plan-0001-a01",
+            "ordinal": 1,
+            "attempt": 1,
+            "status": "pending",
+            "raw_completion": "{}",
+        }
+        execution_root.mkdir(parents=True, exist_ok=True)
+        (execution_root / "step_review_session_v1.json").write_text(
+            json.dumps({"calls": [call]}, ensure_ascii=False), encoding="utf-8"
+        )
+        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
+            json.dumps(call, ensure_ascii=False), encoding="utf-8"
+        )
+
+        response = workflow.revalidate_design(run_id=run_id)
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        session = json.loads(
+            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(session["calls"][0]["status"], "superseded")
+        self.assertEqual(
+            session["calls"][0]["superseded_reason"],
+            "upstream_design_revalidation",
+        )
+
+    def test_revalidate_design_supersedes_unapproved_plan_checkpoint(self) -> None:
+        created = self._create_phase1_run()
+        PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        workflow = PhaseTwoWorkflow(self.settings)
+        run_id = str(created["run_id"])
+        state = workflow.store.read_state(run_id)
+        state["latest_artifacts"].update(
+            {
+                "implementation_plan": "artifacts/implementation_plan_v1.md",
+                "implementation_plan_structured": "artifacts/implementation_plan_structured_v1.json",
+                "implementation_plan_review": "artifacts/implementation_plan_review_v1.json",
+            }
+        )
+        state["quality_reports"]["implementation_plan_review"] = {"ok": True}
+        state.update(
+            {
+                "current_phase": "implementation_planning",
+                "status": "waiting_implementation_plan_review",
+                "pending_checkpoint": {
+                    "checkpoint_id": f"checkpoint_implementation_plan_{run_id}",
+                    "type": "implementation_plan_review",
+                },
+            }
+        )
+        workflow.store.write_state(state)
+        execution_root = workflow.store.run_dir(run_id) / "implementation_plan_execution"
+        call = {
+            "call_id": "implementation-plan-0001-a01",
+            "ordinal": 1,
+            "attempt": 1,
+            "status": "approved",
+            "raw_completion": "{}",
+        }
+        execution_root.mkdir(parents=True, exist_ok=True)
+        (execution_root / "step_review_session_v1.json").write_text(
+            json.dumps({"calls": [call]}, ensure_ascii=False), encoding="utf-8"
+        )
+        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
+            json.dumps(call, ensure_ascii=False), encoding="utf-8"
+        )
+
+        response = workflow.revalidate_design(run_id=run_id)
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        self.assertEqual(response["pending_checkpoint"]["type"], "design_approval")
+        self.assertNotIn("implementation_plan", response["latest_artifacts"])
+        self.assertNotIn("implementation_plan_structured", response["latest_artifacts"])
+        self.assertNotIn("implementation_plan_review", response["latest_artifacts"])
+        self.assertNotIn("implementation_plan_review", response["quality_reports"])
+        session = json.loads(
+            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(session["calls"][0]["status"], "superseded")
+        self.assertEqual(
+            session["calls"][0]["superseded_reason"],
+            "upstream_design_revalidation",
+        )
 
 
     def test_cli_revalidate_design_returns_json_contract(self) -> None:

@@ -7,13 +7,17 @@ import json
 
 import pytest
 
-from sdlc_harness.agents.developer.planner import _developer_plan_prompt
+from sdlc_harness.agents.developer.planner import (
+    _component_plan_prompt,
+    _developer_plan_prompt,
+)
 from sdlc_harness.agents.validator.plan_review import (
     ImplementationPlanReview,
     _llm_review_prompt,
 )
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import fake_completion
+from sdlc_harness.repo_context.codegraph import _context_query
 from sdlc_harness.profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     build_planning_path_policy,
@@ -139,6 +143,46 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 
+def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    prompt = _component_plan_prompt(
+        run_id="run_signature_targets",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[
+            {
+                "target_path": "apps/web/src/CulturalHeritageInsertionForm.tsx",
+                "target_symbol": "CulturalHeritageInsertionForm",
+                "symbol_kind": "function",
+                "owner_kind": "",
+                "design_element_ids": [
+                    "method:CulturalHeritageInsertionForm.submit",
+                    "method:CulturalHeritageInsertionForm.confirm",
+                ],
+            }
+        ],
+        repair_feedback="",
+        previous_review={},
+    )
+
+    assert '"target_path": "Harness-owned source path"' in prompt
+    assert '"target_symbol": "Harness-owned function/component or Owner.method"' in prompt
+    assert "Multiple legacy Design operations may trace to one function/component target" in prompt
+    assert "Never emit design_element_id" in prompt
+    assert "`packages/contracts/src/...` target" in prompt
+    assert "Do not add database, API, or Web barrel/index targets" in prompt
+    assert "apps/web/src/CulturalHeritageInsertionForm.tsx" in prompt
+    assert "Legacy Class graph" not in prompt
+    assert "Legacy Sequence graph" not in prompt
+
+
 def test_fake_developer_plan_follows_language_directive() -> None:
     payload = json.loads(fake_completion(_developer_prompt()))
     encoded = json.dumps(payload, ensure_ascii=False).lower()
@@ -149,3 +193,41 @@ def test_fake_developer_plan_follows_language_directive() -> None:
     assert "src/test/java" not in encoded
     assert "command" not in encoded
     assert [item["stage_id"] for item in payload["test_intents"]] == ["unit", "typecheck"]
+
+
+def test_codegraph_context_prioritizes_runtime_wiring_terms() -> None:
+    query = _context_query(
+        issue_key="SDLC-1",
+        target_files=["apps/api/src/health.ts"],
+        class_graph={"nodes": [{"className": "LegacyHealth"}]},
+        sequence_graph={"sequenceDiagrams": []},
+        vertical_design_graph={
+            "nodes": [
+                {
+                    "runtime_binding": {
+                        "target": {
+                            "path": "apps/api/src/cultural-heritage-delete.ts",
+                            "symbol": "registerDeleteCulturalHeritageRoute",
+                        },
+                        "attachment": {
+                            "owner_path": "apps/api/src/app.ts",
+                            "owner_symbol": "createApp",
+                        },
+                    }
+                }
+            ],
+            "edges": [
+                {
+                    "boundary_contract": {
+                        "consumer_operation": "deleteSelectedHeritage",
+                        "provider_operation": "DELETE /cultural-heritage/{id}",
+                    }
+                }
+            ],
+        },
+    )
+
+    assert query.index("cultural-heritage-delete") < query.index("LegacyHealth")
+    assert "registerDeleteCulturalHeritageRoute" in query
+    assert "createApp" in query
+    assert "DELETE /cultural-heritage/{id}" in query

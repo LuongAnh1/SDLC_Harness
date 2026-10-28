@@ -18,6 +18,7 @@ from sdlc_harness.agents.validator import (
     validate_vertical_trace_graph,
     validate_vertical_trace_report,
 )
+from sdlc_harness.agents.validator.vertical_trace import _graph_digest
 from sdlc_harness.agents.designer.graph import graph_digest
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.workflows.phase2 import _vertical_trace_repair_feedback
@@ -130,6 +131,50 @@ class VerticalTraceTest(unittest.TestCase):
         result = validate_vertical_trace_coverage(first, mode="shadow")
         self.assertTrue(result.ok)
         self.assertEqual(result.coverage["required_surface_count"], result.coverage["covered_surface_count"])
+        main_web = next(
+            item
+            for item in first["nodes"]
+            if item.get("layer") == "design"
+            and item.get("scenario_id") == "SC-1"
+            and item.get("surface") == "ui"
+        )
+        self.assertTrue(
+            any(
+                edge.get("from") == "AC-2"
+                and edge.get("to") == main_web["id"]
+                and edge.get("kind") == "realizes"
+                for edge in first["edges"]
+            )
+        )
+
+    def test_missing_inferred_acceptance_design_binding_is_blocked(self) -> None:
+        graph = build_vertical_trace_graph(
+            requirement_model=self.model,
+            design_graph=self._design_graph(),
+        )
+        main_web = next(
+            item
+            for item in graph["nodes"]
+            if item.get("layer") == "design"
+            and item.get("scenario_id") == "SC-1"
+            and item.get("surface") == "ui"
+        )
+        graph["edges"] = [
+            edge
+            for edge in graph["edges"]
+            if not (
+                edge.get("from") == "AC-2"
+                and edge.get("to") == main_web["id"]
+                and edge.get("kind") == "realizes"
+            )
+        ]
+        graph["artifact_digest"] = _graph_digest(graph)
+
+        categories = {
+            item.category
+            for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings
+        }
+        self.assertIn("acceptance_design_binding_missing", categories)
 
     def test_missing_required_surface_is_exact_blocker(self) -> None:
         graph = build_vertical_trace_graph(

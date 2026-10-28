@@ -23,6 +23,7 @@ from ..agents.developer import (
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
+    GRAPH_VERSION_V2,
     design_bundle_findings,
     validate_vertical_design_graph,
 )
@@ -54,6 +55,7 @@ from ..repo_context import (
 )
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
+from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..workspaces import RunWorkspaceManager
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
@@ -78,12 +80,18 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
 class PhaseThreeWorkflow:
     """Điều phối Phase 3 từ checkpoint design sang implementation plan."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        plan_step_review: dict[str, object] | None = None,
+    ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
-        llm_client = LlmClient(settings)
-        self.developer = DeveloperPlanAgent(llm_client)
-        self.validator = ImplementationPlanValidator(llm_client)
+        self.llm_client = LlmClient(settings)
+        self.plan_step_review = dict(plan_step_review or {})
+        self.developer = DeveloperPlanAgent(self.llm_client)
+        self.validator = ImplementationPlanValidator(self.llm_client)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.workspace_manager = RunWorkspaceManager(settings)
 
@@ -111,7 +119,26 @@ class PhaseThreeWorkflow:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
         with self.workspace_manager.locked_workspace(run_id):
-            return self._approve_design_checkpoint_locked(run_id=run_id, checkpoint_id=checkpoint_id)
+            try:
+                return self._approve_design_checkpoint_locked(run_id=run_id, checkpoint_id=checkpoint_id)
+            except LlmStepReviewRequired as exc:
+                return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
+
+    def continue_implementation_plan_step_review(self, *, run_id: str) -> dict[str, object]:
+        """Replay approved Phase 3 exchanges and pause at the next provider output."""
+
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") != "implementation_plan_step_review_required":
+            raise HarnessError(
+                "implementation_plan_step_review_not_pending",
+                f"Run has no pending Phase 3 step review: {run_id}",
+                run_id=run_id,
+            )
+        with self.workspace_manager.locked_workspace(run_id):
+            try:
+                return self._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
+            except LlmStepReviewRequired as exc:
+                return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
 
     def revalidate_implementation_plan(self, *, run_id: str) -> dict[str, object]:
         """Create a new plan version from frozen Phase 1/2 inputs and review it again."""
@@ -176,6 +203,7 @@ class PhaseThreeWorkflow:
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             issue_key=issue_key,
+            vertical_design_graph=vertical_design_graph,
         ).to_dict()
         requirement_packet = frozen_requirement.requirement_packet
         plan_draft = self.developer.plan(
@@ -393,11 +421,14 @@ class PhaseThreeWorkflow:
         *,
         run_id: str,
         checkpoint_id: str | None = None,
+        resume_step_review: bool = False,
     ) -> dict[str, object]:
         """Thực thi Phase 3 trong khi caller giữ per-run workspace lock."""
 
         state = self.store.read_state(run_id)
-        self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        if not resume_step_review:
+            self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
+        self._configure_plan_llm(run_id=run_id)
         frozen_requirement, requirement_graph = self._read_phase3_inputs(state=state, run_id=run_id)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         requirement_path = frozen_requirement.approved_artifacts["requirement_packet"]
@@ -425,6 +456,7 @@ class PhaseThreeWorkflow:
                 "current_phase": "implementation_planning",
                 "status": "implementation_planning",
                 "pending_checkpoint": None,
+                "pending_step_review": None,
                 "last_error": None,
                 "approved_artifacts": {
                     **_dict_value(state.get("approved_artifacts")),
@@ -470,6 +502,7 @@ class PhaseThreeWorkflow:
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             issue_key=issue_key,
+            vertical_design_graph=vertical_design_graph,
         ).to_dict()
         try:
             plan_draft = self.developer.plan(
@@ -503,6 +536,8 @@ class PhaseThreeWorkflow:
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
             )
+        except LlmStepReviewRequired:
+            raise
         except HarnessError as exc:
             self._mark_phase3_failed(state, run_id=run_id, error=exc)
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
@@ -648,6 +683,8 @@ class PhaseThreeWorkflow:
                     repo_landscape=repo_landscape,
                     component_plan_inputs=component_plan_inputs,
                 )
+            except LlmStepReviewRequired:
+                raise
             except HarnessError as exc:
                 self._mark_phase3_failed(state, run_id=run_id, error=exc)
                 raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
@@ -722,6 +759,42 @@ class PhaseThreeWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _configure_plan_llm(self, *, run_id: str) -> None:
+        if not bool(self.plan_step_review.get("enabled")):
+            return
+        client: object = ReviewableLlmClient(
+            self.llm_client,
+            store=self.store,
+            run_id=run_id,
+            review=self.plan_step_review,
+        )
+        self.developer.llm_client = client
+        self.validator.llm_client = client
+
+    def _pause_for_plan_step_review(
+        self,
+        *,
+        run_id: str,
+        progress: dict[str, object],
+    ) -> dict[str, object]:
+        state = self.store.read_state(run_id)
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "implementation_planning",
+                "status": "implementation_plan_step_review_required",
+                "pending_checkpoint": None,
+                "pending_step_review": progress,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": None,
+                "summary_for_user": (
+                    f"Phase 3 paused for LLM exchange review: {progress.get('call_id')}."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
     def _component_plan_context(
         self,
         *,
@@ -740,6 +813,15 @@ class PhaseThreeWorkflow:
         """Load the immutable Vertical Design inputs only for V4 runs."""
 
         contract_version = resolve_implementation_plan_contract(state)
+        if (
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION_V2
+            and contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
+        ):
+            raise HarnessError(
+                "implementation_plan_contract_invalid",
+                "Vertical Design Graph V2 requires Component-aware Plan V4.",
+                run_id=run_id,
+            )
         if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
             return contract_version, {}, {}, {}, {}
         if (
@@ -973,6 +1055,7 @@ class PhaseThreeWorkflow:
             "status": state.get("status"),
             "latest_artifacts": state.get("latest_artifacts", {}),
             "pending_checkpoint": state.get("pending_checkpoint"),
+            "pending_step_review": state.get("pending_step_review"),
             "allowed_next_actions": state.get("allowed_next_actions", []),
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),

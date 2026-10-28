@@ -754,6 +754,34 @@ def _fake_typescript_implementation_signature_contract(
         )
     component_symbols = _fake_component_symbols(prompt, unit_updates=unit_updates)
     component_aware = "Component-aware Implementation Plan V4" in prompt
+    if component_aware:
+        targets = _fake_json_prompt_value(
+            prompt=prompt,
+            start="Harness-owned signature targets:",
+            end="Harness-owned work units:",
+        )
+        return {
+            "entries": [
+                {
+                    "target_path": str(item.get("target_path") or ""),
+                    "target_symbol": str(item.get("target_symbol") or ""),
+                    "parameters": [],
+                    "return_type": (
+                        "JSX.Element"
+                        if str(item.get("target_path") or "").endswith(".tsx")
+                        else "Promise<unknown>"
+                    ),
+                    "type_parameters": [],
+                    "async": not str(item.get("target_path") or "").endswith(".tsx"),
+                }
+                for item in targets
+                if isinstance(item, dict)
+                and str(item.get("target_path") or "")
+                and str(item.get("target_symbol") or "")
+            ]
+            if isinstance(targets, list)
+            else []
+        }
     entries: list[dict[str, object]] = []
     nodes = class_graph.get("nodes") if isinstance(class_graph, dict) else []
     for node in nodes if isinstance(nodes, list) else []:

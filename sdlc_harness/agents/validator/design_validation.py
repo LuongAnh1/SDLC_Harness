@@ -17,6 +17,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
+from ...llm.step_review import LlmStepReviewRequired
 from .traceability import TraceabilityResult
 
 
@@ -209,6 +210,8 @@ class DesignValidator:
                     }
                 )
                 valid_trials.append((trial_id, payload, normalized))
+            except LlmStepReviewRequired:
+                raise
             except HarnessError as exc:
                 if requested_trials == 1:
                     raise
@@ -313,7 +316,7 @@ Blocking policy:
 - An uncertainty without evidence is a warning, not a blocker.
 
 Canonical Requirement V2:
-{json.dumps(canonical or {}, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(canonical or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Requirement packet:
 {_excerpt(requirement_packet, 7000)}
@@ -322,22 +325,22 @@ Design artifact:
 {_excerpt(design_artifact, 9000)}
 
 Class graph:
-{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Sequence graph:
-{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Traceability:
-{json.dumps({"class_trace": traceability.class_trace, "sequence_trace": traceability.sequence_trace}, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps({"class_trace": traceability.class_trace, "sequence_trace": traceability.sequence_trace}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Canonical vertical Requirement-to-Design trace (bounded, deterministic):
-{json.dumps(vertical_trace or {}, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(vertical_trace or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Runtime-bound Vertical Design Graph V2 (deterministic gate already passed):
-{json.dumps(vertical_design_graph or {}, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(vertical_design_graph or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Deterministic review:
-{json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"))}
+{json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 """.strip()
         raw = _complete_json(
             self.llm_client,

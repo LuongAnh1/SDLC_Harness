@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 
 from sdlc_harness.cli import main as cli_main
+from sdlc_harness.agents.designer import GRAPH_VERSION_V2
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
 from sdlc_harness.agents.developer.planner import _parse_developer_plan_payload
 from sdlc_harness.agents.validator import (
@@ -479,6 +480,33 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(approved["status"], "waiting_design_approval")
         return approved
 
+    def test_phase3_step_review_pauses_and_replays_approved_exchange(self) -> None:
+        approved = self._create_phase2_run()
+        first = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={"enabled": True},
+        ).approve_design_checkpoint(
+            run_id=self.run_id,
+            checkpoint_id=str(approved["pending_checkpoint"]["checkpoint_id"]),
+        )
+
+        self.assertEqual(first["status"], "implementation_plan_step_review_required")
+        first_pending = first["pending_step_review"]
+        exchange_path = self.repo_root / str(first_pending["exchange_path"])
+        self.assertTrue(exchange_path.exists())
+
+        second = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={
+                "enabled": True,
+                "call_id": first_pending["call_id"],
+                "decision": "approve",
+            },
+        ).continue_implementation_plan_step_review(run_id=self.run_id)
+
+        self.assertEqual(second["status"], "implementation_plan_step_review_required")
+        self.assertNotEqual(second["pending_step_review"]["call_id"], first_pending["call_id"])
+
     def _create_phase3_run_from_template(self) -> dict[str, object]:
         manager = RunWorkspaceManager(self.settings)
         worktree_path = manager.expected_worktree_path(self.run_id)
@@ -512,6 +540,21 @@ class PhaseThreeTest(unittest.TestCase):
 
         self.assertEqual(approved["status"], "waiting_design_approval")
         self.assertEqual(approved["pending_checkpoint"]["type"], "design_approval")
+
+    def test_design_v2_cannot_fall_back_to_historical_plan_v3(self) -> None:
+        workflow = PhaseThreeWorkflow(self.settings)
+
+        with self.assertRaises(HarnessError) as error:
+            workflow._component_plan_context(
+                state={"designer_contract_version": GRAPH_VERSION_V2},
+                run_id="run_design_v2_without_plan_marker",
+                artifact_paths={},
+                requirement_revision=1,
+                requirement_contract_version="v2",
+            )
+
+        self.assertEqual(error.exception.error_code, "implementation_plan_contract_invalid")
+        self.assertIn("Plan V4", error.exception.message)
 
     def test_approve_design_checkpoint_creates_implementation_plan(self) -> None:
         approved = self._create_phase2_run()
@@ -675,6 +718,28 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(signature_contract["version"], "implementation_signature_contract_v1")
         self.assertTrue(signature_contract["digest"].startswith("sha256:"))
         self.assertTrue(signature_contract["entries"])
+        work_unit_targets = {
+            (str(target.get("path") or ""), str(target.get("symbol") or ""))
+            for unit in structured["work_units"]
+            for target in unit.get("planned_code_targets", [])
+        }
+        signature_targets = [
+            (str(entry.get("source_path") or ""), str(entry.get("qualified_name") or ""))
+            for entry in signature_contract["entries"]
+        ]
+        self.assertTrue(
+            all(
+                target in work_unit_targets
+                or any(
+                    target[0] == work_path
+                    and target[1].startswith(f"{work_symbol}.")
+                    for work_path, work_symbol in work_unit_targets
+                    if work_symbol
+                )
+                for target in signature_targets
+            )
+        )
+        self.assertEqual(len(signature_targets), len(set(signature_targets)))
         self.assertIn("# Implementation Plan V4", plan_markdown)
         self.assertIn("## Approved Implementation Signatures", plan_markdown)
         self.assertIn("## Verification Plan", plan_markdown)

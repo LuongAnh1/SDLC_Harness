@@ -55,6 +55,7 @@ COMPOSITION_REPAIR_CODES = frozenset(
         "planned_target_conflicts_as_is",
         "runtime_path_disconnected",
         "boundary_contract_mismatch",
+        "runtime_operation_binding_mismatch",
         "duplicate_runtime_api_operation",
     }
 )
@@ -227,6 +228,15 @@ class DesignerToolLoopExecutor:
             registry=registry,
             journal_file=journal_file,
         )
+        if str(session.get("status") or "") == "completed":
+            return DesignerExecutionResult(
+                graph=registry.graph,
+                session_path=session_path,
+                manifest_path=manifest_path,
+                journal_path=journal_path,
+                delta_paths=_strings(session.get("delta_paths")),
+                progress=_progress(session),
+            )
         try:
             if self.settings.llm_mode == "fake":
                 self._execute_fake(
@@ -1139,6 +1149,7 @@ class DesignerToolLoopExecutor:
                 if exc.error_code in {
                     "designer_tool_unknown",
                     "designer_tool_input_invalid",
+                    "designer_evidence_not_found",
                     "designer_delta_invalid",
                     "designer_delta_no_effect",
                     "designer_delta_precondition_failed",
@@ -1640,6 +1651,8 @@ def _designer_prompt(
         "profile-owned target path/symbol for the required behavior and attach it to an inspected existing composition "
         "owner; never bind new domain behavior to an unrelated health, smoke, demo, or test symbol. The add target must "
         "not be identical to its owner or to an existing anchor. Use modify/reuse when the target itself already exists. "
+        "repo.read only accepts existing AS-IS files. When an add target does not exist yet, read its existing composition "
+        "owner or use an available CodeGraph call path instead of trying to read the TO-BE target. "
         "Never repeat an identical successful tool action. If a search returns zero matches, either broaden it once "
         "or model the required surface as add using a component/root from the frozen landscape. "
         "Use active_partition only to build missing surfaces. Use active_repair_task for every composition or validator repair. "
@@ -1657,6 +1670,8 @@ def _designer_prompt(
         "Do not rewrite an entire scenario edge chain when one named edge or node can satisfy the finding. "
         "When every active repair finding is boundary_contract_mismatch, submit exactly the delta_scaffold operations: "
         "keep each replacement edge's from, to, kind, and label unchanged, and do not add or reorder unrelated edges. "
+        "When every active repair finding is runtime_operation_binding_mismatch, submit exactly the delta_scaffold "
+        "update_node operation and preserve every runtime_binding field except the corrected target symbol. "
         "Use its exact partition identity, preserve required_coverage, and add or update a node for every listed surface. "
         "For Graph V2, candidate anchors locate source but do not satisfy investigation: use repo.read or an available "
         f"codegraph.query for the active component before its first delta. Make at most {observation_limit} distinct observation actions, "
@@ -1704,6 +1719,9 @@ def _designer_prompt(
         "\"required\":true}],\"error_mapping\":[]}}. Map every required API request field, non-public "
         "authorization, success response, and 4xx/5xx response. This full provider mapping is required on both calls "
         "and returns edges when the provider is an API; a returns edge must not map only the response. "
+        "For service and persistence_adapter providers, when boundary_contract.provider_operation is a concrete "
+        "identifier, runtime_binding.target.symbol must expose that exact callable. A file may host multiple symbols; "
+        "never bind a query operation to a create/update/delete callable. "
         "In repair mode, assign every edge to the scenario named by the finding, even when an endpoint is reused from "
         "another scenario partition. Edge order is assigned from add_edge operation order. To change an existing "
         "scenario order, remove every obsolete/current edge first using exactly "
@@ -2484,6 +2502,27 @@ def _repair_delta_scaffold(
             for edge_id in sorted(_ambiguous_branch_parent_excess_edge_ids(findings))
             if edge_id in edges_by_id
         )
+    elif codes and codes <= {"runtime_operation_binding_mismatch"}:
+        for finding in findings:
+            node_id = str(finding.get("subject_ref") or "")
+            node = nodes_by_id.get(node_id)
+            diagnostics = _dict(finding.get("contract_diagnostics"))
+            expected_symbol = str(diagnostics.get("expected_provider_operation") or "")
+            if node is None or not expected_symbol:
+                continue
+            runtime_binding = json.loads(
+                json.dumps(_dict(node.get("runtime_binding")), ensure_ascii=False)
+            )
+            target = _dict(runtime_binding.get("target"))
+            target["symbol"] = expected_symbol
+            runtime_binding["target"] = target
+            operations.append(
+                {
+                    "op": "update_node",
+                    "node_id": node_id,
+                    "changes": {"runtime_binding": runtime_binding},
+                }
+            )
     elif "runtime_path_disconnected" in codes:
         operations.append(
             {

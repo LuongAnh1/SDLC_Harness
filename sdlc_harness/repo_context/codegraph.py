@@ -65,6 +65,7 @@ class CodeGraphContextProvider:
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         issue_key: str,
+        vertical_design_graph: dict[str, object] | None = None,
     ) -> RepoContext:
         """Thu thập context liên quan tới design đã duyệt."""
 
@@ -74,6 +75,7 @@ class CodeGraphContextProvider:
             sequence_graph=sequence_graph,
             target_files=target_files,
             issue_key=issue_key,
+            vertical_design_graph=vertical_design_graph or {},
         )
         if self.fake_mode:
             return RepoContext(
@@ -206,8 +208,30 @@ def _context_query(
     sequence_graph: dict[str, object],
     target_files: list[str],
     issue_key: str,
+    vertical_design_graph: dict[str, object] | None = None,
 ) -> str:
     terms: list[str] = [issue_key]
+    for node in _dict_items((vertical_design_graph or {}).get("nodes")):
+        binding = node.get("runtime_binding")
+        if not isinstance(binding, dict):
+            continue
+        for endpoint in (binding.get("target"), binding.get("attachment")):
+            if not isinstance(endpoint, dict):
+                continue
+            path = str(endpoint.get("path") or endpoint.get("owner_path") or "").strip()
+            symbol = str(endpoint.get("symbol") or endpoint.get("owner_symbol") or "").strip()
+            if path:
+                terms.append(Path(path).stem)
+            if symbol:
+                terms.append(symbol)
+    for edge in _dict_items((vertical_design_graph or {}).get("edges")):
+        contract = edge.get("boundary_contract")
+        if not isinstance(contract, dict):
+            continue
+        for key in ("consumer_operation", "provider_operation"):
+            operation = str(contract.get(key) or "").strip()
+            if operation:
+                terms.append(operation)
     for node in _dict_items(class_graph.get("nodes")):
         class_name = str(node.get("className") or node.get("id") or "").strip()
         if class_name:

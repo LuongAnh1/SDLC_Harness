@@ -66,6 +66,7 @@ DISPOSITIONS = frozenset({"reuse", "modify", "add", "no_change"})
 EDGE_KINDS = frozenset({"contains", "calls", "reads", "writes", "returns", "realized_by", "depends_on"})
 OPERATIONS = frozenset({"add_node", "update_node", "remove_node", "add_edge", "remove_edge", "set_partition_coverage"})
 _SAFE_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,160}$")
+_TYPESCRIPT_IDENTIFIER = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
 def canonical_hash(value: object) -> str:
@@ -917,6 +918,7 @@ def _runtime_composition_findings(
                 )
             )
 
+    checked_operation_bindings: set[tuple[str, str, str]] = set()
     for edge in edges:
         source = nodes_by_id.get(str(edge.get("from") or ""), {})
         target = nodes_by_id.get(str(edge.get("to") or ""), {})
@@ -939,6 +941,33 @@ def _runtime_composition_findings(
                 )
                 finding["contract_diagnostics"] = diagnostics
                 findings.append(finding)
+            operation_diagnostics = _runtime_operation_binding_diagnostics(contract, provider)
+            if operation_diagnostics:
+                operation_key = (
+                    str(provider.get("id") or ""),
+                    str(operation_diagnostics["expected_provider_operation"]),
+                    str(operation_diagnostics["actual_target_symbol"]),
+                )
+                if operation_key not in checked_operation_bindings:
+                    checked_operation_bindings.add(operation_key)
+                    expected_operation = str(operation_diagnostics["expected_provider_operation"])
+                    actual_symbol = str(operation_diagnostics["actual_target_symbol"])
+                    target_path = str(operation_diagnostics["target_path"])
+                    finding = _composition_finding(
+                        "runtime_operation_binding_mismatch",
+                        str(provider.get("id") or ""),
+                        (
+                            f"Boundary provider operation {expected_operation} is bound to "
+                            f"{target_path}#{actual_symbol}."
+                        ),
+                        (
+                            f"Keep the target path when appropriate, but bind this provider node "
+                            f"to the callable symbol {expected_operation}."
+                        ),
+                        node=provider,
+                    )
+                    finding["contract_diagnostics"] = operation_diagnostics
+                    findings.append(finding)
 
     inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
     for scenario_id, surfaces in sorted(inferred.items()):
@@ -1064,6 +1093,32 @@ def _boundary_contract_diagnostics(
         "response_mapping_missing": response_missing,
         "error_mapping_missing": error_missing,
         "mismatches": mismatches,
+    }
+
+
+def _runtime_operation_binding_diagnostics(
+    contract: dict[str, object], provider: dict[str, object]
+) -> dict[str, object] | None:
+    """Match concrete service/data operations to their bound TypeScript callable."""
+
+    binding = _dict_value(provider.get("runtime_binding"))
+    runtime_kind = str(binding.get("runtime_kind") or "")
+    if runtime_kind not in {"service", "persistence_adapter"}:
+        return None
+    expected = str(contract.get("provider_operation") or "").strip()
+    if not _TYPESCRIPT_IDENTIFIER.fullmatch(expected):
+        return None
+    target = _dict_value(binding.get("target"))
+    actual_symbol = str(target.get("symbol") or "").strip()
+    actual_callable = actual_symbol.rsplit(".", 1)[-1]
+    if actual_callable == expected:
+        return None
+    return {
+        "provider_runtime_kind": runtime_kind,
+        "expected_provider_operation": expected,
+        "actual_target_symbol": actual_symbol,
+        "actual_callable_symbol": actual_callable,
+        "target_path": str(target.get("path") or ""),
     }
 
 

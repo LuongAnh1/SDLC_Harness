@@ -450,6 +450,24 @@ def _shadow_report(
         if isinstance(latest_session.get("pending_step_review"), dict)
         else None
     )
+    validator_sessions = sorted(
+        store.run_dir(str(state["run_id"])).glob("design_validator_execution/*/step_review_session_v1.json")
+    )
+    if pending_step_review is None and validator_sessions:
+        validator_session = json.loads(validator_sessions[-1].read_text(encoding="utf-8"))
+        pending_validator_calls = [
+            item
+            for item in validator_session.get("calls", [])
+            if isinstance(item, dict) and str(item.get("status") or "") == "pending"
+        ]
+        if pending_validator_calls:
+            pending_validator = pending_validator_calls[-1]
+            call_id = str(pending_validator.get("call_id") or "")
+            exchange_path = validator_sessions[-1].parent / f"exchange_{call_id}.json"
+            pending_step_review = {
+                "call_id": call_id,
+                "exchange_path": store.relative(exchange_path),
+            }
     tool_calls = Counter()
     for journal in journals:
         for line in journal.read_text(encoding="utf-8").splitlines():

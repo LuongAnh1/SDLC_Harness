@@ -801,6 +801,150 @@ class VerticalDesignGraphTest(unittest.TestCase):
         }
         self.assertIn("planned_target_conflicts_as_is", conflict_categories)
 
+    def test_service_boundary_operation_must_match_runtime_callable(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-operation-binding", snapshot_binding=self.binding)
+        graph["partitions"] = [
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": component_id,
+                "coverage": {surface: "covered"},
+                "source_observation_refs": [f"repo:{component_id}:source"],
+            }
+            for component_id, surface in (("api", "business_rule"), ("database", "data"))
+        ]
+        graph["nodes"] = [
+            {
+                "id": "VDN-service",
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": "api",
+                "semantic_key": "SC-1:service",
+                "name": "Duplicate check service",
+                "kind": "business_rule",
+                "surface": "business_rule",
+                "disposition": "add",
+                "requirement_refs": ["REQ-1"],
+                "evidence_refs": [],
+                "evidence_reason": "Required behavior is new.",
+                "contract": "Check whether a matching identity already exists.",
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION,
+                    "runtime_kind": "service",
+                    "target": {
+                        "component_id": "api",
+                        "path": "apps/api/src/cultural-heritage.ts",
+                        "symbol": "checkDuplicateCulturalHeritage",
+                    },
+                    "attachment": {
+                        "relation": "called_by",
+                        "owner_ref": "RLA-api-owner",
+                        "owner_path": "apps/api/src/app.ts",
+                        "owner_symbol": "createApp",
+                    },
+                    "evidence_refs": ["RLA-api-owner"],
+                },
+            },
+            {
+                "id": "VDN-database",
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": "database",
+                "semantic_key": "SC-1:data-query",
+                "name": "Duplicate identity lookup",
+                "kind": "data_operation",
+                "surface": "data",
+                "disposition": "add",
+                "requirement_refs": ["REQ-1"],
+                "evidence_refs": [],
+                "evidence_reason": "Required behavior is new.",
+                "contract": "Query an existing record by name and origin.",
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION,
+                    "runtime_kind": "persistence_adapter",
+                    "target": {
+                        "component_id": "database",
+                        "path": "packages/db/src/cultural-heritage.ts",
+                        "symbol": "createCulturalHeritage",
+                    },
+                    "attachment": {
+                        "relation": "implemented_by",
+                        "owner_ref": "RLA-db-owner",
+                        "owner_path": "packages/db/src/client.ts",
+                        "owner_symbol": "getDatabaseClient",
+                    },
+                    "evidence_refs": ["RLA-db-owner"],
+                },
+            },
+        ]
+        graph["edges"] = [
+            {
+                "id": "VDE-query",
+                "from": "VDN-service",
+                "to": "VDN-database",
+                "kind": "reads",
+                "label": "look up duplicate identity",
+                "scenario_id": "SC-1",
+                "order": 1,
+                "terminal": True,
+                "boundary_contract": {
+                    "schema_version": BOUNDARY_CONTRACT_VERSION,
+                    "consumer_operation": "checkDuplicateCulturalHeritage",
+                    "provider_operation": "queryCulturalHeritageByIdentity",
+                    "input_mapping": [{"from": "identity", "to": "identity", "required": True}],
+                    "auth_mapping": [],
+                    "response_mapping": [{"from": "record", "to": "duplicate", "required": True}],
+                    "error_mapping": [],
+                },
+            }
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        landscape = {
+            "components": [
+                {"component_id": "api", "roots": ["apps/api/src"]},
+                {"component_id": "database", "roots": ["packages/db/src"]},
+            ],
+            "anchors": [],
+        }
+
+        findings = design_bundle_findings(graph, landscape=landscape)
+        mismatch = next(
+            item for item in findings if item["category"] == "runtime_operation_binding_mismatch"
+        )
+        self.assertEqual(mismatch["subject_ref"], "VDN-database")
+        self.assertEqual(
+            mismatch["contract_diagnostics"]["expected_provider_operation"],
+            "queryCulturalHeritageByIdentity",
+        )
+        repair_task = _active_repair_task(
+            repair_feedback=[mismatch],
+            graph=graph,
+            completed_targets=[],
+            landscape=landscape,
+            source="inline_composition",
+        )
+        operation = next(
+            item
+            for item in repair_task["delta_scaffold"]["operations"]
+            if item["op"] == "update_node"
+        )
+        self.assertEqual(operation["op"], "update_node")
+        self.assertEqual(
+            operation["changes"]["runtime_binding"]["target"]["symbol"],
+            "queryCulturalHeritageByIdentity",
+        )
+
+        repaired = json.loads(json.dumps(graph))
+        repaired["nodes"][1]["runtime_binding"]["target"]["symbol"] = (
+            "CulturalHeritageRepository.queryCulturalHeritageByIdentity"
+        )
+        repaired["artifact_digest"] = graph_digest(repaired)
+        repaired_categories = {
+            str(item["category"])
+            for item in design_bundle_findings(repaired, landscape=landscape)
+        }
+        self.assertNotIn("runtime_operation_binding_mismatch", repaired_categories)
+
     @staticmethod
     def _api_contract() -> dict[str, object]:
         return {
@@ -1246,6 +1390,7 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("a returns edge must not map only the response", prompt)
         self.assertIn("write_scope.allow_add_node is false, never use add_node", prompt)
         self.assertIn("separate outgoing confirmation interaction", prompt)
+        self.assertIn("never bind a query operation to a create/update/delete callable", prompt)
 
     def test_repair_prompt_uses_graph_summary_and_six_read_actions(self) -> None:
         repair_task = {
@@ -2470,6 +2615,7 @@ class DesignerResumeTest(unittest.TestCase):
                 llm_client=_ScriptedDesignerClient(
                     [
                         {"action": "design.propose_delta", "arguments": {"delta": delta}},
+                        {"action": "repo.read", "arguments": {"path": "planned-route.ts", "start_line": 1}},
                         {"action": "repo.read", "arguments": {"path": "route.ts", "start_line": 1}},
                         {"action": "design.propose_delta", "arguments": {"delta": delta}},
                     ]
@@ -2483,7 +2629,7 @@ class DesignerResumeTest(unittest.TestCase):
             )
 
             self.assertEqual(result.graph["revision"], 1)
-            self.assertEqual(result.progress["invalid_action_budget"]["used"], 1)
+            self.assertEqual(result.progress["invalid_action_budget"]["used"], 2)
             partition = result.graph["partitions"][0]
             self.assertTrue(str(partition["source_observation_refs"][0]).startswith("repo:route.ts#L1@sha256:"))
 

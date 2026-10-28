@@ -39,6 +39,7 @@ from ..artifacts.writers import write_phase2_design_artifacts
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import BudgetedLlmClient, LlmClient
+from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..profiles import build_planning_path_policy, read_profile_snapshot
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
@@ -167,12 +168,20 @@ class PhaseTwoWorkflow:
             and phase == "implementation_planning"
             and str(last_error.get("error_code") or "") in DESIGN_ROUTING_ERROR_CODES
         )
+        recoverable_plan_step_review = (
+            status == "implementation_plan_step_review_required"
+            and phase == "implementation_planning"
+        )
+        recoverable_plan_checkpoint = (
+            status == "waiting_implementation_plan_review"
+            and phase == "implementation_planning"
+        )
         recoverable_vertical_design_block = (
             str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS
             and status == "design_blocked"
             and phase.startswith("design_")
         )
-        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_vertical_design_block and (
+        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_plan_step_review and not recoverable_plan_checkpoint and not recoverable_vertical_design_block and (
             phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
         ):
             raise HarnessError(
@@ -180,6 +189,30 @@ class PhaseTwoWorkflow:
                 f"Run is not waiting on a design checkpoint: {run_id}",
                 run_id=run_id,
             )
+        if recoverable_plan_step_review:
+            self._supersede_pending_plan_step_review(run_id=run_id)
+        if recoverable_plan_checkpoint:
+            self._supersede_pending_plan_step_review(
+                run_id=run_id,
+                include_approved=True,
+            )
+            latest_artifacts = _string_dict(state.get("latest_artifacts"))
+            for key in (
+                "implementation_plan",
+                "implementation_plan_structured",
+                "implementation_plan_review",
+            ):
+                latest_artifacts.pop(key, None)
+            quality_reports = _dict_value(state.get("quality_reports"))
+            quality_reports.pop("implementation_plan_review", None)
+            state.update(
+                {
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                }
+            )
+            self.store.write_state(state)
         approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
         versions = _design_versions(state)
         existing_graph = self._latest_vertical_graph(state, run_id=run_id, required=False)
@@ -215,6 +248,49 @@ class PhaseTwoWorkflow:
             session_ordinal=session_ordinal,
             initial_repair_feedback=initial_repair_feedback,
         )
+
+    def _supersede_pending_plan_step_review(
+        self,
+        *,
+        run_id: str,
+        include_approved: bool = False,
+    ) -> None:
+        """Preserve audit while invalidating a plan response built from stale Design."""
+
+        root = self.store.run_dir(run_id) / "implementation_plan_execution"
+        session_path = root / "step_review_session_v1.json"
+        if not session_path.exists():
+            return
+        try:
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError(
+                "implementation_plan_step_review_corrupted",
+                "Cannot supersede the pending Phase 3 review because its session is unreadable.",
+                run_id=run_id,
+            ) from exc
+        if not isinstance(session, dict):
+            raise HarnessError(
+                "implementation_plan_step_review_corrupted",
+                "Cannot supersede the pending Phase 3 review because its session is invalid.",
+                run_id=run_id,
+            )
+        calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
+        changed = False
+        for call in calls:
+            superseded_statuses = {"pending", "approved"} if include_approved else {"pending"}
+            if str(call.get("status") or "") not in superseded_statuses:
+                continue
+            call["status"] = "superseded"
+            call["superseded_at"] = utc_now_iso()
+            call["superseded_reason"] = "upstream_design_revalidation"
+            exchange_path = root / f"exchange_{str(call.get('call_id') or '')}.json"
+            _write_json_atomic(exchange_path, call)
+            changed = True
+        if changed:
+            session["calls"] = calls
+            session["updated_at"] = utc_now_iso()
+            _write_json_atomic(session_path, session)
 
     def continue_design(self, *, run_id: str) -> dict[str, object]:
         """Resume đúng persisted L3 Designer session sau transport/environment pause."""
@@ -506,18 +582,59 @@ class PhaseTwoWorkflow:
                     mode="vertical_trace_preflight_v1" if enforced_trace_blockers else "design_bundle_preflight_v1",
                 )
             else:
-                validation = self.design_validator.review(
-                    requirement_packet=approved.requirement_packet,
-                    design_artifact=str(projections["design_markdown"]),
-                    class_graph=projections["class_graph"],
-                    sequence_graph=projections["sequence_graph"],
-                    traceability=traceability,
-                    canonical_requirement=approved.canonical_model,
-                    vertical_trace=bounded_trace_view(trace_graph) if trace_graph is not None else None,
-                    vertical_design_graph=graph,
-                    repair_iterations=repair_iteration,
-                    validation_trials=self.settings.design_validation_trials,
-                )
+                validator = self.design_validator
+                if bool(self.designer_step_review.get("enabled")):
+                    validator = DesignValidator(
+                        ReviewableLlmClient(
+                            self.llm,
+                            store=self.store,
+                            run_id=run_id,
+                            review=self.designer_step_review,
+                            call_prefix="design-validator",
+                            execution_dir=f"design_validator_execution/design_v{version}",
+                            error_prefix="design_validator",
+                            label="Design Validator",
+                        )
+                    )
+                try:
+                    validation = validator.review(
+                        requirement_packet=approved.requirement_packet,
+                        design_artifact=str(projections["design_markdown"]),
+                        class_graph=projections["class_graph"],
+                        sequence_graph=projections["sequence_graph"],
+                        traceability=traceability,
+                        canonical_requirement=approved.canonical_model,
+                        vertical_trace=bounded_trace_view(trace_graph) if trace_graph is not None else None,
+                        vertical_design_graph=graph,
+                        repair_iterations=repair_iteration,
+                        validation_trials=self.settings.design_validation_trials,
+                    )
+                except LlmStepReviewRequired as exc:
+                    state = self.store.read_state(run_id)
+                    state.update(
+                        {
+                            "updated_at": utc_now_iso(),
+                            "current_phase": "design_validating",
+                            "status": "design_paused",
+                            "pending_checkpoint": None,
+                            "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                            "last_error": exc.to_response(),
+                            "designer_execution": {
+                                "contract_version": design_contract_version,
+                                "status": "validator_review_required",
+                                "session_ordinal": ordinal,
+                                "design_version": version,
+                                **execution.progress,
+                                "repair_iteration": repair_iteration,
+                                "validator_step_review": exc.progress,
+                            },
+                            "summary_for_user": (
+                                f"Design Validator call {exc.progress['call_id']} requires operator review."
+                            ),
+                        }
+                    )
+                    self.store.write_state(state)
+                    return self._status_response(state, created_new_run=False)
             validation_payload = validation.to_dict()
             validation_payload["version"] = "design_validation_report_v4_vertical_graph"
             validation_payload["mode"] = design_contract_version
@@ -1248,3 +1365,10 @@ def _next_design_version(artifact_dir: Path) -> int:
 def _artifact_ref(path: str) -> str:
     name = path.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
     return name.rsplit(".", 1)[0]
+
+
+def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)

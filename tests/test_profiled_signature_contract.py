@@ -136,6 +136,54 @@ def test_signature_contract_binds_qualified_name_to_mapping_symbol(policies) -> 
     ) == []
 
 
+def test_component_signature_contract_collapses_shared_legacy_methods_to_one_target(
+    policies,
+) -> None:
+    planning, _ = policies
+    mappings = [
+        {
+            **_mapping(),
+            "design_element_id": f"method:HealthService.{name}",
+            "planned_code_target": f"{SOURCE_PATH}#readHealth",
+        }
+        for name in ("submit", "confirm")
+    ]
+    candidate = {
+        "entries": [
+            {
+                "design_element_id": mapping["design_element_id"],
+                "symbol_kind": "function",
+                "owner_kind": "",
+                "qualified_name": "readHealth",
+                "parameters": [],
+                "return_type": "Promise<HealthSnapshot>",
+                "type_parameters": [],
+                "async": True,
+            }
+            for mapping in mappings
+        ]
+    }
+
+    contract = build_implementation_signature_contract(
+        planning_policy=planning,
+        mappings=mappings,
+        class_graph=_class_graph(),
+        candidate=candidate,
+        bind_to_mapped_symbol=True,
+    )
+
+    assert len(contract["entries"]) == 1
+    assert contract["entries"][0]["qualified_name"] == "readHealth"
+    assert not implementation_signature_contract_issues(
+        contract,
+        planning_policy=planning,
+        mappings=mappings,
+        class_graph=_class_graph(),
+        enforce_design_method_arity=False,
+        bind_to_mapped_symbol=True,
+    )
+
+
 def test_component_plan_signature_uses_vertical_contract_shape_not_legacy_arity(
     policies,
 ) -> None:
@@ -232,7 +280,7 @@ def test_component_plan_rejects_placeholder_only_signature_contract(policies) ->
     assert any("placeholder-only" in issue for issue in issues)
 
 
-def test_component_plan_binds_exact_work_unit_symbol_and_rejects_shared_method_binding(
+def test_component_plan_binds_exact_work_unit_symbol_and_allows_shared_trace_binding(
     policies,
 ) -> None:
     planning, _ = policies
@@ -289,7 +337,7 @@ def test_component_plan_binds_exact_work_unit_symbol_and_rejects_shared_method_b
         enforce_design_method_arity=False,
         bind_to_mapped_symbol=True,
     )
-    assert any("share one implementation signature binding" in issue for issue in issues)
+    assert issues == []
 
 
 def _actual_symbol() -> dict[str, object]:

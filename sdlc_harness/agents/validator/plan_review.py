@@ -647,6 +647,9 @@ class ImplementationPlanValidator:
                     expected_inputs=component_plan_inputs or {},
                     planning_policy=planning_policy,
                     verification_stage_ids=list(verification_policy.stage_ids),
+                    design_graph=vertical_design_graph or {},
+                    trace_graph=vertical_trace_graph or {},
+                    repo_landscape=repo_landscape or {},
                 )
                 issues.extend(
                     profiled_plan_contract_issues(

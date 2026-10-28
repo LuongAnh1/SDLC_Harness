@@ -126,6 +126,12 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
     assert first == second
     assert len(first) == 3
     assert len({(item["scenario_id"], item["component_id"]) for item in first}) == 3
+    main_web = next(
+        item
+        for item in first
+        if item["scenario_id"] == "SC-1" and item["component_id"] == "web"
+    )
+    assert main_web["acceptance_refs"] == ["AC-2"]
 
     rules = {item.component_id: item for item in planning.component_rules}
     updates = []
@@ -173,6 +179,12 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
             }
         updates.append(update)
     units = merge_work_unit_updates(units=first, updates=updates, planning_policy=planning)
+    api_unit = next(item for item in units if item["component_id"] == "api")
+    contract_paths = {
+        str(item.get("path") or "") for item in api_unit["planned_code_targets"]
+    }
+    assert "packages/contracts/src/sc1.ts" in contract_paths
+    assert "packages/contracts/src/index.ts" in contract_paths
     requirement_graph = build_requirement_graph_v2(model)
     projections = component_plan_projections(
         units=units,
@@ -258,6 +270,37 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
     )
     assert any("shared contract target" in issue for issue in issues)
 
+    missing_contract_barrel = deepcopy(structured)
+    for unit in missing_contract_barrel["work_units"]:
+        unit["planned_code_targets"] = [
+            target
+            for target in unit["planned_code_targets"]
+            if str(target.get("path") or "") != "packages/contracts/src/index.ts"
+        ]
+    missing_contract_barrel["work_units"] = canonicalize_work_unit_dependencies(
+        missing_contract_barrel["work_units"]
+    )
+    missing_contract_barrel.update(
+        component_plan_projections(
+            units=missing_contract_barrel["work_units"],
+            design_graph=design,
+            requirement_graph=requirement_graph,
+            legacy_mappings=[],
+            planning_policy=planning,
+        )
+    )
+    issues = component_plan_issues(
+        structured_plan=missing_contract_barrel,
+        expected_units=first,
+        expected_inputs=inputs,
+        planning_policy=planning,
+        verification_stage_ids=list(verification.stage_ids),
+    )
+    assert any(
+        "shared contract modules must update `packages/contracts/src/index.ts`" in issue
+        for issue in issues
+    )
+
     tampered = deepcopy(structured)
     tampered["work_units"][0]["component_id"] = "database"
     issues = component_plan_issues(
@@ -299,9 +342,113 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
     assert any("outside work-unit code targets" in issue for issue in issues)
 
 
+def test_branch_units_depend_on_and_follow_primary_main_units() -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "requirement_v2" / "uc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    model = RequirementModelV2.from_dict(payload)
+    planning, _ = _policy()
+    graph = new_vertical_design_graph(
+        run_id=model.run_id,
+        snapshot_binding={
+            "requirement_digest": "sha256:req",
+            "repo_landscape_digest": "sha256:repo",
+            "workspace_ref": "run_workspace_v1",
+            "base_sha": "abc123",
+        },
+    )
+    main_scenario = next(item for item in model.scenario_contract["scenarios"] if item["id"] == "SC-1")
+    branch_scenario = next(item for item in model.scenario_contract["scenarios"] if item["id"] == "SC-2")
+    graph, main_refs = apply_designer_delta(
+        graph,
+        {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": graph["artifact_digest"],
+            "partition": {"use_case_id": model.use_case["id"], "scenario_id": "SC-1", "component_id": "web"},
+            "operations": [
+                {"op": "set_partition_coverage", "coverage": {"ui": "covered"}},
+                {
+                    "op": "add_node",
+                    "node": {
+                        "temp_ref": "tmp:main-ui",
+                        "semantic_key": "SC-1:web:ui",
+                        "name": "Main UI",
+                        "kind": "ui_interaction",
+                        "surface": "ui",
+                        "disposition": "add",
+                        "requirement_refs": main_scenario["surfaces"]["ui"]["requirement_refs"],
+                        "evidence_refs": [],
+                        "evidence_reason": "Main UI is new.",
+                        "contract": "Render the main flow.",
+                    },
+                },
+            ],
+            "completion_claims": [],
+            "unresolved_items": [],
+        },
+        valid_evidence_refs=set(),
+    )
+    graph, _ = apply_designer_delta(
+        graph,
+        {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": graph["artifact_digest"],
+            "partition": {"use_case_id": model.use_case["id"], "scenario_id": "SC-2", "component_id": "web"},
+            "operations": [
+                {"op": "set_partition_coverage", "coverage": {"ui": "covered"}},
+                {
+                    "op": "add_node",
+                    "node": {
+                        "temp_ref": "tmp:branch-ui",
+                        "semantic_key": "SC-2:web:ui",
+                        "name": "Cancel UI",
+                        "kind": "ui_interaction",
+                        "surface": "ui",
+                        "disposition": "add",
+                        "requirement_refs": branch_scenario["surfaces"]["ui"]["requirement_refs"],
+                        "evidence_refs": [],
+                        "evidence_reason": "Cancellation UI is new.",
+                        "contract": "Cancel the main flow.",
+                    },
+                },
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "from": "tmp:branch-ui",
+                        "to": main_refs["tmp:main-ui"],
+                        "kind": "depends_on",
+                        "label": "Cancellation depends on the main delete flow",
+                        "scenario_id": "SC-2",
+                        "branch_group": "",
+                        "guard": "",
+                        "terminal": False,
+                    },
+                },
+            ],
+            "completion_claims": [],
+            "unresolved_items": [],
+        },
+        valid_evidence_refs=set(),
+    )
+    trace = build_vertical_trace_graph(requirement_model=model, design_graph=graph)
+    units = build_component_work_units(
+        design_graph=graph,
+        trace_graph=trace,
+        repo_landscape={"anchors": []},
+        planning_policy=planning,
+    )
+
+    main_unit = next(item for item in units if item["scenario_id"] == "SC-1")
+    branch_unit = next(item for item in units if item["scenario_id"] == "SC-2")
+    assert branch_unit["depends_on"] == [main_unit["unit_id"]]
+    assert main_unit["order"] < branch_unit["order"]
+
+
 def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -> None:
     model, design, _ = _fixture()
-    planning, _ = _policy()
+    planning, verification = _policy()
     ui_node = next(item for item in design["nodes"] if item["surface"] == "ui")
     partition = next(
         item
@@ -325,6 +472,7 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
                     "op": "update_node",
                     "node_id": ui_node["id"],
                     "changes": {
+                        "evidence_refs": ["RLA-app-shell", "RLA-main-entry"],
                         "runtime_binding": {
                             "schema_version": RUNTIME_BINDING_VERSION,
                             "runtime_kind": "ui_component",
@@ -347,7 +495,7 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
             "completion_claims": [],
             "unresolved_items": [],
         },
-        valid_evidence_refs={"RLA-app-shell"},
+        valid_evidence_refs={"RLA-app-shell", "RLA-main-entry"},
     )
     trace = build_vertical_trace_graph(requirement_model=model, design_graph=design)
     units = build_component_work_units(
@@ -360,7 +508,13 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
                     "component_id": "web",
                     "path": "apps/web/src/AppShell.tsx",
                     "symbol": "AppShell",
-                }
+                },
+                {
+                    "anchor_id": "RLA-main-entry",
+                    "component_id": "web",
+                    "path": "apps/web/src/main.tsx",
+                    "symbol": "main",
+                },
             ]
         },
         planning_policy=planning,
@@ -372,6 +526,8 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
     }
     assert ("apps/web/src/CulturalHeritageDeleteScreen.tsx", "CulturalHeritageDeleteScreen") in targets
     assert ("apps/web/src/AppShell.tsx", "AppShell") in targets
+    assert ("apps/web/src/main.tsx", "main") not in targets
+    assert web_unit["repo_evidence_refs"] == ["RLA-app-shell", "RLA-main-entry"]
     assert web_unit["runtime_bindings"][0]["attachment"]["owner_symbol"] == "AppShell"
 
     mappings = component_plan_projections(
@@ -385,6 +541,46 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
     assert ui_mapping["planned_code_target"] == (
         "apps/web/src/CulturalHeritageDeleteScreen.tsx#CulturalHeritageDeleteScreen"
     )
+
+    polluted_units = deepcopy(units)
+    polluted_web = next(item for item in polluted_units if item["component_id"] == "web")
+    polluted_web["planned_code_targets"].append(
+        {"path": "apps/web/src/main.tsx", "symbol": "main", "action": "create_or_update"}
+    )
+    polluted_units = canonicalize_work_unit_dependencies(polluted_units)
+    projections = component_plan_projections(
+        units=polluted_units,
+        design_graph=design,
+        requirement_graph=build_requirement_graph_v2(model),
+        legacy_mappings=[],
+        planning_policy=planning,
+    )
+    issues = component_plan_issues(
+        structured_plan={
+            "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+            "inputs": {},
+            "work_units": polluted_units,
+            **projections,
+        },
+        expected_units=units,
+        expected_inputs={},
+        planning_policy=planning,
+        verification_stage_ids=list(verification.stage_ids),
+        design_graph=design,
+        trace_graph=trace,
+        repo_landscape={
+            "anchors": [
+                {
+                    "anchor_id": "RLA-main-entry",
+                    "component_id": "web",
+                    "path": "apps/web/src/main.tsx",
+                    "symbol": "main",
+                }
+            ]
+        },
+    )
+    assert any("main.tsx#main` outside runtime wiring" in issue for issue in issues)
+    assert any("no connected runtime work-unit path" in issue for issue in issues)
 
 
 def test_legacy_projection_rebinds_to_real_work_unit_targets() -> None:
@@ -496,7 +692,10 @@ def test_legacy_method_keeps_method_symbol_when_target_is_a_typescript_class() -
         planning_policy=planning,
     )
 
-    assert mappings[0]["planned_code_target"] == "apps/api/src/CulturalHeritage.ts#execute"
+    assert (
+        mappings[0]["planned_code_target"]
+        == "apps/api/src/CulturalHeritage.ts#CulturalHeritage.execute"
+    )
 
 
 def test_legacy_methods_bind_to_their_matching_concrete_targets() -> None:
@@ -863,9 +1062,12 @@ def test_required_migration_needs_concrete_sql_artifact() -> None:
         expected_inputs={},
         planning_policy=planning,
         verification_stage_ids=list(verification.stage_ids),
+        design_graph=design,
+        trace_graph=trace,
     )
 
     assert any("no concrete Prisma migration SQL target" in issue for issue in issues)
+    assert not any("schema.prisma#Heritage` outside runtime wiring" in issue for issue in issues)
 
 
 def test_markdown_verification_plan_renders_exact_targets() -> None:

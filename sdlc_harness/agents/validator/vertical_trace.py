@@ -112,12 +112,21 @@ def build_vertical_trace_graph(
     ]
     claim_records = _requirement_claims(requirement_payload)
     claim_ids = {str(item["id"]) for item in claim_records}
+    acceptance_verifies = {
+        str(item["id"]): set(_strings(item.get("requirement_refs")))
+        for item in claim_records
+        if str(item.get("kind") or "") == "acceptance_criterion"
+    }
     for claim in claim_records:
         nodes.append(claim)
 
     edges: list[dict[str, object]] = []
     scenarios = _dicts(_dict(requirement_payload.get("scenario_contract")).get("scenarios"))
     scenario_ids = {str(item.get("id") or "") for item in scenarios}
+    scenario_acceptance = {
+        str(item.get("id") or ""): _strings(item.get("acceptance_refs"))
+        for item in scenarios
+    }
     for scenario in scenarios:
         scenario_id = str(scenario.get("id") or "")
         nodes.append(
@@ -184,7 +193,15 @@ def build_vertical_trace_graph(
         surface = str(item.get("surface") or "")
         if scenario_id in scenario_ids and surface in REQUIREMENT_SURFACES:
             edges.append(_edge(_surface_id(scenario_id, surface), str(item.get("id") or ""), "realizes", scenario_id=scenario_id, component_id=str(item.get("component_id") or "")))
-        for ref in _strings(item.get("requirement_refs")):
+        node_requirement_refs = _strings(item.get("requirement_refs"))
+        realized_refs = list(node_requirement_refs)
+        for acceptance_ref in scenario_acceptance.get(scenario_id, []):
+            if (
+                set(node_requirement_refs) & acceptance_verifies.get(acceptance_ref, set())
+                and acceptance_ref not in realized_refs
+            ):
+                realized_refs.append(acceptance_ref)
+        for ref in realized_refs:
             if ref in claim_ids or ref in scenario_ids:
                 edges.append(_edge(ref, str(item.get("id") or ""), "realizes", scenario_id=scenario_id, component_id=str(item.get("component_id") or "")))
 
@@ -367,6 +384,31 @@ def validate_vertical_trace_coverage(
             linked = any(edge.get("from") == ref and edge.get("kind") == "realizes" for edge in edges)
             if not linked:
                 blockers.append(_finding("acceptance_trace_missing", ref, f"Acceptance criterion {ref} is not realized by a Design element in {scenario_id}.", requirement_ids=[ref]))
+            verifies = set(_strings(_dict(by_id.get(ref)).get("requirement_refs")))
+            if not verifies:
+                continue
+            for design_node in design_nodes:
+                node_id = str(design_node.get("id") or "")
+                if str(design_node.get("scenario_id") or "") != scenario_id:
+                    continue
+                if not verifies.intersection(_strings(design_node.get("requirement_refs"))):
+                    continue
+                bound = any(
+                    edge.get("from") == ref
+                    and edge.get("to") == node_id
+                    and edge.get("kind") == "realizes"
+                    for edge in edges
+                )
+                if not bound:
+                    blockers.append(
+                        _finding(
+                            "acceptance_design_binding_missing",
+                            f"{ref}:{node_id}",
+                            f"Acceptance criterion {ref} verifies behavior owned by Design node {node_id}, but their realization binding is missing.",
+                            requirement_ids=[ref],
+                            design_ids=[node_id],
+                        )
+                    )
 
     design_edges = [edge for edge in edges if by_id.get(str(edge.get("from") or ""), {}).get("layer") == "design" and by_id.get(str(edge.get("to") or ""), {}).get("layer") == "design"]
     allowed_cross_scenario_count = 0
@@ -554,7 +596,11 @@ def _requirement_claims(model: dict[str, object]) -> list[dict[str, object]]:
                     "scenario_id": "",
                     "component_id": "",
                     "surface": "",
-                    "requirement_refs": [],
+                    "requirement_refs": (
+                        _strings(item.get("verifies"))
+                        if claim_type == "acceptance_criterion"
+                        else []
+                    ),
                     "evidence_refs": _strings(item.get("evidence_refs")),
                     "status": str(item.get("status") or ""),
                 }

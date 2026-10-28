@@ -614,28 +614,6 @@ class DeveloperPlanAgent:
             repo_landscape=repo_landscape,
             planning_policy=planning_policy,
         )
-        llm_payload = self._component_plan_llm(
-            run_id=run_id,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-            units=skeleton,
-            vertical_design_graph=vertical_design_graph,
-            vertical_trace_graph=vertical_trace_graph,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            repo_context=repo_context,
-            planning_policy=planning_policy,
-            prompt_directive=prompt_directive,
-            verification_policy=verification_policy,
-            repair_feedback="",
-            previous_review={},
-        )
-        units = merge_work_unit_updates(
-            units=skeleton,
-            updates=llm_payload.get("work_unit_updates"),
-            planning_policy=planning_policy,
-        )
-        units = canonicalize_work_unit_dependencies(units)
         legacy_mappings = _design_mappings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -645,14 +623,36 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         legacy_mappings = rebind_legacy_mappings_to_work_units(
-            units=units,
+            units=skeleton,
             design_graph=vertical_design_graph,
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
-            signature_entries=_dict_items(
-                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
-            ),
         )
+        signature_targets = _implementation_signature_targets(
+            mappings=legacy_mappings,
+            class_graph=class_graph,
+        )
+        llm_payload = self._component_plan_llm(
+            run_id=run_id,
+            requirement_packet=requirement_packet,
+            design_artifact=design_artifact,
+            units=skeleton,
+            vertical_design_graph=vertical_design_graph,
+            vertical_trace_graph=vertical_trace_graph,
+            repo_context=repo_context,
+            planning_policy=planning_policy,
+            prompt_directive=prompt_directive,
+            verification_policy=verification_policy,
+            signature_targets=signature_targets,
+            repair_feedback="",
+            previous_review={},
+        )
+        units = merge_work_unit_updates(
+            units=skeleton,
+            updates=llm_payload.get("work_unit_updates"),
+            planning_policy=planning_policy,
+        )
+        units = canonicalize_work_unit_dependencies(units)
         projections = component_plan_projections(
             units=units,
             design_graph=vertical_design_graph,
@@ -672,7 +672,10 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
             mappings=projections["design_mappings"],
             class_graph=class_graph,
-            candidate=llm_payload.get("implementation_signature_contract"),
+            candidate=_bind_target_signature_patch(
+                candidate=llm_payload.get("implementation_signature_contract"),
+                signature_targets=signature_targets,
+            ),
             bind_to_mapped_symbol=True,
         )
         parse_error = str(llm_payload.get("_developer_llm_parse_error") or "").strip()
@@ -783,6 +786,24 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         preserved = canonicalize_work_unit_dependencies(preserved)
+        legacy_mappings = _design_mappings(
+            class_graph=class_graph,
+            sequence_graph=sequence_graph,
+            target_files=target_files,
+            target_repo_path=target_repo_path,
+            requirement_design_trace={},
+            planning_policy=planning_policy,
+        )
+        legacy_mappings = rebind_legacy_mappings_to_work_units(
+            units=preserved,
+            design_graph=vertical_design_graph,
+            legacy_mappings=legacy_mappings,
+            planning_policy=planning_policy,
+        )
+        signature_targets = _implementation_signature_targets(
+            mappings=legacy_mappings,
+            class_graph=class_graph,
+        )
         llm_payload = self._component_plan_llm(
             run_id=run_id,
             requirement_packet=requirement_packet,
@@ -790,12 +811,11 @@ class DeveloperPlanAgent:
             units=preserved,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
             repo_context=repo_context,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            signature_targets=signature_targets,
             repair_feedback=developer_feedback,
             previous_review=_compact_review(review_report),
         )
@@ -813,23 +833,6 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         units = canonicalize_work_unit_dependencies(units)
-        legacy_mappings = _design_mappings(
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            target_files=target_files,
-            target_repo_path=target_repo_path,
-            requirement_design_trace={},
-            planning_policy=planning_policy,
-        )
-        legacy_mappings = rebind_legacy_mappings_to_work_units(
-            units=units,
-            design_graph=vertical_design_graph,
-            legacy_mappings=legacy_mappings,
-            planning_policy=planning_policy,
-            signature_entries=_dict_items(
-                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
-            ),
-        )
         projections = component_plan_projections(
             units=units,
             design_graph=vertical_design_graph,
@@ -850,9 +853,12 @@ class DeveloperPlanAgent:
             mappings=projections["design_mappings"],
             class_graph=class_graph,
             previous=previous.get("implementation_signature_contract"),
-            patch=_signature_patch_for_repair(
-                llm_payload=llm_payload,
-                developer_feedback=developer_feedback,
+            patch=_bind_target_signature_patch(
+                candidate=_signature_patch_for_repair(
+                    llm_payload=llm_payload,
+                    developer_feedback=developer_feedback,
+                ),
+                signature_targets=signature_targets,
             ),
             bind_to_mapped_symbol=True,
         )
@@ -926,12 +932,11 @@ class DeveloperPlanAgent:
         units: list[dict[str, object]],
         vertical_design_graph: dict[str, object],
         vertical_trace_graph: dict[str, object],
-        class_graph: dict[str, object],
-        sequence_graph: dict[str, object],
         repo_context: dict[str, object],
         planning_policy: PlanningPathPolicy,
         prompt_directive: LanguagePromptDirective | None,
         verification_policy: VerificationStagePolicy,
+        signature_targets: list[dict[str, object]],
         repair_feedback: str,
         previous_review: dict[str, object],
     ) -> dict[str, object]:
@@ -944,12 +949,11 @@ class DeveloperPlanAgent:
             units=units,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
             repo_context=repo_context,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
+            signature_targets=signature_targets,
             repair_feedback=repair_feedback,
             previous_review=previous_review,
         )
@@ -974,12 +978,11 @@ def _component_plan_prompt(
     units: list[dict[str, object]],
     vertical_design_graph: dict[str, object],
     vertical_trace_graph: dict[str, object],
-    class_graph: dict[str, object],
-    sequence_graph: dict[str, object],
     repo_context: dict[str, object],
     planning_policy: PlanningPathPolicy,
     prompt_directive: LanguagePromptDirective | None,
     verification_policy: VerificationStagePolicy,
+    signature_targets: list[dict[str, object]],
     repair_feedback: str,
     previous_review: dict[str, object],
 ) -> str:
@@ -1057,10 +1060,8 @@ Return JSON only:
   "implementation_signature_contract": {{
     "entries": [
       {{
-        "design_element_id": "method:Owner.operation",
-        "symbol_kind": "method",
-        "owner_kind": "class|interface|abstract",
-        "qualified_name": "Owner.operation",
+        "target_path": "Harness-owned source path",
+        "target_symbol": "Harness-owned function/component or Owner.method",
         "parameters": [
           {{"name": "value", "type": "string", "optional": false, "rest": false}}
         ],
@@ -1089,26 +1090,26 @@ Rules:
 - When another data unit already owns the same schema migration, mark a read-only
   consumer `not_required` and explain that it uses the approved shared schema.
 - Do not invent Requirement, Design, component, dependency or work-unit IDs.
-- Do not propose a new work unit. Supporting files in an existing repository component
-  may belong to the nearest approved unit: an API-surface unit may own shared contract
-  files, and a web unit may own its API client adapter. Follow repository evidence and
-  include existing barrel exports when a new shared contract requires them.
+- Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
+  wiring, except approved shared-contract files and data schema/migration artifacts.
+- When Web and API cross a boundary and the profile has a contracts component, add an
+  exact `packages/contracts/src/...` target to the nearest API work unit. Include the
+  shared-contract barrel only when repository evidence requires its export.
+- Do not add database, API, or Web barrel/index targets unless that exact path is already
+  present in the work unit's Harness-owned runtime wiring.
 - Do not change dependency or order in prose. Harness serializes units that share code,
   test, contract, schema, or migration artifacts.
 - For a repair, return only affected unit updates.
-- Include one exact signature entry for every approved method in the legacy Class graph.
-- The legacy Class graph supplies trace identity only. Derive callable parameter and
-  return types from Vertical Design contracts, Requirement behavior, repository types,
-  and the selected code target. Do not copy placeholder `(): void` signatures when the
-  operation must accept input, return data/status, or render UI.
-- Planned target symbols are exact code bindings: use `Owner.method` for a TypeScript
-  class/interface method and a simple symbol for an exported function/component.
-- Use that exact work-unit target symbol in qualified_name; the Harness binds the final
-  qualified symbol and rejects two approved methods sharing one binding.
-- Every signature qualified_name must also appear as a symbol in the owning work unit's
-  planned_code_targets. To repair a collision, add the distinct symbols to the work unit;
-  changing only the signature entry is ignored by the Harness.
-- Never emit source_path or contract_id in signature entries; the Harness binds them.
+- Emit exactly one signature entry for every Harness-owned signature target below.
+- Copy `target_path` and `target_symbol` exactly. Harness owns Design-to-code binding;
+  never derive a class/method owner from the legacy Class graph and never invent a target.
+- Multiple legacy Design operations may trace to one function/component target. Describe
+  the callable signature of that real target once, not one fake method per Design operation.
+- Derive parameters and return type from Vertical Design contracts, Requirement behavior,
+  repository types, and the target's actual TypeScript role. A React function component
+  returns a renderable value; an exported function uses its simple target symbol.
+- Never emit design_element_id, symbol_kind, owner_kind, qualified_name, source_path or
+  contract_id. Harness binds those identity fields deterministically.
 
 Run id: {run_id}
 Planning policy:
@@ -1117,17 +1118,24 @@ Verification policy:
 {json.dumps(verification_policy.prompt_context(), ensure_ascii=False, indent=2)}
 Language directive:
 {json.dumps(language, ensure_ascii=False, indent=2)}
+Harness-owned signature targets:
+{json.dumps(
+    [
+        {
+            "target_path": item.get("target_path"),
+            "target_symbol": item.get("target_symbol"),
+        }
+        for item in signature_targets
+    ],
+    ensure_ascii=False,
+    indent=2,
+)}
 Harness-owned work units:
 {json.dumps(units, ensure_ascii=False, indent=2)}
 Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:
 {json.dumps(trace_slice, ensure_ascii=False, separators=(",", ":"))}
-Legacy Class graph (signature contract only):
-{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))}
-
-Legacy Sequence graph (signature contract only):
-{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))}
 
 Repository context:
 {json.dumps(_repo_context_summary(repo_context), ensure_ascii=False, indent=2)}
@@ -1501,6 +1509,86 @@ def _merge_implementation_signature_contract(
         candidate={"entries": list(merged_entries.values())},
         bind_to_mapped_symbol=bind_to_mapped_symbol,
     )
+
+
+def _implementation_signature_targets(
+    *,
+    mappings: list[dict[str, object]],
+    class_graph: dict[str, object],
+) -> list[dict[str, object]]:
+    """Expose real callable targets while keeping legacy Design IDs Harness-owned."""
+
+    owner_kinds = {
+        str(item.get("className") or item.get("id") or "").strip():
+        str(item.get("type") or "class").strip().lower()
+        for item in _dict_items(class_graph.get("nodes"))
+        if str(item.get("className") or item.get("id") or "").strip()
+    }
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for mapping in mappings:
+        if str(mapping.get("design_element_type") or "") != "method":
+            continue
+        target = str(mapping.get("planned_code_target") or "").strip().replace("\\", "/")
+        path, separator, symbol = target.partition("#")
+        design_id = str(mapping.get("design_element_id") or "").strip()
+        if separator and path and symbol and design_id:
+            grouped.setdefault((path, symbol), []).append(design_id)
+
+    targets: list[dict[str, object]] = []
+    for (path, symbol), design_ids in sorted(grouped.items()):
+        representative = sorted(set(design_ids))[0]
+        design_owner = representative.removeprefix("method:").rsplit(".", 1)[0]
+        target_owner = symbol.rsplit(".", 1)[0] if "." in symbol else ""
+        owner_kind = owner_kinds.get(target_owner) or owner_kinds.get(design_owner) or "class"
+        targets.append(
+            {
+                "target_path": path,
+                "target_symbol": symbol,
+                "symbol_kind": "method" if "." in symbol else "function",
+                "owner_kind": owner_kind if "." in symbol else "",
+                "design_element_ids": sorted(set(design_ids)),
+            }
+        )
+    return targets
+
+
+def _bind_target_signature_patch(
+    *,
+    candidate: object,
+    signature_targets: list[dict[str, object]],
+) -> dict[str, object]:
+    """Bind LLM-proposed shapes to the immutable target catalogue."""
+
+    requested = {
+        (
+            str(item.get("target_path") or "").strip().replace("\\", "/"),
+            str(item.get("target_symbol") or "").strip(),
+        ): item
+        for item in _dict_items(_object_dict(candidate).get("entries"))
+    }
+    entries: list[dict[str, object]] = []
+    for target in signature_targets:
+        key = (
+            str(target.get("target_path") or ""),
+            str(target.get("target_symbol") or ""),
+        )
+        raw = requested.get(key)
+        design_ids = _string_items(target.get("design_element_ids"))
+        if not raw or not design_ids:
+            continue
+        entries.append(
+            {
+                "design_element_id": design_ids[0],
+                "symbol_kind": str(target.get("symbol_kind") or "function"),
+                "owner_kind": str(target.get("owner_kind") or ""),
+                "qualified_name": key[1],
+                "parameters": raw.get("parameters"),
+                "return_type": raw.get("return_type"),
+                "type_parameters": raw.get("type_parameters"),
+                "async": raw.get("async") is True,
+            }
+        )
+    return {"entries": entries}
 
 
 def _signature_patch_for_repair(

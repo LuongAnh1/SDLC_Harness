@@ -49,9 +49,13 @@ def build_implementation_signature_contract(
         if entry:
             entries.append(entry)
 
-    unique: dict[str, dict[str, object]] = {}
+    unique: dict[object, dict[str, object]] = {}
     for entry in entries:
-        key = str(entry["contract_id"])
+        key = (
+            (str(entry["source_path"]), str(entry["qualified_name"]))
+            if bind_to_mapped_symbol
+            else str(entry["contract_id"])
+        )
         unique[key] = entry
     contract = {
         "version": IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
@@ -103,6 +107,7 @@ def implementation_signature_contract_issues(
         and item.get("implementation_status") != "waived_by_design_adjustment"
     }
     covered_methods: set[str] = set()
+    covered_bindings: set[tuple[str, str]] = set()
     seen_ids: set[str] = set()
     seen_method_bindings: dict[tuple[str, str], str] = {}
     for index, raw in enumerate(raw_entries):
@@ -134,27 +139,42 @@ def implementation_signature_contract_issues(
                 str(raw.get("source_path") or ""),
                 str(raw.get("qualified_name") or ""),
             )
-            previous_design_id = seen_method_bindings.get(binding)
-            if previous_design_id and previous_design_id != design_id:
-                issues.append(
-                    "Approved methods share one implementation signature binding: "
-                    f"{previous_design_id}, {design_id} -> {binding[0]}#{binding[1]}"
-                )
-            else:
-                seen_method_bindings[binding] = design_id
+            covered_bindings.add(binding)
+            if not bind_to_mapped_symbol:
+                previous_design_id = seen_method_bindings.get(binding)
+                if previous_design_id and previous_design_id != design_id:
+                    issues.append(
+                        "Approved methods share one implementation signature binding: "
+                        f"{previous_design_id}, {design_id} -> {binding[0]}#{binding[1]}"
+                    )
+                else:
+                    seen_method_bindings[binding] = design_id
         if enforce_design_method_arity and class_graph is not None and design_id.startswith("method:"):
             if not _matches_design_method(raw, class_graph=class_graph):
                 issues.append(
                     f"{label} does not match the approved method identity/arity: {design_id}"
                 )
 
-    required_methods = {
-        design_id
-        for design_id, mapping in mapping_by_id.items()
-        if str(mapping.get("design_element_type") or "") == "method"
-    }
-    for design_id in sorted(required_methods - covered_methods):
-        issues.append(f"Missing implementation signature contract for approved method: {design_id}")
+    if bind_to_mapped_symbol:
+        required_bindings = {
+            binding
+            for mapping in mapping_by_id.values()
+            if str(mapping.get("design_element_type") or "") == "method"
+            for binding in [_mapping_binding(mapping, planning_policy=planning_policy)]
+            if binding
+        }
+        for path, symbol in sorted(required_bindings - covered_bindings):
+            issues.append(
+                f"Missing implementation signature contract for approved code target: {path}#{symbol}"
+            )
+    else:
+        required_methods = {
+            design_id
+            for design_id, mapping in mapping_by_id.items()
+            if str(mapping.get("design_element_type") or "") == "method"
+        }
+        for design_id in sorted(required_methods - covered_methods):
+            issues.append(f"Missing implementation signature contract for approved method: {design_id}")
     entries = [item for item in raw_entries if isinstance(item, dict)]
     if reject_placeholder_only and len(entries) > 1 and all(
         not _dict_items(item.get("parameters"))
@@ -184,6 +204,17 @@ def normalize_typescript_type(value: object) -> str:
     text = re.sub(r"\s+", " ", str(value or "").strip())
     text = re.sub(r"\s*([<>{}\[\](),|&?:])\s*", r"\1", text)
     return text
+
+
+def _mapping_binding(
+    mapping: dict[str, object],
+    *,
+    planning_policy: PlanningPathPolicy,
+) -> tuple[str, str] | None:
+    target = str(mapping.get("planned_code_target") or "").strip().replace("\\", "/")
+    path, separator, symbol = target.partition("#")
+    path = planning_policy.normalize_mapping_path(path)
+    return (path, symbol) if separator and path and symbol else None
 
 
 def signature_shape(entry: dict[str, object]) -> dict[str, object]:

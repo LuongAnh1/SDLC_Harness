@@ -13,7 +13,7 @@ from ...profiles import (
     PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
 )
-from ..designer.graph import validate_vertical_design_graph
+from ..designer.graph import GRAPH_VERSION_V2, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
 
 
@@ -25,6 +25,7 @@ IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY = "implementation_plan_contract_version"
 _ACTIONABLE_DISPOSITIONS = {"add", "modify"}
 _FORWARD_DEPENDENCY_KINDS = {"calls", "reads", "writes", "depends_on", "realized_by"}
 _REVERSE_DEPENDENCY_KINDS = {"returns"}
+_TYPESCRIPT_SHARED_CONTRACT_BARREL = "packages/contracts/src/index.ts"
 _IMMUTABLE_UNIT_FIELDS = {
     "unit_id",
     "order",
@@ -104,7 +105,6 @@ def build_component_work_units(
         if str(_dict(trace_nodes.get(source)).get("kind") or "") == "acceptance_criterion" and target in nodes:
             acceptance_by_design.setdefault(target, set()).add(source)
 
-    anchors = {str(item.get("anchor_id") or ""): item for item in _dicts(repo_landscape.get("anchors"))}
     units: list[dict[str, object]] = []
     unit_by_node: dict[str, str] = {}
     for (scenario_id, component_id), group_nodes in sorted(grouped.items()):
@@ -138,18 +138,6 @@ def build_component_work_units(
         )
         seeded_targets: list[dict[str, object]] = []
         seen_targets: set[tuple[str, str]] = set()
-        for ref in evidence_refs:
-            anchor = anchors.get(ref)
-            if not anchor or str(anchor.get("component_id") or "") != component_id:
-                continue
-            path = planning_policy.normalize_editable_path(anchor.get("path"))
-            symbol = str(anchor.get("symbol") or "").strip()
-            key = (path, symbol)
-            if path and key not in seen_targets:
-                seen_targets.add(key)
-                seeded_targets.append(
-                    {"path": path, "symbol": symbol, "action": "create_or_update"}
-                )
         runtime_bindings: list[dict[str, object]] = []
         for node in group_nodes:
             binding = _dict(node.get("runtime_binding"))
@@ -221,6 +209,11 @@ def build_component_work_units(
         units.append(unit)
 
     units_by_id = {str(item["unit_id"]): item for item in units}
+    scenario_kinds = {
+        str(item.get("id") or ""): str(item.get("scenario_kind") or "")
+        for item in _dicts(trace_graph.get("nodes"))
+        if str(item.get("kind") or "") == "scenario"
+    }
     for edge in _dicts(design_graph.get("edges")):
         source_node = str(edge.get("from") or "")
         target_node = str(edge.get("to") or "")
@@ -256,8 +249,28 @@ def build_component_work_units(
             refs = units_by_id[dependent]["depends_on"]
             if isinstance(refs, list) and dependency not in refs:
                 refs.append(dependency)
+        source_scenario = str(_dict(nodes.get(source_node)).get("scenario_id") or "")
+        target_scenario = str(_dict(nodes.get(target_node)).get("scenario_id") or "")
+        if (
+            kind == "depends_on"
+            and source_scenario != target_scenario
+            and scenario_kinds.get(source_scenario) in {"alternative", "exception"}
+            and scenario_kinds.get(target_scenario) == "main"
+        ):
+            for branch_unit in units:
+                if str(branch_unit.get("scenario_id") or "") != source_scenario:
+                    continue
+                refs = branch_unit.get("depends_on")
+                branch_unit_id = str(branch_unit.get("unit_id") or "")
+                if (
+                    isinstance(refs, list)
+                    and target_unit
+                    and target_unit != branch_unit_id
+                    and target_unit not in refs
+                ):
+                    refs.append(target_unit)
 
-    ordered_ids = _topological_order(units)
+    ordered_ids = _topological_order(units, scenario_rank=_scenario_rank(trace_graph))
     order_by_id = {unit_id: index for index, unit_id in enumerate(ordered_ids, start=1)}
     for unit in units:
         unit["order"] = order_by_id[str(unit["unit_id"])]
@@ -294,6 +307,19 @@ def merge_work_unit_updates(
             surfaces=_strings(unit.get("surfaces")),
             planning_policy=planning_policy,
         )
+        if (
+            planning_policy.project_profile_id == "typescript_fullstack_v1"
+            and any(
+                planning_policy.component_for_path(str(target.get("path") or "")) == "contracts"
+                for target in targets
+            )
+        ):
+            targets = _canonical_targets(
+                [*targets, {"path": _TYPESCRIPT_SHARED_CONTRACT_BARREL}],
+                component_id=component_id,
+                surfaces=_strings(unit.get("surfaces")),
+                planning_policy=planning_policy,
+            )
         unit["planned_code_targets"] = targets
         unit["test_intents"] = _canonical_test_intents(patch.get("test_intents")) or _dicts(
             unit.get("test_intents")
@@ -476,7 +502,7 @@ def rebind_legacy_mappings_to_work_units(
             and path.endswith(".ts")
             and symbol.lower() == path_stem.lower()
         ):
-            symbol = current_symbol
+            symbol = f"{symbol}.{current_symbol}"
         item["planned_code_target"] = path + (f"#{symbol}" if direct_symbol and symbol else "")
         item["component_id"] = planning_policy.component_for_path(path, mapping_only=True)
         rebound.append(item)
@@ -658,6 +684,9 @@ def component_plan_issues(
     expected_inputs: dict[str, object],
     planning_policy: PlanningPathPolicy,
     verification_stage_ids: list[str],
+    design_graph: dict[str, object] | None = None,
+    trace_graph: dict[str, object] | None = None,
+    repo_landscape: dict[str, object] | None = None,
 ) -> list[str]:
     """Return deterministic V4 contract violations."""
 
@@ -686,6 +715,7 @@ def component_plan_issues(
     if set(actual_by_id) != set(expected_by_id):
         issues.append("Component-aware plan work-unit identity does not match the approved Design graph.")
     allowed_stages = set(verification_stage_ids)
+    strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION_V2
     for unit_id, unit in actual_by_id.items():
         expected = expected_by_id.get(unit_id)
         if expected:
@@ -712,6 +742,47 @@ def component_plan_issues(
                 surfaces=_strings(unit.get("surfaces")),
             ):
                 issues.append(f"Work unit {unit_id} has invalid target path `{path}`.")
+        if strict_runtime_targets and expected:
+            allowed_targets = {
+                (
+                    str(_dict(binding.get("target")).get("path") or ""),
+                    str(_dict(binding.get("target")).get("symbol") or ""),
+                )
+                for binding in _dicts(expected.get("runtime_bindings"))
+            } | {
+                (
+                    str(_dict(binding.get("attachment")).get("owner_path") or ""),
+                    str(_dict(binding.get("attachment")).get("owner_symbol") or ""),
+                )
+                for binding in _dicts(expected.get("runtime_bindings"))
+            }
+            allowed_targets.discard(("", ""))
+            has_boundary_contract = bool(_dicts(expected.get("boundary_contracts")))
+            for target in targets:
+                target_key = (
+                    str(target.get("path") or ""),
+                    str(target.get("symbol") or ""),
+                )
+                is_shared_contract = (
+                    has_boundary_contract
+                    and planning_policy.component_for_path(target_key[0]) == "contracts"
+                )
+                is_data_schema_artifact = "data" in _strings(unit.get("surfaces")) and (
+                    target_key[0] == "packages/db/prisma/schema.prisma"
+                    or (
+                        target_key[0].startswith("packages/db/prisma/migrations/")
+                        and target_key[0].endswith(".sql")
+                    )
+                )
+                if (
+                    target_key not in allowed_targets
+                    and not is_shared_contract
+                    and not is_data_schema_artifact
+                ):
+                    issues.append(
+                        f"Work unit {unit_id} has unapproved support target "
+                        f"`{target_key[0]}#{target_key[1]}` outside runtime wiring."
+                    )
         for binding in _dicts(unit.get("runtime_bindings")):
             target_path = str(_dict(binding.get("target")).get("path") or "")
             owner_path = str(_dict(binding.get("attachment")).get("owner_path") or "")
@@ -820,6 +891,30 @@ def component_plan_issues(
         issues.append(
             "Cross-boundary Web/API work requires an approved shared contract target from the repository profile."
         )
+    contract_paths = {
+        str(target.get("path") or "")
+        for unit in units
+        for target in _dicts(unit.get("planned_code_targets"))
+        if planning_policy.component_for_path(str(target.get("path") or "")) == "contracts"
+    }
+    if (
+        planning_policy.project_profile_id == "typescript_fullstack_v1"
+        and contract_paths - {_TYPESCRIPT_SHARED_CONTRACT_BARREL}
+        and _TYPESCRIPT_SHARED_CONTRACT_BARREL not in contract_paths
+    ):
+        issues.append(
+            "TypeScript full-stack shared contract modules must update "
+            f"`{_TYPESCRIPT_SHARED_CONTRACT_BARREL}`."
+        )
+
+    if strict_runtime_targets:
+        issues.extend(
+            _structural_plan_issues(
+                units=units,
+                design_graph=_dict(design_graph),
+                trace_graph=_dict(trace_graph),
+            )
+        )
 
     step_ids = {str(item.get("unit_id") or "") for item in _dicts(structured_plan.get("implementation_steps"))}
     if step_ids != unit_ids:
@@ -866,19 +961,230 @@ def component_plan_issues(
     return issues
 
 
+def _structural_plan_issues(
+    *,
+    units: list[dict[str, object]],
+    design_graph: dict[str, object],
+    trace_graph: dict[str, object],
+) -> list[str]:
+    issues: list[str] = []
+    units_by_id = {str(item.get("unit_id") or ""): item for item in units}
+    node_unit_counts: dict[str, int] = {}
+    unit_by_node = {
+        node_id: str(unit.get("unit_id") or "")
+        for unit in units
+        for node_id in _strings(unit.get("design_node_ids"))
+    }
+    for unit in units:
+        for node_id in _strings(unit.get("design_node_ids")):
+            node_unit_counts[node_id] = node_unit_counts.get(node_id, 0) + 1
+    design_nodes = {
+        str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))
+    }
+    actionable_nodes = {
+        node_id
+        for node_id, node in design_nodes.items()
+        if str(node.get("disposition") or "") in _ACTIONABLE_DISPOSITIONS
+    }
+    if set(unit_by_node) != actionable_nodes or any(
+        node_unit_counts.get(node_id) != 1 for node_id in actionable_nodes
+    ):
+        issues.append("Work units do not cover every actionable Vertical Design node exactly once.")
+
+    scenario_kinds = {
+        str(item.get("id") or ""): str(item.get("scenario_kind") or "")
+        for item in _dicts(trace_graph.get("nodes"))
+        if str(item.get("kind") or "") == "scenario"
+    }
+    dependencies = {
+        unit_id: set(_strings(unit.get("depends_on")))
+        for unit_id, unit in units_by_id.items()
+    }
+
+    def dependency_closure(unit_id: str) -> set[str]:
+        found: set[str] = set()
+        pending = list(dependencies.get(unit_id, set()))
+        while pending:
+            dependency = pending.pop()
+            if dependency in found:
+                continue
+            found.add(dependency)
+            pending.extend(dependencies.get(dependency, set()) - found)
+        return found
+
+    parent_scenarios: dict[str, set[str]] = {}
+    scenario_edges: dict[str, list[dict[str, object]]] = {}
+    for edge in _dicts(design_graph.get("edges")):
+        source_node = str(edge.get("from") or "")
+        target_node = str(edge.get("to") or "")
+        source = _dict(design_nodes.get(source_node))
+        target = _dict(design_nodes.get(target_node))
+        source_scenario = str(source.get("scenario_id") or "")
+        target_scenario = str(target.get("scenario_id") or "")
+        if source_scenario and source_scenario == target_scenario:
+            scenario_edges.setdefault(source_scenario, []).append(edge)
+        source_unit = unit_by_node.get(source_node, "")
+        target_unit = unit_by_node.get(target_node, "")
+        if source_unit and target_unit and source_unit != target_unit:
+            kind = str(edge.get("kind") or "")
+            dependent = source_unit if kind in _FORWARD_DEPENDENCY_KINDS else target_unit if kind in _REVERSE_DEPENDENCY_KINDS else ""
+            dependency = target_unit if kind in _FORWARD_DEPENDENCY_KINDS else source_unit if kind in _REVERSE_DEPENDENCY_KINDS else ""
+            if dependent and dependency and dependency not in dependency_closure(dependent):
+                issues.append(
+                    f"Work unit {dependent} does not preserve Design dependency on {dependency}."
+                )
+        if (
+            str(edge.get("kind") or "") == "depends_on"
+            and scenario_kinds.get(source_scenario) in {"alternative", "exception"}
+            and scenario_kinds.get(target_scenario) == "main"
+        ):
+            parent_scenarios.setdefault(source_scenario, set()).add(target_scenario)
+        if not edge.get("boundary_contract"):
+            continue
+        edge_id = str(edge.get("id") or "")
+        for endpoint_unit in {source_unit, target_unit} - {""}:
+            covered_edges = {
+                str(item.get("design_edge_id") or "")
+                for item in _dicts(_dict(units_by_id.get(endpoint_unit)).get("boundary_contracts"))
+            }
+            if edge_id not in covered_edges:
+                issues.append(
+                    f"Runtime boundary {edge_id} is not bound to work unit {endpoint_unit}."
+                )
+
+    for unit_id, unit in units_by_id.items():
+        scenario_id = str(unit.get("scenario_id") or "")
+        if scenario_kinds.get(scenario_id) not in {"alternative", "exception"}:
+            continue
+        parents = parent_scenarios.get(scenario_id, set())
+        parent_units = {
+            candidate_id
+            for candidate_id, candidate in units_by_id.items()
+            if str(candidate.get("scenario_id") or "") in parents
+        }
+        if not parents or not dependency_closure(unit_id).intersection(parent_units):
+            issues.append(
+                f"Branch work unit {unit_id} has no dependency path to its parent main scenario."
+            )
+
+    actionable_surfaces = {
+        (str(node.get("scenario_id") or ""), str(node.get("surface") or ""))
+        for node in design_nodes.values()
+        if str(node.get("disposition") or "") in _ACTIONABLE_DISPOSITIONS
+    }
+    planned_surfaces = {
+        (str(unit.get("scenario_id") or ""), surface)
+        for unit in units
+        for surface in _strings(unit.get("surfaces"))
+    }
+    missing_surfaces = sorted(actionable_surfaces - planned_surfaces)
+    if missing_surfaces:
+        issues.append(f"Work units omit actionable scenario surfaces: {missing_surfaces}")
+
+    required_surfaces: dict[str, set[str]] = {}
+    for node in _dicts(trace_graph.get("nodes")):
+        if str(node.get("kind") or "") != "surface_requirement" or str(node.get("status") or "") != "required":
+            continue
+        required_surfaces.setdefault(str(node.get("scenario_id") or ""), set()).add(
+            str(node.get("surface") or "")
+        )
+    for scenario_id, surfaces in required_surfaces.items():
+        scenario_nodes = [
+            node for node in design_nodes.values() if str(node.get("scenario_id") or "") == scenario_id
+        ]
+        if not scenario_nodes:
+            continue
+        starts = [
+            node
+            for node in scenario_nodes
+            if str(_dict(node.get("runtime_binding")).get("runtime_kind") or "")
+            in (
+                {"entrypoint", "ui_component"}
+                if "ui" in surfaces
+                else {"entrypoint", "api_route"}
+                if "api" in surfaces
+                else {"entrypoint", "service", "persistence_adapter", "data_model"}
+            )
+        ]
+        adjacency: dict[str, set[str]] = {}
+        for edge in scenario_edges.get(scenario_id, []):
+            adjacency.setdefault(str(edge.get("from") or ""), set()).add(str(edge.get("to") or ""))
+        reachable = {str(node.get("id") or "") for node in starts}
+        pending = list(reachable)
+        while pending:
+            source = pending.pop()
+            for target in adjacency.get(source, set()):
+                if target not in reachable:
+                    reachable.add(target)
+                    pending.append(target)
+        uncovered = sorted(
+            surface
+            for surface in surfaces
+            if not any(
+                str(node.get("surface") or "") == surface
+                and str(node.get("id") or "") in reachable
+                for node in scenario_nodes
+            )
+        )
+        has_terminal = any(
+            bool(edge.get("terminal")) and str(edge.get("to") or "") in reachable
+            for edge in scenario_edges.get(scenario_id, [])
+        )
+        if not starts or uncovered or (len(surfaces) > 1 and not has_terminal):
+            issues.append(
+                f"Scenario {scenario_id} has no connected runtime work-unit path; "
+                f"uncovered surfaces: {uncovered or ['observable outcome']}."
+            )
+    return issues
+
+
 def _unit_id(*, scenario_id: str, component_id: str, node_ids: list[str]) -> str:
     payload = json.dumps([scenario_id, component_id, node_ids], ensure_ascii=False, separators=(",", ":"))
     return "WU-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12].upper()
 
 
-def _topological_order(units: list[dict[str, object]]) -> list[str]:
+def _scenario_rank(trace_graph: dict[str, object]) -> dict[str, tuple[int, int]]:
+    scenarios = [
+        item
+        for item in _dicts(trace_graph.get("nodes"))
+        if str(item.get("kind") or "") == "scenario"
+    ]
+    primary_main = next(
+        (
+            str(item.get("id") or "")
+            for item in scenarios
+            if str(item.get("scenario_kind") or "") == "main"
+        ),
+        "",
+    )
+    kind_rank = {"main": 1, "alternative": 2, "exception": 3}
+    return {
+        str(item.get("id") or ""): (
+            0
+            if str(item.get("id") or "") == primary_main
+            else kind_rank.get(str(item.get("scenario_kind") or ""), 4),
+            index,
+        )
+        for index, item in enumerate(scenarios)
+        if str(item.get("id") or "")
+    }
+
+
+def _topological_order(
+    units: list[dict[str, object]],
+    *,
+    scenario_rank: dict[str, tuple[int, int]] | None = None,
+) -> list[str]:
     by_id = {str(item.get("unit_id") or ""): item for item in units}
     remaining = {unit_id: set(_strings(item.get("depends_on"))) for unit_id, item in by_id.items()}
+    ranks = scenario_rank or {}
     ordered: list[str] = []
     while remaining:
         ready = sorted(
             (unit_id for unit_id, dependencies in remaining.items() if not dependencies),
             key=lambda unit_id: (
+                *ranks.get(str(by_id[unit_id].get("scenario_id") or ""), (4, 10**9)),
+                int(by_id[unit_id].get("order") or 10**9),
                 str(by_id[unit_id].get("scenario_id") or ""),
                 str(by_id[unit_id].get("component_id") or ""),
                 unit_id,
