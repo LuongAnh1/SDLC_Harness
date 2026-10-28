@@ -260,6 +260,114 @@ def design_bundle_findings(
             )
     if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
         findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
+        findings.extend(
+            _sequence_behavior_findings(
+                nodes=_dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id),
+                edges=_dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id),
+            )
+        )
+    return findings
+
+
+def _sequence_behavior_findings(
+    *,
+    nodes: list[dict[str, object]],
+    edges: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Reject UI scenarios whose ordered behavior cannot form one observable path."""
+
+    findings: list[dict[str, object]] = []
+    ui_nodes_by_scenario: dict[str, list[dict[str, object]]] = {}
+    for node in nodes:
+        if str(node.get("surface") or "") == "ui":
+            ui_nodes_by_scenario.setdefault(str(node.get("scenario_id") or ""), []).append(node)
+
+    for scenario_id, ui_nodes in sorted(ui_nodes_by_scenario.items()):
+        behavior = sorted(
+            (
+                edge
+                for edge in edges
+                if str(edge.get("scenario_id") or "") == scenario_id
+                and str(edge.get("kind") or "") not in {"contains", "depends_on", "realized_by"}
+            ),
+            key=lambda item: int(item.get("order") or 0),
+        )
+        owner = ui_nodes[0]
+        if not behavior:
+            findings.append(
+                _composition_finding(
+                    "sequence_behavior_missing",
+                    scenario_id,
+                    f"Scenario {scenario_id} has a UI surface but no ordered behavior beyond structural dependencies.",
+                    "Add the user action and observable outcome interactions for this scenario; depends_on alone is not behavior.",
+                    node=owner,
+                )
+            )
+            continue
+
+        terminals = [edge for edge in behavior if bool(edge.get("terminal"))]
+        if len(terminals) != 1 or terminals[0] is not behavior[-1]:
+            findings.append(
+                _composition_finding(
+                    "sequence_terminal_invalid",
+                    scenario_id,
+                    f"Scenario {scenario_id} must have exactly one terminal interaction and it must be last.",
+                    "Keep one terminal=true edge on the final observable outcome and clear terminal on earlier interactions.",
+                    node=owner,
+                )
+            )
+
+        for previous, current in zip(behavior, behavior[1:]):
+            if previous.get("branch_group") or current.get("branch_group"):
+                continue
+            if str(previous.get("to") or "") == str(current.get("from") or ""):
+                continue
+            findings.append(
+                _composition_finding(
+                    "sequence_order_disconnected",
+                    scenario_id,
+                    f"Scenario {scenario_id} jumps between unrelated participants at orders "
+                    f"{previous.get('order')} and {current.get('order')}.",
+                    "Reorder or replace the interactions so each message continues from the participant reached by the previous message.",
+                    node=owner,
+                )
+            )
+            break
+
+        confirmation_required = any(
+            "confirm" in " ".join(str(transition.get(key) or "") for key in ("from", "action", "to", "outcome")).casefold()
+            for node in ui_nodes
+            for transition in _dict_items(
+                _dict_value(node.get("surface_contract")).get("transitions") or [],
+                code="vertical_design_graph_invalid",
+                run_id="",
+            )
+        )
+        writes = [edge for edge in behavior if str(edge.get("kind") or "") == "writes"]
+        if confirmation_required and writes:
+            ui_node_ids = {str(node.get("id") or "") for node in ui_nodes}
+            first_write_order = min(int(edge.get("order") or 0) for edge in writes)
+            returned_to_ui = [
+                int(edge.get("order") or 0)
+                for edge in behavior
+                if str(edge.get("to") or "") in ui_node_ids and int(edge.get("order") or 0) < first_write_order
+            ]
+            confirmation_calls = [
+                int(edge.get("order") or 0)
+                for edge in behavior
+                if str(edge.get("from") or "") in ui_node_ids
+                and any(return_order < int(edge.get("order") or 0) < first_write_order for return_order in returned_to_ui)
+            ]
+            if not confirmation_calls:
+                findings.append(
+                    _composition_finding(
+                        "confirmation_interaction_missing",
+                        scenario_id,
+                        f"Scenario {scenario_id} writes data without a separate UI confirmation interaction.",
+                        "Return the verification result to the UI, then add a distinct confirmation call before the first writes edge.",
+                        node=owner,
+                    )
+                )
     return findings
 
 
@@ -441,10 +549,45 @@ def apply_designer_delta(
     operations = _dict_items(delta.get("operations"), code="designer_delta_invalid", run_id=run_id)
     if not operations:
         raise HarnessError("designer_delta_invalid", "Designer delta must contain at least one operation.", run_id=run_id)
+    remove_ops = [item for item in operations if str(item.get("op") or "") == "remove_edge"]
+    add_ops = [item for item in operations if str(item.get("op") or "") == "add_edge"]
+    replacement_order: int | None = None
+    if len(remove_ops) == len(add_ops) == 1:
+        removed = next(
+            (
+                item
+                for item in _dict_items(candidate.get("edges"), code="designer_delta_invalid", run_id=run_id)
+                if str(item.get("id") or "") == str(remove_ops[0].get("edge_id") or "")
+            ),
+            None,
+        )
+        added = _dict_value(add_ops[0].get("edge"))
+        if removed and (
+            str(removed.get("scenario_id") or ""),
+            str(removed.get("from") or ""),
+            str(removed.get("to") or ""),
+            str(removed.get("kind") or ""),
+            str(removed.get("label") or ""),
+            str(removed.get("branch_group") or ""),
+            str(removed.get("guard") or ""),
+        ) == (
+            str(added.get("scenario_id") or partition.get("scenario_id") or ""),
+            str(added.get("from") or ""),
+            str(added.get("to") or ""),
+            str(added.get("kind") or ""),
+            str(added.get("label") or ""),
+            str(added.get("branch_group") or ""),
+            str(added.get("guard") or ""),
+        ):
+            replacement_order = int(removed.get("order") or 0) or None
     for operation in operations:
         op = str(operation.get("op") or "")
         if op not in OPERATIONS:
             raise HarnessError("designer_delta_invalid", f"Unsupported Designer delta operation: {op}", run_id=run_id)
+        if op == "add_edge" and replacement_order is not None:
+            edge = _dict_value(operation.get("edge"))
+            if "order" not in edge:
+                operation = {**operation, "edge": {**edge, "order": replacement_order}}
         _apply_operation(
             candidate,
             operation,
@@ -470,6 +613,8 @@ def apply_designer_delta(
         ),
     )
     candidate["partitions"] = sorted(_dict_items(candidate.get("partitions"), code="designer_delta_invalid", run_id=run_id), key=lambda item: _partition_key(item, run_id=run_id))
+    if str(candidate.get("schema_version") or "") == GRAPH_VERSION_V2:
+        _validate_unique_cross_scenario_parent(candidate, run_id=run_id)
     semantic_candidate = dict(candidate)
     semantic_candidate.pop("artifact_digest", None)
     semantic_candidate.pop("revision", None)
@@ -485,6 +630,38 @@ def apply_designer_delta(
     candidate["artifact_digest"] = graph_digest(candidate)
     validate_vertical_design_graph(candidate, expected_run_id=run_id)
     return candidate, temp_refs
+
+
+def _validate_unique_cross_scenario_parent(graph: dict[str, object], *, run_id: str) -> None:
+    nodes_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
+    }
+    parent_edges: dict[str, list[str]] = {}
+    for edge in _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id):
+        if str(edge.get("kind") or "") != "depends_on":
+            continue
+        source = nodes_by_id.get(str(edge.get("from") or ""), {})
+        target = nodes_by_id.get(str(edge.get("to") or ""), {})
+        scenario_id = str(edge.get("scenario_id") or "")
+        source_scenario = str(source.get("scenario_id") or "")
+        target_scenario = str(target.get("scenario_id") or "")
+        if scenario_id and source_scenario == scenario_id and target_scenario and target_scenario != scenario_id:
+            parent_edges.setdefault(scenario_id, []).append(str(edge.get("id") or "<new edge>"))
+    duplicate = next(
+        ((scenario_id, edge_ids) for scenario_id, edge_ids in sorted(parent_edges.items()) if len(edge_ids) > 1),
+        None,
+    )
+    if duplicate is not None:
+        scenario_id, edge_ids = duplicate
+        raise HarnessError(
+            "designer_delta_invalid",
+            (
+                f"Branch scenario {scenario_id} already has one cross-scenario parent dependency; "
+                f"remove the existing parent before adding another ({', '.join(edge_ids)})."
+            ),
+            run_id=run_id,
+        )
 
 
 def completion_findings(
@@ -683,6 +860,63 @@ def _runtime_composition_findings(
                     )
                 )
 
+    api_operations: dict[tuple[str, str], list[dict[str, object]]] = {}
+    for node in nodes:
+        if (
+            str(node.get("surface") or "") != "api"
+            or str(node.get("disposition") or "") not in {"add", "modify"}
+        ):
+            continue
+        surface_contract = _dict_value(node.get("surface_contract"))
+        method = str(surface_contract.get("method") or "").strip().upper()
+        path = str(surface_contract.get("path") or "").strip()
+        binding = _dict_value(node.get("runtime_binding"))
+        target = _dict_value(binding.get("target"))
+        target_path = str(target.get("path") or "").strip()
+        target_symbol = str(target.get("symbol") or "").strip()
+        if method and path and target_path:
+            api_operations.setdefault((method, path), []).append(node)
+
+    for (method, path), members in sorted(api_operations.items()):
+        ordered = sorted(
+            members,
+            key=lambda item: (
+                str(item.get("scenario_id") or ""),
+                str(item.get("id") or ""),
+            ),
+        )
+        canonical = ordered[0]
+        canonical_target = _dict_value(_dict_value(canonical.get("runtime_binding")).get("target"))
+        canonical_key = (
+            str(canonical_target.get("path") or "").strip(),
+            str(canonical_target.get("symbol") or "").strip(),
+        )
+        for conflict in ordered[1:]:
+            conflict_target = _dict_value(_dict_value(conflict.get("runtime_binding")).get("target"))
+            conflict_key = (
+                str(conflict_target.get("path") or "").strip(),
+                str(conflict_target.get("symbol") or "").strip(),
+            )
+            if conflict_key == canonical_key:
+                continue
+            operation = f"{method} {path}"
+            findings.append(
+                _composition_finding(
+                    "duplicate_runtime_api_operation",
+                    str(conflict.get("id") or operation),
+                    (
+                        f"API operation {operation} is assigned to conflicting runtime targets "
+                        f"{canonical_key[0]}#{canonical_key[1]} and "
+                        f"{conflict_key[0]}#{conflict_key[1]}."
+                    ),
+                    (
+                        "Reuse the approved runtime target for this operation or change the "
+                        "method/path so each registered route is unique."
+                    ),
+                    node=conflict,
+                )
+            )
+
     for edge in edges:
         source = nodes_by_id.get(str(edge.get("from") or ""), {})
         target = nodes_by_id.get(str(edge.get("to") or ""), {})
@@ -692,17 +926,19 @@ def _runtime_composition_findings(
         if crosses_boundary:
             contract = _dict_value(edge.get("boundary_contract"))
             provider = source if str(edge.get("kind") or "") == "returns" else target
-            if not contract or not _boundary_matches_provider(contract, provider):
-                findings.append(
-                    _composition_finding(
-                        "boundary_contract_mismatch",
-                        str(edge.get("id") or ""),
-                        "Cross-component consumer/provider operations do not have a compatible boundary contract.",
-                        "Map the provider operation plus required input, auth, response and error outcomes.",
-                        scenario_id=str(edge.get("scenario_id") or ""),
-                        component_id=str(source.get("component_id") or ""),
-                    )
+            diagnostics = _boundary_contract_diagnostics(contract, provider)
+            if diagnostics["mismatches"]:
+                expected_change = "; ".join(str(item) for item in diagnostics["mismatches"])
+                finding = _composition_finding(
+                    "boundary_contract_mismatch",
+                    str(edge.get("id") or ""),
+                    f"Boundary contract mismatch: {expected_change}.",
+                    expected_change + ".",
+                    scenario_id=str(edge.get("scenario_id") or ""),
+                    component_id=str(source.get("component_id") or ""),
                 )
+                finding["contract_diagnostics"] = diagnostics
+                findings.append(finding)
 
     inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
     for scenario_id, surfaces in sorted(inferred.items()):
@@ -772,30 +1008,63 @@ def _compatible_surface_components(
     }
 
 
-def _boundary_matches_provider(contract: dict[str, object], provider: dict[str, object]) -> bool:
+def _boundary_contract_diagnostics(
+    contract: dict[str, object], provider: dict[str, object]
+) -> dict[str, object]:
     surface = _dict_value(provider.get("surface_contract"))
+    mismatches: list[str] = []
+    if not contract:
+        mismatches.append("add boundary_contract")
     if str(provider.get("surface") or "") != "api":
-        return True
+        return {"provider_surface": str(provider.get("surface") or ""), "mismatches": mismatches}
     expected = f"{str(surface.get('method') or '').upper()} {str(surface.get('path') or '')}".strip()
-    if expected and str(contract.get("provider_operation") or "").strip().upper() != expected.upper():
-        return False
+    actual = str(contract.get("provider_operation") or "").strip()
+    if expected and actual.upper() != expected.upper():
+        mismatches.append(f"set provider_operation to {expected}")
     fields = _dict_items(surface.get("request_fields", []), code="vertical_design_graph_invalid", run_id="")
     input_mappings = _dict_items(contract.get("input_mapping", []), code="vertical_design_graph_invalid", run_id="")
     mapped_targets = {str(item.get("to") or "") for item in input_mappings if bool(item.get("required"))}
-    if any(str(item.get("name") or "") not in mapped_targets for item in fields):
-        return False
+    required_targets = [str(item.get("name") or "") for item in fields if str(item.get("name") or "")]
+    missing_targets = [name for name in required_targets if name not in mapped_targets]
+    if missing_targets:
+        mismatches.append(f"map required input targets {missing_targets}")
     authorization = str(surface.get("authorization") or "").strip().casefold()
-    if authorization and authorization not in {"none", "not required", "public"} and not _dict_items(
+    auth_required = bool(authorization and authorization not in {"none", "not required", "public"})
+    auth_missing = auth_required and not _dict_items(
         contract.get("auth_mapping", []), code="vertical_design_graph_invalid", run_id=""
-    ):
-        return False
+    )
+    if auth_missing:
+        mismatches.append(f"add auth_mapping for {str(surface.get('authorization') or '').strip()}")
     responses = _dict_items(surface.get("responses", []), code="vertical_design_graph_invalid", run_id="")
-    has_error = any(str(item.get("status") or "").startswith(("4", "5")) for item in responses)
-    if not _dict_items(contract.get("response_mapping", []), code="vertical_design_graph_invalid", run_id=""):
-        return False
-    if has_error and not _dict_items(contract.get("error_mapping", []), code="vertical_design_graph_invalid", run_id=""):
-        return False
-    return True
+    error_statuses = [
+        str(item.get("status") or "")
+        for item in responses
+        if str(item.get("status") or "").startswith(("4", "5"))
+    ]
+    response_missing = not _dict_items(
+        contract.get("response_mapping", []), code="vertical_design_graph_invalid", run_id=""
+    )
+    error_missing = bool(error_statuses) and not _dict_items(
+        contract.get("error_mapping", []), code="vertical_design_graph_invalid", run_id=""
+    )
+    if response_missing:
+        mismatches.append("add response_mapping")
+    if error_missing:
+        mismatches.append(f"add error_mapping for statuses {error_statuses}")
+    return {
+        "provider_surface": "api",
+        "expected_provider_operation": expected,
+        "actual_provider_operation": actual,
+        "required_input_targets": required_targets,
+        "mapped_input_targets": sorted(mapped_targets),
+        "missing_input_targets": missing_targets,
+        "authorization_required": auth_required,
+        "auth_mapping_missing": auth_missing,
+        "error_response_statuses": error_statuses,
+        "response_mapping_missing": response_missing,
+        "error_mapping_missing": error_missing,
+        "mismatches": mismatches,
+    }
 
 
 def _required_surfaces_from_partitions(partitions: list[dict[str, object]]) -> dict[str, set[str]]:

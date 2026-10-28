@@ -71,10 +71,16 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
 class PhaseTwoWorkflow:
     """Coordinate Designer and hybrid Design Validator before human review."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        designer_step_review: dict[str, object] | None = None,
+    ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_discovery = RepoDiscoveryWorkflow(settings)
+        self.designer_step_review = dict(designer_step_review or {})
         self._reset_design_runtime()
 
     def _reset_design_runtime(self) -> None:
@@ -87,6 +93,7 @@ class PhaseTwoWorkflow:
             settings=self.settings,
             store=self.store,
             llm_client=self.llm,
+            step_review=self.designer_step_review,
         )
 
     def approve_checkpoint(self, *, run_id: str, checkpoint_id: str | None = None) -> dict[str, object]:
@@ -291,6 +298,12 @@ class PhaseTwoWorkflow:
         merged_artifacts = dict(artifact_paths)
         prior_digest = str((existing_graph or {}).get("artifact_digest") or "")
         repair_feedback = list(initial_repair_feedback or [])
+        prior_blocker_keys = frozenset(
+            str(item.get("canonical_key") or "")
+            for item in repair_feedback
+            if str(item.get("canonical_key") or "")
+        )
+        repair_stalled = False
         validation: DesignValidationResult | None = None
         trace_validation = None
         design_paths: dict[str, str] = {}
@@ -658,16 +671,24 @@ class PhaseTwoWorkflow:
             if validation.ok:
                 break
             current_digest = str(graph.get("artifact_digest") or "")
-            if repair_iteration >= self.settings.design_repair_limit or (prior_digest and current_digest == prior_digest):
+            current_blocker_keys = frozenset(item.canonical_key for item in validation.blocking_findings)
+            repair_stalled = _design_repair_stalled(
+                prior_digest=prior_digest,
+                current_digest=current_digest,
+                prior_blocker_keys=prior_blocker_keys,
+                current_blocker_keys=current_blocker_keys,
+            )
+            if repair_iteration >= self.settings.design_repair_limit or repair_stalled:
                 break
             prior_digest = current_digest
+            prior_blocker_keys = current_blocker_keys
             repair_feedback = [item.to_dict() for item in validation.blocking_findings]
 
         if validation is None or graph is None:
             raise HarnessError("designer_failed", "L3 Designer did not produce a validated graph.", run_id=run_id)
         if not validation.ok:
             error = HarnessError(
-                "design_repair_stalled" if prior_digest == str(graph.get("artifact_digest") or "") else "design_repair_exhausted",
+                "design_repair_stalled" if repair_stalled else "design_repair_exhausted",
                 f"Vertical Design graph still has {len(validation.blocking_findings)} blocker(s).",
                 run_id=run_id,
             )
@@ -1169,6 +1190,19 @@ def _runtime_design_summary(
 
 def _dict_items(value: object) -> list[dict[str, object]]:
     return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _design_repair_stalled(
+    *,
+    prior_digest: str,
+    current_digest: str,
+    prior_blocker_keys: frozenset[str],
+    current_blocker_keys: frozenset[str],
+) -> bool:
+    return bool(
+        (prior_digest and current_digest == prior_digest)
+        or (prior_blocker_keys and current_blocker_keys == prior_blocker_keys)
+    )
 
 
 def _dict_value(value: object) -> dict[str, object]:

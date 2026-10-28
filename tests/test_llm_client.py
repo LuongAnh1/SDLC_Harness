@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.llm.client import LlmClient
+from sdlc_harness.llm.json_utils import parse_first_json_object
 
 
 class _FakeResponse:
@@ -87,6 +88,29 @@ class LlmClientPayloadTests(unittest.TestCase):
                 )
 
         self.assertNotIn("thinking", captured)
+
+
+class JsonUtilsTests(unittest.TestCase):
+    def test_parse_first_json_object_requires_all_expected_keys(self) -> None:
+        malformed_outer_action = (
+            '{"action":"design.propose_delta","arguments":{"delta":{"operations":'
+            '[{"node":{"surface_contract":{"transitions":'
+            '[{"from":"idle","action":"activate feature","to":"shown"}]}}}}]}}'
+        )
+
+        with self.assertRaises(json.JSONDecodeError):
+            parse_first_json_object(
+                malformed_outer_action,
+                expected_keys={"action", "arguments"},
+            )
+
+    def test_parse_first_json_object_still_accepts_complete_embedded_object(self) -> None:
+        parsed = parse_first_json_object(
+            'result: {"action":"repo.read","arguments":{"path":"apps/web/src/App.tsx"}} done',
+            expected_keys={"action", "arguments"},
+        )
+
+        self.assertEqual(parsed["action"], "repo.read")
 
 
 if __name__ == "__main__":

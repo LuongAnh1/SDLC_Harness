@@ -28,7 +28,7 @@ from sdlc_harness.llm.client import LlmClient
 from sdlc_harness.llm.fake import fake_design_model, fake_refined_requirement
 from sdlc_harness.sync.atlassian import real_sync_design_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
-from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
+from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow, _design_repair_stalled
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from tests._support import GitRepositoryTemplate, RuntimeDirectoryTemplate, populate_typescript_target
 
@@ -294,10 +294,20 @@ class PhaseTwoTest(unittest.TestCase):
             runtime_root=self.runtime_root,
             overrides={"SDLC_DESIGN_REPAIR_LIMIT": "0"},
         )
-
         self.assertEqual(settings.design_repair_limit, 0)
 
+    def test_step_review_decision_survives_design_runtime_reset(self) -> None:
+        review = {
+            "enabled": True,
+            "call_id": "designer-0001",
+            "decision": "approve",
+            "note": "",
+        }
+        workflow = PhaseTwoWorkflow(self.settings, designer_step_review=review)
 
+        workflow._reset_design_runtime()
+
+        self.assertEqual(workflow.designer_tool_loop.step_review, review)
 
     def test_production_flow_blocks_safely_when_tight_budget_cannot_converge(self) -> None:
         settings = load_settings(
@@ -319,6 +329,24 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "design_repair_stalled")
         self.assertIn("revalidate_design", response["allowed_next_actions"])
         self.assertIsNone(response["pending_checkpoint"])
+
+    def test_repair_stalls_when_canonical_blockers_repeat_after_graph_change(self) -> None:
+        self.assertTrue(
+            _design_repair_stalled(
+                prior_digest="sha256:v1",
+                current_digest="sha256:v2",
+                prior_blocker_keys=frozenset({"branch_parent_ambiguous|sc-4"}),
+                current_blocker_keys=frozenset({"branch_parent_ambiguous|sc-4"}),
+            )
+        )
+        self.assertFalse(
+            _design_repair_stalled(
+                prior_digest="sha256:v1",
+                current_digest="sha256:v2",
+                prior_blocker_keys=frozenset({"branch_parent_ambiguous|sc-4"}),
+                current_blocker_keys=frozenset({"terminal_state|sc-4"}),
+            )
+        )
 
 
     def test_designer_fake_mode_creates_analysis_and_design_model(self) -> None:

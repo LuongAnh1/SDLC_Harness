@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from ...core.errors import HarnessError
-from ..designer.graph import SUPPORTED_GRAPH_VERSIONS, validate_vertical_design_graph
+from ..designer.graph import GRAPH_VERSION_V2, SUPPORTED_GRAPH_VERSIONS, validate_vertical_design_graph
 from ..requirements import RequirementModelV2
 from .design_validation import DesignFinding
 
@@ -396,6 +396,73 @@ def validate_vertical_trace_coverage(
                 continue
             blockers.append(_finding("cross_scenario_design_edge", str(edge.get("id") or ""), "Design interaction edge crosses unrelated scenario partitions.", design_ids=[str(source.get("id") or ""), str(target.get("id") or "")]))
 
+    valid_branch_parent_count = 0
+    if str(_dict(graph.get("binding")).get("design_contract_version") or "") == GRAPH_VERSION_V2:
+        branch_scenarios = [
+            item
+            for item in scenarios
+            if str(item.get("scenario_kind") or "") in {"alternative", "exception"}
+        ]
+        for branch in branch_scenarios:
+            branch_id = str(branch.get("id") or "")
+            related = []
+            valid = []
+            for edge in design_edges:
+                if str(edge.get("kind") or "") != "depends_on":
+                    continue
+                source = by_id[str(edge.get("from") or "")]
+                target = by_id[str(edge.get("to") or "")]
+                source_scenario_id = str(source.get("scenario_id") or "")
+                target_scenario_id = str(target.get("scenario_id") or "")
+                endpoint_ids = {source_scenario_id, target_scenario_id}
+                endpoint_kinds = {
+                    str(_dict(by_id.get(source_scenario_id)).get("scenario_kind") or ""),
+                    str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or ""),
+                }
+                if branch_id not in endpoint_ids or "main" not in endpoint_kinds:
+                    continue
+                related.append(edge)
+                if (
+                    source_scenario_id == branch_id
+                    and str(_dict(by_id.get(target_scenario_id)).get("scenario_kind") or "") == "main"
+                    and str(edge.get("scenario_id") or "") == branch_id
+                ):
+                    valid.append(edge)
+            if len(valid) == 1:
+                valid_branch_parent_count += 1
+            elif len(valid) > 1:
+                blockers.append(
+                    _finding(
+                        "branch_parent_ambiguous",
+                        branch_id,
+                        f"Branch scenario {branch_id} has more than one branch-to-main parent dependency.",
+                        requirement_ids=[branch_id],
+                        design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in valid],
+                    )
+                )
+            elif related:
+                blockers.append(
+                    _finding(
+                        "branch_parent_invalid",
+                        branch_id,
+                        (
+                            f"Branch scenario {branch_id} must declare depends_on from a branch node "
+                            "to one main-scenario node with edge.scenario_id set to the branch."
+                        ),
+                        requirement_ids=[branch_id],
+                        design_ids=[str(item.get("source_edge_id") or item.get("id") or "") for item in related],
+                    )
+                )
+            else:
+                blockers.append(
+                    _finding(
+                        "branch_parent_missing",
+                        branch_id,
+                        f"Branch scenario {branch_id} has no branch-to-main depends_on parent edge.",
+                        requirement_ids=[branch_id],
+                    )
+                )
+
     blockers = [
         replace(item, snapshot_fingerprint=str(graph.get("artifact_digest") or ""))
         for item in _dedupe_findings(blockers)
@@ -407,6 +474,7 @@ def validate_vertical_trace_coverage(
         "design_node_count": len(design_nodes),
         "edge_count": len(edges),
         "allowed_cross_scenario_count": allowed_cross_scenario_count,
+        "valid_branch_parent_count": valid_branch_parent_count,
     }
     return VerticalTraceValidationResult(graph=graph, blocking_findings=blockers, coverage=coverage, mode=mode)
 

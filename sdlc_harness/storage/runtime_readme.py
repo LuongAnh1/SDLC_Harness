@@ -196,6 +196,7 @@ không dùng nó làm đầu vào.
 | `designer_execution/design_v<N>/designer_loop_session_v1.json` | L3 Designer executor | Frozen authority, cursor, pending call, budgets và canonical graph đang chạy | Private resume/reconciliation; không mở qua Read API |
 | `designer_execution/design_v<N>/designer_loop_manifest_v1.json` | L3 Designer executor | Input digest, tool policy và workspace binding của session | Input-drift guard; private runtime evidence |
 | `designer_execution/design_v<N>/designer_loop_journal_v1.jsonl` | L3 Designer executor | Sanitized tool result/evidence refs theo call ID | Private audit/idempotency; không phải public artifact |
+| `designer_execution/design_v<N>/designer_exchange_designer-<call>.json` | L3 Designer executor | Prompt thật, raw completion, parsed action, rejection và post-delta findings của từng call | Private forensic evidence cho loop/repair; không mở qua Read API hoặc tool sync |
 | `designer_execution/design_v<N>/designer_delta_designer-<call>.json` | `design.propose_delta` | Delta input, apply result và graph revision đã persist | Reconcile ambiguous mutation khi resume; private runtime evidence |
 | `vertical_design_graph_v<N>.json` | L3 Designer graph engine | Canonical scenario/component graph bind frozen Requirement/landscape/workspace | Design checkpoint, deterministic projections và L4/B1 handoff |
 | `design_component_view_v<N>.json`, `design_surface_view_v<N>.json` | Deterministic projection renderer | Read-only views nhóm canonical node theo component/surface | Human review và public Read API |

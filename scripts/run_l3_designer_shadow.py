@@ -25,6 +25,10 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
 from sdlc_harness.agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
+from sdlc_harness.agents.developer import (
+    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
+)
 from sdlc_harness.agents.requirements import normalize_and_validate_requirement_model_v2
 from sdlc_harness.agents.validator import (
     VERTICAL_TRACE_GRAPH_VERSION,
@@ -52,10 +56,29 @@ def main() -> int:
     parser.add_argument("--approved-requirement")
     parser.add_argument("--source-file")
     parser.add_argument("--revalidate-run-id")
+    parser.add_argument("--review-run-id")
+    parser.add_argument("--step-review", action="store_true")
+    parser.add_argument("--review-call-id")
+    parser.add_argument("--review-decision", choices=("approve", "reject"))
+    parser.add_argument("--review-note", default="")
     parser.add_argument("--design-call-budget", type=int, default=28)
     parser.add_argument("--design-repair-limit", type=int, default=3)
     parser.add_argument("--vertical-trace-mode", choices=("shadow", "enforce"), default="shadow")
     args = parser.parse_args()
+
+    if args.revalidate_run_id and args.review_run_id:
+        raise HarnessError("l3_shadow_args_invalid", "Choose either --revalidate-run-id or --review-run-id.")
+    if args.review_run_id and not args.step_review:
+        raise HarnessError("l3_shadow_args_invalid", "--review-run-id requires --step-review.")
+    if bool(args.review_call_id) != bool(args.review_decision):
+        raise HarnessError(
+            "l3_shadow_args_invalid",
+            "--review-call-id and --review-decision must be supplied together.",
+        )
+    if args.review_decision and not args.review_run_id:
+        raise HarnessError("l3_shadow_args_invalid", "A review decision requires --review-run-id.")
+    if args.review_decision == "reject" and not str(args.review_note).strip():
+        raise HarnessError("l3_shadow_args_invalid", "A rejected call requires --review-note.")
 
     runtime_root = Path(args.runtime_root).resolve()
     target_repo = Path(args.target_repo).resolve()
@@ -95,8 +118,12 @@ def main() -> int:
     )
 
     store = RuntimeStore(repo_root=ROOT, runtime_root=runtime_root)
-    run_id = str(args.revalidate_run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}")
-    if not args.revalidate_run_id:
+    run_id = str(
+        args.review_run_id
+        or args.revalidate_run_id
+        or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
+    )
+    if not args.revalidate_run_id and not args.review_run_id:
         _seed_approved_requirement(
             store=store,
             settings=settings,
@@ -105,13 +132,24 @@ def main() -> int:
             source_file=Path(args.source_file).resolve() if args.source_file else None,
             vertical_trace_mode=args.vertical_trace_mode,
         )
+    elif args.review_run_id and args.step_review:
+        _recover_missed_invalid_step_review(store=store, run_id=run_id)
 
     started = perf_counter()
-    workflow = PhaseTwoWorkflow(settings)
+    workflow = PhaseTwoWorkflow(settings, designer_step_review={
+        "enabled": bool(args.step_review),
+        "call_id": str(args.review_call_id or ""),
+        "decision": str(args.review_decision or ""),
+        "note": str(args.review_note or ""),
+    })
     result = (
-        workflow.revalidate_design(run_id=run_id)
-        if args.revalidate_run_id
-        else workflow.approve_checkpoint(run_id=run_id, checkpoint_id=f"checkpoint_requirement_{run_id}")
+        workflow.continue_design(run_id=run_id)
+        if args.review_run_id
+        else (
+            workflow.revalidate_design(run_id=run_id)
+            if args.revalidate_run_id
+            else workflow.approve_checkpoint(run_id=run_id, checkpoint_id=f"checkpoint_requirement_{run_id}")
+        )
     )
     elapsed = round(perf_counter() - started, 3)
     state = store.read_state(run_id)
@@ -122,12 +160,124 @@ def main() -> int:
         llm_summary=workflow.llm.summary(),
         elapsed_seconds=elapsed,
     )
-    report_path = store.run_dir(run_id) / (
-        "l3_shadow_revalidate_report.json" if args.revalidate_run_id else "l3_shadow_report.json"
+    report_name = (
+        f"l3_shadow_step_{str(args.review_call_id or 'pending')}.json"
+        if args.review_run_id
+        else ("l3_shadow_revalidate_report.json" if args.revalidate_run_id else "l3_shadow_report.json")
     )
+    report_path = store.run_dir(run_id) / report_name
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({**report, "report": store.relative(report_path)}, ensure_ascii=False, indent=2))
     return 0 if result.get("status") == "waiting_design_approval" else 2
+
+
+def _recover_missed_invalid_step_review(*, store: RuntimeStore, run_id: str) -> bool:
+    """Restore the latest auto-retried invalid JSON as a controlled pending review."""
+
+    state = store.read_state(run_id)
+    last_error = state.get("last_error") if isinstance(state.get("last_error"), dict) else {}
+    if (
+        str(state.get("status") or "") != "design_blocked"
+        or str(last_error.get("error_code") or "") != "designer_invalid_action_exhausted"
+    ):
+        return False
+    session_files = sorted(store.run_dir(run_id).glob("designer_execution/*/designer_loop_session_v1.json"))
+    if not session_files:
+        raise HarnessError("l3_shadow_recovery_failed", "Blocked Designer run has no persisted session.", run_id=run_id)
+    session_file = session_files[-1]
+    session = json.loads(session_file.read_text(encoding="utf-8"))
+    if isinstance(session.get("pending_step_review"), dict):
+        return False
+
+    exchange_path: Path | None = None
+    exchange: dict[str, object] = {}
+    for relative in reversed([str(item) for item in session.get("exchange_paths", [])]):
+        candidate = ROOT / relative
+        if not candidate.exists():
+            continue
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+        rejection = payload.get("rejection") if isinstance(payload.get("rejection"), dict) else {}
+        if str(rejection.get("code") or "") == "invalid_json" and not payload.get("operator_review"):
+            exchange_path = candidate
+            exchange = payload
+            break
+    if exchange_path is None:
+        raise HarnessError(
+            "l3_shadow_recovery_failed",
+            "Blocked Designer run has no recoverable invalid-JSON exchange.",
+            run_id=run_id,
+        )
+
+    call_id = str(exchange.get("call_id") or "")
+    try:
+        call_ordinal = int(call_id.rsplit("-", 1)[-1])
+    except ValueError as exc:
+        raise HarnessError("l3_shadow_recovery_failed", "Recoverable exchange has an invalid call id.", run_id=run_id) from exc
+    cursor = session.get("cursor") if isinstance(session.get("cursor"), dict) else {}
+    if int(cursor.get("next_action_index") or 0) != call_ordinal + 1:
+        raise HarnessError(
+            "l3_shadow_recovery_failed",
+            "Latest invalid exchange does not match the persisted Designer cursor.",
+            run_id=run_id,
+        )
+    budgets = session.get("budgets") if isinstance(session.get("budgets"), dict) else {}
+    action_budget = budgets.get("action") if isinstance(budgets.get("action"), dict) else {}
+    invalid_budget = budgets.get("invalid_action") if isinstance(budgets.get("invalid_action"), dict) else {}
+    if int(action_budget.get("used") or 0) < 1 or int(invalid_budget.get("used") or 0) < 1:
+        raise HarnessError("l3_shadow_recovery_failed", "Designer budgets cannot be rolled back safely.", run_id=run_id)
+    observations = session.get("observations") if isinstance(session.get("observations"), list) else []
+    last_observation = observations[-1] if observations and isinstance(observations[-1], dict) else {}
+    if str(last_observation.get("tool_id") or "") != "llm" or str(last_observation.get("status") or "") != "rejected":
+        raise HarnessError(
+            "l3_shadow_recovery_failed",
+            "Latest Designer observation is not the invalid output being recovered.",
+            run_id=run_id,
+        )
+
+    action_budget["used"] = int(action_budget.get("used") or 0) - 1
+    invalid_budget["used"] = int(invalid_budget.get("used") or 0) - 1
+    budgets["action"] = action_budget
+    budgets["invalid_action"] = invalid_budget
+    session["budgets"] = budgets
+    target_key = str(session.get("active_repair_target_id") or "") or "__construction__"
+    by_target = session.get("invalid_actions_by_target") if isinstance(session.get("invalid_actions_by_target"), dict) else {}
+    by_target[target_key] = max(0, int(by_target.get(target_key) or 0) - 1)
+    session["invalid_actions_by_target"] = by_target
+    session["observations"] = observations[:-1]
+    cursor["pending_call"] = None
+    cursor["next_action_index"] = call_ordinal
+    session["cursor"] = cursor
+    session["pending_step_review"] = {
+        "call_id": call_id,
+        "exchange_file": exchange_path.name,
+        "exchange_path": store.relative(exchange_path),
+        "action": {},
+        "parse_error": {"code": "invalid_json", "message": "Designer returned invalid JSON."},
+        "recovered_from_auto_retry": True,
+        "created_at": utc_now_iso(),
+    }
+    session["status"] = "review_required"
+    session["last_error"] = None
+    session["last_invalid_action"] = ""
+    session["updated_at"] = utc_now_iso()
+    session_file.write_text(json.dumps(session, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    exchange["status"] = "review_required"
+    exchange["recovery"] = {"recovered_from_auto_retry": True, "timestamp": utc_now_iso()}
+    exchange_path.write_text(json.dumps(exchange, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    state.update(
+        {
+            "status": "design_paused",
+            "current_phase": "design_investigating",
+            "pending_checkpoint": None,
+            "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+            "last_error": None,
+            "summary_for_user": f"Designer call {call_id} requires operator review.",
+            "updated_at": utc_now_iso(),
+        }
+    )
+    store.write_state(state)
+    return True
 
 
 def _seed_approved_requirement(
@@ -216,6 +366,7 @@ def _seed_approved_requirement(
         "requirement_contract_version": "v2",
         REPO_DISCOVERY_CONTRACT_STATE_KEY: REPO_DISCOVERY_CONTRACT_VERSION,
         DESIGNER_CONTRACT_STATE_KEY: GRAPH_VERSION,
+        IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
         VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
         VERTICAL_TRACE_MODE_STATE_KEY: vertical_trace_mode,
         "profile_snapshot": build_profile_snapshot(
@@ -285,8 +436,20 @@ def _shadow_report(
         if not graph_path.is_absolute():
             graph_path = ROOT / graph_path
         graph = json.loads(graph_path.read_text(encoding="utf-8"))
-    nodes = [item for item in graph.get("nodes", []) if isinstance(item, dict)]
     journals = sorted(store.run_dir(str(state["run_id"])).glob("designer_execution/*/designer_loop_journal_v1.jsonl"))
+    session_files = sorted(
+        store.run_dir(str(state["run_id"])).glob("designer_execution/*/designer_loop_session_v1.json")
+    )
+    latest_session = json.loads(session_files[-1].read_text(encoding="utf-8")) if session_files else {}
+    session_graph = latest_session.get("graph")
+    if isinstance(session_graph, dict):
+        graph = session_graph
+    nodes = [item for item in graph.get("nodes", []) if isinstance(item, dict)]
+    pending_step_review = (
+        latest_session.get("pending_step_review")
+        if isinstance(latest_session.get("pending_step_review"), dict)
+        else None
+    )
     tool_calls = Counter()
     for journal in journals:
         for line in journal.read_text(encoding="utf-8").splitlines():
@@ -316,6 +479,11 @@ def _shadow_report(
         if isinstance(state.get("quality_reports"), dict)
         else {},
         "last_error": state.get("last_error"),
+        "step_review": {
+            "required": pending_step_review is not None,
+            "call_id": str((pending_step_review or {}).get("call_id") or ""),
+            "exchange_path": str((pending_step_review or {}).get("exchange_path") or ""),
+        },
         "published_artifacts": sorted(
             key
             for key in artifacts

@@ -305,6 +305,7 @@ Blocking policy:
 - Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
 - Block a sequence call whose receiver contract is inconsistent with the class design.
 - Block success, cancellation, and failure paths that reach the wrong terminal state.
+- Block a flow that requires human confirmation before persistence when the sequence omits the return-to-human and separate confirmation interaction.
 - Block transaction/rollback ambiguity only when the approved requirement or the design itself explicitly promises atomicity, all-or-nothing behavior, or a single consistency boundary.
 - If transaction behavior is merely an architectural improvement not required by either input, emit a warning.
 - Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.

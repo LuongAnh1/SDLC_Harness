@@ -37,6 +37,7 @@ class VerticalTraceTest(unittest.TestCase):
         skip: tuple[str, str] | None = None,
         unknown_ref: bool = False,
         include_not_applicable: tuple[str, str] | None = None,
+        include_branch_parents: bool = True,
     ) -> dict[str, object]:
         graph = new_vertical_design_graph(
             run_id=self.model.run_id,
@@ -92,6 +93,31 @@ class VerticalTraceTest(unittest.TestCase):
                     },
                     valid_evidence_refs=set(),
                 )
+        if include_branch_parents:
+            main = next(item for item in graph["nodes"] if item["scenario_id"] == "SC-1")
+            scenario_kinds = {
+                str(item.get("id") or ""): str(item.get("kind") or "")
+                for item in self.model.scenario_contract["scenarios"]
+            }
+            for branch_id, scenario_kind in scenario_kinds.items():
+                if scenario_kind not in {"alternative", "exception"}:
+                    continue
+                branch = next(item for item in graph["nodes"] if item["scenario_id"] == branch_id)
+                graph["edges"].append(
+                    {
+                        "id": f"VDE-{branch_id.lower()}-parent",
+                        "from": branch["id"],
+                        "to": main["id"],
+                        "kind": "depends_on",
+                        "label": f"{branch_id} depends on SC-1",
+                        "branch_group": "",
+                        "guard": "",
+                        "terminal": False,
+                        "scenario_id": branch_id,
+                        "order": 1,
+                    }
+                )
+            graph["artifact_digest"] = graph_digest(graph)
         return graph
 
     def test_build_is_deterministic_and_design_gate_passes(self) -> None:
@@ -157,7 +183,7 @@ class VerticalTraceTest(unittest.TestCase):
                 "guard": "",
                 "terminal": False,
                 "scenario_id": "SC-2",
-                "order": 1,
+                "order": 99,
             }
         )
         design["artifact_digest"] = graph_digest(design)
@@ -165,17 +191,45 @@ class VerticalTraceTest(unittest.TestCase):
         categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings}
         self.assertIn("cross_scenario_design_edge", categories)
 
-    def test_main_to_exception_branch_edge_is_allowed(self) -> None:
+    def test_branch_to_main_parent_edges_are_required_and_allowed(self) -> None:
         design = self._design_graph()
-        main = next(item for item in design["nodes"] if item["scenario_id"] == "SC-1")
-        exception = next(item for item in design["nodes"] if item["scenario_id"] == "SC-3")
-        design["edges"].append(
+        graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
+        result = validate_vertical_trace_coverage(graph, mode="enforce")
+
+        self.assertNotIn("cross_scenario_design_edge", {item.category for item in result.blocking_findings})
+        self.assertFalse(
+            {"branch_parent_missing", "branch_parent_invalid", "branch_parent_ambiguous"}
+            & {item.category for item in result.blocking_findings}
+        )
+        expected_branch_count = sum(
+            1
+            for item in self.model.scenario_contract["scenarios"]
+            if item["kind"] in {"alternative", "exception"}
+        )
+        self.assertEqual(result.coverage["valid_branch_parent_count"], expected_branch_count)
+
+    def test_missing_invalid_and_ambiguous_branch_parents_are_blocked(self) -> None:
+        missing_design = self._design_graph(include_branch_parents=False)
+        missing_graph = build_vertical_trace_graph(
+            requirement_model=self.model,
+            design_graph=missing_design,
+        )
+        missing_categories = {
+            item.category
+            for item in validate_vertical_trace_coverage(missing_graph, mode="enforce").blocking_findings
+        }
+        self.assertIn("branch_parent_missing", missing_categories)
+
+        invalid_design = self._design_graph(include_branch_parents=False)
+        main = next(item for item in invalid_design["nodes"] if item["scenario_id"] == "SC-1")
+        exception = next(item for item in invalid_design["nodes"] if item["scenario_id"] == "SC-3")
+        invalid_design["edges"].append(
             {
-                "id": "VDE-main-exception",
+                "id": "VDE-invalid-parent-direction",
                 "from": main["id"],
                 "to": exception["id"],
                 "kind": "depends_on",
-                "label": "invalid input branch",
+                "label": "wrong parent direction",
                 "branch_group": "",
                 "guard": "",
                 "terminal": False,
@@ -183,12 +237,46 @@ class VerticalTraceTest(unittest.TestCase):
                 "order": 1,
             }
         )
-        design["artifact_digest"] = graph_digest(design)
-        graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
-        result = validate_vertical_trace_coverage(graph, mode="enforce")
+        invalid_design["artifact_digest"] = graph_digest(invalid_design)
+        invalid_graph = build_vertical_trace_graph(
+            requirement_model=self.model,
+            design_graph=invalid_design,
+        )
+        invalid_categories = {
+            item.category
+            for item in validate_vertical_trace_coverage(invalid_graph, mode="enforce").blocking_findings
+        }
+        self.assertIn("branch_parent_invalid", invalid_categories)
 
-        self.assertNotIn("cross_scenario_design_edge", {item.category for item in result.blocking_findings})
-        self.assertEqual(result.coverage["allowed_cross_scenario_count"], 1)
+        ambiguous_design = self._design_graph()
+        main = next(item for item in ambiguous_design["nodes"] if item["scenario_id"] == "SC-1")
+        second_exception = [
+            item for item in ambiguous_design["nodes"] if item["scenario_id"] == "SC-3"
+        ][1]
+        ambiguous_design["edges"].append(
+            {
+                "id": "VDE-second-exception-parent",
+                "from": second_exception["id"],
+                "to": main["id"],
+                "kind": "depends_on",
+                "label": "duplicate parent",
+                "branch_group": "",
+                "guard": "",
+                "terminal": False,
+                "scenario_id": "SC-3",
+                "order": 2,
+            }
+        )
+        ambiguous_design["artifact_digest"] = graph_digest(ambiguous_design)
+        ambiguous_graph = build_vertical_trace_graph(
+            requirement_model=self.model,
+            design_graph=ambiguous_design,
+        )
+        ambiguous_categories = {
+            item.category
+            for item in validate_vertical_trace_coverage(ambiguous_graph, mode="enforce").blocking_findings
+        }
+        self.assertIn("branch_parent_ambiguous", ambiguous_categories)
 
     def test_enforce_report_must_match_graph_and_pass(self) -> None:
         graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=self._design_graph())

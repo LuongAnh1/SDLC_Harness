@@ -63,4 +63,4 @@ def parse_first_json_array(raw: str) -> list[Any]:
 def _matches_keys(parsed: dict[str, Any], expected_keys: set[str] | None) -> bool:
     if not expected_keys:
         return True
-    return bool(expected_keys.intersection(parsed.keys()))
+    return expected_keys.issubset(parsed.keys())
