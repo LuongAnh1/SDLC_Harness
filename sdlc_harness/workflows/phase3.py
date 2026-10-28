@@ -21,6 +21,11 @@ from ..agents.developer import (
     DeveloperPlanAgent,
     resolve_implementation_plan_contract,
 )
+from ..agents.designer import (
+    DESIGNER_CONTRACT_STATE_KEY,
+    design_bundle_findings,
+    validate_vertical_design_graph,
+)
 from ..agents.validator import (
     ImplementationPlanValidator,
     VERTICAL_TRACE_GRAPH_VERSION,
@@ -749,9 +754,16 @@ class PhaseThreeWorkflow:
         design_ref = _required_artifact(artifact_paths, "vertical_design_graph", run_id=run_id)
         trace_ref = _required_artifact(artifact_paths, "vertical_trace_graph", run_id=run_id)
         landscape_ref = _required_artifact(artifact_paths, "repo_landscape", run_id=run_id)
-        design_graph = _read_json_artifact(
-            self._existing_artifact_path(design_ref, run_id=run_id), run_id=run_id
+        design_graph = validate_vertical_design_graph(
+            _read_json_artifact(self._existing_artifact_path(design_ref, run_id=run_id), run_id=run_id),
+            expected_run_id=run_id,
         )
+        if str(design_graph.get("schema_version") or "") != str(state.get(DESIGNER_CONTRACT_STATE_KEY) or ""):
+            raise HarnessError(
+                "implementation_plan_contract_invalid",
+                "Vertical Design graph does not match the run-pinned Designer contract.",
+                run_id=run_id,
+            )
         trace_graph = _read_json_artifact(
             self._existing_artifact_path(trace_ref, run_id=run_id), run_id=run_id
         )
@@ -761,6 +773,13 @@ class PhaseThreeWorkflow:
             ),
             expected_run_id=run_id,
         )
+        composition_findings = design_bundle_findings(design_graph, landscape=landscape)
+        if composition_findings:
+            raise HarnessError(
+                "implementation_plan_contract_invalid",
+                f"Vertical Design graph has {len(composition_findings)} unresolved runtime composition blocker(s).",
+                run_id=run_id,
+            )
         profile = _dict_value(state.get("profile_snapshot"))
         inputs = {
             "requirement_contract_version": requirement_contract_version,
@@ -867,6 +886,7 @@ class PhaseThreeWorkflow:
             "design_validation_hybrid_v2",
             "design_validation_progressive_v1",
             "vertical_design_graph_v1",
+            "vertical_design_graph_v2",
         }
         if (
             not bool(design_validation.get("ok"))

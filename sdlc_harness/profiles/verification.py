@@ -25,6 +25,7 @@ PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VER
 COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v4"
 LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
 PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v2"
+UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v3"
 _ACTIVE_STAGE_IDS_BY_PROJECT = {
     # Chặng A chỉ chạy smoke suite. Catalog full-stack trong ProjectProfile vẫn
     # bất biến; Chặng B phải phát hành policy/profile version mới để mở rộng.
@@ -131,6 +132,7 @@ def is_profiled_work_packet_schema(value: object) -> bool:
     """Nhận diện cả packet hiện hành và packet profiled lịch sử."""
 
     return value in {
+        UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
         PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
         LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     }

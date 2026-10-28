@@ -850,7 +850,10 @@ class DeveloperPlanAgent:
             mappings=projections["design_mappings"],
             class_graph=class_graph,
             previous=previous.get("implementation_signature_contract"),
-            patch=llm_payload.get("implementation_signature_contract"),
+            patch=_signature_patch_for_repair(
+                llm_payload=llm_payload,
+                developer_feedback=developer_feedback,
+            ),
             bind_to_mapped_symbol=True,
         )
         history = _dict_items(previous.get("repair_history"))
@@ -1498,6 +1501,16 @@ def _merge_implementation_signature_contract(
         candidate={"entries": list(merged_entries.values())},
         bind_to_mapped_symbol=bind_to_mapped_symbol,
     )
+
+
+def _signature_patch_for_repair(
+    *,
+    llm_payload: dict[str, object],
+    developer_feedback: str,
+) -> object:
+    if "implementation signature" not in developer_feedback.casefold():
+        return {}
+    return llm_payload.get("implementation_signature_contract")
 
 
 def _resolve_verification_policy(

@@ -32,6 +32,11 @@ class ComponentPlanningRule:
     test_suffix: str
     stereotype_aliases: tuple[str, ...]
     class_name_suffixes: tuple[str, ...]
+    additional_suffix_pairs: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def suffix_pairs(self) -> tuple[tuple[str, str], ...]:
+        return ((self.source_suffix, self.test_suffix), *self.additional_suffix_pairs)
 
 
 @dataclass(frozen=True)
@@ -63,6 +68,7 @@ class PlanningPathPolicy:
                     "source_root": rule.source_root,
                     "source_suffix": rule.source_suffix,
                     "test_suffix": rule.test_suffix,
+                    "supported_suffix_pairs": [list(pair) for pair in rule.suffix_pairs],
                 }
                 for rule in self.component_rules
             ],
@@ -200,7 +206,8 @@ class PlanningPathPolicy:
         if component_id == "e2e":
             return path if path.endswith((".spec.ts", ".spec.tsx")) else ""
         rule = self.rule(component_id)
-        suffixes = tuple(sorted((*self.language_test_suffixes, rule.source_suffix), key=len, reverse=True))
+        source_suffixes = tuple(source for source, _ in rule.suffix_pairs)
+        suffixes = tuple(sorted((*self.language_test_suffixes, *source_suffixes), key=len, reverse=True))
         return path if path.endswith(suffixes) else ""
 
     def normalize_mapping_path(self, value: object) -> str:
@@ -211,7 +218,7 @@ class PlanningPathPolicy:
         if component_id == "e2e" or root == "packages/db/prisma":
             return ""
         rule = self.rule(component_id)
-        return path if path.endswith(rule.source_suffix) else ""
+        return path if path.endswith(tuple(source for source, _ in rule.suffix_pairs)) else ""
 
     def component_for_path(self, value: object, *, mapping_only: bool = False) -> str:
         path = self.normalize_mapping_path(value) if mapping_only else self.normalize_editable_path(value)
@@ -233,7 +240,29 @@ class PlanningPathPolicy:
         component_id = self.component_for_path(path, mapping_only=True)
         rule = self.rule(component_id)
         parent = path.rsplit("/", 1)[0]
-        return f"{parent}/{test_stem}{rule.test_suffix}"
+        test_suffix = next(
+            (test for source, test in rule.suffix_pairs if path.endswith(source)),
+            rule.test_suffix,
+        )
+        return f"{parent}/{test_stem}{test_suffix}"
+
+    def source_path_for_test(self, test_path: str) -> str:
+        path = self.normalize_editable_path(test_path)
+        if not path or not self.is_test_path(path):
+            return ""
+        component_id = self.component_for_path(path)
+        if component_id == "e2e":
+            return ""
+        rule = self.rule(component_id)
+        for source_suffix, test_suffix in sorted(
+            rule.suffix_pairs,
+            key=lambda pair: len(pair[1]),
+            reverse=True,
+        ):
+            if path.endswith(test_suffix):
+                candidate = f"{path[:-len(test_suffix)]}{source_suffix}"
+                return candidate if self.normalize_mapping_path(candidate) == candidate else ""
+        return ""
 
     def symbol_owner(self, value: object) -> str:
         path = _canonical_path(value)
@@ -307,6 +336,7 @@ def build_planning_path_policy(
             test_suffix=".test.tsx",
             stereotype_aliases=("frontend", "ui", "presentation", "view", "page", "form"),
             class_name_suffixes=("View", "Page", "Component", "Form"),
+            additional_suffix_pairs=((".ts", ".test.ts"),),
         ),
         ComponentPlanningRule(
             component_id="api",

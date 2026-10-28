@@ -346,9 +346,10 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertIn("delta_sha256", delta_call["arguments"])
         self.assertNotIn("requirement_delta", delta_call["arguments"])
 
-    def test_rejected_delta_is_persisted_and_journal_arguments_are_sanitized(self) -> None:
+    def test_rejected_delta_is_persisted_then_retried_within_action_budget(self) -> None:
         invalid = deepcopy(self.payload)
-        invalid["scenario_contract"]["scenarios"][0]["requirement_refs"].append("AC-1")
+        scenario = invalid["scenario_contract"]["scenarios"][0]
+        scenario["requirement_refs"].append("AC-1")
         rejected_delta = self.delta_action(
             [
                 {
@@ -358,24 +359,43 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
                 }
             ]
         )
+        accepted_delta = self.delta_action(
+            [
+                {
+                    "op": "entity.update",
+                    "target_id": "SC-1",
+                    "fields": {
+                        "requirement_refs": [
+                            ref for ref in scenario["requirement_refs"] if ref != "AC-1"
+                        ]
+                    },
+                }
+            ]
+        )
         client = ScriptedLlmClient(
-            self.source_actions() + [self.as_complete(self.completion(invalid)), rejected_delta]
+            self.source_actions()
+            + [self.as_complete(self.completion(invalid)), rejected_delta, accepted_delta]
         )
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
-            with self.assertRaises(HarnessError) as context:
-                RequirementModelV2Refiner(client, store=store).refine(
-                    self.source,
-                    run_id="run_v2_test",
-                    source_artifact_ref=(
-                        ".runtime/runs/run_v2_test/artifacts/use_case_packet_v1.md"
-                    ),
-                )
-            delta_artifact = json.loads(
+            result = RequirementModelV2Refiner(client, store=store).refine(
+                self.source,
+                run_id="run_v2_test",
+                source_artifact_ref=(
+                    ".runtime/runs/run_v2_test/artifacts/use_case_packet_v1.md"
+                ),
+            )
+            rejected_artifact = json.loads(
                 (
                     root
                     / ".runtime/runs/run_v2_test/artifacts/requirement_delta_v1_a1.json"
+                ).read_text(encoding="utf-8")
+            )
+            applied_artifact = json.loads(
+                (
+                    root
+                    / ".runtime/runs/run_v2_test/artifacts/requirement_delta_v1_a2.json"
                 ).read_text(encoding="utf-8")
             )
             journal = json.loads(
@@ -385,17 +405,21 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
                 ).read_text(encoding="utf-8")
             )
 
-        self.assertEqual(context.exception.error_code, "requirement_delta_policy_violation")
-        self.assertEqual(delta_artifact["status"], "rejected")
+        self.assertTrue(result.final_report.ok)
+        self.assertEqual(rejected_artifact["status"], "rejected")
         self.assertEqual(
-            delta_artifact["error"]["error_code"],
+            rejected_artifact["error"]["error_code"],
             "requirement_delta_policy_violation",
         )
-        self.assertEqual(journal["status"], "failed")
-        delta_call = journal["calls"][-1]
-        self.assertEqual(delta_call["action"], "requirement.propose_delta")
-        self.assertIn("delta_sha256", delta_call["arguments"])
-        self.assertNotIn("requirement_delta", delta_call["arguments"])
+        self.assertEqual(applied_artifact["status"], "applied")
+        self.assertEqual(journal["status"], "completed")
+        rejected_call, accepted_call = journal["calls"][-2:]
+        self.assertEqual(rejected_call["tool_result"]["status"], "rejected")
+        self.assertEqual(accepted_call["tool_result"]["status"], "succeeded")
+        for delta_call in (rejected_call, accepted_call):
+            self.assertEqual(delta_call["action"], "requirement.propose_delta")
+            self.assertIn("delta_sha256", delta_call["arguments"])
+            self.assertNotIn("requirement_delta", delta_call["arguments"])
 
     def test_invalid_root_schema_uses_bounded_validator_repair(self) -> None:
         result, _ = self.refine(self.completion({"use_case": {}}), self.completion(self.payload))

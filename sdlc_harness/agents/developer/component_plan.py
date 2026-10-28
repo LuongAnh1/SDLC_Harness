@@ -36,6 +36,8 @@ _IMMUTABLE_UNIT_FIELDS = {
     "requirement_refs",
     "acceptance_refs",
     "depends_on",
+    "runtime_bindings",
+    "boundary_contracts",
 }
 
 
@@ -128,7 +130,10 @@ def build_component_work_units(
             {
                 ref
                 for node in group_nodes
-                for ref in _strings(node.get("evidence_refs"))
+                for ref in [
+                    *_strings(node.get("evidence_refs")),
+                    *_strings(_dict(node.get("runtime_binding")).get("evidence_refs")),
+                ]
             }
         )
         seeded_targets: list[dict[str, object]] = []
@@ -145,6 +150,39 @@ def build_component_work_units(
                 seeded_targets.append(
                     {"path": path, "symbol": symbol, "action": "create_or_update"}
                 )
+        runtime_bindings: list[dict[str, object]] = []
+        for node in group_nodes:
+            binding = _dict(node.get("runtime_binding"))
+            if not binding:
+                continue
+            target = _dict(binding.get("target"))
+            attachment = _dict(binding.get("attachment"))
+            target_path = planning_policy.normalize_editable_path(target.get("path"))
+            target_symbol = str(target.get("symbol") or "").strip()
+            target_key = (target_path, target_symbol)
+            if target_path and target_key not in seen_targets:
+                seen_targets.add(target_key)
+                seeded_targets.append(
+                    {"path": target_path, "symbol": target_symbol, "action": "create_or_update"}
+                )
+            owner_path = str(attachment.get("owner_path") or "").strip()
+            owner_symbol = str(attachment.get("owner_symbol") or "").strip()
+            if owner_path:
+                normalized_owner = planning_policy.normalize_editable_path(owner_path)
+                owner_key = (normalized_owner, owner_symbol)
+                if normalized_owner and owner_key not in seen_targets:
+                    seen_targets.add(owner_key)
+                    seeded_targets.append(
+                        {"path": normalized_owner, "symbol": owner_symbol, "action": "create_or_update"}
+                    )
+            runtime_bindings.append(
+                {
+                    "design_node_id": str(node.get("id") or ""),
+                    "runtime_kind": str(binding.get("runtime_kind") or ""),
+                    "target": target,
+                    "attachment": attachment,
+                }
+            )
         surfaces = sorted({str(item.get("surface") or "") for item in group_nodes if item.get("surface")})
         unit: dict[str, object] = {
             "unit_id": unit_id,
@@ -162,6 +200,8 @@ def build_component_work_units(
             "planned_code_targets": seeded_targets,
             "test_intents": [],
             "repo_evidence_refs": evidence_refs,
+            "runtime_bindings": runtime_bindings,
+            "boundary_contracts": [],
         }
         if "data" in surfaces:
             intents = sorted(
@@ -191,6 +231,18 @@ def build_component_work_units(
             edge_ids = units_by_id[unit_id]["design_edge_ids"]
             if isinstance(edge_ids, list) and edge_id and edge_id not in edge_ids:
                 edge_ids.append(edge_id)
+            boundary = _dict(edge.get("boundary_contract"))
+            if boundary:
+                contracts = units_by_id[unit_id].get("boundary_contracts")
+                if isinstance(contracts, list):
+                    contracts.append(
+                        {
+                            "design_edge_id": edge_id,
+                            "from": source_node,
+                            "to": target_node,
+                            **boundary,
+                        }
+                    )
         if not source_unit or not target_unit or source_unit == target_unit:
             continue
         kind = str(edge.get("kind") or "")
@@ -211,6 +263,10 @@ def build_component_work_units(
         unit["order"] = order_by_id[str(unit["unit_id"])]
         unit["depends_on"] = sorted(_strings(unit.get("depends_on")))
         unit["design_edge_ids"] = sorted(_strings(unit.get("design_edge_ids")))
+        unit["boundary_contracts"] = sorted(
+            _dicts(unit.get("boundary_contracts")),
+            key=lambda item: str(item.get("design_edge_id") or ""),
+        )
     return sorted(units, key=lambda item: int(item.get("order") or 0))
 
 
@@ -531,12 +587,13 @@ def component_plan_projections(
             entry["work_unit_ids"] = sorted(set(_strings(entry.get("work_unit_ids"))) | {unit_id})
         primary = next((item for item in targets if str(item.get("path") or "")), None)
         if primary:
-            target = str(primary.get("path") or "")
-            symbol = str(primary.get("symbol") or "").strip()
-            if symbol:
-                target += f"#{symbol}"
             for node_id in _strings(unit.get("design_node_ids")):
                 node = _dict(design_nodes.get(node_id))
+                runtime_target = _dict(_dict(node.get("runtime_binding")).get("target"))
+                target = str(runtime_target.get("path") or primary.get("path") or "")
+                symbol = str(runtime_target.get("symbol") or primary.get("symbol") or "").strip()
+                if symbol:
+                    target += f"#{symbol}"
                 vdn_mappings.append(
                     {
                         "design_element_id": node_id,
@@ -655,6 +712,18 @@ def component_plan_issues(
                 surfaces=_strings(unit.get("surfaces")),
             ):
                 issues.append(f"Work unit {unit_id} has invalid target path `{path}`.")
+        for binding in _dicts(unit.get("runtime_bindings")):
+            target_path = str(_dict(binding.get("target")).get("path") or "")
+            owner_path = str(_dict(binding.get("attachment")).get("owner_path") or "")
+            for required_path in {target_path, owner_path} - {""}:
+                if required_path not in target_paths:
+                    issues.append(
+                        f"Work unit {unit_id} omits runtime wiring target `{required_path}`."
+                    )
+        known_edge_ids = set(_strings(unit.get("design_edge_ids")))
+        for boundary in _dicts(unit.get("boundary_contracts")):
+            if str(boundary.get("design_edge_id") or "") not in known_edge_ids:
+                issues.append(f"Work unit {unit_id} has an unbound runtime boundary contract.")
         tests = _dicts(unit.get("test_intents"))
         if not tests:
             issues.append(f"Work unit {unit_id} has no test intent.")
@@ -682,6 +751,29 @@ def component_plan_issues(
                 )
                 if not valid_path or not valid_stage_target:
                     issues.append(f"Work unit {unit_id} has invalid test target path `{path}`.")
+                if stage_id == "unit":
+                    source_path = planning_policy.source_path_for_test(path)
+                    test_component = planning_policy.component_for_path(path)
+                    additional_source_suffixes = (
+                        tuple(
+                            source_suffix
+                            for source_suffix, _ in planning_policy.rule(
+                                test_component
+                            ).additional_suffix_pairs
+                        )
+                        if test_component and test_component != "e2e"
+                        else ()
+                    )
+                    if (
+                        source_path
+                        and additional_source_suffixes
+                        and source_path.endswith(additional_source_suffixes)
+                        and source_path not in target_paths
+                    ):
+                        issues.append(
+                            f"Work unit {unit_id} plans unit test `{path}` without matching "
+                            f"source target `{source_path}`."
+                        )
         if "data" in _strings(unit.get("surfaces")):
             migration = _dict(unit.get("migration_impact"))
             status = str(migration.get("status") or "")

@@ -96,6 +96,14 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
             _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call budget", "integer", 28, "Ngân sách call LLM cho design validation và repo-aware Designer loop.", minimum=1),
             _field(
+                "SDLC_DESIGNER_CONTRACT_VERSION",
+                "Designer contract",
+                "enum",
+                "vertical_design_graph_v1",
+                "Pin V1 mặc định; chỉ bật V2 có chủ đích cho controlled L3.8 run trước cutover.",
+                options=("vertical_design_graph_v1", "vertical_design_graph_v2"),
+            ),
+            _field(
                 "SDLC_VERTICAL_TRACE_MODE",
                 "Vertical trace mode",
                 "enum",

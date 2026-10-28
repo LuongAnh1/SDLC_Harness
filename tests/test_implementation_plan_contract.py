@@ -11,6 +11,7 @@ from sdlc_harness.agents.developer.planner import (
     _design_adjustments,
     _design_mappings,
     _ensure_executable_test_files,
+    _signature_patch_for_repair,
 )
 from sdlc_harness.agents.developer.work_packet import (
     build_developer_work_packet,
@@ -361,6 +362,19 @@ class _RepairLlm:
                 "test_intents": [],
             }
         )
+
+
+def test_semantic_repair_cannot_overwrite_approved_signature_bindings():
+    payload = {"implementation_signature_contract": {"entries": [{"design_element_id": "method:X.run"}]}}
+
+    assert _signature_patch_for_repair(
+        llm_payload=payload,
+        developer_feedback="Add the missing API client adapter target.",
+    ) == {}
+    assert _signature_patch_for_repair(
+        llm_payload=payload,
+        developer_feedback="Approved methods share one implementation signature binding.",
+    ) == payload["implementation_signature_contract"]
 
 
 def test_repair_preserves_candidate_and_moves_review_to_history():

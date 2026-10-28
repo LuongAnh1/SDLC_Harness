@@ -8,13 +8,14 @@ from pathlib import Path
 
 from ..agents.designer import (
     DESIGN_BUNDLE_STATE_KEY,
-    DESIGN_BUNDLE_VERSION,
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION,
+    GRAPH_VERSION_V1,
+    SUPPORTED_GRAPH_VERSIONS,
     DesignerExecutionError,
     DesignerToolLoopExecutor,
     build_deterministic_trace,
     design_bundle_findings,
+    design_bundle_version_for,
     projection_manifest,
     render_design_projections,
     validate_vertical_design_graph,
@@ -160,7 +161,7 @@ class PhaseTwoWorkflow:
             and str(last_error.get("error_code") or "") in DESIGN_ROUTING_ERROR_CODES
         )
         recoverable_vertical_design_block = (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS
             and status == "design_blocked"
             and phase.startswith("design_")
         )
@@ -174,14 +175,23 @@ class PhaseTwoWorkflow:
             )
         approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
         versions = _design_versions(state)
-        existing_graph = self._latest_vertical_graph(state, run_id=run_id)
+        existing_graph = self._latest_vertical_graph(state, run_id=run_id, required=False)
+        if existing_graph is None and recoverable_vertical_design_block:
+            existing_graph = self._blocked_session_graph(state=state, run_id=run_id)
+        if existing_graph is None:
+            raise HarnessError(
+                "vertical_design_graph_missing",
+                "Run has no canonical or recoverable persisted vertical Design graph.",
+                run_id=run_id,
+            )
         start_version = _next_design_version(self.store.run_dir(run_id) / "artifacts")
         prior_execution = _dict_value(state.get("designer_execution"))
         session_ordinal = max(
             start_version,
             int(prior_execution.get("session_ordinal") or 0) + 1,
         )
-        initial_repair_feedback = design_bundle_findings(existing_graph)
+        initial_repair_feedback = self._persisted_design_feedback(state=state, run_id=run_id)
+        initial_repair_feedback.extend(design_bundle_findings(existing_graph))
         initial_repair_feedback.extend(
             _vertical_trace_repair_feedback(
                 state=state,
@@ -205,7 +215,7 @@ class PhaseTwoWorkflow:
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
         if (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") != GRAPH_VERSION
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") not in SUPPORTED_GRAPH_VERSIONS
             or str(state.get("status") or "") != "design_paused"
         ):
             raise HarnessError(
@@ -243,6 +253,14 @@ class PhaseTwoWorkflow:
         """Run the repo-aware Designer loop and publish compatibility projections."""
 
         run_id = str(state.get("run_id") or "")
+        design_contract_version = str(state.get(DESIGNER_CONTRACT_STATE_KEY) or GRAPH_VERSION_V1)
+        if design_contract_version not in SUPPORTED_GRAPH_VERSIONS:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Unsupported pinned Designer contract: {design_contract_version}",
+                run_id=run_id,
+            )
+        design_bundle_version = design_bundle_version_for(design_contract_version)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         landscape = self.repo_discovery.run(
             run_id=run_id,
@@ -263,6 +281,12 @@ class PhaseTwoWorkflow:
                 expected_run_id=run_id,
                 expected_binding=snapshot_binding,
             )
+            if str(existing_graph.get("schema_version") or "") != design_contract_version:
+                raise HarnessError(
+                    "designer_input_drift",
+                    "Persisted Design graph contract does not match the run-pinned contract.",
+                    run_id=run_id,
+                )
         versions = list(existing_versions)
         merged_artifacts = dict(artifact_paths)
         prior_digest = str((existing_graph or {}).get("artifact_digest") or "")
@@ -291,7 +315,7 @@ class PhaseTwoWorkflow:
                         else f"Designer đang sửa partition bị chặn, vòng {repair_iteration}/{self.settings.design_repair_limit}."
                     ),
                     "designer_execution": {
-                        "contract_version": GRAPH_VERSION,
+                        "contract_version": design_contract_version,
                         "status": "running",
                         "session_ordinal": ordinal,
                         "design_version": version,
@@ -311,7 +335,7 @@ class PhaseTwoWorkflow:
                 )
                 current["status"] = current["current_phase"]
                 current["designer_execution"] = {
-                    "contract_version": GRAPH_VERSION,
+                    "contract_version": design_contract_version,
                     "status": "running",
                     "session_ordinal": ordinal,
                     "design_version": version,
@@ -335,6 +359,7 @@ class PhaseTwoWorkflow:
                     repair_feedback=repair_feedback,
                     session_ordinal=ordinal,
                     on_progress=on_progress,
+                    contract_version=design_contract_version,
                 )
             except DesignerExecutionError as exc:
                 state = self.store.read_state(run_id)
@@ -360,7 +385,7 @@ class PhaseTwoWorkflow:
                         ),
                         "last_error": exc.to_response(),
                         "designer_execution": {
-                            "contract_version": GRAPH_VERSION,
+                            "contract_version": design_contract_version,
                             "status": "human_required" if human_required else ("paused" if exc.retriable else "blocked"),
                             "session_ordinal": ordinal,
                             "design_version": version,
@@ -389,7 +414,7 @@ class PhaseTwoWorkflow:
                     "current_phase": "design_validating",
                     "status": "design_validating",
                     "designer_execution": {
-                        "contract_version": GRAPH_VERSION,
+                        "contract_version": design_contract_version,
                         "status": "validating",
                         "session_ordinal": ordinal,
                         "design_version": version,
@@ -448,7 +473,8 @@ class PhaseTwoWorkflow:
                 if trace_graph is not None
                 else None
             )
-            bundle_blockers = _bundle_design_findings(design_bundle_findings(graph))
+            bundle_findings = design_bundle_findings(graph, landscape=landscape)
+            bundle_blockers = _bundle_design_findings(bundle_findings)
             trace_blockers = list(trace_validation.blocking_findings) if trace_validation is not None else []
             enforced_trace_blockers = trace_blockers if trace_mode == "enforce" else []
             deterministic_blockers = [*bundle_blockers, *enforced_trace_blockers]
@@ -475,12 +501,13 @@ class PhaseTwoWorkflow:
                     traceability=traceability,
                     canonical_requirement=approved.canonical_model,
                     vertical_trace=bounded_trace_view(trace_graph) if trace_graph is not None else None,
+                    vertical_design_graph=graph,
                     repair_iterations=repair_iteration,
                     validation_trials=self.settings.design_validation_trials,
                 )
             validation_payload = validation.to_dict()
             validation_payload["version"] = "design_validation_report_v4_vertical_graph"
-            validation_payload["mode"] = "vertical_design_graph_v1"
+            validation_payload["mode"] = design_contract_version
             graph_path = self.store.write_json_artifact(run_id, f"vertical_design_graph_v{version}.json", graph)
             component_path = self.store.write_json_artifact(
                 run_id,
@@ -581,11 +608,11 @@ class PhaseTwoWorkflow:
             merged_artifacts = {**merged_artifacts, **design_paths}
             quality_reports = _quality_reports(state, validation, versions, design_paths)
             vertical_validation_summary = _dict_value(quality_reports.get("design_validation"))
-            vertical_validation_summary["mode"] = GRAPH_VERSION
+            vertical_validation_summary["mode"] = design_contract_version
             quality_reports["design_validation"] = vertical_validation_summary
             quality_reports["design_vertical_graph"] = {
                 "ok": validation.ok,
-                "mode": GRAPH_VERSION,
+                "mode": design_contract_version,
                 "graph_revision": graph.get("revision"),
                 "graph_digest": graph.get("artifact_digest"),
                 "graph": design_paths["vertical_design_graph"],
@@ -594,12 +621,13 @@ class PhaseTwoWorkflow:
             }
             quality_reports["design_bundle"] = {
                 "ok": validation.ok and not bundle_blockers,
-                "contract_version": DESIGN_BUNDLE_VERSION,
+                "contract_version": design_bundle_version,
                 "component_count": len(_dict_items(projections["component_view"].get("components"))),
                 "ui_count": len(_dict_items(projections["surface_view"].get("ui"))),
                 "api_count": len(_dict_items(projections["surface_view"].get("api"))),
                 "business_rule_count": len(_dict_items(projections["surface_view"].get("business_rules"))),
                 "data_count": len(_dict_items(projections["surface_view"].get("data"))),
+                **_runtime_design_summary(graph=graph, findings=bundle_findings),
             }
             if trace_validation is not None:
                 quality_reports["vertical_trace"] = {
@@ -613,7 +641,7 @@ class PhaseTwoWorkflow:
                     "latest_artifacts": merged_artifacts,
                     "quality_reports": quality_reports,
                     "designer_execution": {
-                        "contract_version": GRAPH_VERSION,
+                        "contract_version": design_contract_version,
                         "status": "validated" if validation.ok else "repair_needed",
                         "session_ordinal": ordinal,
                         "design_version": version,
@@ -621,6 +649,9 @@ class PhaseTwoWorkflow:
                         "blocking_count": len(validation.blocking_findings),
                         "warning_count": len(validation.warnings),
                     },
+                    "designer_repair_feedback": [
+                        item.to_dict() for item in validation.blocking_findings
+                    ],
                 }
             )
             self.store.write_state(state)
@@ -676,7 +707,7 @@ class PhaseTwoWorkflow:
                     "artifact_path": design_paths["design_artifact"],
                     "vertical_design_graph": design_paths["vertical_design_graph"],
                     "projection_manifest": design_paths["design_projection_manifest"],
-                    "design_bundle_contract_version": DESIGN_BUNDLE_VERSION,
+                    "design_bundle_contract_version": design_bundle_version,
                     **(
                         {
                             "vertical_trace_graph": design_paths["vertical_trace_graph"],
@@ -688,13 +719,13 @@ class PhaseTwoWorkflow:
                         else {}
                     ),
                 },
-                DESIGN_BUNDLE_STATE_KEY: DESIGN_BUNDLE_VERSION,
+                DESIGN_BUNDLE_STATE_KEY: design_bundle_version,
                 "allowed_next_actions": ALLOWED_DESIGN_ACTIONS,
                 "last_error": None,
                 "last_sync": last_sync,
                 "designer_execution": {
                     **_dict_value(state.get("designer_execution")),
-                    "contract_version": GRAPH_VERSION,
+                    "contract_version": design_contract_version,
                     "status": "completed",
                     "graph_revision": graph.get("revision"),
                     "graph_digest": graph.get("artifact_digest"),
@@ -708,6 +739,29 @@ class PhaseTwoWorkflow:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _persisted_design_feedback(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+    ) -> list[dict[str, object]]:
+        feedback = _dict_items(state.get("designer_repair_feedback"))
+        if feedback:
+            return feedback
+        ledger_ref = _string_dict(state.get("latest_artifacts")).get("design_finding_ledger", "")
+        if not ledger_ref:
+            return []
+        ledger_path = self.store.artifact_path(run_id, Path(ledger_ref).name)
+        try:
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError(
+                "design_finding_ledger_invalid",
+                "Latest Design finding ledger cannot be read for revalidation.",
+                run_id=run_id,
+            ) from exc
+        return _dict_items(ledger.get("blocking_findings")) if isinstance(ledger, dict) else []
 
     def _latest_vertical_graph(
         self,
@@ -732,6 +786,33 @@ class PhaseTwoWorkflow:
         except (OSError, json.JSONDecodeError) as exc:
             raise HarnessError("vertical_design_graph_invalid", "Vertical Design graph is not valid JSON.", run_id=run_id) from exc
         return validate_vertical_design_graph(payload, expected_run_id=run_id)
+
+    def _blocked_session_graph(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+    ) -> dict[str, object] | None:
+        """Recover the last validated graph after invalid-action exhaustion."""
+
+        execution = _dict_value(state.get("designer_execution"))
+        version = int(execution.get("design_version") or 0)
+        if version < 1:
+            return None
+        path = (
+            self.store.run_dir(run_id)
+            / "designer_execution"
+            / f"design_v{version}"
+            / "designer_loop_session_v1.json"
+        )
+        try:
+            session = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        graph = _dict_value(_dict_value(session).get("graph"))
+        if not graph:
+            return None
+        return validate_vertical_design_graph(graph, expected_run_id=run_id)
 
 
 
@@ -804,7 +885,42 @@ def _vertical_trace_repair_feedback(
         design_graph=graph,
     )
     result = validate_vertical_trace_coverage(trace_graph, mode="enforce")
-    return [item.to_dict() for item in result.blocking_findings]
+    trace_edges = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(trace_graph.get("edges"))
+        if str(item.get("id") or "")
+    }
+    design_edges = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("edges"))
+        if str(item.get("id") or "")
+    }
+    design_nodes = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("nodes"))
+        if str(item.get("id") or "")
+    }
+    feedback: list[dict[str, object]] = []
+    for finding in result.blocking_findings:
+        item = finding.to_dict()
+        trace_ref = str(item.get("subject_ref") or "")
+        trace_edge = trace_edges.get(trace_ref, {})
+        source_edge_id = str(trace_edge.get("source_edge_id") or "")
+        design_edge = design_edges.get(source_edge_id, {})
+        if design_edge:
+            source_node = design_nodes.get(str(design_edge.get("from") or ""), {})
+            item["trace_subject_ref"] = trace_ref
+            item["subject_ref"] = source_edge_id
+            item["partition"] = {
+                "scenario_id": str(design_edge.get("scenario_id") or source_node.get("scenario_id") or ""),
+                "component_id": str(source_node.get("component_id") or ""),
+            }
+            if str(item.get("category") or "") == "cross_scenario_design_edge":
+                item["expected_change"] = (
+                    f"Remove Design edge {source_edge_id}, or replace it only with an approved main-to-alternative/exception branch."
+                )
+        feedback.append(item)
+    return feedback
 
 
 def _quality_reports(
@@ -1007,6 +1123,48 @@ def _bundle_design_findings(items: list[dict[str, object]]) -> list[DesignFindin
         )
         for item in items
     ]
+
+
+def _runtime_design_summary(
+    *,
+    graph: dict[str, object],
+    findings: list[dict[str, object]],
+) -> dict[str, object]:
+    """Expose bounded V2 composition coverage without leaking source excerpts."""
+
+    nodes = _dict_items(graph.get("nodes"))
+    partitions = _dict_items(graph.get("partitions"))
+    edges = _dict_items(graph.get("edges"))
+    bound_nodes = [item for item in nodes if isinstance(item.get("runtime_binding"), dict)]
+    observed_partitions = [
+        item
+        for item in partitions
+        if isinstance(item.get("source_observation_refs"), list)
+        and any(str(ref) for ref in item.get("source_observation_refs", []))
+    ]
+    scenarios = {str(item.get("scenario_id") or "") for item in partitions if str(item.get("scenario_id") or "")}
+    disconnected = {
+        str(_dict_value(item.get("partition")).get("scenario_id") or "")
+        for item in findings
+        if str(item.get("category") or "") == "runtime_path_disconnected"
+    } - {""}
+    return {
+        "runtime_binding_coverage": {
+            "bound": len(bound_nodes),
+            "total": len(nodes),
+        },
+        "investigation_evidence_coverage": {
+            "observed": len(observed_partitions),
+            "total": len(partitions),
+        },
+        "runtime_path_coverage": {
+            "connected": max(0, len(scenarios) - len(disconnected)),
+            "required": len(scenarios),
+        },
+        "boundary_contract_count": sum(
+            1 for item in edges if isinstance(item.get("boundary_contract"), dict)
+        ),
+    }
 
 
 def _dict_items(value: object) -> list[dict[str, object]]:

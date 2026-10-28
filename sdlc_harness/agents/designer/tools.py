@@ -45,25 +45,30 @@ class DesignerToolRegistry:
             for item in _dicts(landscape.get("anchors"))
             if str(item.get("anchor_id") or "")
         }
+        self.observed_evidence_refs = {
+            ref
+            for node in _dicts(graph.get("nodes"))
+            for ref in _strings(_dict(node.get("runtime_binding")).get("evidence_refs"))
+        }
 
     @property
     def valid_evidence_refs(self) -> set[str]:
-        return set(self.anchors)
+        return {*self.anchors, *self.observed_evidence_refs}
 
     def execute(self, tool_id: str, arguments: object) -> tuple[dict[str, object], list[str]]:
         args = dict(arguments) if isinstance(arguments, dict) else {}
         if tool_id == "landscape.search":
-            return self._landscape_search(args)
+            return self._record_evidence(self._landscape_search(args))
         if tool_id == "landscape.get_anchor":
-            return self._landscape_get_anchor(args)
+            return self._record_evidence(self._landscape_get_anchor(args))
         if tool_id == "repo.search":
-            return self._repo_search(args)
+            return self._record_evidence(self._repo_search(args))
         if tool_id == "repo.read":
-            return self._repo_read(args)
+            return self._record_evidence(self._repo_read(args))
         if tool_id == "codegraph.query":
-            return self._codegraph_query(args)
+            return self._record_evidence(self._codegraph_query(args))
         if tool_id == "design.inspect_partition":
-            return self._inspect_partition(args)
+            return self._record_evidence(self._inspect_partition(args))
         if tool_id == "design.propose_delta":
             candidate, temp_refs = apply_designer_delta(
                 self.graph,
@@ -78,6 +83,29 @@ class DesignerToolRegistry:
                 "temp_refs": temp_refs,
             }, []
         raise HarnessError("designer_tool_unknown", f"Unknown Designer tool: {tool_id}", run_id=self.run_id)
+
+    def _record_evidence(
+        self,
+        result: tuple[dict[str, object], list[str]],
+    ) -> tuple[dict[str, object], list[str]]:
+        output, refs = result
+        self.observed_evidence_refs.update(refs)
+        return output, refs
+
+    def component_for_path(self, relative: str) -> str:
+        normalized = relative.strip().replace("\\", "/")
+        matches = [
+            str(component.get("component_id") or "")
+            for component in _dicts(self.landscape.get("components"))
+            if any(
+                root == "." or normalized == root or normalized.startswith(f"{root}/")
+                for root in _strings(component.get("roots"))
+            )
+        ]
+        return matches[0] if len(set(matches)) == 1 else ""
+
+    def register_evidence_refs(self, refs: list[str]) -> None:
+        self.observed_evidence_refs.update(ref for ref in refs if ref)
 
     def _landscape_search(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         query = str(args.get("query") or "").strip().casefold()
@@ -188,12 +216,15 @@ class DesignerToolRegistry:
                 "truncated": False,
             }, []
         sanitized = output.replace(str(self.target_path), "<workspace>").replace(str(self.target_path).replace("\\", "/"), "<workspace>")
+        output_digest = "sha256:" + hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
+        ref = f"codegraph:{output_digest}"
         return {
             "status": "available",
             "query_digest": "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest(),
             "evidence": sanitized[:MAX_OUTPUT_CHARS],
             "truncated": len(sanitized) > MAX_OUTPUT_CHARS,
-        }, []
+            "evidence_ref": ref,
+        }, [ref]
 
     def _inspect_partition(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         scenario_id = str(args.get("scenario_id") or "").strip()

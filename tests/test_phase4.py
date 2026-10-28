@@ -670,6 +670,34 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response, resumed)
         repair.assert_called_once_with(state=state, run_id=run_id)
 
+    def test_continue_run_resumes_blocked_initial_developer_scope_mismatch(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings())
+        run_id = "run_initial_item_scope_mismatch"
+        state = {
+            "run_id": run_id,
+            "status": "blocked",
+            "current_phase": "implementation_writing",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "developer_act"},
+            "latest_artifacts": {
+                "developer_work_packet": "packet.json",
+                "developer_execution_manifest": "manifest.json",
+                "developer_execution_journal": "journal.json",
+            },
+            "allowed_next_actions": ["get_status", "cancel_run"],
+        }
+        resumed = {"run_id": run_id, "status": "implementation_executing"}
+
+        with (
+            patch.object(workflow.workspace_manager, "locked_workspace", return_value=contextlib.nullcontext()),
+            patch.object(workflow.store, "read_state", return_value=state),
+            patch.object(workflow, "_continue_developer_act", return_value=resumed) as developer_act,
+        ):
+            response = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(response, resumed)
+        developer_act.assert_called_once_with(state=state, run_id=run_id)
+
     def test_resume_repair_uses_packet_bound_to_execution_artifact_version(self) -> None:
         workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_bound_repair_packet"
@@ -816,10 +844,26 @@ class PhaseFourTest(unittest.TestCase):
 
         packet_path = self.repo_root / str(response["latest_artifacts"]["developer_work_packet"])
         packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        self.assertEqual(packet["version"], "developer_work_packet_v2")
+        self.assertEqual(packet["version"], "developer_work_packet_v3")
+        self.assertEqual(packet["schema_version"], "developer_work_packet_profiled_v3")
         self.assertEqual(packet["run_id"], phase3["run_id"])
         self.assertEqual(packet["approved_plan"]["implementation_plan"], phase3["latest_artifacts"]["implementation_plan"])
         self.assertTrue(packet["implementation_steps"])
+        self.assertTrue(packet["execution_units"])
+        structured_path = self.repo_root / str(
+            phase3["latest_artifacts"]["implementation_plan_structured"]
+        )
+        structured = json.loads(structured_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [
+                (item["unit_id"], item["order"], item["depends_on"])
+                for item in packet["execution_units"]
+            ],
+            [
+                (item["unit_id"], item["order"], item["depends_on"])
+                for item in structured["work_units"]
+            ],
+        )
         self.assertTrue(packet["proposed_files"])
         self.assertTrue(packet["current_files"])
         self.assertEqual(packet["run_workspace"]["workspace_mode"], "git_worktree_v1")
@@ -830,6 +874,39 @@ class PhaseFourTest(unittest.TestCase):
         grouped = packet["design_mappings_by_file"]
         self.assertTrue(any(path.startswith(("apps/api/src/", "packages/db/src/")) for path in grouped))
         self.assertTrue(any(item["exists"] for item in packet["proposed_files"]))
+
+    def test_clean_pre_session_plan_v4_packet_upgrades_once_without_code_mutation(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        packet_path = self.repo_root / str(ready["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet.pop("execution_units")
+        packet["version"] = "developer_work_packet_v2"
+        packet["schema_version"] = "developer_work_packet_profiled_v2"
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        before = self._git_output(self.target_repo, "status", "--porcelain")
+        workflow = PhaseFourWorkflow(self.settings)
+        state = workflow.store.read_state(run_id)
+
+        upgraded, upgraded_path = workflow._upgrade_unit_aware_work_packet(
+            state=state,
+            run_id=run_id,
+            work_packet=packet,
+        )
+
+        self.assertTrue(upgraded_path)
+        self.assertEqual(upgraded["version"], "developer_work_packet_v3")
+        self.assertEqual(len(upgraded["execution_units"]), len(
+            json.loads((self.repo_root / state["approved_artifacts"]["implementation_plan_structured"]).read_text(encoding="utf-8"))["work_units"]
+        ))
+        self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), before)
+        unchanged, second_path = workflow._upgrade_unit_aware_work_packet(
+            state=state,
+            run_id=run_id,
+            work_packet=upgraded,
+        )
+        self.assertIs(unchanged, upgraded)
+        self.assertEqual(second_path, "")
 
     def test_approve_implementation_plan_rejects_plan_changed_after_review(self) -> None:
         phase3 = self._create_phase3_run()
@@ -1089,15 +1166,20 @@ class PhaseFourTest(unittest.TestCase):
         response = workflow.continue_run(run_id=str(ready["run_id"]))
 
         self.assertEqual(response["status"], "implementation_written", response)
-        self.assertEqual(response["developer_execution"]["schema_version"], "developer_execution_state_v1")
+        self.assertEqual(response["developer_execution"]["schema_version"], "developer_execution_state_v2")
+        self.assertEqual(
+            response["developer_execution"]["contract_version"],
+            "developer_execution_units_v1",
+        )
         self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
         self.assertEqual(response["developer_execution"]["mode"], "developer_act")
         self.assertEqual(response["developer_execution"]["status"], "completed")
         self.assertIn("developer_execution_manifest", response["latest_artifacts"])
         self.assertIn("developer_execution_journal", response["latest_artifacts"])
+        self.assertIn("developer_execution_session", response["latest_artifacts"])
         manifest_path = self.repo_root / str(response["latest_artifacts"]["developer_execution_manifest"])
         journal_path = self.repo_root / str(response["latest_artifacts"]["developer_execution_journal"])
-        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["version"], "developer_execution_manifest_v7")
+        self.assertEqual(json.loads(manifest_path.read_text(encoding="utf-8"))["version"], "developer_execution_manifest_v8")
         self.assertEqual(json.loads(journal_path.read_text(encoding="utf-8"))["status"], "completed")
         report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
         report = report_path.read_text(encoding="utf-8")

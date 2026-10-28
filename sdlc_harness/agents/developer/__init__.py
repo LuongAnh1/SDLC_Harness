@@ -9,7 +9,7 @@ from .execution import (
     DeveloperExecutionResult,
     DeveloperToolLoopExecutor,
     developer_transport_retry_allowed,
-    repair_scope_mismatch_retry_allowed,
+    developer_execution_retry_allowed,
 )
 from .planner import DeveloperPlanAgent, ImplementationPlanDraft
 from .component_plan import (
@@ -35,7 +35,7 @@ __all__ = [
     "DeveloperExecutionResult",
     "DeveloperToolLoopExecutor",
     "developer_transport_retry_allowed",
-    "repair_scope_mismatch_retry_allowed",
+    "developer_execution_retry_allowed",
     "DeveloperPlanAgent",
     "ImplementationPlanDraft",
     "COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION",

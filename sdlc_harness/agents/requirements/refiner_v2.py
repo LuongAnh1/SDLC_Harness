@@ -689,6 +689,7 @@ class RequirementModelV2Refiner:
             return result, None
 
         candidate_count = int(session["budgets"]["candidate_used"])
+        delta_attempt = len(context["delta_artifact_paths"]) + 1
         raw_delta = arguments.get("requirement_delta")
         try:
             application = apply_requirement_delta(
@@ -706,7 +707,7 @@ class RequirementModelV2Refiner:
                 )
             )
             delta_path = self._write_delta_artifact(
-                run_id=run_id, attempt=1, raw_delta=raw_delta, status="rejected",
+                run_id=run_id, attempt=delta_attempt, raw_delta=raw_delta, status="rejected",
                 base_hash=requirement_candidate_hash(repair_base), result_hash=None,
                 validation_report=report_dict, error=exc,
             )
@@ -716,17 +717,13 @@ class RequirementModelV2Refiner:
                 "ok": False, "error_code": exc.error_code, "message": exc.message,
                 "candidate_attempt": candidate_count, "validation_report": report_dict,
             }
-            self._persist_working_context(run_id=run_id, session=session, context=context)
-            self._append_journal(
-                journal, journal_path, action_index=action_index,
-                action="requirement.propose_delta",
-                arguments=self._journal_arguments("requirement.propose_delta", arguments),
-                summary=summary, result=result, completion=completion, duration=duration,
-                status="failed",
-                input_payload={"action": "requirement.propose_delta", "arguments": arguments},
+            self._finish_non_terminal_action(
+                run_id=run_id, journal=journal, journal_path=journal_path, session=session,
+                context=context, action_index=action_index, name="requirement.propose_delta",
+                arguments=arguments, summary=summary, result=result, completion=completion,
+                duration=duration,
             )
-            complete_requirement_call(store=self.store, run_id=run_id, session=session)
-            raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
+            return result, None
 
         context["attempts"].append(
             self._attempt(
@@ -735,7 +732,7 @@ class RequirementModelV2Refiner:
             )
         )
         delta_path = self._write_delta_artifact(
-            run_id=run_id, attempt=1,
+            run_id=run_id, attempt=delta_attempt,
             raw_delta={
                 "schema_version": DELTA_SCHEMA_VERSION,
                 "base_candidate_sha256": application.base_candidate_sha256,

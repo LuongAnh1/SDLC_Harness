@@ -35,7 +35,7 @@ from ..agents.developer import (
     DeveloperToolLoopExecutor,
     build_developer_work_packet,
     developer_transport_retry_allowed,
-    repair_scope_mismatch_retry_allowed,
+    developer_execution_retry_allowed,
 )
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
@@ -133,12 +133,14 @@ class _PhaseFourCore:
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
+        self.verification_runner = VerificationRunner()
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
             store=self.store,
             llm_client=self.llm_client,
+            repo_context_provider=self.repo_context_provider,
+            verification_runner=self.verification_runner,
         )
-        self.verification_runner = VerificationRunner()
         self.code_trace_validator = CodeTraceValidator(
             self.llm_client,
             validation_trials=settings.implementation_validation_trials,
@@ -339,6 +341,11 @@ class _PhaseFourCore:
                 "pending_checkpoint": None,
                 "allowed_next_actions": ALLOWED_IMPLEMENTATION_READY_ACTIONS,
                 "last_error": None,
+                **(
+                    {"developer_execution_contract_version": "developer_execution_units_v1"}
+                    if packet.get("execution_units")
+                    else {}
+                ),
                 "summary_for_user": (
                     f"Đã duyệt implementation plan cho run {run_id} và chuẩn bị DeveloperWorkPacket V1. "
                     f"Target repo `{target_info.path}` sạch, packet có {len(packet['proposed_files'])} file mục tiêu. "
@@ -463,10 +470,12 @@ class _PhaseFourCore:
             return self._continue_developer_act(state=state, run_id=run_id)
         if status == "blocked" and self._qa_generation_retry_allowed(state):
             return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "blocked" and repair_scope_mismatch_retry_allowed(state):
+        if status == "blocked" and developer_execution_retry_allowed(state):
             execution = _dict_value(state.get("developer_execution"))
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
                 return self._continue_qa_repair(state=state, run_id=run_id)
+            if execution.get("mode") == "developer_act":
+                return self._continue_developer_act(state=state, run_id=run_id)
             return self._continue_implementation_repair(state=state, run_id=run_id)
         if status == "blocked" and developer_transport_retry_allowed(state):
             execution = _dict_value(state.get("developer_execution"))
@@ -644,7 +653,7 @@ class _PhaseFourCore:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
         if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
-        if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+        if developer_execution_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if developer_transport_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")

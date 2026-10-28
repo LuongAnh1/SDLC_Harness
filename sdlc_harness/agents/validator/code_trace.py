@@ -19,7 +19,11 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
-from ...profiles import CodeTracePolicy, PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+from ...profiles import (
+    CodeTracePolicy,
+    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+)
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
     aggregate_semantic_trials,
@@ -279,7 +283,10 @@ class CodeTraceValidator:
                     }
                 )
 
-        if work_packet.get("schema_version") == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+        if work_packet.get("schema_version") in {
+            PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        }:
             deterministic_findings = deterministic_typescript_contract_findings(
                 work_packet=work_packet,
                 ast_evidence=ast_evidence,

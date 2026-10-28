@@ -146,6 +146,15 @@ def test_policy_routes_typescript_components_and_test_suffixes():
         policy.test_path_for_source("packages/db/src/HeritageRepository.ts", "HeritageRepository")
         == "packages/db/src/HeritageRepository.test.ts"
     )
+    assert policy.normalize_mapping_path("apps/web/src/health-client.ts") == (
+        "apps/web/src/health-client.ts"
+    )
+    assert policy.test_path_for_source("apps/web/src/health-client.ts", "health-client") == (
+        "apps/web/src/health-client.test.ts"
+    )
+    assert policy.source_path_for_test("apps/web/src/health-client.test.ts") == (
+        "apps/web/src/health-client.ts"
+    )
 
 
 def test_policy_fails_closed_for_unclassified_conflicting_and_ambiguous_classes():
@@ -186,6 +195,7 @@ def test_policy_accepts_only_profile_owned_file_kinds():
     policy = _policy()
     accepted = {
         "apps/web/src/Page.tsx",
+        "apps/web/src/Page.ts",
         "apps/web/src/Page.test.tsx",
         "apps/api/src/Service.ts",
         "packages/db/prisma/schema.prisma",
@@ -194,7 +204,7 @@ def test_policy_accepts_only_profile_owned_file_kinds():
     }
     rejected = {
         "apps/api/src/Service.tsx",
-        "apps/web/src/Page.ts",
+        "apps/web/src/Page.jsx",
         "tests/e2e/delete.test.ts",
         "package.json",
         "../escape.ts",

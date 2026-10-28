@@ -10,7 +10,10 @@ from .snapshot import PROFILE_SNAPSHOT_STATE_KEY, read_profile_snapshot
 
 # Kept local to avoid importing the Designer package from config/profile bootstrap.
 DESIGNER_CONTRACT_STATE_KEY = "designer_contract_version"
-CURRENT_DESIGNER_CONTRACT_VERSION = "vertical_design_graph_v1"
+CURRENT_DESIGNER_CONTRACT_VERSION = "vertical_design_graph_v2"
+SUPPORTED_DESIGNER_CONTRACT_VERSIONS = frozenset(
+    {"vertical_design_graph_v1", "vertical_design_graph_v2"}
+)
 
 LEGACY_RETIRED_ALLOWED_COMMANDS = frozenset(
     {
@@ -141,4 +144,4 @@ def _has_retired_developer_executor(state: Mapping[str, object]) -> bool:
 
 
 def _has_retired_designer_contract(state: Mapping[str, object]) -> bool:
-    return state.get(DESIGNER_CONTRACT_STATE_KEY) != CURRENT_DESIGNER_CONTRACT_VERSION
+    return state.get(DESIGNER_CONTRACT_STATE_KEY) not in SUPPORTED_DESIGNER_CONTRACT_VERSIONS

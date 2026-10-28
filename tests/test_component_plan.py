@@ -6,7 +6,12 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
-from sdlc_harness.agents.designer import DELTA_VERSION, apply_designer_delta, new_vertical_design_graph
+from sdlc_harness.agents.designer import (
+    DELTA_VERSION,
+    RUNTIME_BINDING_VERSION,
+    apply_designer_delta,
+    new_vertical_design_graph,
+)
 from sdlc_harness.agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     build_component_work_units,
@@ -197,6 +202,34 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         verification_stage_ids=list(verification.stage_ids),
     ) == []
 
+    missing_test_source = deepcopy(structured)
+    web_unit = next(
+        unit for unit in missing_test_source["work_units"] if unit["component_id"] == "web"
+    )
+    web_unit["test_intents"][0]["target_paths"] = [
+        "apps/web/src/unplanned-client.test.ts"
+    ]
+    missing_test_source.update(
+        component_plan_projections(
+            units=missing_test_source["work_units"],
+            design_graph=design,
+            requirement_graph=requirement_graph,
+            legacy_mappings=[],
+            planning_policy=planning,
+        )
+    )
+    issues = component_plan_issues(
+        structured_plan=missing_test_source,
+        expected_units=first,
+        expected_inputs=inputs,
+        planning_policy=planning,
+        verification_stage_ids=list(verification.stage_ids),
+    )
+    assert any(
+        "without matching source target `apps/web/src/unplanned-client.ts`" in issue
+        for issue in issues
+    )
+
     missing_contract = deepcopy(structured)
     for unit in missing_contract["work_units"]:
         unit["planned_code_targets"] = [
@@ -264,6 +297,94 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         verification_stage_ids=list(verification.stage_ids),
     )
     assert any("outside work-unit code targets" in issue for issue in issues)
+
+
+def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -> None:
+    model, design, _ = _fixture()
+    planning, _ = _policy()
+    ui_node = next(item for item in design["nodes"] if item["surface"] == "ui")
+    partition = next(
+        item
+        for item in design["partitions"]
+        if item["scenario_id"] == ui_node["scenario_id"]
+        and item["component_id"] == ui_node["component_id"]
+    )
+    design, _ = apply_designer_delta(
+        design,
+        {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": design["artifact_digest"],
+            "partition": {
+                "use_case_id": partition["use_case_id"],
+                "scenario_id": partition["scenario_id"],
+                "component_id": partition["component_id"],
+                "source_observation_refs": ["repo:apps/web/src/AppShell.tsx#L1@sha256:source"],
+            },
+            "operations": [
+                {
+                    "op": "update_node",
+                    "node_id": ui_node["id"],
+                    "changes": {
+                        "runtime_binding": {
+                            "schema_version": RUNTIME_BINDING_VERSION,
+                            "runtime_kind": "ui_component",
+                            "target": {
+                                "component_id": "web",
+                                "path": "apps/web/src/CulturalHeritageDeleteScreen.tsx",
+                                "symbol": "CulturalHeritageDeleteScreen",
+                            },
+                            "attachment": {
+                                "relation": "rendered_by",
+                                "owner_ref": "RLA-app-shell",
+                                "owner_path": "apps/web/src/AppShell.tsx",
+                                "owner_symbol": "AppShell",
+                            },
+                            "evidence_refs": ["RLA-app-shell"],
+                        }
+                    },
+                }
+            ],
+            "completion_claims": [],
+            "unresolved_items": [],
+        },
+        valid_evidence_refs={"RLA-app-shell"},
+    )
+    trace = build_vertical_trace_graph(requirement_model=model, design_graph=design)
+    units = build_component_work_units(
+        design_graph=design,
+        trace_graph=trace,
+        repo_landscape={
+            "anchors": [
+                {
+                    "anchor_id": "RLA-app-shell",
+                    "component_id": "web",
+                    "path": "apps/web/src/AppShell.tsx",
+                    "symbol": "AppShell",
+                }
+            ]
+        },
+        planning_policy=planning,
+    )
+    web_unit = next(item for item in units if item["component_id"] == "web")
+    targets = {
+        (str(item.get("path") or ""), str(item.get("symbol") or ""))
+        for item in web_unit["planned_code_targets"]
+    }
+    assert ("apps/web/src/CulturalHeritageDeleteScreen.tsx", "CulturalHeritageDeleteScreen") in targets
+    assert ("apps/web/src/AppShell.tsx", "AppShell") in targets
+    assert web_unit["runtime_bindings"][0]["attachment"]["owner_symbol"] == "AppShell"
+
+    mappings = component_plan_projections(
+        units=units,
+        design_graph=design,
+        requirement_graph=build_requirement_graph_v2(model),
+        legacy_mappings=[],
+        planning_policy=planning,
+    )["design_mappings"]
+    ui_mapping = next(item for item in mappings if item["design_element_id"] == ui_node["id"])
+    assert ui_mapping["planned_code_target"] == (
+        "apps/web/src/CulturalHeritageDeleteScreen.tsx#CulturalHeritageDeleteScreen"
+    )
 
 
 def test_legacy_projection_rebinds_to_real_work_unit_targets() -> None:

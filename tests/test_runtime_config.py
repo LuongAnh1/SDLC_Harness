@@ -105,6 +105,11 @@ class RuntimeConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_thinking_mode, "disabled")
         self.assertEqual(settings.sync_mode, "mock")
         self.assertNotIn("SDLC_DESIGNER_LOOP_ENABLED", config_field_index())
+        self.assertEqual(settings.designer_contract_version, "vertical_design_graph_v1")
+        self.assertEqual(
+            config_field_index()["SDLC_DESIGNER_CONTRACT_VERSION"]["options"],
+            ["vertical_design_graph_v1", "vertical_design_graph_v2"],
+        )
         self.assertEqual(settings.vertical_trace_mode, "enforce")
         self.assertEqual(config_field_index()["SDLC_VERTICAL_TRACE_MODE"]["options"], ["shadow", "enforce"])
 

@@ -8,6 +8,7 @@ from ...core.errors import HarnessError
 from ...profiles import (
     IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     get_language_profile,
     implementation_signature_contract_digest,
     is_profiled_work_packet_schema,
@@ -50,7 +51,10 @@ def developer_generation_context(work_packet: dict[str, object]) -> dict[str, ob
         raise _profile_error(exc.message) from exc
 
     signature_contract = _dict_value(work_packet.get("implementation_signature_contract"))
-    if schema_version == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+    if schema_version in {
+        PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    }:
         if (
             signature_contract.get("version") != IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION
             or signature_contract.get("digest")

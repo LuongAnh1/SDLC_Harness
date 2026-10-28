@@ -1022,6 +1022,30 @@ class OnlyClass {
         self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
         self.assertNotEqual(initial["pending_checkpoint"]["artifact_ref"], response["pending_checkpoint"]["artifact_ref"])
 
+    def test_revalidate_design_recovers_feedback_from_latest_finding_ledger(self) -> None:
+        created = self._create_phase1_run()
+        PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
+        workflow = PhaseTwoWorkflow(self.settings)
+        run_id = str(created["run_id"])
+        state = workflow.store.read_state(run_id)
+        state["designer_repair_feedback"] = []
+        ledger_ref = state["latest_artifacts"]["design_finding_ledger"]
+        ledger_path = self.repo_root / str(ledger_ref)
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        ledger["blocking_findings"] = [
+            {
+                "id": "CONS-RETRY",
+                "category": "behavior_order",
+                "severity": "blocking",
+                "message": "The previous semantic blocker must reach Designer revalidation.",
+            }
+        ]
+        ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+        feedback = workflow._persisted_design_feedback(state=state, run_id=run_id)
+
+        self.assertEqual([item["id"] for item in feedback], ["CONS-RETRY"])
+
     def test_revalidate_design_recovers_failed_phase3_component_routing(self) -> None:
         created = self._create_phase1_run()
         designed = PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
@@ -1054,7 +1078,7 @@ class OnlyClass {
 
         self.assertEqual(response["status"], "waiting_design_approval")
         self.assertIsNone(response["last_error"])
-        self.assertEqual(response["designer_contract_version"], "vertical_design_graph_v1")
+        self.assertEqual(response["designer_contract_version"], self.settings.designer_contract_version)
         self.assertIn("revalidate_design", response["allowed_next_actions"])
 
 

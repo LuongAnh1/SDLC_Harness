@@ -40,6 +40,7 @@ class Settings:
     design_repair_limit: int
     design_validation_trials: int
     design_llm_call_budget: int
+    designer_contract_version: str
     vertical_trace_mode: str
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
@@ -196,6 +197,12 @@ def load_settings(
     vertical_trace_mode = merged.get("SDLC_VERTICAL_TRACE_MODE", "enforce").strip().lower() or "enforce"
     if vertical_trace_mode not in {"shadow", "enforce"}:
         vertical_trace_mode = "enforce"
+    designer_contract_version = merged.get(
+        "SDLC_DESIGNER_CONTRACT_VERSION",
+        "vertical_design_graph_v1",
+    ).strip()
+    if designer_contract_version not in {"vertical_design_graph_v1", "vertical_design_graph_v2"}:
+        designer_contract_version = "vertical_design_graph_v1"
     project_profile_id = get_project_profile(
         project_profile_raw or "typescript_fullstack_v1"
     ).profile_id
@@ -227,6 +234,7 @@ def load_settings(
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
         design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=28, minimum=1),
+        designer_contract_version=designer_contract_version,
         vertical_trace_mode=vertical_trace_mode,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),

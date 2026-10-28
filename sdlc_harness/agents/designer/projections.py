@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import Any
 
-from .graph import DESIGN_BUNDLE_VERSION
+from .graph import design_bundle_version_for
 
 
 def render_design_projections(
@@ -154,7 +154,7 @@ def build_deterministic_trace(
 def projection_manifest(*, graph: dict[str, object], artifacts: dict[str, str]) -> dict[str, object]:
     return {
         "schema_version": "design_projection_manifest_v1",
-        "design_bundle_contract_version": DESIGN_BUNDLE_VERSION,
+        "design_bundle_contract_version": design_bundle_version_for(str(graph.get("schema_version") or "")),
         "graph_revision": int(graph.get("revision") or 0),
         "graph_digest": str(graph.get("artifact_digest") or ""),
         "projections": [
@@ -224,6 +224,46 @@ def _render_markdown(
     lines.extend(["", "## Component Architecture", "", "| Component | Design elements |", "| --- | ---: |"])
     for component in _dicts(component_view.get("components")):
         lines.append(f"| {component.get('component_id', '')} | {len(_dicts(component.get('nodes')))} |")
+    if str(graph.get("schema_version") or "").endswith("_v2"):
+        lines.extend(
+            [
+                "",
+                "## Runtime Wiring",
+                "",
+                "| Scenario | Design element | Runtime target | Attached by | Boundary mapping |",
+                "| --- | --- | --- | --- | --- |",
+            ]
+        )
+        nodes_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("nodes"))}
+        outgoing = {
+            node_id: [edge for edge in _dicts(graph.get("edges")) if str(edge.get("from") or "") == node_id]
+            for node_id in nodes_by_id
+        }
+        for node_id, item in sorted(nodes_by_id.items()):
+            binding = _dict(item.get("runtime_binding"))
+            target = _dict(binding.get("target"))
+            attachment = _dict(binding.get("attachment"))
+            boundary_summaries = []
+            for edge in outgoing.get(node_id, []):
+                boundary = _dict(edge.get("boundary_contract"))
+                if boundary:
+                    boundary_summaries.append(
+                        f"{boundary.get('consumer_operation', '')} → {boundary.get('provider_operation', '')}"
+                    )
+            lines.append(
+                "| "
+                + " | ".join(
+                    value.replace("|", "/")
+                    for value in (
+                        str(item.get("scenario_id") or ""),
+                        str(item.get("name") or node_id),
+                        f"{binding.get('runtime_kind', '')}: {target.get('path', '')}#{target.get('symbol', '')}",
+                        f"{attachment.get('relation', '')}: {attachment.get('owner_path', '')}#{attachment.get('owner_symbol', '')}",
+                        "; ".join(boundary_summaries) or "same-runtime/no boundary",
+                    )
+                )
+                + " |"
+            )
     lines.extend(["", "## Surface Contracts", ""])
     for title, key in (
         ("UI", "ui"),

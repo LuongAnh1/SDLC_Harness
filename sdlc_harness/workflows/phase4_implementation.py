@@ -8,6 +8,7 @@ import re
 from ..agents.developer import (
     DeveloperExecutionError,
     DeveloperExecutionResult,
+    build_developer_work_packet,
     refresh_developer_work_packet,
 )
 from ..artifacts.writers import (
@@ -18,6 +19,7 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
+from ..profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
 from ..storage.runtime import utc_now_iso
 from ..verification import VerificationResult
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
@@ -97,8 +99,14 @@ class PhaseFourImplementationCycle:
         artifact_version: int,
         progress: dict[str, object] | None = None,
         status: str,
+        unit_aware: bool | None = None,
     ) -> dict[str, object]:
         existing = _dict_value(state.get("developer_execution"))
+        if unit_aware is None:
+            unit_aware = bool(
+                (progress or {}).get("total_units") is not None
+                or existing.get("contract_version") == "developer_execution_units_v1"
+            )
         same_session = (
             existing.get("executor") == executor
             and existing.get("mode") == mode
@@ -112,9 +120,17 @@ class PhaseFourImplementationCycle:
         )
         return {
             **(existing if same_session else {}),
-            "schema_version": "developer_execution_state_v1",
+            "schema_version": (
+                "developer_execution_state_v2" if unit_aware else "developer_execution_state_v1"
+            ),
+            **({"contract_version": "developer_execution_units_v1"} if unit_aware else {}),
             "executor": executor,
             "mode": mode,
+            "session_id": (
+                f"{mode}-v{session_ordinal or artifact_version}"
+                if unit_aware
+                else existing.get("session_id", "")
+            ),
             "repair_iteration": repair_iteration,
             **({"session_iteration": session_ordinal} if session_ordinal else {}),
             "artifact_version": artifact_version,
@@ -143,6 +159,8 @@ class PhaseFourImplementationCycle:
     ) -> DeveloperExecutionResult:
         """Chạy một durable tool-loop session và phản chiếu tiến độ vào workflow state."""
 
+        unit_aware = bool(work_packet.get("execution_units"))
+        session_key = manifest_key.replace("_manifest", "_session")
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -160,6 +178,7 @@ class PhaseFourImplementationCycle:
                     session_iteration=session_iteration,
                     artifact_version=artifact_version,
                     status="executing",
+                    unit_aware=unit_aware,
                 ),
                 "summary_for_user": f"Developer tool-loop đang thực thi {mode} cho run {run_id}.",
             }
@@ -182,6 +201,7 @@ class PhaseFourImplementationCycle:
                         artifact_version=artifact_version,
                         progress=progress,
                         status="executing",
+                        unit_aware=unit_aware,
                     ),
                 }
             )
@@ -197,6 +217,7 @@ class PhaseFourImplementationCycle:
                 session_iteration=session_iteration,
                 repair_scope=repair_scope,
                 expected_dirty_paths=expected_dirty_paths,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
                 on_progress=persist_progress,
             )
         except DeveloperExecutionError:
@@ -207,8 +228,10 @@ class PhaseFourImplementationCycle:
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
+            session_file = session_dir / "session.json"
             manifest_path = self.store.relative(manifest_file) if manifest_file.exists() else ""
             journal_path = self.store.relative(journal_file) if journal_file.exists() else ""
+            session_path = self.store.relative(session_file) if session_file.exists() else ""
             raise DeveloperExecutionError(
                 exc.error_code,
                 exc.message,
@@ -216,6 +239,7 @@ class PhaseFourImplementationCycle:
                 retriable=exc.error_code == "llm_transport_failed",
                 manifest_path=manifest_path,
                 journal_path=journal_path,
+                session_path=session_path,
                 progress={
                     "status": "paused" if exc.error_code == "llm_transport_failed" else "blocked"
                 },
@@ -226,8 +250,10 @@ class PhaseFourImplementationCycle:
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
+            session_file = session_dir / "session.json"
             manifest_path = self.store.relative(manifest_file) if manifest_file.exists() else ""
             journal_path = self.store.relative(journal_file) if journal_file.exists() else ""
+            session_path = self.store.relative(session_file) if session_file.exists() else ""
             raise DeveloperExecutionError(
                 "developer_execution_internal_error",
                 f"Unexpected Developer executor failure ({type(exc).__name__}): {exc}",
@@ -235,11 +261,14 @@ class PhaseFourImplementationCycle:
                 retriable=True,
                 manifest_path=manifest_path,
                 journal_path=journal_path,
+                session_path=session_path,
                 progress={"status": "paused"},
             ) from exc
 
         latest_artifacts[manifest_key] = result.manifest_path
         latest_artifacts[journal_key] = result.journal_path
+        if result.session_path:
+            latest_artifacts[session_key] = result.session_path
         state["latest_artifacts"] = latest_artifacts
         state["developer_execution"] = self._developer_execution_state(
             state,
@@ -250,6 +279,7 @@ class PhaseFourImplementationCycle:
             artifact_version=artifact_version,
             progress=result.progress,
             status="completed",
+            unit_aware=unit_aware,
         )
         return result
 
@@ -270,6 +300,19 @@ class PhaseFourImplementationCycle:
                 run_id=run_id,
             )
             resuming = self._tool_loop_session_active(state, mode="developer_act")
+            if not resuming:
+                work_packet, upgraded_path = self._upgrade_unit_aware_work_packet(
+                    state=state,
+                    run_id=run_id,
+                    work_packet=work_packet,
+                )
+                if upgraded_path:
+                    packet_path = upgraded_path
+                    latest_artifacts["developer_work_packet"] = upgraded_path
+                    state["latest_artifacts"] = latest_artifacts
+                    state["developer_execution_contract_version"] = "developer_execution_units_v1"
+                    state["updated_at"] = utc_now_iso()
+                    self.store.write_state(state)
             target_info = self._workspace_target_info(
                 run_id=run_id,
                 work_packet=work_packet,
@@ -312,6 +355,10 @@ class PhaseFourImplementationCycle:
                 latest_artifacts["developer_execution_manifest"] = exc.manifest_path
             if exc.journal_path:
                 latest_artifacts["developer_execution_journal"] = exc.journal_path
+            if exc.session_path:
+                latest_artifacts["developer_execution_session"] = exc.session_path
+            if exc.failure_path:
+                latest_artifacts["developer_failure_classification"] = exc.failure_path
             paused = exc.retriable
             state.update(
                 {
@@ -342,6 +389,7 @@ class PhaseFourImplementationCycle:
             )
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
+
         except HarnessError as exc:
             state.update(
                 {
@@ -376,6 +424,68 @@ class PhaseFourImplementationCycle:
         )
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
+
+    def _upgrade_unit_aware_work_packet(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        work_packet: dict[str, object],
+    ) -> tuple[dict[str, object], str]:
+        """Upgrade an approved Plan V4 packet before the first Developer mutation only."""
+
+        if work_packet.get("execution_units"):
+            return work_packet, ""
+        artifacts = _string_dict(state.get("latest_artifacts"))
+        if any("execution_manifest" in key or "execution_journal" in key for key in artifacts):
+            return work_packet, ""
+        approved_plan = _string_dict(work_packet.get("approved_plan"))
+        structured_ref = approved_plan.get("implementation_plan_structured")
+        if not structured_ref:
+            return work_packet, ""
+        structured_plan = _read_json_artifact(
+            self._existing_artifact_path(structured_ref, run_id=run_id),
+            run_id=run_id,
+        )
+        if structured_plan.get("version") != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
+            return work_packet, ""
+        target_info = self._workspace_target_info(
+            run_id=run_id,
+            work_packet=work_packet,
+            allow_dirty=False,
+        )
+        workspace = self.workspace_manager.resolve(run_id)
+        packet = build_developer_work_packet(
+            run_id=run_id,
+            source_ref=str(work_packet.get("source_ref") or state.get("source_ref") or ""),
+            issue_key=str(work_packet.get("issue_key") or ""),
+            structured_plan=structured_plan,
+            target_repo_path=target_info.path,
+            run_workspace=workspace.to_dict(),
+            approved_plan_refs=approved_plan,
+            canonical_requirements=[
+                dict(item)
+                for item in work_packet.get("canonical_requirements", [])
+                if isinstance(item, dict)
+            ],
+            requirement_contract=_dict_value(work_packet.get("requirement_contract")),
+            requirement_coverage=[
+                dict(item)
+                for item in work_packet.get("requirement_coverage", [])
+                if isinstance(item, dict)
+            ],
+            effective_design_contract=_dict_value(work_packet.get("effective_design_contract")),
+            planning_policy=_planning_policy_for_state(state, run_id=run_id),
+            verification_policy=_verification_policy_for_state(state, run_id=run_id),
+        )
+        version = _next_phase4_artifact_version(self.store, run_id)
+        path = write_phase4_developer_work_packet(
+            store=self.store,
+            run_id=run_id,
+            packet=packet,
+            version=version,
+        )
+        return packet, path
 
     def _continue_verification(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Chạy Slice 4.3: Verification Runner compile/unit test target repo."""
@@ -1215,6 +1325,10 @@ class PhaseFourImplementationCycle:
                 latest_artifacts["developer_repair_execution_manifest"] = exc.manifest_path
             if exc.journal_path:
                 latest_artifacts["developer_repair_execution_journal"] = exc.journal_path
+            if exc.session_path:
+                latest_artifacts["developer_repair_execution_session"] = exc.session_path
+            if exc.failure_path:
+                latest_artifacts["developer_failure_classification"] = exc.failure_path
             paused = exc.retriable
             state.update(
                 {

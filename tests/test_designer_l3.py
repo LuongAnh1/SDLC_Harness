@@ -8,22 +8,33 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from sdlc_harness.agents.designer import (
+    BOUNDARY_CONTRACT_VERSION,
     DELTA_VERSION,
+    DELTA_VERSION_V1,
     DESIGN_BUNDLE_STATE_KEY,
     DESIGN_BUNDLE_VERSION,
     GRAPH_VERSION,
+    GRAPH_VERSION_V1,
+    RUNTIME_BINDING_VERSION,
     SURFACE_CONTRACT_VERSION,
     DesignerExecutionError,
     DesignerToolLoopExecutor,
     apply_designer_delta,
+    completion_findings,
     design_bundle_findings,
     new_vertical_design_graph,
     validate_vertical_design_graph,
 )
 from sdlc_harness.agents.designer.tools import DesignerToolRegistry
-from sdlc_harness.agents.designer.execution import _active_partition, _active_repair_task, _repair_targets
+from sdlc_harness.agents.designer.execution import (
+    _active_partition,
+    _active_repair_task,
+    _designer_prompt,
+    _repair_targets,
+)
 from sdlc_harness.agents.designer.graph import graph_digest
 from sdlc_harness.agents.designer.projections import render_design_projections
 from sdlc_harness.agents.validator import (
@@ -103,12 +114,432 @@ class VerticalDesignGraphTest(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "designer_delta_precondition_failed")
         self.assertEqual(graph["revision"], 0)
 
-    def test_bundle_contract_is_additive_but_required_for_bundle_readiness(self) -> None:
-        graph = new_vertical_design_graph(run_id="run-bundle", snapshot_binding=self.binding)
-        designed, refs = apply_designer_delta(
+    def test_semantic_no_effect_delta_is_rejected(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-no-effect", snapshot_binding=self.binding)
+        first, _ = apply_designer_delta(
             graph,
             {
                 "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web"},
+                "operations": [{"op": "set_partition_coverage", "coverage": {"ui": "covered"}}],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs=set(),
+        )
+
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(
+                first,
+                {
+                    "schema_version": DELTA_VERSION,
+                    "base_graph_digest": first["artifact_digest"],
+                    "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web"},
+                    "operations": [{"op": "set_partition_coverage", "coverage": {"ui": "covered"}}],
+                    "completion_claims": [],
+                    "unresolved_items": [],
+                },
+                valid_evidence_refs=set(),
+            )
+
+        self.assertEqual(caught.exception.error_code, "designer_delta_no_effect")
+
+    def test_v2_rejects_v1_delta_contract(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-v2", snapshot_binding=self.binding)
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(
+                graph,
+                {
+                    "schema_version": DELTA_VERSION_V1,
+                    "base_graph_digest": graph["artifact_digest"],
+                    "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
+                    "operations": [{"op": "set_partition_coverage", "coverage": {"api": "covered"}}],
+                    "completion_claims": [],
+                    "unresolved_items": [],
+                },
+                valid_evidence_refs=set(),
+            )
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+
+    def test_v2_bundle_requires_investigation_and_runtime_binding(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-v2-missing", snapshot_binding=self.binding)
+        designed, _ = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:api",
+                            "semantic_key": "SC-1:api",
+                            "name": "Delete route",
+                            "kind": "api_contract",
+                            "surface": "api",
+                            "disposition": "add",
+                            "requirement_refs": ["REQ-1"],
+                            "evidence_refs": [],
+                            "evidence_reason": "The approved endpoint is new.",
+                            "contract": "Delete the selected record.",
+                            "surface_contract": self._api_contract(),
+                        },
+                    },
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs=set(),
+        )
+        categories = {str(item["category"]) for item in design_bundle_findings(designed)}
+        self.assertIn("design_investigation_missing", categories)
+        self.assertIn("runtime_binding_missing", categories)
+
+    def test_v2_runtime_binding_is_evidence_backed_and_relation_checked(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-v2-valid", snapshot_binding=self.binding)
+        source_ref = "repo:apps/api/src/routes.ts#L1@sha256:source"
+        designed, _ = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": "UC1",
+                    "scenario_id": "SC-1",
+                    "component_id": "api",
+                    "source_observation_refs": [source_ref],
+                },
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:api",
+                            "semantic_key": "SC-1:api",
+                            "name": "Delete route",
+                            "kind": "api_contract",
+                            "surface": "api",
+                            "disposition": "modify",
+                            "requirement_refs": ["REQ-1"],
+                            "evidence_refs": ["RLA-route"],
+                            "evidence_reason": "",
+                            "contract": "Delete the selected record.",
+                            "surface_contract": self._api_contract(),
+                            "runtime_binding": {
+                                "schema_version": RUNTIME_BINDING_VERSION,
+                                "runtime_kind": "api_route",
+                                "target": {
+                                    "component_id": "api",
+                                    "path": "apps/api/src/delete-route.ts",
+                                    "symbol": "deleteRoute",
+                                },
+                                "attachment": {
+                                    "relation": "registered_by",
+                                    "owner_ref": "RLA-app",
+                                    "owner_path": "apps/api/src/app.ts",
+                                    "owner_symbol": "createApp",
+                                },
+                                "evidence_refs": [source_ref, "RLA-app"],
+                            },
+                        },
+                    },
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs={"RLA-route", "RLA-app", source_ref},
+        )
+        landscape = {
+            "components": [{"component_id": "api", "roots": ["apps/api/src"]}],
+            "anchors": [
+                {"anchor_id": "RLA-route", "component_id": "api", "path": "apps/api/src/delete-route.ts", "symbol": "deleteRoute"},
+                {"anchor_id": "RLA-app", "component_id": "api", "path": "apps/api/src/app.ts", "symbol": "createApp"},
+            ],
+        }
+        self.assertEqual(design_bundle_findings(designed, landscape=landscape), [])
+
+        invalid = json.loads(json.dumps(designed))
+        invalid["nodes"][0]["runtime_binding"]["attachment"]["relation"] = "rendered_by"
+        invalid["artifact_digest"] = graph_digest(invalid)
+        categories = {str(item["category"]) for item in design_bundle_findings(invalid, landscape=landscape)}
+        self.assertIn("runtime_attachment_missing", categories)
+
+        outside_root = json.loads(json.dumps(designed))
+        outside_root["nodes"][0]["runtime_binding"]["target"]["path"] = "apps/web/src/wrong-owner.ts"
+        outside_root["artifact_digest"] = graph_digest(outside_root)
+        categories = {str(item["category"]) for item in design_bundle_findings(outside_root, landscape=landscape)}
+        self.assertIn("component_ownership_invalid", categories)
+
+        wrong_surface_owner = json.loads(json.dumps(designed))
+        wrong_surface_owner["partitions"][0]["component_id"] = "contracts"
+        wrong_surface_owner["nodes"][0]["component_id"] = "contracts"
+        wrong_surface_owner["nodes"][0]["runtime_binding"]["target"]["component_id"] = "contracts"
+        wrong_surface_owner["nodes"][0]["runtime_binding"]["target"]["path"] = "packages/contracts/src/delete.ts"
+        wrong_surface_owner["nodes"][0]["runtime_binding"]["attachment"] = {
+            "relation": "registered_by",
+            "owner_ref": "RLA-contracts",
+            "owner_path": "packages/contracts/src/index.ts",
+            "owner_symbol": "contracts",
+        }
+        wrong_surface_owner["artifact_digest"] = graph_digest(wrong_surface_owner)
+        wrong_landscape = {
+            "components": [
+                *landscape["components"],
+                {"component_id": "contracts", "roots": ["packages/contracts/src"]},
+            ],
+            "anchors": [
+                *landscape["anchors"],
+                {
+                    "anchor_id": "RLA-contracts",
+                    "component_id": "contracts",
+                    "path": "packages/contracts/src/index.ts",
+                    "symbol": "contracts",
+                },
+            ],
+        }
+        categories = {
+            str(item["category"])
+            for item in design_bundle_findings(wrong_surface_owner, landscape=wrong_landscape)
+        }
+        self.assertIn("surface_component_mismatch", categories)
+
+        node = designed["nodes"][0]
+        invented_binding = json.loads(json.dumps(node["runtime_binding"]))
+        invented_binding["evidence_refs"] = ["RLA-invented"]
+        with self.assertRaises(HarnessError) as invented:
+            apply_designer_delta(
+                designed,
+                {
+                    "schema_version": DELTA_VERSION,
+                    "base_graph_digest": designed["artifact_digest"],
+                    "partition": {
+                        "use_case_id": "UC1",
+                        "scenario_id": "SC-1",
+                        "component_id": "api",
+                        "source_observation_refs": [source_ref],
+                    },
+                    "operations": [
+                        {"op": "update_node", "node_id": node["id"], "changes": {"runtime_binding": invented_binding}}
+                    ],
+                    "completion_claims": [],
+                    "unresolved_items": [],
+                },
+                valid_evidence_refs={"RLA-route", "RLA-app", source_ref},
+            )
+        self.assertEqual(invented.exception.error_code, "designer_delta_invalid")
+
+    def test_v2_http_boundary_requires_authorization_mapping(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-v2-boundary", snapshot_binding=self.binding)
+        source_ref = "repo:apps/web/src/AppShell.tsx#L1@sha256:source"
+        graph, ui_refs = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": "UC1",
+                    "scenario_id": "SC-1",
+                    "component_id": "web",
+                    "source_observation_refs": [source_ref],
+                },
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"ui": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:ui",
+                            "semantic_key": "SC-1:ui",
+                            "name": "Delete screen",
+                            "kind": "ui_interaction",
+                            "surface": "ui",
+                            "disposition": "add",
+                            "requirement_refs": ["REQ-1"],
+                            "evidence_refs": [],
+                            "evidence_reason": "The screen is new.",
+                            "contract": "Request deletion and render its outcome.",
+                            "surface_contract": self._ui_contract(),
+                            "runtime_binding": {
+                                "schema_version": RUNTIME_BINDING_VERSION,
+                                "runtime_kind": "ui_component",
+                                "target": {"component_id": "web", "path": "apps/web/src/DeleteScreen.tsx", "symbol": "DeleteScreen"},
+                                "attachment": {
+                                    "relation": "rendered_by",
+                                    "owner_ref": "RLA-web-app",
+                                    "owner_path": "apps/web/src/AppShell.tsx",
+                                    "owner_symbol": "AppShell",
+                                },
+                                "evidence_refs": ["RLA-web-app"],
+                            },
+                        },
+                    },
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs={"RLA-web-app", source_ref},
+        )
+        api_source = "repo:apps/api/src/app.ts#L1@sha256:source"
+        graph, api_refs = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": "UC1",
+                    "scenario_id": "SC-1",
+                    "component_id": "api",
+                    "source_observation_refs": [api_source],
+                },
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:api",
+                            "semantic_key": "SC-1:api",
+                            "name": "Delete route",
+                            "kind": "api_contract",
+                            "surface": "api",
+                            "disposition": "add",
+                            "requirement_refs": ["REQ-1"],
+                            "evidence_refs": [],
+                            "evidence_reason": "The endpoint is new.",
+                            "contract": "Authorize and delete the selected record.",
+                            "surface_contract": self._api_contract(),
+                            "runtime_binding": {
+                                "schema_version": RUNTIME_BINDING_VERSION,
+                                "runtime_kind": "api_route",
+                                "target": {"component_id": "api", "path": "apps/api/src/delete-route.ts", "symbol": "deleteRoute"},
+                                "attachment": {
+                                    "relation": "registered_by",
+                                    "owner_ref": "RLA-api-app",
+                                    "owner_path": "apps/api/src/app.ts",
+                                    "owner_symbol": "createApp",
+                                },
+                                "evidence_refs": ["RLA-api-app"],
+                            },
+                        },
+                    },
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs={"RLA-api-app", api_source},
+        )
+        graph, _ = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": "UC1",
+                    "scenario_id": "SC-1",
+                    "component_id": "web",
+                    "source_observation_refs": [source_ref],
+                },
+                "operations": [
+                    {
+                        "op": "add_edge",
+                        "edge": {
+                            "from": ui_refs["tmp:ui"],
+                            "to": api_refs["tmp:api"],
+                            "kind": "calls",
+                            "label": "DELETE cultural heritage",
+                            "scenario_id": "SC-1",
+                            "terminal": True,
+                            "boundary_contract": {
+                                "schema_version": BOUNDARY_CONTRACT_VERSION,
+                                "consumer_operation": "deleteHeritage(id)",
+                                "provider_operation": "DELETE /cultural-heritage/{id}",
+                                "input_mapping": [{"from": "selectedId", "to": "id", "required": True}],
+                                "auth_mapping": [],
+                                "response_mapping": [{"from": "204", "to": "deleted", "required": True}],
+                                "error_mapping": [{"from": "404", "to": "not_found", "required": True}],
+                            },
+                        },
+                    }
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs={"RLA-web-app", source_ref},
+        )
+        misnamed = json.loads(json.dumps(graph))
+        misnamed_edge = misnamed["edges"][0]
+        misnamed_edge[BOUNDARY_CONTRACT_VERSION] = misnamed_edge.pop("boundary_contract")
+        misnamed["artifact_digest"] = graph_digest(misnamed)
+        with self.assertRaises(HarnessError) as caught:
+            validate_vertical_design_graph(misnamed, expected_run_id="run-v2-boundary")
+        self.assertIn("use boundary_contract instead", caught.exception.message)
+        landscape = {
+            "components": [
+                {"component_id": "web", "roots": ["apps/web/src"]},
+                {"component_id": "api", "roots": ["apps/api/src"]},
+            ],
+            "anchors": [
+                {"anchor_id": "RLA-web-app", "component_id": "web", "path": "apps/web/src/AppShell.tsx", "symbol": "AppShell"},
+                {"anchor_id": "RLA-api-app", "component_id": "api", "path": "apps/api/src/app.ts", "symbol": "createApp"},
+            ],
+        }
+        categories = {str(item["category"]) for item in design_bundle_findings(graph, landscape=landscape)}
+        self.assertIn("boundary_contract_mismatch", categories)
+        conflicting = json.loads(json.dumps(graph))
+        ui_node = next(item for item in conflicting["nodes"] if item["component_id"] == "web")
+        ui_node["runtime_binding"]["target"] = {
+            "component_id": "web",
+            "path": "apps/web/src/AppShell.tsx",
+            "symbol": "AppShell",
+        }
+        conflicting["artifact_digest"] = graph_digest(conflicting)
+        conflict_categories = {
+            str(item["category"])
+            for item in design_bundle_findings(conflicting, landscape=landscape)
+        }
+        self.assertIn("planned_target_conflicts_as_is", conflict_categories)
+
+    @staticmethod
+    def _api_contract() -> dict[str, object]:
+        return {
+            "schema_version": SURFACE_CONTRACT_VERSION,
+            "surface": "api",
+            "operation_id": "deleteHeritage",
+            "method": "DELETE",
+            "path": "/cultural-heritage/{id}",
+            "request_fields": [{"name": "id", "type": "string", "location": "path"}],
+            "responses": [
+                {"status": "204", "outcome": "record deleted"},
+                {"status": "404", "outcome": "record not found"},
+            ],
+            "authorization": "authenticated operator",
+        }
+
+    @staticmethod
+    def _ui_contract() -> dict[str, object]:
+        return {
+            "schema_version": SURFACE_CONTRACT_VERSION,
+            "surface": "ui",
+            "entrypoint": "delete control",
+            "states": ["ready", "deleted", "error"],
+            "transitions": [
+                {"from": "ready", "action": "confirm delete", "to": "deleted", "outcome": "record deleted"}
+            ],
+            "validations": ["A record is selected."],
+            "outcomes": ["record deleted", "error shown"],
+        }
+
+    def test_bundle_contract_is_additive_but_required_for_bundle_readiness(self) -> None:
+        graph = new_vertical_design_graph(
+            run_id="run-bundle",
+            snapshot_binding=self.binding,
+            contract_version=GRAPH_VERSION_V1,
+        )
+        designed, refs = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION_V1,
                 "base_graph_digest": graph["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -138,7 +569,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
         enriched, _ = apply_designer_delta(
             designed,
             {
-                "schema_version": DELTA_VERSION,
+                "schema_version": DELTA_VERSION_V1,
                 "base_graph_digest": designed["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -405,6 +836,25 @@ class _ScriptedDesignerClient:
 
 
 class DesignerResumeTest(unittest.TestCase):
+    def test_designer_prompt_prioritizes_last_rejected_action(self) -> None:
+        message = "Design edge already exists: VDE-duplicate."
+
+        prompt = _designer_prompt(
+            requirement_model={},
+            landscape={},
+            graph={"schema_version": GRAPH_VERSION, "nodes": [], "edges": [], "partitions": []},
+            observations=[],
+            repair_feedback=[],
+            active_partition=None,
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action=message,
+        )
+
+        self.assertTrue(prompt.startswith("Your previous action was rejected."))
+        self.assertIn(message, prompt)
+        self.assertIn("Do not resend the rejected delta unchanged.", prompt)
+
     def test_repair_targets_preserve_finding_order_and_deduplicate_scenarios(self) -> None:
         self.assertEqual(
             _repair_targets(
@@ -484,14 +934,16 @@ class DesignerResumeTest(unittest.TestCase):
                 {"component_id": "database", "roots": ["packages/db"]},
             ],
             "anchors": [
+                {"anchor_id": "RLA-000-contract", "component_id": "contracts", "kind": "service_symbol", "path": "packages/contracts/health.ts", "symbol": "HEALTH_ENDPOINT"},
                 {"anchor_id": "RLA-ui", "component_id": "web", "kind": "ui_component", "path": "apps/web/App.tsx", "symbol": "App"},
                 {"anchor_id": "RLA-api", "component_id": "api", "kind": "api_route", "path": "apps/api/app.ts", "symbol": "GET /items"},
+                {"anchor_id": "RLA-api-app", "component_id": "api", "kind": "service_symbol", "path": "apps/api/app.ts", "symbol": "createApp"},
                 {"anchor_id": "RLA-rule", "component_id": "api", "kind": "service_symbol", "path": "apps/api/items.ts", "symbol": "listItems"},
             ],
             "scenario_matches": [
                 {"scenario_id": "SC-1", "surface": "ui", "candidate_anchor_refs": ["RLA-ui"]},
-                {"scenario_id": "SC-1", "surface": "api", "candidate_anchor_refs": ["RLA-api"]},
-                {"scenario_id": "SC-1", "surface": "business_rule", "candidate_anchor_refs": ["RLA-rule"]},
+                {"scenario_id": "SC-1", "surface": "api", "candidate_anchor_refs": ["RLA-000-contract", "RLA-api"]},
+                {"scenario_id": "SC-1", "surface": "business_rule", "candidate_anchor_refs": ["RLA-000-contract", "RLA-rule"]},
             ],
         }
         graph = new_vertical_design_graph(
@@ -518,6 +970,303 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(second["partition"]["component_id"], "api")
         self.assertEqual(second["missing_surfaces"], ["api", "business_rule"])
         self.assertEqual(second["required_coverage"], {"api": "covered", "business_rule": "covered"})
+        self.assertEqual(
+            second["surface_work"][0]["composition_owner_candidates"][0]["anchor_id"],
+            "RLA-api-app",
+        )
+        api_scaffold = second["delta_scaffold"]["operations"][1]["node"]["runtime_binding"]
+        self.assertEqual(api_scaffold["attachment"]["owner_ref"], "RLA-api-app")
+        self.assertTrue(api_scaffold["target"]["path"].startswith("<new profile-owned"))
+
+    def test_composition_partition_uses_finding_owner_and_one_finding(self) -> None:
+        requirement = {
+            "use_case_id": "UC1",
+            "scenario_contract": {"scenarios": [{"id": "SC-1", "surfaces": {}}]},
+        }
+        landscape = {
+            "components": [{"component_id": "contracts"}, {"component_id": "web"}],
+            "anchors": [],
+            "scenario_matches": [],
+        }
+        graph = new_vertical_design_graph(
+            run_id="run-composition",
+            snapshot_binding={
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            },
+        )
+        graph["nodes"] = [
+            {"id": "VDN-contracts", "scenario_id": "SC-1", "component_id": "contracts"},
+            {"id": "VDN-web", "scenario_id": "SC-1", "component_id": "web"},
+        ]
+        graph["partitions"] = [
+            {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web", "coverage": {}}
+        ]
+        findings = [
+            {
+                "code": "boundary_contract_mismatch",
+                "subject_ref": "VDE-edge",
+                "diagram_ids": ["SC-1"],
+                "partition": {"scenario_id": "SC-1", "component_id": "web"},
+            },
+            {
+                "code": "runtime_path_disconnected",
+                "subject_ref": "SC-2",
+                "diagram_ids": ["SC-2"],
+                "partition": {"scenario_id": "SC-2", "component_id": "contracts"},
+            },
+        ]
+
+        with patch("sdlc_harness.agents.designer.execution.completion_findings", return_value=findings):
+            active = _active_partition(requirement_model=requirement, landscape=landscape, graph=graph)
+
+        self.assertEqual(active["partition"]["component_id"], "web")
+        self.assertEqual(active["composition_findings"], [findings[0]])
+
+    def test_invalid_graph_delta_is_rejected_and_retried_in_same_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            (target / "App.tsx").write_text("export function App() { return null; }\n", encoding="utf-8")
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            settings = SimpleNamespace(
+                llm_mode="deepseek",
+                design_llm_call_budget=4,
+                llm_structured_max_tokens=1000,
+            )
+            run_id = "run-invalid-delta-retry"
+            requirement = {
+                "use_case_id": "UC1",
+                "scenario_contract": {
+                    "scenarios": [{"id": "SC-1", "surfaces": {"ui": {"status": "required"}}}]
+                },
+            }
+            landscape = {
+                "artifact_digest": "sha256:repo",
+                "components": [{"component_id": "web", "roots": ["."], "file_refs": ["App.tsx"]}],
+                "anchors": [
+                    {
+                        "anchor_id": "RLA-0000000000000001",
+                        "kind": "ui_component",
+                        "component_id": "web",
+                        "path": "App.tsx",
+                        "symbol": "App",
+                        "evidence_source": "test",
+                    }
+                ],
+                "scenario_matches": [
+                    {
+                        "scenario_id": "SC-1",
+                        "surface": "ui",
+                        "candidate_anchor_refs": ["RLA-0000000000000001"],
+                    }
+                ],
+                "snapshot": {},
+            }
+            binding = {
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            }
+            initial = new_vertical_design_graph(
+                run_id=run_id,
+                snapshot_binding=binding,
+                contract_version=GRAPH_VERSION_V1,
+            )
+
+            def delta(validations: list[object]) -> dict[str, object]:
+                return {
+                    "schema_version": DELTA_VERSION_V1,
+                    "base_graph_digest": initial["artifact_digest"],
+                    "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web"},
+                    "operations": [
+                        {"op": "set_partition_coverage", "coverage": {"ui": "covered"}},
+                        {
+                            "op": "add_node",
+                            "node": {
+                                "temp_ref": "tmp:ui",
+                                "semantic_key": "SC-1:ui",
+                                "name": "Delete heritage control",
+                                "kind": "ui_interaction",
+                                "surface": "ui",
+                                "disposition": "reuse",
+                                "requirement_refs": ["REQ-1"],
+                                "evidence_refs": ["RLA-0000000000000001"],
+                                "evidence_reason": "",
+                                "contract": "Confirm deletion of the selected heritage record.",
+                                "surface_contract": {
+                                    "schema_version": SURFACE_CONTRACT_VERSION,
+                                    "surface": "ui",
+                                    "entrypoint": "heritage list delete control",
+                                    "states": ["selected", "confirmation_open", "deleted"],
+                                    "transitions": [
+                                        {
+                                            "from": "selected",
+                                            "action": "confirm deletion",
+                                            "to": "deleted",
+                                            "outcome": "selected record is removed",
+                                        }
+                                    ],
+                                    "validations": validations,
+                                    "outcomes": ["record removed from the list"],
+                                },
+                            },
+                        },
+                    ],
+                    "completion_claims": [{"scenario_id": "SC-1", "surfaces": ["ui"]}],
+                    "unresolved_items": [],
+                }
+
+            result = DesignerToolLoopExecutor(
+                settings=settings,
+                store=store,
+                llm_client=_ScriptedDesignerClient(
+                    [
+                        {
+                            "action": "design.propose_delta",
+                            "arguments": {"delta": delta([{"name": "selection", "rule": "required"}])},
+                        },
+                        {
+                            "action": "design.propose_delta",
+                            "arguments": {"delta": delta(["A record must be selected before deletion."])},
+                        },
+                    ]
+                ),
+            ).execute(
+                run_id=run_id,
+                requirement_model=requirement,
+                landscape=landscape,
+                target_path=target,
+                snapshot_binding=binding,
+                contract_version=GRAPH_VERSION_V1,
+            )
+
+            self.assertEqual(result.graph["revision"], 1)
+            self.assertEqual(result.progress["invalid_action_budget"]["used"], 1)
+            self.assertEqual(len(result.delta_paths), 1)
+            session = json.loads((root / result.session_path).read_text(encoding="utf-8"))
+            self.assertIsNone(session["cursor"]["pending_call"])
+            self.assertEqual(session["observations"][0]["error"]["error_code"], "vertical_design_graph_invalid")
+
+    def test_v2_requires_source_read_before_first_component_delta(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            (target / "route.ts").write_text("export const route = '/items';\n", encoding="utf-8")
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            settings = SimpleNamespace(
+                llm_mode="deepseek",
+                design_llm_call_budget=4,
+                llm_structured_max_tokens=1000,
+            )
+            run_id = "run-v2-source-gate"
+            requirement = {
+                "use_case_id": "UC1",
+                "scenario_contract": {
+                    "scenarios": [{"id": "SC-1", "surfaces": {"api": {"status": "required"}}}]
+                },
+            }
+            landscape = {
+                "artifact_digest": "sha256:repo",
+                "components": [{"component_id": "api", "roots": ["."], "file_refs": ["route.ts"]}],
+                "anchors": [
+                    {
+                        "anchor_id": "RLA-route",
+                        "kind": "api_route",
+                        "component_id": "api",
+                        "path": "route.ts",
+                        "symbol": "route",
+                        "evidence_source": "test",
+                    }
+                ],
+                "scenario_matches": [
+                    {"scenario_id": "SC-1", "surface": "api", "candidate_anchor_refs": ["RLA-route"]}
+                ],
+                "snapshot": {},
+            }
+            binding = {
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            }
+            initial = new_vertical_design_graph(run_id=run_id, snapshot_binding=binding)
+            delta = {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": initial["artifact_digest"],
+                "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:api",
+                            "semantic_key": "SC-1:api",
+                            "name": "Items route",
+                            "kind": "api_contract",
+                            "surface": "api",
+                            "disposition": "reuse",
+                            "requirement_refs": ["REQ-1"],
+                            "evidence_refs": ["RLA-route"],
+                            "evidence_reason": "",
+                            "contract": "Handle the items request.",
+                            "surface_contract": VerticalDesignGraphTest._api_contract(),
+                            "runtime_binding": {
+                                "schema_version": RUNTIME_BINDING_VERSION,
+                                "runtime_kind": "api_route",
+                                "target": {"component_id": "api", "path": "route.ts", "symbol": "route"},
+                                "attachment": {
+                                    "relation": "registered_by",
+                                    "owner_ref": "RLA-route",
+                                    "owner_path": "route.ts",
+                                    "owner_symbol": "route",
+                                },
+                                "evidence_refs": ["RLA-route"],
+                            },
+                        },
+                    },
+                ],
+                "completion_claims": [{"scenario_id": "SC-1", "surfaces": ["api"]}],
+                "unresolved_items": [],
+            }
+            preview_delta = json.loads(json.dumps(delta))
+            preview_delta["partition"]["source_observation_refs"] = ["repo:route.ts#L1@sha256:preview"]
+            preview, _ = apply_designer_delta(
+                initial,
+                preview_delta,
+                valid_evidence_refs={"RLA-route", "repo:route.ts#L1@sha256:preview"},
+            )
+            self.assertEqual(
+                completion_findings(preview, required_surfaces={"SC-1": {"api"}}, landscape=landscape),
+                [],
+            )
+            result = DesignerToolLoopExecutor(
+                settings=settings,
+                store=store,
+                llm_client=_ScriptedDesignerClient(
+                    [
+                        {"action": "design.propose_delta", "arguments": {"delta": delta}},
+                        {"action": "repo.read", "arguments": {"path": "route.ts", "start_line": 1}},
+                        {"action": "design.propose_delta", "arguments": {"delta": delta}},
+                    ]
+                ),
+            ).execute(
+                run_id=run_id,
+                requirement_model=requirement,
+                landscape=landscape,
+                target_path=target,
+                snapshot_binding=binding,
+            )
+
+            self.assertEqual(result.graph["revision"], 1)
+            self.assertEqual(result.progress["invalid_action_budget"]["used"], 1)
+            partition = result.graph["partitions"][0]
+            self.assertTrue(str(partition["source_observation_refs"][0]).startswith("repo:route.ts#L1@sha256:"))
 
     def test_transport_pause_resumes_same_session_without_repeating_delta(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -566,9 +1315,13 @@ class DesignerResumeTest(unittest.TestCase):
                 "workspace_ref": "run_workspace_v1",
                 "base_sha": "abc123",
             }
-            initial = new_vertical_design_graph(run_id=run_id, snapshot_binding=binding)
+            initial = new_vertical_design_graph(
+                run_id=run_id,
+                snapshot_binding=binding,
+                contract_version=GRAPH_VERSION_V1,
+            )
             delta = {
-                "schema_version": DELTA_VERSION,
+                "schema_version": DELTA_VERSION_V1,
                 "base_graph_digest": initial["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -600,6 +1353,7 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
+                    contract_version=GRAPH_VERSION_V1,
                 )
             self.assertTrue(paused.exception.retriable)
 
@@ -621,17 +1375,18 @@ class DesignerResumeTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
+                contract_version=GRAPH_VERSION_V1,
             )
 
             self.assertEqual(result.graph["revision"], 1)
             self.assertEqual(len(result.delta_paths), 1)
             self.assertEqual(result.session_path, paused.exception.session_path)
             self.assertEqual(result.progress["status"], "completed")
-            self.assertEqual(result.progress["invalid_action_budget"]["used"], 2)
+            self.assertEqual(result.progress["invalid_action_budget"]["used"], 0)
 
             node_id = str(result.graph["nodes"][0]["id"])
             repair_delta = {
-                "schema_version": DELTA_VERSION,
+                "schema_version": DELTA_VERSION_V1,
                 "base_graph_digest": result.graph["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -656,6 +1411,7 @@ class DesignerResumeTest(unittest.TestCase):
                 existing_graph=result.graph,
                 repair_feedback=[{"id": "SEM-1", "message": "Add the missing interaction."}],
                 session_ordinal=2,
+                contract_version=GRAPH_VERSION_V1,
             )
             self.assertEqual(repaired.graph["revision"], 2)
             self.assertEqual(len(repaired.graph["edges"]), 1)
@@ -690,6 +1446,7 @@ class DesignerResumeTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
+                contract_version=GRAPH_VERSION_V1,
             )
             self.assertEqual(reconciled.graph["revision"], 1)
             self.assertEqual(reconciled.delta_paths, result.delta_paths)
@@ -718,6 +1475,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                     "SDLC_VERTICAL_TRACE_MODE": "shadow",
+                    "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
@@ -736,6 +1494,10 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             self.assertEqual(designed["designer_execution"]["status"], "completed")
             self.assertEqual(designed[DESIGN_BUNDLE_STATE_KEY], DESIGN_BUNDLE_VERSION)
             self.assertEqual(designed["quality_reports"]["design_validation"]["mode"], GRAPH_VERSION)
+            bundle_summary = designed["quality_reports"]["design_bundle"]
+            self.assertEqual(bundle_summary["runtime_binding_coverage"]["bound"], bundle_summary["runtime_binding_coverage"]["total"])
+            self.assertEqual(bundle_summary["investigation_evidence_coverage"]["observed"], bundle_summary["investigation_evidence_coverage"]["total"])
+            self.assertEqual(bundle_summary["runtime_path_coverage"]["connected"], bundle_summary["runtime_path_coverage"]["required"])
             for key in (
                 "vertical_design_graph",
                 "design_projection_manifest",
@@ -896,6 +1658,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
                     "SDLC_VERTICAL_TRACE_MODE": "enforce",
+                    "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
@@ -942,7 +1705,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                 requested_by="test",
             )
 
-            self.assertEqual(created["designer_contract_version"], GRAPH_VERSION)
+            self.assertEqual(created["designer_contract_version"], GRAPH_VERSION_V1)
 
 
 if __name__ == "__main__":

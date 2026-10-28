@@ -30,7 +30,7 @@ from ..agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     developer_transport_retry_allowed,
-    repair_scope_mismatch_retry_allowed,
+    developer_execution_retry_allowed,
     resolve_implementation_plan_contract,
 )
 from ..agents.requirements import (
@@ -75,7 +75,7 @@ from ..agents.requirements.session_v1 import (
     read_requirement_session,
     requirement_session_summary,
 )
-from ..agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
+from ..agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION_V1, SUPPORTED_GRAPH_VERSIONS
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
@@ -139,7 +139,7 @@ class PhaseOneWorkflow:
         """Chạy Phase 1 từ source đã được load, bất kể source là fixture hay Jira."""
 
         active_state = self.store.find_active_run(source.source_ref)
-        if active_state and str(active_state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION:
+        if active_state and str(active_state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS:
             return self._status_response(active_state, created_new_run=False)
 
         run_id = self.store.new_run_id()
@@ -169,7 +169,16 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
-        state[DESIGNER_CONTRACT_STATE_KEY] = GRAPH_VERSION
+        designer_contract_version = str(
+            getattr(self.settings, "designer_contract_version", GRAPH_VERSION_V1)
+        )
+        if designer_contract_version not in SUPPORTED_GRAPH_VERSIONS:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Unsupported configured Designer contract: {designer_contract_version}",
+                run_id=run_id,
+            )
+        state[DESIGNER_CONTRACT_STATE_KEY] = designer_contract_version
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
             COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
@@ -1438,7 +1447,7 @@ class PhaseOneWorkflow:
         )
         if legacy_verification_repair and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
-        if repair_scope_mismatch_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+        if developer_execution_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if developer_transport_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")

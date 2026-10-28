@@ -222,6 +222,10 @@ class PhaseFourQaCycle:
                 latest_artifacts["developer_qa_repair_execution_manifest"] = exc.manifest_path
             if exc.journal_path:
                 latest_artifacts["developer_qa_repair_execution_journal"] = exc.journal_path
+            if exc.session_path:
+                latest_artifacts["developer_qa_repair_execution_session"] = exc.session_path
+            if exc.failure_path:
+                latest_artifacts["developer_failure_classification"] = exc.failure_path
             paused = exc.retriable
             state.update(
                 {

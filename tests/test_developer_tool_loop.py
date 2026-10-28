@@ -4,24 +4,36 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 from sdlc_harness.agents.developer.execution import (
     DeveloperExecutionError,
     DeveloperToolLoopExecutor,
+    _action_memory,
+    _action_prompt,
     _build_manifest,
+    _action_policy_error,
+    _current_mutated_sources,
+    _diagnostic_repeat_count,
+    _execution_phase,
     _new_journal,
     _parse_action,
+    _prior_attempt_feedback,
     _selected_repair_paths,
-    repair_scope_mismatch_retry_allowed,
+    _verification_diagnostic_fingerprint,
+    _verification_repair_state,
+    developer_execution_retry_allowed,
 )
 from sdlc_harness.agents.developer.repair_context import build_repair_closure
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
+from sdlc_harness.profiles import VerificationStagePolicy
 from sdlc_harness.storage.runtime import RuntimeStore
 
 
@@ -29,8 +41,10 @@ class ScriptedLlm:
     def __init__(self, responses: list[LlmCompletion]):
         self.responses = list(responses)
         self.prompts: list[str] = []
+        self.systems: list[str] = []
 
     def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.systems.append(str(kwargs.get("system") or ""))
         self.prompts.append(str(kwargs.get("prompt") or ""))
         if not self.responses:
             raise AssertionError("Scripted LLM ran out of responses")
@@ -116,6 +130,603 @@ class DeveloperToolLoopTest(unittest.TestCase):
     def executor(self, llm: ScriptedLlm) -> DeveloperToolLoopExecutor:
         return DeveloperToolLoopExecutor(settings=self.settings, store=self.store, llm_client=llm)
 
+    def test_action_budget_reserves_required_stages_before_completion(self) -> None:
+        self.assertEqual(
+            _execution_phase(
+                history=[],
+                mutated=True,
+                action_index=22,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+            ),
+            "verification_required",
+        )
+        self.assertIsNone(
+            _action_policy_error(
+                action={"action": "verification.run_stage", "arguments": {"stage_id": "typecheck"}},
+                history=[],
+                seen_observations=set(),
+                mutated=True,
+                action_index=24,
+                max_actions=24,
+                pending_stage_ids=["typecheck"],
+            )
+        )
+
+    def test_failed_stage_requires_mutation_before_verification_rerun(self) -> None:
+        self.assertEqual(
+            _execution_phase(
+                history=[],
+                mutated=True,
+                action_index=20,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+                failed_stage_ids=["typecheck"],
+            ),
+            "verification_repair_required",
+        )
+        rejected = _action_policy_error(
+            action={"action": "verification.run_stage", "arguments": {"stage_id": "typecheck"}},
+            history=[],
+            seen_observations=set(),
+            mutated=True,
+            action_index=20,
+            max_actions=24,
+            pending_stage_ids=["typecheck", "unit"],
+            failed_stage_ids=["typecheck"],
+        )
+        self.assertEqual(rejected["error"], "verification_repair_required")
+        self.assertIsNone(
+            _action_policy_error(
+                action={"action": "repo.write_file", "arguments": {"path": "src/Main.java"}},
+                history=[],
+                seen_observations=set(),
+                mutated=True,
+                action_index=20,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+                failed_stage_ids=["typecheck"],
+            )
+        )
+        self.assertIsNone(
+            _action_policy_error(
+                action={"action": "repo.read", "arguments": {"path": "package.json"}},
+                history=[],
+                seen_observations=set(),
+                mutated=True,
+                action_index=20,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+                failed_stage_ids=["typecheck"],
+            )
+        )
+        self.assertIsNone(
+            _action_policy_error(
+                action={"action": "verification.run_stage", "arguments": {"stage_id": "typecheck"}},
+                history=[],
+                seen_observations=set(),
+                mutated=True,
+                action_index=24,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+                failed_stage_ids=["typecheck"],
+                repair_mutated_stage_ids=["typecheck"],
+            )
+        )
+        ready = _action_policy_error(
+            action={
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.java", "content": "class Main { int next; }"},
+            },
+            history=[],
+            seen_observations=set(),
+            mutated=True,
+            action_index=21,
+            max_actions=24,
+            pending_stage_ids=["typecheck", "unit"],
+            failed_stage_ids=["typecheck"],
+            repair_mutated_stage_ids=["typecheck"],
+            repair_verification_ready_stage_ids=["typecheck"],
+        )
+        self.assertIsNone(ready)
+        repeated = "class Main {}"
+        ready_over_duplicate = _action_policy_error(
+            action={
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.java", "content": repeated},
+            },
+            history=[
+                {
+                    "action": "repo.write_file",
+                    "arguments": {
+                        "path": "src/Main.java",
+                        "content_chars": len(repeated),
+                        "content_sha256": hashlib.sha256(repeated.encode("utf-8")).hexdigest(),
+                    },
+                    "result": {"ok": False, "error": "no_effect_mutation"},
+                }
+            ],
+            seen_observations=set(),
+            mutated=True,
+            action_index=22,
+            max_actions=24,
+            pending_stage_ids=["typecheck", "unit"],
+            failed_stage_ids=["typecheck"],
+            repair_mutated_stage_ids=["typecheck"],
+            repair_verification_ready_stage_ids=["typecheck"],
+        )
+        self.assertEqual(ready_over_duplicate["error"], "verification_repair_ready")
+        self.assertEqual(ready_over_duplicate["repeat_count"], 2)
+        blocked_observation = _action_policy_error(
+            action={"action": "repo.read", "arguments": {"path": "src/Main.java"}},
+            history=[],
+            seen_observations=set(),
+            mutated=True,
+            action_index=22,
+            max_actions=24,
+            pending_stage_ids=["typecheck", "unit"],
+            failed_stage_ids=["typecheck"],
+            repair_mutated_stage_ids=["typecheck"],
+            repair_verification_ready_stage_ids=["typecheck"],
+        )
+        self.assertEqual(blocked_observation["error"], "verification_repair_ready")
+        forced_verification = _action_policy_error(
+            action={
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.java", "content": "class Main { int later; }"},
+            },
+            history=[],
+            seen_observations=set(),
+            mutated=True,
+            action_index=23,
+            max_actions=24,
+            pending_stage_ids=["typecheck", "unit"],
+            failed_stage_ids=["typecheck"],
+            repair_mutated_stage_ids=["typecheck"],
+            repair_verification_ready_stage_ids=["typecheck"],
+            repair_verification_forced_stage_ids=["typecheck"],
+        )
+        self.assertEqual(forced_verification["error"], "verification_repair_ready")
+        self.assertIsNone(
+            _action_policy_error(
+                action={"action": "verification.run_stage", "arguments": {"stage_id": "typecheck"}},
+                history=[],
+                seen_observations=set(),
+                mutated=True,
+                action_index=22,
+                max_actions=24,
+                pending_stage_ids=["typecheck", "unit"],
+                failed_stage_ids=["typecheck"],
+                repair_mutated_stage_ids=["typecheck"],
+                repair_verification_ready_stage_ids=["typecheck"],
+            )
+        )
+
+    def test_exact_no_effect_mutation_is_rejected_but_new_content_is_allowed(self) -> None:
+        repeated = "class Main {}"
+        history = [
+            {
+                "action": "repo.write_file",
+                "arguments": {
+                    "path": "src/Main.java",
+                    "content_chars": len(repeated),
+                    "content_sha256": hashlib.sha256(repeated.encode("utf-8")).hexdigest(),
+                },
+                "result": {"ok": False, "error": "no_effect_mutation"},
+            }
+        ]
+
+        rejected = _action_policy_error(
+            action={
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.java", "content": repeated},
+            },
+            history=history,
+            seen_observations=set(),
+            mutated=False,
+            action_index=2,
+            max_actions=24,
+        )
+        self.assertEqual(rejected["error"], "duplicate_no_effect_mutation")
+        self.assertIsNone(
+            _action_policy_error(
+                action={
+                    "action": "repo.write_file",
+                    "arguments": {"path": "src/Main.java", "content": "class Main { int value; }"},
+                },
+                history=history,
+                seen_observations=set(),
+                mutated=False,
+                action_index=3,
+                max_actions=24,
+            )
+        )
+
+    def test_repair_episode_survives_mutations_until_the_failed_stage_passes(self) -> None:
+        failed = {
+            "stage_id": "typecheck",
+            "status": "failed",
+            "failure_kind": "implementation",
+            "reason": "tsc failed",
+            "stage_results": [
+                {
+                    "stage_id": "typecheck",
+                    "status": "failed",
+                    "failure_kind": "implementation",
+                    "reason": "tsc failed",
+                    "stdout": "src/Main.ts(1,1): error TS1: broken",
+                    "stderr": "",
+                }
+            ],
+        }
+        fingerprint = _verification_diagnostic_fingerprint(failed)
+        history = [
+            {"action": "verification.run_stage", "result": failed},
+            {
+                "action": "repo.write_file",
+                "result": {"ok": True, "path": "src/Main.ts"},
+            },
+        ]
+
+        state = _verification_repair_state(history)
+
+        self.assertEqual(state["typecheck"]["diagnostic_fingerprint"], fingerprint)
+        self.assertTrue(state["typecheck"]["mutated_since_failure"])
+        self.assertEqual(state["typecheck"]["changed_paths"], ["src/Main.ts"])
+        history.append(
+            {
+                "action": "repo.write_file",
+                "result": {"ok": False, "error": "no_effect_mutation", "path": "src/Main.ts"},
+            }
+        )
+        self.assertTrue(_verification_repair_state(history)["typecheck"]["verification_ready"])
+        history.append(
+            {
+                "action": "repo.write_file",
+                "result": {"ok": False, "error": "verification_repair_ready", "path": "src/Main.ts"},
+            }
+        )
+        self.assertTrue(_verification_repair_state(history)["typecheck"]["verification_forced"])
+        history.append(
+            {
+                "action": "verification.run_stage",
+                "result": {"stage_id": "typecheck", "status": "passed", "failure_kind": ""},
+            }
+        )
+        self.assertEqual(_verification_repair_state(history), {})
+
+    def unit_packet(self) -> dict[str, object]:
+        packet = self.work_packet()
+        packet["execution_units"] = [
+            {
+                "unit_id": "WU-001",
+                "order": 1,
+                "title": "Implement behavior",
+                "objective": "Implement the approved behavior.",
+                "depends_on": [],
+                "write_paths": ["src/Main.java"],
+                "requirement_refs": ["REQ-1"],
+                "acceptance_refs": ["AC-1"],
+                "design_node_ids": ["class:Main"],
+                "required_stage_ids": [],
+                "test_target_paths": [],
+                "input_digest": "sha256:unit-1",
+            },
+            {
+                "unit_id": "WU-002",
+                "order": 2,
+                "title": "Verify behavior",
+                "objective": "Add the approved test.",
+                "depends_on": ["WU-001"],
+                "write_paths": ["src/MainTest.java"],
+                "requirement_refs": ["REQ-1"],
+                "acceptance_refs": ["AC-1"],
+                "design_node_ids": ["class:Main"],
+                "required_stage_ids": [],
+                "test_target_paths": [],
+                "input_digest": "sha256:unit-2",
+            },
+        ]
+        return packet
+
+    def test_unit_aware_execution_uses_plan_units_and_durable_session(self) -> None:
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                ),
+                action(
+                    "repo.write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "test complete",
+                        "path_dispositions": [
+                            {"path": "src/MainTest.java", "status": "mutated", "reason": "Added test."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_units",
+            work_packet=self.unit_packet(),
+            target_path=self.repo,
+        )
+
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        session = json.loads((self.root / result.session_path).read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version"], "developer_execution_manifest_v8")
+        self.assertEqual([item["id"] for item in manifest["items"]], ["WU-001", "WU-002"])
+        self.assertEqual(journal["version"], "developer_execution_journal_v4")
+        self.assertEqual(session["contract_version"], "developer_execution_units_v1")
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001", "WU-002"])
+        self.assertIn("repo.write_file", llm.prompts[0])
+        self.assertIn("execution.complete_unit", llm.prompts[0])
+        self.assertIn("The action is not executed until the Harness returns its tool result", llm.systems[0])
+        self.assertIn("end the response immediately", llm.prompts[0])
+        self.assertIn("Treat current_sources as authoritative", llm.prompts[0])
+
+    def test_unit_completion_requires_current_verification_evidence(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        packet["execution_units"][0]["required_stage_ids"] = ["typecheck"]
+        calls: list[str] = []
+
+        class StageRunner:
+            def run_stage(self, **kwargs: object) -> SimpleNamespace:
+                calls.append(str(kwargs["stage_id"]))
+                return SimpleNamespace(
+                    status="passed",
+                    failure_kind="",
+                    reason="passed",
+                    selected_test_files=(),
+                    verified_test_files=(),
+                    stage_results=(),
+                )
+
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "too early",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                ),
+                action("verification.run_stage", {"stage_id": "typecheck"}),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "verified",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                ),
+            ]
+        )
+        executor = DeveloperToolLoopExecutor(
+            settings=self.settings,
+            store=self.store,
+            llm_client=llm,
+            verification_runner=StageRunner(),
+        )
+
+        result = executor.execute(
+            run_id="run_unit_verification",
+            work_packet=packet,
+            target_path=self.repo,
+            verification_policy=VerificationStagePolicy(
+                project_profile_id="typescript_fullstack_v1",
+                policy_version="verification_stage_policy_v1",
+                stage_ids=("typecheck",),
+            ),
+        )
+
+        self.assertEqual(calls, ["typecheck"])
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        evidence = journal["items"][0]["verification_evidence"][0]
+        self.assertEqual(evidence["report_ref"], "units/WU-001/verification/typecheck.json")
+        self.assertTrue(str(evidence["report_digest"]).startswith("sha256:"))
+
+    def test_identical_verification_failures_stall_after_three_repair_batches(self) -> None:
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "7",
+            },
+        )
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        packet["execution_units"][0]["required_stage_ids"] = ["typecheck"]
+
+        class FailedStage:
+            def to_dict(self) -> dict[str, object]:
+                return {
+                    "stage_id": "typecheck",
+                    "status": "failed",
+                    "argv": ["npm", "run", "typecheck"],
+                    "cwd": ".",
+                    "timeout_seconds": 120,
+                    "exit_code": 2,
+                    "duration_seconds": 0.1,
+                    "stdout": "src/Main.java(1,1): error TS1: broken",
+                    "stderr": "",
+                    "reason": "tsc failed",
+                    "failure_kind": "implementation",
+                    "timed_out": False,
+                    "selected_test_files": [],
+                    "verified_test_files": [],
+                }
+
+        class RepeatedFailureRunner:
+            def run_stage(self, **kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    status="failed",
+                    failure_kind="implementation",
+                    reason="tsc failed",
+                    selected_test_files=(),
+                    verified_test_files=(),
+                    stage_results=(FailedStage(),),
+                )
+
+        contents = ["class Main { int value = 1; }", "class Main { int value = 2; }", "class Main { int value = 3; }"]
+        hashes = [
+            hashlib.sha256((content.rstrip() + os.linesep).encode("utf-8")).hexdigest()
+            for content in contents
+        ]
+        llm = ScriptedLlm(
+            [
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": contents[0]}),
+                action("verification.run_stage", {"stage_id": "typecheck"}),
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": hashes[0], "content": contents[1]}),
+                action("verification.run_stage", {"stage_id": "typecheck"}),
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": hashes[1], "content": contents[2]}),
+                action("verification.run_stage", {"stage_id": "typecheck"}),
+            ]
+        )
+        executor = DeveloperToolLoopExecutor(
+            settings=self.settings,
+            store=self.store,
+            llm_client=llm,
+            verification_runner=RepeatedFailureRunner(),
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            executor.execute(
+                run_id="run_repair_stalled",
+                work_packet=packet,
+                target_path=self.repo,
+                verification_policy=VerificationStagePolicy(
+                    project_profile_id="typescript_fullstack_v1",
+                    policy_version="verification_stage_policy_v1",
+                    stage_ids=("typecheck",),
+                ),
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_repair_stalled")
+        self.assertFalse((self.repo / "src" / "Main.java").exists())
+        self.assertIn("verification_repair_episodes", llm.prompts[2])
+        self.assertIn("current_sources", llm.prompts[2])
+
+    def test_active_repair_reports_budget_exhaustion_instead_of_forcing_verification(self) -> None:
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "3",
+            },
+        )
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        packet["execution_units"][0]["required_stage_ids"] = ["typecheck"]
+
+        class FailedRunner:
+            def run_stage(self, **kwargs: object) -> SimpleNamespace:
+                return SimpleNamespace(
+                    status="failed",
+                    failure_kind="implementation",
+                    reason="typecheck failed",
+                    selected_test_files=(),
+                    verified_test_files=(),
+                    stage_results=(),
+                )
+
+        first = "class Main { int value = 1; }"
+        second = "class Main { int value = 2; }"
+        first_hash = hashlib.sha256((first + os.linesep).encode("utf-8")).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": first}),
+                action("verification.run_stage", {"stage_id": "typecheck"}),
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": first_hash, "content": second},
+                ),
+            ]
+        )
+        executor = DeveloperToolLoopExecutor(
+            settings=self.settings,
+            store=self.store,
+            llm_client=llm,
+            verification_runner=FailedRunner(),
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            executor.execute(
+                run_id="run_repair_budget",
+                work_packet=packet,
+                target_path=self.repo,
+                verification_policy=VerificationStagePolicy(
+                    project_profile_id="typescript_fullstack_v1",
+                    policy_version="verification_stage_policy_v1",
+                    stage_ids=("typecheck",),
+                ),
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_repair_budget_exhausted")
+        self.assertFalse((self.repo / "src" / "Main.java").exists())
+
+    def test_unit_budget_exhaustion_blocks_with_failure_artifact(self) -> None:
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "1",
+            },
+        )
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(
+                ScriptedLlm(
+                    [action("write_file", {"path": "src/Main.java", "content": "class Main {}"})]
+                )
+            ).execute(
+                run_id="run_unit_budget",
+                work_packet=packet,
+                target_path=self.repo,
+            )
+
+        error = caught.exception
+        self.assertFalse(error.retriable)
+        self.assertEqual(error.error_code, "developer_action_limit_exceeded")
+        self.assertTrue(error.failure_path)
+        failure = json.loads((self.root / error.failure_path).read_text(encoding="utf-8"))
+        self.assertEqual(failure["version"], "developer_failure_classification_v1")
+        self.assertEqual(failure["class"], "implementation_defect")
+        self.assertEqual(failure["unit_id"], "WU-001")
+
     def test_truncated_execution_unit_rolls_back_and_can_resume(self) -> None:
         first_llm = ScriptedLlm(
             [
@@ -196,7 +807,11 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
     def test_write_action_cannot_escape_current_work_item(self) -> None:
         llm = ScriptedLlm(
-            [action("write_file", {"path": "../escape.java", "expected_sha256": "", "content": "bad"})]
+            [
+                action("write_file", {"path": "../escape.java", "expected_sha256": "", "content": "bad"}),
+                action("write_file", {"path": "../escape.java", "expected_sha256": "", "content": "bad"}),
+                action("write_file", {"path": "../escape.java", "expected_sha256": "", "content": "bad"}),
+            ]
         )
 
         with self.assertRaises(DeveloperExecutionError) as caught:
@@ -210,6 +825,45 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(caught.exception.error_code, "developer_act_out_of_scope")
         self.assertFalse((self.root / "escape.java").exists())
 
+    def test_out_of_scope_write_returns_feedback_and_can_recover_inside_unit(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTION_RETRIES": "2",
+            },
+        )
+        llm = ScriptedLlm(
+            [
+                action("write_file", {"path": "src/Extra.java", "expected_sha256": "", "content": "bad"}),
+                action("write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action(
+                    "write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action("complete", {"summary": "reworked within approved paths"}),
+            ]
+        )
+
+        result = DeveloperToolLoopExecutor(
+            settings=settings,
+            store=self.store,
+            llm_client=llm,
+        ).execute(
+            run_id="run_scope_recovery",
+            work_packet=self.work_packet(),
+            target_path=self.repo,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 1)
+        self.assertFalse((self.repo / "src" / "Extra.java").exists())
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        rejected = journal["items"][0]["actions"][0]["tool_result"]
+        self.assertEqual(rejected["error"], "developer_act_out_of_scope")
+        self.assertIn("src/Main.java", rejected["approved_paths"])
+
     def test_multiple_actions_with_reasoning_are_rejected_with_specific_feedback(self) -> None:
         raw = (
             '{"action":"read_file","arguments":{"path":"src/Main.java"}}\n'
@@ -222,6 +876,261 @@ class DeveloperToolLoopTest(unittest.TestCase):
             "contained 2 JSON actions",
         ):
             _parse_action(raw)
+
+    def test_equivalent_actions_with_different_summaries_are_collapsed(self) -> None:
+        raw = (
+            '{"action":"repo.read","arguments":{"path":"src/Main.java"},"summary":"Inspect source"}'
+            '{"action":"repo.read","arguments":{"path":"src/Main.java"},"summary":"Read source"}'
+        )
+
+        parsed = _parse_action(raw)
+
+        self.assertEqual(parsed["action"], "repo.read")
+        self.assertEqual(parsed["arguments"], {"path": "src/Main.java"})
+        self.assertEqual(parsed["normalization"], "collapsed_2_identical_json_objects")
+
+    def test_actions_with_different_arguments_are_not_collapsed(self) -> None:
+        raw = (
+            '{"action":"repo.read","arguments":{"path":"src/Main.java"}}'
+            '{"action":"repo.read","arguments":{"path":"src/Other.java"}}'
+        )
+
+        with self.assertRaisesRegex(HarnessError, "contained 2 JSON actions"):
+            _parse_action(raw)
+
+    def test_fullstack_database_sources_are_readable(self) -> None:
+        from sdlc_harness.agents.developer.execution import _read_path_allowed
+
+        schema = self.repo / "packages" / "db" / "prisma" / "schema.prisma"
+        migration = self.repo / "packages" / "db" / "prisma" / "migrations" / "migration.sql"
+        schema.parent.mkdir(parents=True)
+        migration.parent.mkdir(parents=True)
+        schema.write_text("model Example {}\n", encoding="utf-8")
+        migration.write_text("CREATE TABLE example ();\n", encoding="utf-8")
+
+        self.assertTrue(_read_path_allowed(self.repo, schema))
+        self.assertTrue(_read_path_allowed(self.repo, migration))
+
+    def test_unit_read_content_stays_in_working_memory_after_recent_window(self) -> None:
+        source = "export const value = 42;"
+        history = [
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/Main.ts"},
+                "result": {
+                    "ok": True,
+                    "path": "src/Main.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "content": source,
+                },
+            },
+            *[
+                {
+                    "action": "repo.list",
+                    "arguments": {"prefix": f"src/{index}"},
+                    "result": {"ok": True, "files": []},
+                }
+                for index in range(5)
+            ],
+        ]
+
+        memory = _action_memory(
+            history,
+            target_item_paths=["src/Main.ts"],
+            max_evidence_chars=1000,
+        )
+
+        self.assertEqual(
+            memory["inspected_sources"],
+            [{"path": "src/Main.ts", "start_line": 1, "end_line": 1, "content": source}],
+        )
+
+    def test_signature_findings_survive_working_memory_and_resume(self) -> None:
+        findings = [{"path": "src/Main.ts", "message": "Expected method save(id)."}]
+        feedback = _prior_attempt_feedback(
+            {
+                "actions": [
+                    {
+                        "completion_gate": {
+                            "status": "rejected",
+                            "reason": "approved_signature_mismatch",
+                            "findings": findings,
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNotNone(feedback)
+        memory = _action_memory([feedback], target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
+        self.assertEqual(memory["recent_results"][0]["result"]["findings"], findings)
+
+    def test_archived_verification_failure_survives_resume_with_stall_feedback(self) -> None:
+        feedback = _prior_attempt_feedback(
+            {
+                "actions": [],
+                "attempt_history": [
+                    {
+                        "attempt": 1,
+                        "actions": [
+                            {
+                                "tool_action": "verification.run_stage",
+                                "tool_result": {
+                                    "status": "failed",
+                                    "failure_kind": "implementation",
+                                    "stage_id": "unit",
+                                    "reason": "expected undefined to be true",
+                                },
+                            },
+                            {
+                                "tool_action": "repo.write_file",
+                                "tool_result": {"ok": False, "error": "no_effect_mutation"},
+                            },
+                        ],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(feedback["error"], "previous_verification_repair_stalled")
+        self.assertEqual(feedback["failed_stage_id"], "unit")
+        self.assertEqual(feedback["previous_no_effect_mutations"], 1)
+        self.assertIn("expected undefined", feedback["diagnostic"])
+
+    def test_current_sources_refresh_successful_mutation_content_from_worktree(self) -> None:
+        source = self.repo / "src" / "Main.ts"
+        source.parent.mkdir(parents=True)
+        source.write_text("export const current = 2;\n", encoding="utf-8")
+        history = [
+            {
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.ts", "content_chars": 26},
+                "result": {"ok": True, "path": "src/Main.ts"},
+            }
+        ]
+
+        current = _current_mutated_sources(
+            history,
+            target_path=self.repo,
+            target_item_paths=["src/Main.ts"],
+            max_evidence_chars=1000,
+        )
+
+        self.assertEqual(current[0]["path"], "src/Main.ts")
+        self.assertEqual(current[0]["content"], "export const current = 2;\n")
+        self.assertFalse(current[0]["truncated"])
+
+    def test_action_prompt_hides_stale_inspected_source_after_mutation(self) -> None:
+        source = self.repo / "src" / "Main.ts"
+        source.parent.mkdir(parents=True)
+        source.write_text("export const current = 2;\n", encoding="utf-8")
+        history = [
+            {
+                "action": "read_file",
+                "arguments": {"path": "src/Main.ts"},
+                "result": {
+                    "ok": True,
+                    "path": "src/Main.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "content": "export const current = 1;\n",
+                },
+            },
+            {
+                "action": "write_file",
+                "arguments": {"path": "src/Main.ts"},
+                "result": {"ok": True, "path": "src/Main.ts"},
+            },
+        ]
+
+        prompt = _action_prompt(
+            item={"paths": ["src/Main.ts"]},
+            manifest={"mode": "act", "base_sha": "base"},
+            history=history,
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=3,
+            max_actions=24,
+            mutated=True,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        memory = context["working_memory"]
+
+        self.assertEqual(memory["inspected_sources"], [])
+        self.assertEqual(memory["current_sources"][0]["path"], "src/Main.ts")
+        self.assertEqual(memory["current_sources"][0]["content"], "export const current = 2;\n")
+
+    def test_action_prompt_allows_only_verification_after_rejected_no_effect_repair(self) -> None:
+        source = self.repo / "src" / "Main.ts"
+        source.parent.mkdir(parents=True)
+        source.write_text("export const current = 2;\n", encoding="utf-8")
+        history = [
+            {
+                "action": "verification.run_stage",
+                "result": {
+                    "stage_id": "unit",
+                    "status": "failed",
+                    "failure_kind": "implementation",
+                    "reason": "unit failed",
+                },
+            },
+            {"action": "repo.write_file", "result": {"ok": True, "path": "src/Main.ts"}},
+            {
+                "action": "repo.write_file",
+                "result": {"ok": False, "error": "no_effect_mutation", "path": "src/Main.ts"},
+            },
+            {
+                "action": "repo.write_file",
+                "result": {"ok": False, "error": "verification_repair_ready", "path": "src/Main.ts"},
+            },
+        ]
+
+        prompt = _action_prompt(
+            item={"id": "WU-001", "paths": ["src/Main.ts"], "required_stage_ids": ["unit"]},
+            manifest={"version": "developer_execution_manifest_v8", "mode": "act", "base_sha": "base"},
+            history=history,
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=5,
+            max_actions=24,
+            mutated=True,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        self.assertIn('"action": "verification.run_stage"', prompt)
+        self.assertNotIn("- repo.write_file:", prompt)
+        self.assertEqual(context["action_budget"]["verification_forced_stage_ids"], ["unit"])
+
+    def test_identical_verification_diagnostics_have_a_stable_repeat_count(self) -> None:
+        failed = {
+            "stage_id": "typecheck",
+            "status": "failed",
+            "failure_kind": "implementation",
+            "reason": "tsc failed",
+            "stage_results": [
+                {
+                    "stage_id": "typecheck",
+                    "status": "failed",
+                    "failure_kind": "implementation",
+                    "reason": "tsc failed",
+                    "stdout": "src/Main.ts(1,1): error TS1: broken",
+                    "stderr": "",
+                }
+            ],
+        }
+        fingerprint = _verification_diagnostic_fingerprint(failed)
+        history = [
+            {"action": "verification.run_stage", "result": dict(failed)},
+            {"action": "repo.write_file", "result": {"ok": True, "path": "src/Main.ts"}},
+            {"action": "verification.run_stage", "result": dict(failed)},
+        ]
+
+        self.assertEqual(_diagnostic_repeat_count(history, fingerprint=fingerprint), 2)
 
     def test_invalid_action_retry_count_resets_after_a_valid_action(self) -> None:
         self.settings = load_settings(
@@ -529,11 +1438,34 @@ class DeveloperToolLoopTest(unittest.TestCase):
             },
         }
 
-        self.assertTrue(repair_scope_mismatch_retry_allowed(state))
+        self.assertTrue(developer_execution_retry_allowed(state))
         state["last_error"] = {"error_code": "developer_input_drift"}
-        self.assertTrue(repair_scope_mismatch_retry_allowed(state))
+        self.assertTrue(developer_execution_retry_allowed(state))
         state["latest_artifacts"].pop("developer_repair_execution_journal")
-        self.assertFalse(repair_scope_mismatch_retry_allowed(state))
+        self.assertFalse(developer_execution_retry_allowed(state))
+
+    def test_blocked_initial_developer_scope_mismatch_can_resume_same_session(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "implementation_writing",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "developer_act"},
+            "latest_artifacts": {
+                "developer_work_packet": "packet.json",
+                "developer_execution_manifest": "manifest.json",
+                "developer_execution_journal": "journal.json",
+            },
+        }
+
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["last_error"] = {"error_code": "developer_action_limit_exceeded"}
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["last_error"] = {"error_code": "developer_repair_budget_exhausted"}
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["last_error"] = {"error_code": "developer_repair_stalled"}
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["latest_artifacts"].pop("developer_execution_journal")
+        self.assertFalse(developer_execution_retry_allowed(state))
 
     def test_repair_prompt_contains_structured_verification_feedback(self) -> None:
         feedback = {
@@ -783,6 +1715,30 @@ class DeveloperToolLoopTest(unittest.TestCase):
         journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
         self.assertEqual(journal["items"][0]["no_effect_actions"], 1)
         self.assertIn("int value", target.read_text(encoding="utf-8"))
+
+    def test_three_identical_no_effect_writes_stop_the_loop(self) -> None:
+        packet = self.one_file_packet()
+        target = self.repo / "src/Main.java"
+        target.parent.mkdir(parents=True)
+        target.write_text("class Main {}\n", encoding="utf-8")
+        initial_hash = hashlib.sha256(target.read_bytes()).hexdigest()
+        repeated = action(
+            "write_file",
+            {"path": "src/Main.java", "expected_sha256": initial_hash, "content": "class Main {}"},
+        )
+        llm = ScriptedLlm([repeated, repeated, repeated])
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(llm).execute(
+                run_id="run_repeated_no_effect_write",
+                work_packet=packet,
+                target_path=self.repo,
+                repair_feedback={"feedback_source": "verification"},
+                repair_iteration=1,
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_repair_stalled")
+        self.assertEqual(len(llm.prompts), 3)
 
     def test_repair_can_keep_an_inspected_path_with_an_explicit_reason(self) -> None:
         packet = self.one_file_packet()

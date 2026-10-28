@@ -8,6 +8,8 @@ target repo thật để Developer không sửa dựa trên code cũ.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,7 @@ from ...profiles import (
     LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
     is_profiled_work_packet_schema,
@@ -95,17 +98,25 @@ def build_developer_work_packet(
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
     required_fields = ["path", "content"]
-    current_profiled_contract = structured_plan.get("version") in {
-        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    }
+    component_aware_contract = (
+        structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    )
+    current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
     legacy_profiled_contract = (
         structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
     )
     return {
-        "version": "developer_work_packet_v2" if current_profiled_contract else "developer_work_packet_v1",
+        "version": (
+            "developer_work_packet_v3"
+            if component_aware_contract
+            else "developer_work_packet_v2"
+            if current_profiled_contract
+            else "developer_work_packet_v1"
+        ),
         "schema_version": (
-            PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+            UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
+            if component_aware_contract
+            else PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
             if current_profiled_contract
             else LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
             if legacy_profiled_contract
@@ -138,6 +149,19 @@ def build_developer_work_packet(
             planning_policy=planning_policy,
         ),
         "implementation_steps": implementation_steps,
+        **(
+            {
+                "execution_units": _build_execution_units(
+                    structured_plan=structured_plan,
+                    allowed_paths=allowed_paths,
+                    planning_policy=planning_policy,
+                    verification_policy=verification_policy,
+                    run_id=run_id,
+                )
+            }
+            if component_aware_contract
+            else {}
+        ),
         "proposed_files": enriched_files,
         "design_mappings_by_file": _group_design_mappings_by_file(
             design_mappings,
@@ -149,7 +173,7 @@ def build_developer_work_packet(
                     structured_plan.get("implementation_signature_contract")
                 )
             }
-            if current_profiled_contract
+            if component_aware_contract or current_profiled_contract
             else {}
         ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
@@ -181,6 +205,148 @@ def build_developer_work_packet(
             "Nếu thiếu ngữ cảnh để code an toàn, Developer phải trả lỗi thay vì đoán.",
         ],
     }
+
+
+def _build_execution_units(
+    *,
+    structured_plan: dict[str, object],
+    allowed_paths: list[str],
+    planning_policy: PlanningPathPolicy,
+    verification_policy: VerificationStagePolicy,
+    run_id: str,
+) -> list[dict[str, object]]:
+    """Project approved Plan V4 work units without inventing new execution scope."""
+
+    work_units = _dict_items(structured_plan.get("work_units"))
+    if not work_units:
+        raise HarnessError(
+            "developer_execution_units_missing",
+            "Component-aware implementation plan has no work units for Phase 4.",
+            run_id=run_id,
+        )
+    allowed = set(allowed_paths)
+    allowed_stages = set(verification_policy.stage_ids)
+    signatures = _dict_items(
+        _dict_value(structured_plan.get("implementation_signature_contract")).get("entries")
+    )
+    ids = [str(item.get("unit_id") or "").strip() for item in work_units]
+    if any(not unit_id for unit_id in ids) or len(ids) != len(set(ids)):
+        raise HarnessError(
+            "developer_execution_unit_identity_invalid",
+            "Component-aware implementation plan has missing or duplicate work-unit IDs.",
+            run_id=run_id,
+        )
+    known = set(ids)
+    projected: list[dict[str, object]] = []
+    paths_by_unit: dict[str, set[str]] = {}
+    dependencies: dict[str, set[str]] = {}
+    for item in sorted(work_units, key=lambda row: (int(row.get("order") or 0), str(row.get("unit_id") or ""))):
+        unit_id = str(item.get("unit_id") or "").strip()
+        depends_on = _string_items(item.get("depends_on"))
+        if unit_id in depends_on or any(value not in known for value in depends_on):
+            raise HarnessError(
+                "developer_execution_unit_dependency_invalid",
+                f"Execution unit has an invalid dependency: {unit_id}",
+                run_id=run_id,
+            )
+        targets = _dict_items(item.get("planned_code_targets"))
+        raw_paths = [str(target.get("path") or "") for target in targets]
+        migration = _dict_value(item.get("migration_impact"))
+        raw_paths.extend(_string_items(migration.get("targets")))
+        test_intents = _dict_items(item.get("test_intents"))
+        for intent in test_intents:
+            raw_paths.extend(_string_items(intent.get("target_paths")))
+        write_paths: list[str] = []
+        for raw_path in raw_paths:
+            path = _clean_repo_path(
+                raw_path,
+                run_id=run_id,
+                planning_policy=planning_policy,
+            )
+            if path not in allowed:
+                raise HarnessError(
+                    "developer_execution_unit_path_invalid",
+                    f"Execution unit {unit_id} references a path outside approved packet scope: {path}",
+                    run_id=run_id,
+                )
+            if path not in write_paths:
+                write_paths.append(path)
+        if not write_paths:
+            raise HarnessError(
+                "developer_execution_unit_path_invalid",
+                f"Execution unit has no approved write path: {unit_id}",
+                run_id=run_id,
+            )
+        stage_ids = list(dict.fromkeys(str(row.get("stage_id") or "").strip() for row in test_intents))
+        if any(not stage_id or stage_id not in allowed_stages for stage_id in stage_ids):
+            raise HarnessError(
+                "developer_execution_unit_stage_invalid",
+                f"Execution unit references an unsupported verification stage: {unit_id}",
+                run_id=run_id,
+            )
+        signature_ids = [
+            str(entry.get("contract_id") or "").strip()
+            for entry in signatures
+            if str(entry.get("source_path") or "").strip().replace("\\", "/") in write_paths
+            and str(entry.get("contract_id") or "").strip()
+        ]
+        canonical = {
+            "unit_id": unit_id,
+            "order": int(item.get("order") or 0),
+            "scenario_id": str(item.get("scenario_id") or "").strip(),
+            "component_id": str(item.get("component_id") or "").strip(),
+            "surfaces": _string_items(item.get("surfaces")),
+            "title": str(item.get("title") or "").strip(),
+            "objective": str(item.get("objective") or "").strip(),
+            "depends_on": depends_on,
+            "requirement_refs": _string_items(item.get("requirement_refs")),
+            "acceptance_refs": _string_items(item.get("acceptance_refs")),
+            "design_node_ids": _string_items(item.get("design_node_ids")),
+            "design_edge_ids": _string_items(item.get("design_edge_ids")),
+            "write_paths": write_paths,
+            "test_target_paths": list(
+                dict.fromkeys(
+                    path
+                    for row in test_intents
+                    if str(row.get("stage_id") or "").strip() == "unit"
+                    for path in _string_items(row.get("target_paths"))
+                    if path in allowed
+                )
+            ),
+            "required_stage_ids": stage_ids,
+            "signature_entry_ids": signature_ids,
+            "test_intents": test_intents,
+            "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
+        }
+        digest_payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        canonical["input_digest"] = "sha256:" + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
+        projected.append(canonical)
+        paths_by_unit[unit_id] = set(write_paths)
+        dependencies[unit_id] = set(depends_on)
+
+    def reaches(source: str, target: str) -> bool:
+        pending = list(dependencies.get(source, set()))
+        seen: set[str] = set()
+        while pending:
+            current = pending.pop()
+            if current == target:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            pending.extend(dependencies.get(current, set()))
+        return False
+
+    for index, left in enumerate(ids):
+        for right in ids[index + 1 :]:
+            shared = paths_by_unit[left] & paths_by_unit[right]
+            if shared and not (reaches(left, right) or reaches(right, left)):
+                raise HarnessError(
+                    "developer_unit_write_ownership_ambiguous",
+                    f"Execution units {left} and {right} share unordered write paths: {sorted(shared)}",
+                    run_id=run_id,
+                )
+    return projected
 
 
 def refresh_developer_work_packet(

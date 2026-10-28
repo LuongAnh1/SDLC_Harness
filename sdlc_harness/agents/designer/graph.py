@@ -10,12 +10,44 @@ from typing import Any
 from ...core.errors import HarnessError
 
 
-GRAPH_VERSION = "vertical_design_graph_v1"
-DELTA_VERSION = "designer_delta_v1"
+GRAPH_VERSION_V1 = "vertical_design_graph_v1"
+GRAPH_VERSION_V2 = "vertical_design_graph_v2"
+GRAPH_VERSION = GRAPH_VERSION_V2
+SUPPORTED_GRAPH_VERSIONS = frozenset({GRAPH_VERSION_V1, GRAPH_VERSION_V2})
+DELTA_VERSION_V1 = "designer_delta_v1"
+DELTA_VERSION_V2 = "designer_delta_v2"
+DELTA_VERSION = DELTA_VERSION_V2
 DESIGNER_CONTRACT_STATE_KEY = "designer_contract_version"
-DESIGN_BUNDLE_VERSION = "system_design_bundle_v1"
+DESIGN_BUNDLE_VERSION_V1 = "system_design_bundle_v1"
+DESIGN_BUNDLE_VERSION_V2 = "system_design_bundle_v2"
+DESIGN_BUNDLE_VERSION = DESIGN_BUNDLE_VERSION_V2
 DESIGN_BUNDLE_STATE_KEY = "design_bundle_contract_version"
 SURFACE_CONTRACT_VERSION = "design_surface_contract_v1"
+RUNTIME_BINDING_VERSION = "runtime_binding_v1"
+BOUNDARY_CONTRACT_VERSION = "boundary_contract_v1"
+RUNTIME_KINDS = frozenset(
+    {
+        "entrypoint",
+        "ui_component",
+        "http_client",
+        "api_route",
+        "service",
+        "persistence_adapter",
+        "data_model",
+    }
+)
+ATTACHMENT_RELATIONS = frozenset(
+    {"rendered_by", "registered_by", "called_by", "injected_by", "implemented_by", "owned_by"}
+)
+RUNTIME_ATTACHMENT_RELATIONS = {
+    "entrypoint": frozenset({"implemented_by", "owned_by"}),
+    "ui_component": frozenset({"rendered_by"}),
+    "http_client": frozenset({"called_by", "injected_by"}),
+    "api_route": frozenset({"registered_by"}),
+    "service": frozenset({"called_by", "injected_by", "implemented_by"}),
+    "persistence_adapter": frozenset({"injected_by", "implemented_by"}),
+    "data_model": frozenset({"owned_by"}),
+}
 NODE_KINDS = frozenset(
     {
         "ui_interaction",
@@ -55,9 +87,12 @@ def new_vertical_design_graph(
     *,
     run_id: str,
     snapshot_binding: dict[str, object],
+    contract_version: str = GRAPH_VERSION,
 ) -> dict[str, object]:
+    if contract_version not in SUPPORTED_GRAPH_VERSIONS:
+        raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=run_id)
     graph: dict[str, object] = {
-        "schema_version": GRAPH_VERSION,
+        "schema_version": contract_version,
         "revision": 0,
         "run_id": run_id,
         "snapshot_binding": dict(snapshot_binding),
@@ -76,8 +111,9 @@ def validate_vertical_design_graph(
     expected_run_id: str | None = None,
     expected_binding: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema_version") != GRAPH_VERSION:
+    if not isinstance(value, dict) or value.get("schema_version") not in SUPPORTED_GRAPH_VERSIONS:
         raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=expected_run_id)
+    graph_version = str(value.get("schema_version") or "")
     run_id = str(value.get("run_id") or "")
     if not run_id or (expected_run_id and run_id != expected_run_id):
         raise HarnessError("vertical_design_graph_invalid", "Design graph run identity is invalid.", run_id=expected_run_id)
@@ -101,6 +137,14 @@ def validate_vertical_design_graph(
         for surface, status in coverage.items():
             if str(surface) not in SURFACES or str(status) not in {"covered", "no_change", "not_applicable", "missing"}:
                 raise HarnessError("vertical_design_graph_invalid", "Design partition coverage contains an invalid value.", run_id=run_id)
+        if graph_version == GRAPH_VERSION_V2:
+            source_refs = partition.get("source_observation_refs", [])
+            if not isinstance(source_refs, list) or any(not isinstance(item, str) or not item for item in source_refs):
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    "Design partition source observations are invalid.",
+                    run_id=run_id,
+                )
         partition_keys.add(key)
 
     nodes = _dict_items(value.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
@@ -134,6 +178,8 @@ def validate_vertical_design_graph(
                 node_id=node_id,
                 run_id=run_id,
             )
+        if graph_version == GRAPH_VERSION_V2 and node.get("runtime_binding") is not None:
+            _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
         node_ids.add(node_id)
 
     edges = _dict_items(value.get("edges"), code="vertical_design_graph_invalid", run_id=run_id)
@@ -155,6 +201,15 @@ def validate_vertical_design_graph(
             raise HarnessError("vertical_design_graph_invalid", "Design graph branch metadata is invalid.", run_id=run_id)
         if "terminal" in edge and not isinstance(edge.get("terminal"), bool):
             raise HarnessError("vertical_design_graph_invalid", "Design graph edge terminal marker is invalid.", run_id=run_id)
+        if graph_version == GRAPH_VERSION_V2:
+            if edge.get(BOUNDARY_CONTRACT_VERSION) is not None:
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Edge {edge_id} uses {BOUNDARY_CONTRACT_VERSION} as a field name; use boundary_contract instead.",
+                    run_id=run_id,
+                )
+            if edge.get("boundary_contract") is not None:
+                _validate_boundary_contract(edge.get("boundary_contract"), edge_id=edge_id, run_id=run_id)
         scenario_id = str(edge.get("scenario_id") or "")
         order = edge.get("order")
         if not scenario_id or not isinstance(order, int) or order < 1 or (scenario_id, order) in edge_orders:
@@ -171,7 +226,11 @@ def validate_vertical_design_graph(
     return value
 
 
-def design_bundle_findings(graph: dict[str, object]) -> list[dict[str, object]]:
+def design_bundle_findings(
+    graph: dict[str, object],
+    *,
+    landscape: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
     """Return deterministic blockers for the human-readable System Design bundle."""
 
     run_id = str(graph.get("run_id") or "")
@@ -199,6 +258,8 @@ def design_bundle_findings(graph: dict[str, object]) -> list[dict[str, object]]:
                     "origin": "deterministic",
                 }
             )
+    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
+        findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
     return findings
 
 
@@ -297,6 +358,62 @@ def _validate_surface_contract(
         require_strings("outcomes")
 
 
+def _validate_runtime_binding(value: object, *, node: dict[str, object], run_id: str) -> None:
+    node_id = str(node.get("id") or "")
+    if not isinstance(value, dict) or value.get("schema_version") != RUNTIME_BINDING_VERSION:
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} has an unsupported runtime binding.", run_id=run_id)
+    runtime_kind = str(value.get("runtime_kind") or "")
+    if runtime_kind not in RUNTIME_KINDS:
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime kind is invalid.", run_id=run_id)
+    target = value.get("target")
+    if not isinstance(target, dict):
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime target is missing.", run_id=run_id)
+    component_id = str(target.get("component_id") or "")
+    path = str(target.get("path") or "")
+    symbol = str(target.get("symbol") or "")
+    if component_id != str(node.get("component_id") or "") or not _is_repo_path(path) or not symbol.strip():
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime target is invalid.", run_id=run_id)
+    attachment = value.get("attachment")
+    if not isinstance(attachment, dict):
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime attachment is missing.", run_id=run_id)
+    if str(attachment.get("relation") or "") not in ATTACHMENT_RELATIONS:
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime attachment relation is invalid.", run_id=run_id)
+    owner_ref = str(attachment.get("owner_ref") or "")
+    owner_path = str(attachment.get("owner_path") or "")
+    owner_symbol = str(attachment.get("owner_symbol") or "")
+    if not owner_ref or (owner_path and not _is_repo_path(owner_path)) or (owner_path and not owner_symbol):
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime attachment owner is invalid.", run_id=run_id)
+    evidence_refs = value.get("evidence_refs")
+    if not isinstance(evidence_refs, list) or any(not isinstance(item, str) or not item for item in evidence_refs):
+        raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime evidence is invalid.", run_id=run_id)
+
+
+def _validate_boundary_contract(value: object, *, edge_id: str, run_id: str) -> None:
+    if not isinstance(value, dict) or value.get("schema_version") != BOUNDARY_CONTRACT_VERSION:
+        raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} has an unsupported boundary contract.", run_id=run_id)
+    for key in ("consumer_operation", "provider_operation"):
+        if not str(value.get(key) or "").strip():
+            raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} boundary contract is missing {key}.", run_id=run_id)
+    for key in ("input_mapping", "auth_mapping", "response_mapping", "error_mapping"):
+        mappings = value.get(key)
+        if not isinstance(mappings, list) or any(
+            not isinstance(item, dict)
+            or not str(item.get("from") or "").strip()
+            or not str(item.get("to") or "").strip()
+            or not isinstance(item.get("required"), bool)
+            for item in mappings
+        ):
+            raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} boundary contract has invalid {key}.", run_id=run_id)
+
+
+def delta_version_for(graph_version: str) -> str:
+    return DELTA_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DELTA_VERSION_V1
+
+
+def design_bundle_version_for(graph_version: str) -> str:
+    return DESIGN_BUNDLE_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DESIGN_BUNDLE_VERSION_V1
+
+
 def apply_designer_delta(
     graph: dict[str, object],
     delta: object,
@@ -305,10 +422,11 @@ def apply_designer_delta(
 ) -> tuple[dict[str, object], dict[str, str]]:
     run_id = str(graph.get("run_id") or "")
     validate_vertical_design_graph(graph, expected_run_id=run_id)
-    if not isinstance(delta, dict) or delta.get("schema_version") != DELTA_VERSION:
+    expected_delta_version = delta_version_for(str(graph.get("schema_version") or ""))
+    if not isinstance(delta, dict) or delta.get("schema_version") != expected_delta_version:
         raise HarnessError(
             "designer_delta_invalid",
-            f"Unsupported Designer delta contract; expected schema_version={DELTA_VERSION} inside arguments.delta.",
+            f"Unsupported Designer delta contract; expected schema_version={expected_delta_version} inside arguments.delta.",
             run_id=run_id,
         )
     if str(delta.get("base_graph_digest") or "") != str(graph.get("artifact_digest") or ""):
@@ -352,12 +470,29 @@ def apply_designer_delta(
         ),
     )
     candidate["partitions"] = sorted(_dict_items(candidate.get("partitions"), code="designer_delta_invalid", run_id=run_id), key=lambda item: _partition_key(item, run_id=run_id))
+    semantic_candidate = dict(candidate)
+    semantic_candidate.pop("artifact_digest", None)
+    semantic_candidate.pop("revision", None)
+    semantic_current = dict(graph)
+    semantic_current.pop("artifact_digest", None)
+    semantic_current.pop("revision", None)
+    if semantic_candidate == semantic_current:
+        raise HarnessError(
+            "designer_delta_no_effect",
+            "Designer delta made no semantic graph change. Address the active finding instead of removing and re-adding equivalent nodes or edges.",
+            run_id=run_id,
+        )
     candidate["artifact_digest"] = graph_digest(candidate)
     validate_vertical_design_graph(candidate, expected_run_id=run_id)
     return candidate, temp_refs
 
 
-def completion_findings(graph: dict[str, object], *, required_surfaces: dict[str, set[str]]) -> list[dict[str, object]]:
+def completion_findings(
+    graph: dict[str, object],
+    *,
+    required_surfaces: dict[str, set[str]],
+    landscape: dict[str, object] | None = None,
+) -> list[dict[str, object]]:
     run_id = str(graph.get("run_id") or "")
     validate_vertical_design_graph(graph, expected_run_id=run_id)
     findings: list[dict[str, object]] = []
@@ -376,7 +511,354 @@ def completion_findings(graph: dict[str, object], *, required_surfaces: dict[str
     for item in _dict_items(graph.get("unresolved_items"), code="vertical_design_graph_invalid", run_id=run_id):
         if str(item.get("owner") or "") in {"requirement", "human"}:
             findings.append(_finding("human_decision_required", str(item.get("id") or "unresolved"), str(item.get("message") or "Design requires a human decision.")))
+    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
+        findings.extend(
+            _runtime_composition_findings(
+                graph,
+                required_surfaces=required_surfaces,
+                landscape=landscape,
+            )
+        )
     return findings
+
+
+def _runtime_composition_findings(
+    graph: dict[str, object],
+    *,
+    required_surfaces: dict[str, set[str]] | None,
+    landscape: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    run_id = str(graph.get("run_id") or "")
+    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
+    edges = _dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id)
+    partitions = _dict_items(graph.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)
+    nodes_by_id = {str(item.get("id") or ""): item for item in nodes}
+    anchors = {
+        str(item.get("anchor_id") or ""): item
+        for item in _dict_items((landscape or {}).get("anchors", []), code="vertical_design_graph_invalid", run_id=run_id)
+        if str(item.get("anchor_id") or "")
+    }
+    component_roots = {
+        str(item.get("component_id") or ""): _strings(item.get("roots"))
+        for item in _dict_items((landscape or {}).get("components", []), code="vertical_design_graph_invalid", run_id=run_id)
+    }
+    component_descriptions = {
+        component_id: " ".join([component_id, *roots]).casefold()
+        for component_id, roots in component_roots.items()
+    }
+    findings: list[dict[str, object]] = []
+
+    for partition in partitions:
+        scenario_id = str(partition.get("scenario_id") or "")
+        component_id = str(partition.get("component_id") or "")
+        if not _strings(partition.get("source_observation_refs")):
+            findings.append(
+                _composition_finding(
+                    "design_investigation_missing",
+                    f"{scenario_id}@{component_id}",
+                    "Component has no successful repo.read or available CodeGraph source observation.",
+                    "Read the composition owner source or its CodeGraph call path before proposing this component delta.",
+                    scenario_id=scenario_id,
+                    component_id=component_id,
+                )
+            )
+
+    realized_targets = {
+        str(edge.get("from") or ""): str(edge.get("to") or "")
+        for edge in edges
+        if str(edge.get("kind") or "") == "realized_by"
+    }
+    for node in nodes:
+        node_id = str(node.get("id") or "")
+        scenario_id = str(node.get("scenario_id") or "")
+        binding = _dict_value(node.get("runtime_binding"))
+        if not binding:
+            target_id = realized_targets.get(node_id, "")
+            target_binding = _dict_value(nodes_by_id.get(target_id, {}).get("runtime_binding"))
+            if str(node.get("kind") or "") != "interaction_step" or not target_binding:
+                findings.append(
+                    _composition_finding(
+                        "runtime_binding_missing",
+                        node_id,
+                        f"Design node {node_id} is not bound to a runtime target.",
+                        "Add runtime_binding_v1 or realize a pure interaction_step through a runtime-bound node.",
+                        node=node,
+                    )
+                )
+            continue
+
+        target = _dict_value(binding.get("target"))
+        attachment = _dict_value(binding.get("attachment"))
+        component_id = str(node.get("component_id") or "")
+        target_path = str(target.get("path") or "")
+        runtime_kind = str(binding.get("runtime_kind") or "")
+        surface = str(node.get("surface") or "")
+        relation = str(attachment.get("relation") or "")
+        roots = component_roots.get(component_id, [])
+        compatible_components = _compatible_surface_components(
+            surface=surface,
+            component_descriptions=component_descriptions,
+        )
+        if compatible_components and component_id not in compatible_components:
+            findings.append(
+                _composition_finding(
+                    "surface_component_mismatch",
+                    node_id,
+                    f"{surface or 'Design'} surface is assigned to component {component_id}, but the frozen landscape has a more appropriate owner.",
+                    f"Move the node to one of these profile-owned components: {sorted(compatible_components)}.",
+                    node=node,
+                )
+            )
+        if roots and not any(
+            root == "." or target_path == root or target_path.startswith(f"{root}/")
+            for root in roots
+        ):
+            findings.append(
+                _composition_finding(
+                    "component_ownership_invalid",
+                    node_id,
+                    f"Runtime target {target_path} is outside component {component_id} roots.",
+                    "Choose a target path owned by the frozen component profile.",
+                    node=node,
+                )
+            )
+        if relation not in RUNTIME_ATTACHMENT_RELATIONS.get(runtime_kind, frozenset()):
+            findings.append(
+                _composition_finding(
+                    "runtime_attachment_missing",
+                    node_id,
+                    f"Runtime attachment relation {relation or '<missing>'} is incompatible with {runtime_kind or '<missing>'}.",
+                    "Use the attachment relation allowed for the selected runtime kind and name its composition owner.",
+                    node=node,
+                )
+            )
+        owner_ref = str(attachment.get("owner_ref") or "")
+        owner_valid = False
+        if owner_ref in nodes_by_id:
+            owner_node = nodes_by_id[owner_ref]
+            owner_valid = (
+                bool(_dict_value(owner_node.get("runtime_binding")))
+                and str(owner_node.get("component_id") or "") == component_id
+            )
+        elif owner_ref in anchors:
+            owner = anchors[owner_ref]
+            owner_valid = str(owner.get("component_id") or "") == component_id
+            owner_path = str(attachment.get("owner_path") or "")
+            owner_symbol = str(attachment.get("owner_symbol") or "")
+            owner_valid = owner_valid and (not owner_path or owner_path == str(owner.get("path") or ""))
+            owner_valid = owner_valid and (not owner_symbol or owner_symbol == str(owner.get("symbol") or ""))
+        elif owner_ref.startswith("RLA-") and not anchors:
+            owner_valid = True
+        if not owner_valid:
+            findings.append(
+                _composition_finding(
+                    "runtime_attachment_missing",
+                    node_id,
+                    f"Runtime target for {node_id} has no valid composition owner.",
+                    "Attach it to a frozen repo anchor or another runtime-bound Design node.",
+                    node=node,
+                )
+            )
+        if str(node.get("disposition") or "") == "add":
+            target_symbol = str(target.get("symbol") or "")
+            matches_existing_target = any(
+                str(anchor.get("component_id") or "") == component_id
+                and str(anchor.get("path") or "") == target_path
+                and str(anchor.get("symbol") or "") == target_symbol
+                for anchor in anchors.values()
+            )
+            duplicates_owner = (
+                bool(str(attachment.get("owner_path") or ""))
+                and str(attachment.get("owner_path") or "") == target_path
+                and str(attachment.get("owner_symbol") or "") == target_symbol
+            )
+            if matches_existing_target or duplicates_owner:
+                findings.append(
+                    _composition_finding(
+                        "planned_target_conflicts_as_is",
+                        node_id,
+                        f"Add node {node_id} points at an existing AS-IS target or duplicates its composition owner.",
+                        "Choose a concrete new target path/symbol and attach it to the existing owner, or change the disposition to modify/reuse.",
+                        node=node,
+                    )
+                )
+
+    for edge in edges:
+        source = nodes_by_id.get(str(edge.get("from") or ""), {})
+        target = nodes_by_id.get(str(edge.get("to") or ""), {})
+        if not source or not target or str(edge.get("kind") or "") in {"contains", "depends_on", "realized_by"}:
+            continue
+        crosses_boundary = str(source.get("component_id") or "") != str(target.get("component_id") or "")
+        if crosses_boundary:
+            contract = _dict_value(edge.get("boundary_contract"))
+            provider = source if str(edge.get("kind") or "") == "returns" else target
+            if not contract or not _boundary_matches_provider(contract, provider):
+                findings.append(
+                    _composition_finding(
+                        "boundary_contract_mismatch",
+                        str(edge.get("id") or ""),
+                        "Cross-component consumer/provider operations do not have a compatible boundary contract.",
+                        "Map the provider operation plus required input, auth, response and error outcomes.",
+                        scenario_id=str(edge.get("scenario_id") or ""),
+                        component_id=str(source.get("component_id") or ""),
+                    )
+                )
+
+    inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
+    for scenario_id, surfaces in sorted(inferred.items()):
+        scenario_nodes = [item for item in nodes if str(item.get("scenario_id") or "") == scenario_id]
+        if not scenario_nodes:
+            continue
+        starts = [
+            item
+            for item in scenario_nodes
+            if str(_dict_value(item.get("runtime_binding")).get("runtime_kind") or "")
+            in (
+                {"entrypoint", "ui_component"}
+                if "ui" in surfaces
+                else {"entrypoint", "api_route"}
+                if "api" in surfaces
+                else {"entrypoint", "service", "persistence_adapter", "data_model"}
+            )
+        ]
+        if not starts:
+            findings.append(
+                _composition_finding(
+                    "runtime_path_disconnected",
+                    scenario_id,
+                    "Scenario has no runtime entrypoint for its required surfaces.",
+                    "Bind a reachable UI or backend entrypoint and connect required surfaces to an observable outcome.",
+                    scenario_id=scenario_id,
+                    component_id=str(scenario_nodes[0].get("component_id") or ""),
+                )
+            )
+            continue
+        reachable = _reachable_node_ids(starts=starts, edges=edges, scenario_id=scenario_id)
+        missing = [
+            surface
+            for surface in sorted(surfaces)
+            if not any(str(item.get("surface") or "") == surface and str(item.get("id") or "") in reachable for item in scenario_nodes)
+        ]
+        if missing or (len(surfaces) > 1 and not any(bool(item.get("terminal")) for item in edges if str(item.get("scenario_id") or "") == scenario_id)):
+            findings.append(
+                _composition_finding(
+                    "runtime_path_disconnected",
+                    scenario_id,
+                    f"Required runtime path is disconnected; unreachable surfaces: {missing or ['observable outcome']}.",
+                    "Connect the scenario entrypoint through every required surface and mark its observable terminal edge.",
+                    scenario_id=scenario_id,
+                    component_id=str(starts[0].get("component_id") or ""),
+                )
+            )
+    return findings
+
+
+def _compatible_surface_components(
+    *,
+    surface: str,
+    component_descriptions: dict[str, str],
+) -> set[str]:
+    aliases = {
+        "ui": ("web", "frontend", " ui", "client"),
+        "api": ("api", "backend", "server"),
+        "business_rule": ("api", "backend", "service", "domain"),
+        "data": ("database", " db", "persistence", "prisma"),
+        "interaction": ("api", "backend", "web", "frontend"),
+    }.get(surface, ())
+    return {
+        component_id
+        for component_id, description in component_descriptions.items()
+        if any(alias in f" {description}" for alias in aliases)
+    }
+
+
+def _boundary_matches_provider(contract: dict[str, object], provider: dict[str, object]) -> bool:
+    surface = _dict_value(provider.get("surface_contract"))
+    if str(provider.get("surface") or "") != "api":
+        return True
+    expected = f"{str(surface.get('method') or '').upper()} {str(surface.get('path') or '')}".strip()
+    if expected and str(contract.get("provider_operation") or "").strip().upper() != expected.upper():
+        return False
+    fields = _dict_items(surface.get("request_fields", []), code="vertical_design_graph_invalid", run_id="")
+    input_mappings = _dict_items(contract.get("input_mapping", []), code="vertical_design_graph_invalid", run_id="")
+    mapped_targets = {str(item.get("to") or "") for item in input_mappings if bool(item.get("required"))}
+    if any(str(item.get("name") or "") not in mapped_targets for item in fields):
+        return False
+    authorization = str(surface.get("authorization") or "").strip().casefold()
+    if authorization and authorization not in {"none", "not required", "public"} and not _dict_items(
+        contract.get("auth_mapping", []), code="vertical_design_graph_invalid", run_id=""
+    ):
+        return False
+    responses = _dict_items(surface.get("responses", []), code="vertical_design_graph_invalid", run_id="")
+    has_error = any(str(item.get("status") or "").startswith(("4", "5")) for item in responses)
+    if not _dict_items(contract.get("response_mapping", []), code="vertical_design_graph_invalid", run_id=""):
+        return False
+    if has_error and not _dict_items(contract.get("error_mapping", []), code="vertical_design_graph_invalid", run_id=""):
+        return False
+    return True
+
+
+def _required_surfaces_from_partitions(partitions: list[dict[str, object]]) -> dict[str, set[str]]:
+    result: dict[str, set[str]] = {}
+    for partition in partitions:
+        scenario_id = str(partition.get("scenario_id") or "")
+        for surface, status in _dict_value(partition.get("coverage")).items():
+            if str(status) in {"covered", "no_change"}:
+                result.setdefault(scenario_id, set()).add(str(surface))
+    return result
+
+
+def _reachable_node_ids(
+    *,
+    starts: list[dict[str, object]],
+    edges: list[dict[str, object]],
+    scenario_id: str,
+) -> set[str]:
+    adjacency: dict[str, set[str]] = {}
+    for edge in edges:
+        if str(edge.get("scenario_id") or "") != scenario_id:
+            continue
+        adjacency.setdefault(str(edge.get("from") or ""), set()).add(str(edge.get("to") or ""))
+    reachable = {str(item.get("id") or "") for item in starts}
+    pending = list(reachable)
+    while pending:
+        source = pending.pop()
+        for target in adjacency.get(source, set()):
+            if target not in reachable:
+                reachable.add(target)
+                pending.append(target)
+    return reachable
+
+
+def _composition_finding(
+    category: str,
+    subject: str,
+    message: str,
+    expected_change: str,
+    *,
+    node: dict[str, object] | None = None,
+    scenario_id: str = "",
+    component_id: str = "",
+) -> dict[str, object]:
+    finding_id = "COMP-" + hashlib.sha256(f"{category}\0{subject}".encode("utf-8")).hexdigest()[:12]
+    item = node or {}
+    scenario = scenario_id or str(item.get("scenario_id") or "")
+    component = component_id or str(item.get("component_id") or "")
+    return {
+        "id": finding_id,
+        "finding_id": finding_id,
+        "code": category,
+        "category": category,
+        "severity": "blocking",
+        "message": message,
+        "expected_change": expected_change,
+        "requirement_ids": _strings(item.get("requirement_refs")),
+        "diagram_ids": [scenario] if scenario else [],
+        "evidence": [{"source": "design_graph", "ref": subject, "excerpt": message}],
+        "subject_ref": subject,
+        "origin": "deterministic",
+        "partition": {"scenario_id": scenario, "component_id": component},
+    }
 
 
 def _apply_operation(
@@ -414,6 +896,11 @@ def _apply_operation(
         evidence_refs = _strings(raw.get("evidence_refs"))
         if any(ref not in valid_evidence_refs for ref in evidence_refs):
             raise HarnessError("designer_delta_invalid", "Design node references evidence outside the frozen landscape.", run_id=run_id)
+        _validate_delta_runtime_evidence(
+            raw.get("runtime_binding"),
+            valid_evidence_refs=valid_evidence_refs,
+            run_id=run_id,
+        )
         node = {
             **raw,
             **partition,
@@ -433,6 +920,12 @@ def _apply_operation(
             raise HarnessError("designer_delta_invalid", "update_node changes are invalid.", run_id=run_id)
         if "evidence_refs" in changes and any(ref not in valid_evidence_refs for ref in _strings(changes.get("evidence_refs"))):
             raise HarnessError("designer_delta_invalid", "Updated node references unknown evidence.", run_id=run_id)
+        if "runtime_binding" in changes:
+            _validate_delta_runtime_evidence(
+                changes.get("runtime_binding"),
+                valid_evidence_refs=valid_evidence_refs,
+                run_id=run_id,
+            )
         nodes = _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
         target_node = next((item for item in nodes if str(item.get("id") or "") == node_id), None)
         if target_node is None:
@@ -540,6 +1033,24 @@ def _apply_operation(
         graph["edges"] = [item for item in edges if str(item.get("id") or "") != edge_id]
 
 
+def _validate_delta_runtime_evidence(
+    value: object,
+    *,
+    valid_evidence_refs: set[str],
+    run_id: str,
+) -> None:
+    if value is None:
+        return
+    binding = _dict_value(value)
+    refs = _strings(binding.get("evidence_refs"))
+    if any(ref not in valid_evidence_refs for ref in refs):
+        raise HarnessError(
+            "designer_delta_invalid",
+            "Runtime binding references evidence outside the frozen or observed repository evidence.",
+            run_id=run_id,
+        )
+
+
 def _partition_key(value: dict[str, object], *, run_id: str) -> str:
     parts = [str(value.get(key) or "").strip() for key in ("scenario_id", "component_id")]
     if any(not part or not _SAFE_KEY.fullmatch(part) for part in parts):
@@ -563,6 +1074,13 @@ def _dict_value(value: object) -> dict[str, object]:
 
 def _strings(value: object) -> list[str]:
     return [str(item) for item in value if str(item)] if isinstance(value, list) else []
+
+
+def _is_repo_path(value: str) -> bool:
+    if not value or value.startswith(("/", "\\")) or "\\" in value:
+        return False
+    parts = value.split("/")
+    return all(part not in {"", ".", ".."} for part in parts)
 
 
 def _finding(code: str, subject: str, message: str) -> dict[str, object]:

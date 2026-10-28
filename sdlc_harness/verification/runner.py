@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -165,6 +166,47 @@ class VerificationRunner:
         )
         return result
 
+    def run_stage(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        stage_id: str,
+        required_test_files: list[str] | None = None,
+        verification_policy: VerificationStagePolicy | None = None,
+    ) -> VerificationResult:
+        """Run one approved stage for the current Developer execution unit."""
+
+        run_id = str(work_packet.get("run_id") or "") or None
+        if verification_policy is None or stage_id not in verification_policy.stage_ids:
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Developer unit requested an unapproved verification stage: {stage_id}",
+                run_id=run_id,
+            )
+        result = self._run_profiled_stages(
+            target_path=target_path,
+            work_packet=work_packet,
+            required_test_files=required_test_files,
+            verification_policy=verification_policy,
+            qa_policy=None,
+            selected_stage_ids=(stage_id,),
+            developer_unit_scope=True,
+        )
+        emit_current(
+            category="verification",
+            event_type="developer_unit_verification_completed",
+            message="Developer unit verification stage completed.",
+            data={
+                "stage_id": stage_id,
+                "status": result.status,
+                "failure_kind": result.failure_kind,
+                "selected_test_files": list(result.selected_test_files),
+                "verified_test_files": list(result.verified_test_files),
+            },
+        )
+        return result
+
     def _run_internal(
         self,
         *,
@@ -198,11 +240,22 @@ class VerificationRunner:
         required_test_files: list[str] | None,
         verification_policy: VerificationStagePolicy,
         qa_policy: QaTestPolicy | None,
+        selected_stage_ids: tuple[str, ...] | None = None,
+        developer_unit_scope: bool = False,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
         run_id = str(work_packet.get("run_id") or "") or None
         specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
+        if selected_stage_ids is not None:
+            selected = set(selected_stage_ids)
+            specs = tuple(spec for spec in specs if spec.stage_id in selected)
+            if tuple(spec.stage_id for spec in specs) != selected_stage_ids:
+                raise HarnessError(
+                    "verification_stage_policy_invalid",
+                    "Developer unit stage selection does not match the immutable verification policy.",
+                    run_id=run_id,
+                )
         preparation_specs = resolve_verification_preparation_specs(verification_policy, run_id=run_id)
         _validate_profiled_work_packet(
             work_packet,
@@ -220,9 +273,11 @@ class VerificationRunner:
         selected_test_files = _profiled_required_test_files(
             target_root=target_root,
             required_test_files=required_test_files or [],
+            work_packet=work_packet,
             verification_policy=verification_policy,
             qa_policy=qa_policy,
             run_id=run_id,
+            developer_unit_scope=developer_unit_scope,
         )
         scripts, manifest_error = _package_scripts(target_root)
         if manifest_error:
@@ -300,7 +355,10 @@ class VerificationRunner:
             report_directory: tempfile.TemporaryDirectory[str] | None = None
             report_path: Path | None = None
             if stage_selected_files:
-                if qa_policy is None or qa_policy.framework != spec.required_test_framework:
+                if (
+                    not developer_unit_scope
+                    and (qa_policy is None or qa_policy.framework != spec.required_test_framework)
+                ):
                     raise HarnessError(
                         "qa_test_policy_invalid",
                         "QA framework does not match the reviewed unit-stage reporter.",
@@ -382,8 +440,9 @@ class VerificationRunner:
             else:
                 verified_test_files: tuple[str, ...] = ()
                 report_error = ""
+                report_failure_kind = ""
                 if report_path is not None:
-                    verified_test_files, report_error = _vitest_verified_test_files(
+                    verified_test_files, report_error, report_failure_kind = _vitest_verified_test_files(
                         report_path=report_path,
                         target_root=target_root,
                         selected_test_files=stage_selected_files,
@@ -392,8 +451,8 @@ class VerificationRunner:
                 failure_kind = ""
                 if not stage_passed:
                     failure_kind = (
-                        "policy"
-                        if report_error
+                        report_failure_kind
+                        if report_error and report_failure_kind
                         else _command_failure_kind(stdout=completed.stdout, stderr=completed.stderr)
                     )
                 stage_result = VerificationStageResult(
@@ -509,27 +568,55 @@ def _profiled_required_test_files(
     *,
     target_root: Path,
     required_test_files: list[str],
+    work_packet: dict[str, object],
     verification_policy: VerificationStagePolicy,
     qa_policy: QaTestPolicy | None,
     run_id: str | None,
+    developer_unit_scope: bool = False,
 ) -> tuple[str, ...]:
     if not required_test_files:
         return ()
-    if qa_policy is None:
+    if qa_policy is None and not developer_unit_scope:
         raise HarnessError(
             "qa_test_policy_invalid",
             "Profiled required test execution requires the immutable QA test policy.",
             run_id=run_id,
         )
-    if qa_policy.project_profile_id != verification_policy.project_profile_id:
+    if qa_policy is not None and qa_policy.project_profile_id != verification_policy.project_profile_id:
         raise HarnessError(
             "qa_test_policy_invalid",
             "QA test policy does not belong to the verification project profile.",
             run_id=run_id,
         )
     selected: list[str] = []
+    allowed_paths = {
+        str(path).strip().replace("\\", "/")
+        for path in (
+            work_packet.get("output_contract", {}).get("allowed_paths", [])
+            if isinstance(work_packet.get("output_contract"), dict)
+            else []
+        )
+        if isinstance(path, str) and path.strip()
+    }
     for raw_path in required_test_files:
-        path = qa_policy.normalize_test_path(raw_path)
+        path = (
+            str(raw_path).strip().replace("\\", "/")
+            if developer_unit_scope
+            else qa_policy.normalize_test_path(raw_path) if qa_policy is not None else ""
+        )
+        if developer_unit_scope and (
+            not path
+            or path.startswith("/")
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+            or path not in allowed_paths
+            or not path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
+        ):
+            raise HarnessError(
+                "developer_unit_test_out_of_scope",
+                f"Developer unit test path is outside the approved packet scope: {raw_path}",
+                run_id=run_id,
+            )
         if not path:
             raise HarnessError(
                 "qa_test_out_of_scope",
@@ -566,60 +653,86 @@ def _vitest_verified_test_files(
     report_path: Path,
     target_root: Path,
     selected_test_files: tuple[str, ...],
-) -> tuple[tuple[str, ...], str]:
+) -> tuple[tuple[str, ...], str, str]:
     """Đọc Vitest JSON và đối chiếu đúng tập file QA đã chọn."""
 
     if not report_path.is_file():
-        return (), "Vitest did not produce the required machine-readable JSON report."
+        return (), "Vitest did not produce the required machine-readable JSON report.", "policy"
     try:
         payload = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
-        return (), "Vitest machine-readable JSON report is missing or invalid."
+        return (), "Vitest machine-readable JSON report is missing or invalid.", "policy"
     test_results = payload.get("testResults") if isinstance(payload, dict) else None
     if not isinstance(test_results, list):
-        return (), "Vitest JSON report does not contain a testResults array."
+        return (), "Vitest JSON report does not contain a testResults array.", "policy"
 
     reported: list[str] = []
-    assertion_error = ""
+    assertion_failures: list[str] = []
     for item in test_results:
         if not isinstance(item, dict):
-            return (), "Vitest JSON report contains an invalid test result entry."
+            return (), "Vitest JSON report contains an invalid test result entry.", "policy"
         raw_path = str(item.get("name") or item.get("testFilePath") or "").strip()
         if not raw_path:
-            return (), "Vitest JSON report contains a test result without a file path."
+            return (), "Vitest JSON report contains a test result without a file path.", "policy"
         candidate = Path(raw_path)
         if not candidate.is_absolute():
             candidate = target_root / candidate
         try:
             relative = candidate.resolve().relative_to(target_root).as_posix()
         except (OSError, ValueError):
-            return (), "Vitest JSON report references a test file outside the target repository."
+            return (), "Vitest JSON report references a test file outside the target repository.", "policy"
         if relative in reported:
-            return tuple(reported), "Vitest JSON report contains a duplicate test file entry."
+            return tuple(reported), "Vitest JSON report contains a duplicate test file entry.", "policy"
         reported.append(relative)
         assertion_results = item.get("assertionResults")
         if not isinstance(assertion_results, list) or not assertion_results:
-            assertion_error = "Vitest JSON report does not prove that each selected file executed a test."
-            continue
-        if not all(
-            isinstance(assertion, dict)
-            and str(assertion.get("status") or "").strip().lower() == "passed"
-            for assertion in assertion_results
-        ):
-            assertion_error = "Vitest JSON report records a non-passing or invalid assertion."
+            return (
+                tuple(reported),
+                "Vitest JSON report does not prove that each selected file executed a test.",
+                "policy",
+            )
+        for assertion in assertion_results:
+            if not isinstance(assertion, dict) or not str(assertion.get("status") or "").strip():
+                return tuple(reported), "Vitest JSON report contains an invalid assertion entry.", "policy"
+            if str(assertion.get("status") or "").strip().lower() != "passed":
+                assertion_failures.append(_vitest_assertion_diagnostic(assertion))
 
     if set(reported) != set(selected_test_files) or len(reported) != len(selected_test_files):
         return (
             tuple(reported),
             "Vitest JSON report does not match the exact selected QA test files: "
             f"selected={list(selected_test_files)}, reported={reported}.",
+            "policy",
         )
     ordered_reported = tuple(path for path in selected_test_files if path in reported)
     if payload.get("success") is not True:
-        return ordered_reported, "Vitest JSON report records an unsuccessful test run."
-    if assertion_error:
-        return ordered_reported, assertion_error
-    return ordered_reported, ""
+        reason = "Vitest test failure"
+        if assertion_failures:
+            reason += ": " + " | ".join(assertion_failures[:3])
+        else:
+            reason += ": the machine-readable report records an unsuccessful test run."
+        return ordered_reported, reason, "implementation"
+    if assertion_failures:
+        return (
+            ordered_reported,
+            "Vitest test failure: " + " | ".join(assertion_failures[:3]),
+            "implementation",
+        )
+    return ordered_reported, "", ""
+
+
+def _vitest_assertion_diagnostic(assertion: dict[str, object]) -> str:
+    """Return one bounded, human/agent-readable Vitest assertion diagnostic."""
+
+    title = str(assertion.get("fullName") or assertion.get("title") or "unnamed assertion").strip()
+    messages = assertion.get("failureMessages")
+    message = ""
+    if isinstance(messages, list):
+        message = next((str(item).strip() for item in messages if str(item).strip()), "")
+    if not message:
+        message = str(assertion.get("failureMessage") or "").strip()
+    message = re.sub(r"\s+", " ", message)[:1200]
+    return f"{title}: {message}" if message else title
 
 
 def _profiled_verification_env(spec: VerificationStageSpec | VerificationPreparationSpec) -> dict[str, str]:

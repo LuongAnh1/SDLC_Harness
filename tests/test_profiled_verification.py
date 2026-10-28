@@ -332,6 +332,25 @@ class ProfiledVerificationTest(unittest.TestCase):
             self.assertNotIn("NODE_OPTIONS", call.kwargs["env"])
             self.assertNotIn("SDLC_SECRET", call.kwargs["env"])
 
+    def test_developer_unit_runner_executes_only_requested_approved_stage(self) -> None:
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner.subprocess.run", return_value=completed) as run,
+        ):
+            result = VerificationRunner().run_stage(
+                target_path=self.target,
+                work_packet=self.packet,
+                stage_id="typecheck",
+                verification_policy=self.policy,
+            )
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.planned_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0], ["npm", "run", "typecheck"])
+
     def test_runner_stops_after_first_failed_stage(self) -> None:
         failed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="type error")
         with (
@@ -608,7 +627,13 @@ class ProfiledVerificationTest(unittest.TestCase):
                             "testResults": [
                                 {
                                     "name": str(qa_file.resolve()),
-                                    "assertionResults": [{"status": "failed"}],
+                                    "assertionResults": [
+                                        {
+                                            "status": "failed",
+                                            "fullName": "delete flow restores state after interruption",
+                                            "failureMessages": ["expected true to be false"],
+                                        }
+                                    ],
                                 }
                             ],
                         }
@@ -638,9 +663,11 @@ class ProfiledVerificationTest(unittest.TestCase):
                 qa_policy=self.qa_policy,
             )
         self.assertEqual(result.status, "failed")
+        self.assertEqual(result.failure_kind, "implementation")
         self.assertEqual(result.selected_test_files, (qa_path,))
         self.assertEqual(result.verified_test_files, (qa_path,))
-        self.assertIn("unsuccessful", result.reason)
+        self.assertIn("delete flow restores state after interruption", result.reason)
+        self.assertIn("expected true to be false", result.reason)
 
     def test_profiled_qa_required_files_need_policy_and_existing_safe_paths(self) -> None:
         with self.assertRaises(HarnessError) as missing_policy:

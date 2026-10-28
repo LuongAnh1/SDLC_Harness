@@ -1,7 +1,7 @@
 """Run an isolated L3 Designer shadow against a frozen local TypeScript clone.
 
-The script seeds an approved UC2 Requirement V2 fixture, runs Phase 2 with the
-real configured DeepSeek client, and forces mock sync. It never calls Jira,
+The script seeds an approved Requirement V2, runs Phase 2 with the real
+configured DeepSeek client, and forces mock sync. It never calls Jira,
 Confluence, GitHub publication, Phase 3, or Phase 4.
 """
 
@@ -49,8 +49,12 @@ def main() -> int:
     parser.add_argument("--runtime-root", required=True)
     parser.add_argument("--target-repo", required=True)
     parser.add_argument("--worktree-root", required=True)
+    parser.add_argument("--approved-requirement")
+    parser.add_argument("--source-file")
+    parser.add_argument("--revalidate-run-id")
     parser.add_argument("--design-call-budget", type=int, default=28)
     parser.add_argument("--design-repair-limit", type=int, default=3)
+    parser.add_argument("--vertical-trace-mode", choices=("shadow", "enforce"), default="shadow")
     args = parser.parse_args()
 
     runtime_root = Path(args.runtime_root).resolve()
@@ -77,7 +81,8 @@ def main() -> int:
             "SDLC_LLM_CONTEXT_WINDOW_TOKENS": str(base.llm_context_window_tokens),
             "SDLC_SYNC_MODE": "mock",
             "SDLC_DESIGNER_LOOP_ENABLED": "1",
-            "SDLC_VERTICAL_TRACE_MODE": "shadow",
+            "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
+            "SDLC_VERTICAL_TRACE_MODE": args.vertical_trace_mode,
             "SDLC_DESIGN_VALIDATION_TRIALS": "1",
             "SDLC_DESIGN_LLM_CALL_BUDGET": str(max(4, args.design_call_budget)),
             "SDLC_DESIGN_REPAIR_LIMIT": str(max(0, args.design_repair_limit)),
@@ -90,40 +95,74 @@ def main() -> int:
     )
 
     store = RuntimeStore(repo_root=ROOT, runtime_root=runtime_root)
-    run_id = f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
-    _seed_approved_uc2(store=store, settings=settings, run_id=run_id)
+    run_id = str(args.revalidate_run_id or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}")
+    if not args.revalidate_run_id:
+        _seed_approved_requirement(
+            store=store,
+            settings=settings,
+            run_id=run_id,
+            approved_requirement=Path(args.approved_requirement).resolve() if args.approved_requirement else None,
+            source_file=Path(args.source_file).resolve() if args.source_file else None,
+            vertical_trace_mode=args.vertical_trace_mode,
+        )
 
     started = perf_counter()
     workflow = PhaseTwoWorkflow(settings)
-    result = workflow.approve_checkpoint(run_id=run_id, checkpoint_id=f"checkpoint_requirement_{run_id}")
+    result = (
+        workflow.revalidate_design(run_id=run_id)
+        if args.revalidate_run_id
+        else workflow.approve_checkpoint(run_id=run_id, checkpoint_id=f"checkpoint_requirement_{run_id}")
+    )
     elapsed = round(perf_counter() - started, 3)
     state = store.read_state(run_id)
     report = _shadow_report(
         store=store,
         state=state,
         result=result,
-        llm_summary=workflow.progressive.llm.summary(),
+        llm_summary=workflow.llm.summary(),
         elapsed_seconds=elapsed,
     )
-    report_path = store.run_dir(run_id) / "l3_shadow_report.json"
+    report_path = store.run_dir(run_id) / (
+        "l3_shadow_revalidate_report.json" if args.revalidate_run_id else "l3_shadow_report.json"
+    )
     report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({**report, "report": store.relative(report_path)}, ensure_ascii=False, indent=2))
     return 0 if result.get("status") == "waiting_design_approval" else 2
 
 
-def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) -> None:
-    source_path = ROOT / "fixtures" / "etour" / "UC2.txt"
+def _seed_approved_requirement(
+    *,
+    store: RuntimeStore,
+    settings: object,
+    run_id: str,
+    approved_requirement: Path | None,
+    source_file: Path | None,
+    vertical_trace_mode: str,
+) -> None:
+    if (approved_requirement is None) != (source_file is None):
+        raise HarnessError(
+            "l3_shadow_source_args_invalid",
+            "--approved-requirement and --source-file must be supplied together.",
+        )
+    source_path = source_file or ROOT / "fixtures" / "etour" / "UC2.txt"
     source_text = source_path.read_text(encoding="utf-8").strip()
+    payload = deepcopy(
+        json.loads(approved_requirement.read_text(encoding="utf-8"))
+        if approved_requirement
+        else _resolved_uc2_payload()
+    )
+    prior_source = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+    source_ref = str(prior_source.get("source_ref") or f"dataset_use_case:eTour:{source_path.stem}:l3-shadow")
+    parts = source_ref.split(":")
     source = UseCaseSource(
-        dataset="eTour",
-        use_case="UC2",
-        source_ref="dataset_use_case:eTour:UC2:l3-shadow",
+        dataset=parts[1] if len(parts) > 2 else "eTour",
+        use_case=parts[2] if len(parts) > 2 else source_path.stem,
+        source_ref=source_ref,
         source_path=source_path,
         text=source_text,
     )
     snapshot_ref = write_source_snapshot_v2(store=store, run_id=run_id, source=source)
     source_entry = source_provenance_entry(source=source, artifact_ref=snapshot_ref)
-    payload = _resolved_uc2_payload()
     payload.update(
         {
             "schema_version": "requirement_model_v2",
@@ -139,7 +178,7 @@ def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) ->
                 "schema_version": "requirement_provenance_v1",
                 "sources": [source_entry],
             },
-            "decisions": [],
+            "decisions": list(payload.get("decisions") or []) if approved_requirement else [],
             "validation": {"status": "invalid", "errors": []},
         }
     )
@@ -148,13 +187,22 @@ def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) ->
         {str(source_entry["id"]): source_text},
     )
     if not validation.report.ok:
-        raise HarnessError("l3_shadow_requirement_invalid", "Seeded UC2 Requirement V2 did not validate.")
+        issue_summary = ", ".join(
+            f"{issue.code}@{issue.path}" for issue in validation.report.issues
+        )
+        raise HarnessError(
+            "l3_shadow_requirement_invalid",
+            f"Seeded Requirement V2 did not validate: {issue_summary}",
+        )
     refs = write_requirement_v2_revision_artifacts(
         store=store,
         run_id=run_id,
         model=validation.model,
         validation_report=validation.report,
-        audit={"mode": "controlled_l3_shadow", "source": "tests/fixtures/requirement_v2/uc2.json"},
+        audit={
+            "mode": "controlled_l3_shadow",
+            "source": str(approved_requirement or "tests/fixtures/requirement_v2/uc2.json"),
+        },
     )
     refs["requirement_source_snapshot"] = snapshot_ref
     now = utc_now_iso()
@@ -169,7 +217,7 @@ def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) ->
         REPO_DISCOVERY_CONTRACT_STATE_KEY: REPO_DISCOVERY_CONTRACT_VERSION,
         DESIGNER_CONTRACT_STATE_KEY: GRAPH_VERSION,
         VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
-        VERTICAL_TRACE_MODE_STATE_KEY: "shadow",
+        VERTICAL_TRACE_MODE_STATE_KEY: vertical_trace_mode,
         "profile_snapshot": build_profile_snapshot(
             project_profile_id=str(getattr(settings, "project_profile_id")),
             target_remote=str(getattr(settings, "target_repo_remote")),
@@ -188,7 +236,7 @@ def _seed_approved_uc2(*, store: RuntimeStore, settings: object, run_id: str) ->
         "last_error": None,
         "quality_reports": {"requirement_model_v2": {"final_report": validation.report.to_dict()}},
         "llm": {"mode": "deepseek", "model": str(getattr(settings, "llm_model"))},
-        "summary_for_user": "Controlled L3 shadow seeded with an approved UC2 Requirement V2 fixture.",
+        "summary_for_user": f"Controlled L3 shadow seeded with approved {source.use_case} Requirement V2.",
     }
     store.write_state(state)
 

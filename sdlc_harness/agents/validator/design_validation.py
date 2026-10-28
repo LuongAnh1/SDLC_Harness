@@ -167,6 +167,7 @@ class DesignValidator:
         traceability: TraceabilityResult,
         canonical_requirement: object | None = None,
         vertical_trace: dict[str, object] | None = None,
+        vertical_design_graph: dict[str, object] | None = None,
         repair_iterations: int = 0,
         validation_trials: int = 1,
     ) -> DesignValidationResult:
@@ -193,6 +194,7 @@ class DesignValidator:
                     traceability=traceability,
                     canonical_requirement=canonical_requirement,
                     vertical_trace=vertical_trace,
+                    vertical_design_graph=vertical_design_graph,
                     rule_review=rule_payload,
                 )
                 normalized = _normalize_llm_findings(payload)
@@ -267,6 +269,7 @@ class DesignValidator:
         traceability: TraceabilityResult,
         canonical_requirement: object | None,
         vertical_trace: dict[str, object] | None,
+        vertical_design_graph: dict[str, object] | None,
         rule_review: dict[str, object],
     ) -> dict[str, object]:
         canonical = (
@@ -328,6 +331,9 @@ Traceability:
 
 Canonical vertical Requirement-to-Design trace (bounded, deterministic):
 {json.dumps(vertical_trace or {}, ensure_ascii=False, separators=(",", ":"))}
+
+Runtime-bound Vertical Design Graph V2 (deterministic gate already passed):
+{json.dumps(vertical_design_graph or {}, ensure_ascii=False, separators=(",", ":"))}
 
 Deterministic review:
 {json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"))}

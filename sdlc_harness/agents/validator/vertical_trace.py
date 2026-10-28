@@ -8,7 +8,7 @@ import json
 from typing import Any
 
 from ...core.errors import HarnessError
-from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
+from ..designer.graph import SUPPORTED_GRAPH_VERSIONS, validate_vertical_design_graph
 from ..requirements import RequirementModelV2
 from .design_validation import DesignFinding
 
@@ -227,7 +227,7 @@ def build_vertical_trace_graph(
         "binding": {
             "requirement_revision": requirement_model.revision,
             "requirement_digest": _canonical_hash(requirement_payload),
-            "design_contract_version": GRAPH_VERSION,
+            "design_contract_version": str(design_graph.get("schema_version") or ""),
             "design_graph_revision": int(design_graph.get("revision") or 0),
             "design_graph_digest": str(design_graph.get("artifact_digest") or ""),
             "snapshot_binding_digest": _canonical_hash(_dict(design_graph.get("snapshot_binding"))),
@@ -255,6 +255,8 @@ def validate_vertical_trace_graph(
     if value.get("phase_gate") != "design" or not isinstance(value.get("revision"), int):
         raise HarnessError("vertical_trace_graph_invalid", "Vertical trace phase/revision is invalid.", run_id=run_id)
     binding = _dict(value.get("binding"))
+    if str(binding.get("design_contract_version") or "") not in SUPPORTED_GRAPH_VERSIONS:
+        raise HarnessError("vertical_trace_graph_invalid", "Vertical trace Design contract binding is invalid.", run_id=run_id)
     if expected_requirement_digest and binding.get("requirement_digest") != expected_requirement_digest:
         raise HarnessError("vertical_trace_binding_stale", "Vertical trace Requirement binding is stale.", run_id=run_id)
     if expected_design_digest and binding.get("design_graph_digest") != expected_design_digest:
