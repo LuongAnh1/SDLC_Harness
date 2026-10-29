@@ -14,6 +14,21 @@ from typing import Any
 from .client import strip_code_fence
 
 
+_THINKING_END_MARKERS = ("</think>", "<｜end▁of▁thinking｜>")
+
+
+def final_response_text(raw: str) -> str:
+    """Return only the provider's final answer after any thinking prefix."""
+
+    text = strip_code_fence(raw).strip()
+    cutoff = 0
+    for marker in _THINKING_END_MARKERS:
+        index = text.rfind(marker)
+        if index >= 0:
+            cutoff = max(cutoff, index + len(marker))
+    return text[cutoff:].strip()
+
+
 def parse_first_json_object(raw: str, *, expected_keys: set[str] | None = None) -> dict[str, Any]:
     """Tìm JSON object đầu tiên có key mong đợi trong raw LLM response."""
 

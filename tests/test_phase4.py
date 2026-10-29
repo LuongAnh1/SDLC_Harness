@@ -808,6 +808,22 @@ class PhaseFourTest(unittest.TestCase):
     def _create_phase4_ready_run(self) -> dict[str, object]:
         return self._materialize_stage(self.ready_runtime_template)
 
+    def test_continue_run_rejects_llm_mode_drift_before_developer_execution(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        state["llm"] = {"mode": "deepseek", "model": "deepseek-flash"}
+        store.write_state(state)
+
+        with self.assertRaises(HarnessError) as raised:
+            PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+
+        self.assertEqual(raised.exception.error_code, "run_llm_mode_mismatch")
+        after = store.read_state(run_id)
+        self.assertEqual(after["status"], "implementation_ready")
+        self.assertNotIn("developer_execution", after)
+
     def _create_phase4_written_run(self) -> dict[str, object]:
         return self._materialize_stage(self.written_runtime_template, with_written_files=True)
 
@@ -864,6 +880,17 @@ class PhaseFourTest(unittest.TestCase):
                 for item in structured["work_units"]
             ],
         )
+        packet_units = {item["unit_id"]: item for item in packet["execution_units"]}
+        for source_unit in structured["work_units"]:
+            projected_unit = packet_units[source_unit["unit_id"]]
+            for field in (
+                "planned_code_targets",
+                "migration_impact",
+                "runtime_bindings",
+                "boundary_contracts",
+            ):
+                default = {} if field == "migration_impact" else []
+                self.assertEqual(projected_unit[field], source_unit.get(field, default))
         self.assertTrue(packet["proposed_files"])
         self.assertTrue(packet["current_files"])
         self.assertEqual(packet["run_workspace"]["workspace_mode"], "git_worktree_v1")
@@ -907,6 +934,61 @@ class PhaseFourTest(unittest.TestCase):
         )
         self.assertIs(unchanged, upgraded)
         self.assertEqual(second_path, "")
+
+    def test_clean_pre_session_plan_v4_packet_repairs_lossy_execution_units(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        packet_path = self.repo_root / str(ready["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["execution_units"][0].pop("boundary_contracts")
+        before = self._git_output(self.target_repo, "status", "--porcelain")
+        workflow = PhaseFourWorkflow(self.settings)
+        state = workflow.store.read_state(run_id)
+
+        upgraded, upgraded_path = workflow._upgrade_unit_aware_work_packet(
+            state=state,
+            run_id=run_id,
+            work_packet=packet,
+        )
+
+        self.assertTrue(upgraded_path)
+        self.assertIn("boundary_contracts", upgraded["execution_units"][0])
+        self.assertEqual(self._git_output(self.target_repo, "status", "--porcelain"), before)
+
+    def test_paused_session_can_upgrade_missing_read_context_contract(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        packet_path = self.repo_root / str(ready["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        for unit in packet["execution_units"]:
+            unit.pop("context_paths", None)
+            unit.pop("contract_anchor_paths", None)
+        expected_write_paths = {
+            unit["unit_id"]: list(unit["write_paths"])
+            for unit in packet["execution_units"]
+        }
+        workflow = PhaseFourWorkflow(self.settings)
+        state = workflow.store.read_state(run_id)
+        state["latest_artifacts"]["developer_execution_manifest"] = (
+            f".runtime/runs/{run_id}/developer_execution/act_v1/manifest.json"
+        )
+
+        upgraded, upgraded_path = workflow._upgrade_unit_aware_work_packet(
+            state=state,
+            run_id=run_id,
+            work_packet=packet,
+        )
+
+        self.assertTrue(upgraded_path)
+        self.assertTrue(all("context_paths" in unit for unit in upgraded["execution_units"]))
+        self.assertTrue(all("contract_anchor_paths" in unit for unit in upgraded["execution_units"]))
+        self.assertEqual(
+            {
+                unit["unit_id"]: unit["write_paths"]
+                for unit in upgraded["execution_units"]
+            },
+            expected_write_paths,
+        )
 
     def test_approve_implementation_plan_rejects_plan_changed_after_review(self) -> None:
         phase3 = self._create_phase3_run()
@@ -1220,6 +1302,109 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
         self.assertEqual(response["developer_execution"]["status"], "completed")
         execute.assert_called_once()
+
+    def test_paused_developer_scope_recovery_preserves_worktree_and_starts_act_v2(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        plan_path = self.repo_root / str(
+            ready["latest_artifacts"]["implementation_plan_structured"]
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        for unit in plan["work_units"]:
+            unit["planned_code_targets"] = [
+                target
+                for target in unit["planned_code_targets"]
+                if target.get("path") != "packages/db/src/index.ts"
+            ]
+        plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        workflow = PhaseFourWorkflow(self._settings())
+        paused_error = DeveloperExecutionError(
+            "developer_step_review_required",
+            "pause legacy scope",
+            run_id=run_id,
+            retriable=True,
+            manifest_path=f".runtime/runs/{run_id}/developer_execution/act_v1/manifest.json",
+            journal_path=f".runtime/runs/{run_id}/developer_execution/act_v1/journal.json",
+            progress={
+                "total_items": 2,
+                "completed_items": 1,
+                "remaining_items": 1,
+                "pending_step_review": {"call_id": "legacy-call"},
+            },
+        )
+        with patch.object(workflow.developer_tool_loop, "execute", side_effect=paused_error):
+            paused = workflow.continue_run(run_id=run_id)
+
+        amended_units = json.loads(json.dumps(plan["work_units"]))
+        amended_units[0]["planned_code_targets"].append(
+            {"path": "packages/db/src/index.ts", "action": "create_or_update"}
+        )
+        previous_packet_path = self.repo_root / str(ready["latest_artifacts"]["developer_work_packet"])
+        amended_packet = json.loads(previous_packet_path.read_text(encoding="utf-8"))
+        amended_packet["output_contract"]["allowed_paths"].append("packages/db/src/index.ts")
+        amended_packet["proposed_files"].append(
+            {"path": "packages/db/src/index.ts", "action": "create_or_update"}
+        )
+        amended_packet["execution_units"][0]["write_paths"].append("packages/db/src/index.ts")
+        projections = {
+            key: plan[key]
+            for key in (
+                "implementation_steps",
+                "proposed_files",
+                "design_mappings",
+                "requirement_coverage",
+                "test_intents",
+            )
+        }
+        with (
+            patch(
+                "sdlc_harness.workflows.phase4_implementation.merge_work_unit_updates",
+                return_value=amended_units,
+            ),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation.canonicalize_work_unit_dependencies",
+                return_value=amended_units,
+            ),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation.component_plan_projections",
+                return_value=projections,
+            ),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation.build_developer_work_packet",
+                return_value=amended_packet,
+            ),
+        ):
+            recovered = PhaseFourWorkflow(self._settings()).recover_developer_scope(run_id=run_id)
+
+        self.assertEqual(paused["status"], "implementation_paused")
+        self.assertEqual(recovered["status"], "implementation_ready")
+        self.assertEqual(recovered["developer_execution"]["session_id"], "developer_act-v2")
+        self.assertEqual(recovered["developer_execution"]["status"], "pending")
+        self.assertIn("developer_scope_amendment", recovered["latest_artifacts"])
+        self.assertNotIn("developer_execution_manifest", recovered["latest_artifacts"])
+        packet_path = self.repo_root / str(recovered["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        owners = [
+            unit["unit_id"]
+            for unit in packet["execution_units"]
+            if "packages/db/src/index.ts" in unit["write_paths"]
+        ]
+        self.assertEqual(len(owners), 1)
+
+        completed = DeveloperExecutionResult(
+            summary="scope-recovered tool-loop",
+            files=[],
+            manifest_path=f".runtime/runs/{run_id}/developer_execution/act_v2/manifest.json",
+            journal_path=f".runtime/runs/{run_id}/developer_execution/act_v2/journal.json",
+            progress={"total_items": 2, "completed_items": 2, "remaining_items": 0},
+        )
+        resumed = PhaseFourWorkflow(self._settings())
+        with patch.object(resumed.developer_tool_loop, "execute", return_value=completed) as execute:
+            response = resumed.continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "implementation_written")
+        self.assertEqual(execute.call_args.kwargs["session_iteration"], 2)
 
     def test_paused_repair_resume_reuses_frozen_packet_and_artifact_version(self) -> None:
         tested = self._create_phase4_tested_run()

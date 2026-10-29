@@ -177,7 +177,7 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     assert "Multiple legacy Design operations may trace to one function/component target" in prompt
     assert "Never emit design_element_id" in prompt
     assert "`packages/contracts/src/...` target" in prompt
-    assert "Do not add database, API, or Web barrel/index targets" in prompt
+    assert "Harness assigns repo-profile" in prompt
     assert "apps/web/src/CulturalHeritageInsertionForm.tsx" in prompt
     assert "Legacy Class graph" not in prompt
     assert "Legacy Sequence graph" not in prompt

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 
 from sdlc_harness.llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
+from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.storage.runtime import RuntimeStore
 
@@ -23,8 +24,74 @@ class _FakeClient:
         self.prompts.append(prompt)
         return self.outputs.pop(0)
 
+    def complete_with_metadata(self, *, system: str, prompt: str, **_: object) -> LlmCompletion:
+        return LlmCompletion(
+            content=self.complete(system=system, prompt=prompt),
+            finish_reason="stop",
+            usage={"completion_tokens": 7},
+        )
+
 
 class PhaseThreeStepReviewTest(unittest.TestCase):
+    def test_metadata_exchange_persists_and_replays_input_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(
+                [
+                    '{"action":"repo.read","arguments":{"path":"src/main.ts"}}\n'
+                    "Wait — use the package manifest instead.\n"
+                    '<｜end▁of▁thinking｜>{"action":"repo.read","arguments":'
+                    '{"path":"package.json"}}'
+                ]
+            )
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-developer",
+                call_prefix="developer-wu-001",
+                execution_dir="developer_execution/act_v1/step_review/wu-001",
+                error_prefix="developer",
+                label="Developer WU-001",
+            )
+
+            with self.assertRaises(LlmStepReviewRequired) as paused:
+                first.complete_with_metadata(
+                    system="developer system",
+                    prompt="developer prompt",
+                    json_mode=True,
+                    max_tokens=2048,
+                )
+
+            exchange = json.loads(
+                (root / str(paused.exception.progress["exchange_path"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(exchange["system"], "developer system")
+            self.assertEqual(exchange["prompt"], "developer prompt")
+            self.assertEqual(exchange["parsed_output"]["action"], "repo.read")
+            self.assertEqual(exchange["parsed_output"]["arguments"], {"path": "package.json"})
+            self.assertEqual(exchange["request_options"], {"json_mode": True, "max_tokens": 2048})
+
+            resumed = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-developer",
+                review={"call_id": exchange["call_id"], "decision": "approve"},
+                call_prefix="developer-wu-001",
+                execution_dir="developer_execution/act_v1/step_review/wu-001",
+                error_prefix="developer",
+                label="Developer WU-001",
+            )
+            completion = resumed.complete_with_metadata(
+                system="developer system",
+                prompt="developer prompt",
+                json_mode=True,
+                max_tokens=2048,
+            )
+            self.assertEqual(completion.content, exchange["raw_completion"])
+            self.assertEqual(completion.finish_reason, "stop")
+            self.assertEqual(len(base.prompts), 1)
+
     def test_scoped_review_uses_design_validator_identity_and_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

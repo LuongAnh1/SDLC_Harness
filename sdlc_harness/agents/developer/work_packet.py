@@ -284,12 +284,7 @@ def _build_execution_units(
                 f"Execution unit references an unsupported verification stage: {unit_id}",
                 run_id=run_id,
             )
-        signature_ids = [
-            str(entry.get("contract_id") or "").strip()
-            for entry in signatures
-            if str(entry.get("source_path") or "").strip().replace("\\", "/") in write_paths
-            and str(entry.get("contract_id") or "").strip()
-        ]
+        signature_ids = _signature_ids_for_targets(signatures=signatures, targets=targets)
         canonical = {
             "unit_id": unit_id,
             "order": int(item.get("order") or 0),
@@ -303,6 +298,10 @@ def _build_execution_units(
             "acceptance_refs": _string_items(item.get("acceptance_refs")),
             "design_node_ids": _string_items(item.get("design_node_ids")),
             "design_edge_ids": _string_items(item.get("design_edge_ids")),
+            "planned_code_targets": targets,
+            "migration_impact": migration,
+            "runtime_bindings": _dict_items(item.get("runtime_bindings")),
+            "boundary_contracts": _dict_items(item.get("boundary_contracts")),
             "write_paths": write_paths,
             "test_target_paths": list(
                 dict.fromkeys(
@@ -318,11 +317,11 @@ def _build_execution_units(
             "test_intents": test_intents,
             "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
         }
-        digest_payload = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        canonical["input_digest"] = "sha256:" + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
         projected.append(canonical)
         paths_by_unit[unit_id] = set(write_paths)
         dependencies[unit_id] = set(depends_on)
+
+    _attach_execution_unit_context(projected, allowed=allowed)
 
     def reaches(source: str, target: str) -> bool:
         pending = list(dependencies.get(source, set()))
@@ -347,6 +346,96 @@ def _build_execution_units(
                     run_id=run_id,
                 )
     return projected
+
+
+def refresh_developer_execution_context(
+    *,
+    packet: dict[str, object],
+    run_id: str,
+) -> dict[str, object]:
+    """Add derived read context without rebuilding or changing the approved write scope."""
+
+    units = json.loads(json.dumps(_dict_items(packet.get("execution_units"))))
+    if not units:
+        raise HarnessError(
+            "developer_execution_units_missing",
+            "Developer work packet has no execution units to refresh.",
+            run_id=run_id,
+        )
+    allowed = set(_string_items(_dict_value(packet.get("output_contract")).get("allowed_paths")))
+    _attach_execution_unit_context(units, allowed=allowed)
+    return {**packet, "execution_units": units}
+
+
+def _attach_execution_unit_context(
+    units: list[dict[str, object]],
+    *,
+    allowed: set[str],
+) -> None:
+    projected_by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
+    for unit in units:
+        write_paths = _string_items(unit.get("write_paths"))
+        design_edge_ids = set(_string_items(unit.get("design_edge_ids")))
+        contract_anchor_paths: list[str] = []
+        for dependency_id in _string_items(unit.get("depends_on")):
+            dependency = projected_by_id[dependency_id]
+            if not design_edge_ids.intersection(_string_items(dependency.get("design_edge_ids"))):
+                continue
+            for path in _execution_context_target_paths(dependency):
+                if path in allowed and path not in write_paths and path not in contract_anchor_paths:
+                    contract_anchor_paths.append(path)
+        unit["context_paths"] = [*write_paths, *contract_anchor_paths]
+        unit["contract_anchor_paths"] = contract_anchor_paths
+        digest_payload = json.dumps(unit, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        unit["input_digest"] = "sha256:" + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
+
+
+def _execution_context_target_paths(unit: dict[str, object]) -> list[str]:
+    """Return dependency implementation targets as bounded read-only context."""
+
+    target_paths = {
+        str(target.get("path") or "").strip().replace("\\", "/")
+        for target in _dict_items(unit.get("planned_code_targets"))
+        if str(target.get("path") or "").strip()
+    }
+    for binding in _dict_items(unit.get("runtime_bindings")):
+        for endpoint in (_dict_value(binding.get("target")), _dict_value(binding.get("attachment"))):
+            path = str(endpoint.get("path") or endpoint.get("owner_path") or "").strip().replace("\\", "/")
+            if path:
+                target_paths.add(path)
+    return [path for path in _string_items(unit.get("write_paths")) if path in target_paths]
+
+
+def _signature_ids_for_targets(
+    *,
+    signatures: list[dict[str, object]],
+    targets: list[dict[str, object]],
+) -> list[str]:
+    target_pairs = {
+        (
+            str(target.get("path") or "").strip().replace("\\", "/"),
+            str(target.get("symbol") or "").strip(),
+        )
+        for target in targets
+        if str(target.get("path") or "").strip()
+    }
+    return [
+        contract_id
+        for entry in signatures
+        if (contract_id := str(entry.get("contract_id") or "").strip())
+        and (
+            (
+                str(entry.get("source_path") or "").strip().replace("\\", "/"),
+                str(entry.get("qualified_name") or "").strip(),
+            )
+            in target_pairs
+            or (
+                str(entry.get("source_path") or "").strip().replace("\\", "/"),
+                "",
+            )
+            in target_pairs
+        )
+    ]
 
 
 def refresh_developer_work_packet(

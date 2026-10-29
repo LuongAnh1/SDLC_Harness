@@ -26,6 +26,8 @@ _ACTIONABLE_DISPOSITIONS = {"add", "modify"}
 _FORWARD_DEPENDENCY_KINDS = {"calls", "reads", "writes", "depends_on", "realized_by"}
 _REVERSE_DEPENDENCY_KINDS = {"returns"}
 _TYPESCRIPT_SHARED_CONTRACT_BARREL = "packages/contracts/src/index.ts"
+_TYPESCRIPT_DATABASE_SOURCE_ROOT = "packages/db/src/"
+_TYPESCRIPT_DATABASE_BARREL = "packages/db/src/index.ts"
 _IMMUTABLE_UNIT_FIELDS = {
     "unit_id",
     "order",
@@ -350,7 +352,52 @@ def merge_work_unit_updates(
                 "targets": sorted(set(migration_targets)),
             }
         result.append(unit)
-    return result
+    return _assign_typescript_database_barrel_owner(
+        result,
+        planning_policy=planning_policy,
+    )
+
+
+def _assign_typescript_database_barrel_owner(
+    units: list[dict[str, object]],
+    *,
+    planning_policy: PlanningPathPolicy,
+) -> list[dict[str, object]]:
+    """Keep the fixed TypeScript DB entrypoint current in every ordered provider unit."""
+
+    if planning_policy.project_profile_id != "typescript_fullstack_v1":
+        return units
+    providers = [
+        unit
+        for unit in units
+        if "data" in _strings(unit.get("surfaces"))
+        and any(
+            str(target.get("path") or "").startswith(_TYPESCRIPT_DATABASE_SOURCE_ROOT)
+            and str(target.get("path") or "") != _TYPESCRIPT_DATABASE_BARREL
+            and not planning_policy.is_test_path(str(target.get("path") or ""))
+            for target in _dicts(unit.get("planned_code_targets"))
+        )
+    ]
+    if not providers:
+        return units
+
+    for unit in units:
+        unit["planned_code_targets"] = [
+            target
+            for target in _dicts(unit.get("planned_code_targets"))
+            if str(target.get("path") or "") != _TYPESCRIPT_DATABASE_BARREL
+        ]
+    for provider in providers:
+        provider["planned_code_targets"] = _canonical_targets(
+            [
+                *_dicts(provider.get("planned_code_targets")),
+                {"path": _TYPESCRIPT_DATABASE_BARREL, "action": "create_or_update"},
+            ],
+            component_id=str(provider.get("component_id") or ""),
+            surfaces=_strings(provider.get("surfaces")),
+            planning_policy=planning_policy,
+        )
+    return units
 
 
 def canonicalize_work_unit_dependencies(
@@ -774,10 +821,16 @@ def component_plan_issues(
                         and target_key[0].endswith(".sql")
                     )
                 )
+                is_database_barrel = (
+                    "data" in _strings(unit.get("surfaces"))
+                    and target_key[0] == _TYPESCRIPT_DATABASE_BARREL
+                    and not target_key[1]
+                )
                 if (
                     target_key not in allowed_targets
                     and not is_shared_contract
                     and not is_data_schema_artifact
+                    and not is_database_barrel
                 ):
                     issues.append(
                         f"Work unit {unit_id} has unapproved support target "
@@ -906,6 +959,33 @@ def component_plan_issues(
             "TypeScript full-stack shared contract modules must update "
             f"`{_TYPESCRIPT_SHARED_CONTRACT_BARREL}`."
         )
+    if planning_policy.project_profile_id == "typescript_fullstack_v1":
+        database_providers = [
+            unit
+            for unit in units
+            if "data" in _strings(unit.get("surfaces"))
+            and any(
+                str(target.get("path") or "").startswith(_TYPESCRIPT_DATABASE_SOURCE_ROOT)
+                and str(target.get("path") or "") != _TYPESCRIPT_DATABASE_BARREL
+                and not planning_policy.is_test_path(str(target.get("path") or ""))
+                for target in _dicts(unit.get("planned_code_targets"))
+            )
+        ]
+        database_barrel_owners = [
+            unit
+            for unit in units
+            if any(
+                str(target.get("path") or "") == _TYPESCRIPT_DATABASE_BARREL
+                for target in _dicts(unit.get("planned_code_targets"))
+            )
+        ]
+        provider_ids = {str(unit.get("unit_id") or "") for unit in database_providers}
+        owner_ids = {str(unit.get("unit_id") or "") for unit in database_barrel_owners}
+        if provider_ids - owner_ids:
+            issues.append(
+                "Every TypeScript database provider unit must update "
+                f"`{_TYPESCRIPT_DATABASE_BARREL}`."
+            )
 
     if strict_runtime_targets:
         issues.extend(

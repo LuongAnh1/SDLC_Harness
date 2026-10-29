@@ -26,6 +26,7 @@ from .component_plan import (
 )
 from .work_packet import (
     build_developer_work_packet,
+    refresh_developer_execution_context,
     refresh_developer_work_packet,
     validate_developer_work_packet_path_policy,
 )
@@ -49,6 +50,7 @@ __all__ = [
     "rebind_legacy_mappings_to_work_units",
     "resolve_implementation_plan_contract",
     "build_developer_work_packet",
+    "refresh_developer_execution_context",
     "refresh_developer_work_packet",
     "validate_developer_work_packet_path_policy",
 ]

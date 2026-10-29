@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass, field
+import http.client
 import json
 from typing import Any
 import urllib.error
@@ -323,7 +324,7 @@ class LlmClient:
                 "requirement_refiner_failed",
                 f"LLM HTTP error {exc.code}: {body[:500]}",
             ) from exc
-        except OSError as exc:
+        except (OSError, http.client.HTTPException) as exc:
             raise HarnessError(
                 "llm_transport_failed",
                 f"LLM request failed: {exc}",

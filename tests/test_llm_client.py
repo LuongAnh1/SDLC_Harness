@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmClient
 from sdlc_harness.llm.json_utils import parse_first_json_object
 
@@ -29,6 +31,11 @@ class _FakeResponse:
         ).encode("utf-8")
 
 
+class _IncompleteResponse(_FakeResponse):
+    def read(self) -> bytes:
+        raise http.client.IncompleteRead(b"", 1)
+
+
 class LlmClientPayloadTests(unittest.TestCase):
     def _settings(self, root: Path, *, mode: str):
         return load_settings(
@@ -41,6 +48,15 @@ class LlmClientPayloadTests(unittest.TestCase):
                 "SDLC_LLM_THINKING_MODE": "disabled",
             },
         )
+
+    def test_incomplete_response_is_reported_as_transport_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            client = LlmClient(self._settings(Path(temp_dir), mode="deepseek"))
+            with patch("urllib.request.urlopen", return_value=_IncompleteResponse()):
+                with self.assertRaises(HarnessError) as raised:
+                    client.complete(system="system", prompt="prompt")
+
+        self.assertEqual(raised.exception.error_code, "llm_transport_failed")
 
     def test_deepseek_payload_explicitly_disables_thinking(self) -> None:
         with TemporaryDirectory() as temp_dir:

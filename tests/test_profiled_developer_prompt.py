@@ -153,6 +153,40 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     )
     assert "typescript_prompt_v1" in prompt
     assert "HealthService.check" in prompt
+    assert "immutable hard constraints" in prompt
+    unit_prompt = _action_prompt(
+        item={
+            **manifest["items"][0],
+            "id": "WU-SIGNATURE",
+            "depends_on": [],
+            "requirement_refs": ["REQ-1"],
+            "acceptance_refs": ["REQ-1"],
+            "design_node_ids": ["method:HealthService.check"],
+            "required_stage_ids": [],
+            "test_target_paths": [TEST_PATH],
+        },
+        manifest={**manifest, "version": "developer_execution_manifest_v8"},
+        history=[],
+        target_path=tmp_path,
+        max_write_chars=12000,
+        force_incremental=False,
+        action_index=1,
+        max_actions=8,
+        mutated=False,
+        context_window_tokens=32000,
+    )
+    context = json.loads(unit_prompt.split("Execution context:\n", 1)[1])
+    unit_contract = context["execution_unit_contract"]
+    assert unit_contract["approved_signatures"][0]["qualified_name"] == "HealthService.check"
+    assert unit_contract["approved_signatures"][0]["return_type"] == "Promise<boolean>"
+    assert unit_contract["hard_constraints"] == [
+        "Approved signatures are immutable and override conflicting prose objectives.",
+        "Preserve each qualified_name, parameter list, async flag, and return_type exactly.",
+        "Treat planned code targets, migration impact, runtime bindings, and boundary mappings as approved execution constraints.",
+        "Preserve each boundary input/output/error mapping and runtime attachment; inspect related approved paths instead of inventing a different contract.",
+            "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+        "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
+    ]
 
 
 def test_profiled_fake_qa_and_code_trace_have_no_java_paths() -> None:

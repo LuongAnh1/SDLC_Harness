@@ -14,6 +14,8 @@ from sdlc_harness.agents.developer.planner import (
     _signature_patch_for_repair,
 )
 from sdlc_harness.agents.developer.work_packet import (
+    _build_execution_units,
+    _signature_ids_for_targets,
     build_developer_work_packet,
     refresh_developer_work_packet,
 )
@@ -27,6 +29,83 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.workflows.phase3 import _next_implementation_plan_version
+
+
+def test_execution_unit_signatures_are_scoped_by_path_and_symbol() -> None:
+    signatures = [
+        {
+            "contract_id": "SIG-CREATE",
+            "source_path": "packages/db/src/cultural-heritage.ts",
+            "qualified_name": "createCulturalHeritage",
+        },
+        {
+            "contract_id": "SIG-QUERY",
+            "source_path": "packages/db/src/cultural-heritage.ts",
+            "qualified_name": "queryCulturalHeritageByIdentity",
+        },
+    ]
+
+    selected = _signature_ids_for_targets(
+        signatures=signatures,
+        targets=[
+            {
+                "path": "packages/db/src/cultural-heritage.ts",
+                "symbol": "createCulturalHeritage",
+            }
+        ],
+    )
+
+    assert selected == ["SIG-CREATE"]
+
+
+def test_execution_unit_adds_shared_boundary_dependency_targets_as_read_context() -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    provider_path = "apps/api/src/cultural-heritage-verification.ts"
+    contract_path = "packages/contracts/src/cultural-heritage.ts"
+    consumer_path = "apps/web/src/CulturalHeritageInsertionForm.tsx"
+
+    units = _build_execution_units(
+        structured_plan={
+            "implementation_signature_contract": {"entries": []},
+            "work_units": [
+                {
+                    "unit_id": "WU-PROVIDER",
+                    "order": 1,
+                    "depends_on": [],
+                    "design_edge_ids": ["EDGE-400"],
+                    "planned_code_targets": [
+                        {"path": provider_path, "symbol": "verifyCulturalHeritageData"},
+                        {"path": contract_path, "symbol": "CulturalHeritageContract"},
+                    ],
+                    "test_intents": [],
+                },
+                {
+                    "unit_id": "WU-CONSUMER",
+                    "order": 2,
+                    "depends_on": ["WU-PROVIDER"],
+                    "design_edge_ids": ["EDGE-400"],
+                    "planned_code_targets": [
+                        {"path": consumer_path, "symbol": "CulturalHeritageInsertionForm"},
+                    ],
+                    "test_intents": [],
+                },
+            ],
+        },
+        allowed_paths=[provider_path, contract_path, consumer_path],
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+        run_id="run_boundary_context",
+    )
+
+    consumer = next(unit for unit in units if unit["unit_id"] == "WU-CONSUMER")
+    assert consumer["write_paths"] == [consumer_path]
+    assert consumer["context_paths"] == [consumer_path, provider_path, contract_path]
+    assert consumer["contract_anchor_paths"] == [provider_path, contract_path]
 
 
 def _graphs():

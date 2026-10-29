@@ -1095,8 +1095,8 @@ Rules:
 - When Web and API cross a boundary and the profile has a contracts component, add an
   exact `packages/contracts/src/...` target to the nearest API work unit. Include the
   shared-contract barrel only when repository evidence requires its export.
-- Do not add database, API, or Web barrel/index targets unless that exact path is already
-  present in the work unit's Harness-owned runtime wiring.
+- Do not add database, API, or Web barrel/index targets. Harness assigns repo-profile
+  package entrypoints to one provider work unit after this enrichment step.
 - Do not change dependency or order in prose. Harness serializes units that share code,
   test, contract, schema, or migration artifacts.
 - For a repair, return only affected unit updates.

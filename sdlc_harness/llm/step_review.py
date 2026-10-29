@@ -9,7 +9,8 @@ from typing import Any
 
 from ..core.errors import HarnessError
 from ..storage.runtime import RuntimeStore, utc_now_iso
-from .json_utils import parse_first_json_object
+from .client import LlmCompletion
+from .json_utils import final_response_text, parse_first_json_object
 
 
 class LlmStepReviewRequired(HarnessError):
@@ -33,7 +34,7 @@ class LlmStepReviewRequired(HarnessError):
 
 
 class ReviewableLlmClient:
-    """Replay approved calls and pause every new Phase 3 provider response."""
+    """Replay approved calls and pause every new controlled provider response."""
 
     def __init__(
         self,
@@ -46,20 +47,50 @@ class ReviewableLlmClient:
         execution_dir: str = "implementation_plan_execution",
         error_prefix: str = "implementation_plan",
         label: str = "Implementation Plan",
+        start_ordinal: int = 0,
     ):
         self.base = base
-        self.settings = base.settings
+        self.settings = getattr(base, "settings", None)
         self.store = store
         self.run_id = run_id
         self.review = dict(review or {})
         self.call_prefix = call_prefix
         self.error_prefix = error_prefix
         self.label = label
-        self.cursor = 0
+        self.cursor = max(0, start_ordinal)
+        self.last_replay_kind = ""
         self.root = store.run_dir(run_id) / execution_dir
         self.session_path = self.root / "step_review_session_v1.json"
 
     def complete(self, *, system: str, prompt: str) -> str:
+        return self._complete(system=system, prompt=prompt, with_metadata=False, request_options={})
+
+    def complete_with_metadata(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        **request_options: object,
+    ) -> LlmCompletion:
+        result = self._complete(
+            system=system,
+            prompt=prompt,
+            with_metadata=True,
+            request_options=request_options,
+        )
+        if not isinstance(result, LlmCompletion):
+            raise TypeError("Reviewable metadata completion did not return LlmCompletion.")
+        return result
+
+    def _complete(
+        self,
+        *,
+        system: str,
+        prompt: str,
+        with_metadata: bool,
+        request_options: dict[str, object],
+    ) -> str | LlmCompletion:
+        self.last_replay_kind = ""
         self.cursor += 1
         ordinal = self.cursor
         prompt_hash = _prompt_hash(system=system, prompt=prompt)
@@ -75,7 +106,8 @@ class ReviewableLlmClient:
                     f"Approved exchange {latest.get('call_id')} no longer matches the {self.label} prompt.",
                     run_id=self.run_id,
                 )
-            return str(latest.get("raw_completion") or "")
+            self.last_replay_kind = "approved"
+            return _replay_completion(latest, with_metadata=with_metadata)
 
         if latest and str(latest.get("status") or "") == "pending":
             return self._resolve_pending(
@@ -85,6 +117,8 @@ class ReviewableLlmClient:
                 system=system,
                 prompt=prompt,
                 prompt_hash=prompt_hash,
+                with_metadata=with_metadata,
+                request_options=request_options,
             )
 
         return self._call_and_pause(
@@ -95,6 +129,8 @@ class ReviewableLlmClient:
             system=system,
             prompt=prompt,
             prompt_hash=prompt_hash,
+            with_metadata=with_metadata,
+            request_options=request_options,
         )
 
     def _resolve_pending(
@@ -106,7 +142,9 @@ class ReviewableLlmClient:
         system: str,
         prompt: str,
         prompt_hash: str,
-    ) -> str:
+        with_metadata: bool,
+        request_options: dict[str, object],
+    ) -> str | LlmCompletion:
         call_id = str(pending.get("call_id") or "")
         decision = str(self.review.get("decision") or "")
         if str(self.review.get("call_id") or "") != call_id or decision not in {"approve", "reject"}:
@@ -134,13 +172,14 @@ class ReviewableLlmClient:
             pending["reviewed_at"] = utc_now_iso()
             self._write_session({**session, "calls": calls})
             _write_json(self.root / f"exchange_{call_id}.json", pending)
-            return str(pending.get("raw_completion") or "")
+            self.last_replay_kind = "pending_approved"
+            return _replay_completion(pending, with_metadata=with_metadata)
 
         note = str(self.review.get("note") or "").strip()
         if not note:
             raise HarnessError(
                 f"{self.error_prefix}_step_review_invalid",
-                "A rejected Phase 3 exchange requires a review note.",
+                f"A rejected {self.label} exchange requires a review note.",
                 run_id=self.run_id,
             )
         pending["status"] = "rejected"
@@ -163,6 +202,8 @@ class ReviewableLlmClient:
             prompt=amended,
             prompt_hash=_prompt_hash(system=system, prompt=amended),
             resume_prompt_hash=prompt_hash,
+            with_metadata=with_metadata,
+            request_options=request_options,
         )
 
     def _call_and_pause(
@@ -176,8 +217,20 @@ class ReviewableLlmClient:
         prompt: str,
         prompt_hash: str,
         resume_prompt_hash: str = "",
-    ) -> str:
-        raw = self.base.complete(system=system, prompt=prompt)
+        with_metadata: bool = False,
+        request_options: dict[str, object] | None = None,
+    ) -> str | LlmCompletion:
+        options = dict(request_options or {})
+        self.last_replay_kind = "provider"
+        if with_metadata:
+            completion = self.base.complete_with_metadata(system=system, prompt=prompt, **options)
+            raw = str(completion.content or "")
+            finish_reason = str(completion.finish_reason or "")
+            usage = dict(completion.usage or {})
+        else:
+            raw = self.base.complete(system=system, prompt=prompt)
+            finish_reason = ""
+            usage = {}
         call_id = f"{self.call_prefix}-{ordinal:04d}-a{attempt:02d}"
         exchange = {
             "call_id": call_id,
@@ -191,6 +244,9 @@ class ReviewableLlmClient:
             "prompt": prompt,
             "raw_completion": raw,
             "parsed_output": _parsed_output(raw),
+            "request_options": options,
+            "finish_reason": finish_reason,
+            "usage": usage,
         }
         calls.append(exchange)
         self._write_session({**session, "calls": calls})
@@ -259,9 +315,24 @@ def _resume_prompt_hash(
 
 def _parsed_output(raw: str) -> object:
     try:
-        return parse_first_json_object(raw)
+        return parse_first_json_object(
+            final_response_text(raw),
+            expected_keys={"action", "arguments"},
+        )
     except json.JSONDecodeError:
         return None
+
+
+def _replay_completion(exchange: dict[str, object], *, with_metadata: bool) -> str | LlmCompletion:
+    raw = str(exchange.get("raw_completion") or "")
+    if not with_metadata:
+        return raw
+    usage = exchange.get("usage")
+    return LlmCompletion(
+        content=raw,
+        finish_reason=str(exchange.get("finish_reason") or ""),
+        usage=dict(usage) if isinstance(usage, dict) else {},
+    )
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:

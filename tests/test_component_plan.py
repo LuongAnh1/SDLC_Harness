@@ -1012,6 +1012,66 @@ def test_shared_artifacts_add_harness_owned_serial_dependencies() -> None:
     assert [item["order"] for item in canonical] == [1, 2, 3]
 
 
+def test_database_barrel_is_updated_by_each_ordered_provider() -> None:
+    planning, _ = _policy()
+    units = merge_work_unit_updates(
+        units=[
+            {
+                "unit_id": "WU-DATA-1",
+                "order": 1,
+                "scenario_id": "SC-1",
+                "component_id": "database",
+                "surfaces": ["data"],
+                "depends_on": [],
+                "planned_code_targets": [],
+                "test_intents": [],
+            },
+            {
+                "unit_id": "WU-DATA-2",
+                "order": 2,
+                "scenario_id": "SC-2",
+                "component_id": "database",
+                "surfaces": ["data"],
+                "depends_on": ["WU-DATA-1"],
+                "planned_code_targets": [],
+                "test_intents": [],
+            },
+        ],
+        updates=[
+            {
+                "unit_id": "WU-DATA-1",
+                "planned_code_targets": [
+                    {"path": "packages/db/src/cultural-heritage.ts"},
+                    {"path": "packages/db/src/index.ts"},
+                ],
+            },
+            {
+                "unit_id": "WU-DATA-2",
+                "planned_code_targets": [
+                    {"path": "packages/db/src/cultural-heritage.ts"},
+                    {"path": "packages/db/src/index.ts"},
+                ],
+            },
+        ],
+        planning_policy=planning,
+    )
+
+    owners = [
+        unit["unit_id"]
+        for unit in units
+        if any(
+            target.get("path") == "packages/db/src/index.ts"
+            for target in unit["planned_code_targets"]
+        )
+    ]
+
+    assert owners == ["WU-DATA-1", "WU-DATA-2"]
+
+    canonical = canonicalize_work_unit_dependencies(units)
+    by_id = {unit["unit_id"]: unit for unit in canonical}
+    assert "WU-DATA-1" in by_id["WU-DATA-2"]["depends_on"]
+
+
 def test_required_migration_needs_concrete_sql_artifact() -> None:
     model, design, trace = _fixture()
     planning, verification = _policy()

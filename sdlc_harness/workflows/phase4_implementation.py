@@ -9,6 +9,10 @@ from ..agents.developer import (
     DeveloperExecutionError,
     DeveloperExecutionResult,
     build_developer_work_packet,
+    canonicalize_work_unit_dependencies,
+    component_plan_projections,
+    merge_work_unit_updates,
+    refresh_developer_execution_context,
     refresh_developer_work_packet,
 )
 from ..artifacts.writers import (
@@ -19,12 +23,16 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
-from ..profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+from ..profiles import (
+    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+)
 from ..storage.runtime import utc_now_iso
 from ..verification import VerificationResult
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4 import (
     ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS,
+    ALLOWED_IMPLEMENTATION_READY_ACTIONS,
     ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS,
     ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS,
     ALLOWED_IMPLEMENTATION_TESTED_ACTIONS,
@@ -48,8 +56,338 @@ from .phase4 import (
 )
 
 
+_EXECUTION_UNIT_CONTRACT_FIELDS = {
+    "boundary_contracts",
+    "context_paths",
+    "contract_anchor_paths",
+    "migration_impact",
+    "planned_code_targets",
+    "runtime_bindings",
+    "write_paths",
+}
+
+
+def _unit_target_paths(units: list[dict[str, object]]) -> dict[str, set[str]]:
+    return {
+        str(unit.get("unit_id") or ""): {
+            str(target.get("path") or "")
+            for target in unit.get("planned_code_targets", [])
+            if isinstance(target, dict) and str(target.get("path") or "")
+        }
+        for unit in units
+    }
+
+
+def _packet_unit_target_paths(packet: dict[str, object]) -> dict[str, set[str]]:
+    return {
+        str(unit.get("unit_id") or ""): {
+            str(target.get("path") or "").replace("\\", "/")
+            for target in unit.get("planned_code_targets", [])
+            if isinstance(target, dict) and str(target.get("path") or "")
+        }
+        for unit in packet.get("execution_units", [])
+        if isinstance(unit, dict)
+    }
+
+
+def _unit_path_changes(
+    before: dict[str, set[str]],
+    after: dict[str, set[str]],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "unit_id": unit_id,
+            "added_paths": sorted(after.get(unit_id, set()) - before.get(unit_id, set())),
+            "removed_paths": sorted(before.get(unit_id, set()) - after.get(unit_id, set())),
+        }
+        for unit_id in sorted(set(before) | set(after))
+        if before.get(unit_id, set()) != after.get(unit_id, set())
+    ]
+
+
+def _has_complete_execution_unit_contract(work_packet: dict[str, object]) -> bool:
+    if work_packet.get("schema_version") != UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+        return True
+    raw_units = work_packet.get("execution_units")
+    if not isinstance(raw_units, list):
+        return False
+    units = [item for item in raw_units if isinstance(item, dict)]
+    return bool(units) and all(_EXECUTION_UNIT_CONTRACT_FIELDS <= set(unit) for unit in units)
+
+
 class PhaseFourImplementationCycle:
     """Own this Phase 4 transition cycle; composed by PhaseFourWorkflow."""
+
+    def recover_developer_scope(self, *, run_id: str) -> dict[str, object]:
+        """Apply a deterministic scope amendment, preserving an active session when safe."""
+
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            execution = _dict_value(state.get("developer_execution"))
+            if (
+                str(state.get("current_phase") or "") != "implementation_writing"
+                or str(state.get("status") or "") not in {"implementation_paused", "blocked"}
+                or execution.get("executor") != "tool_loop"
+                or execution.get("mode") != "developer_act"
+            ):
+                raise HarnessError(
+                    "developer_scope_recovery_not_allowed",
+                    f"Run is not paused in the initial Developer act session: {run_id}",
+                    run_id=run_id,
+                )
+
+            artifacts = _string_dict(state.get("latest_artifacts"))
+            plan_path = _required_phase4_artifact(
+                artifacts,
+                "implementation_plan_structured",
+                run_id=run_id,
+            )
+            packet_path = _required_phase4_artifact(
+                artifacts,
+                "developer_work_packet",
+                run_id=run_id,
+            )
+            design_graph_path = _required_phase4_artifact(
+                artifacts,
+                "vertical_design_graph",
+                run_id=run_id,
+            )
+            requirement_graph_path = _required_phase4_artifact(
+                artifacts,
+                "requirement_graph",
+                run_id=run_id,
+            )
+            structured_plan = _read_json_artifact(
+                self._existing_artifact_path(plan_path, run_id=run_id),
+                run_id=run_id,
+            )
+            previous_packet = _read_json_artifact(
+                self._existing_artifact_path(packet_path, run_id=run_id),
+                run_id=run_id,
+            )
+            design_graph = _read_json_artifact(
+                self._existing_artifact_path(design_graph_path, run_id=run_id),
+                run_id=run_id,
+            )
+            requirement_graph = _read_json_artifact(
+                self._existing_artifact_path(requirement_graph_path, run_id=run_id),
+                run_id=run_id,
+            )
+            planning_policy = _planning_policy_for_state(state, run_id=run_id)
+            previous_units = [
+                dict(item)
+                for item in structured_plan.get("work_units", [])
+                if isinstance(item, dict)
+            ]
+            amended_units = merge_work_unit_updates(
+                units=previous_units,
+                updates=previous_units,
+                planning_policy=planning_policy,
+            )
+            amended_units = canonicalize_work_unit_dependencies(amended_units)
+
+            previous_paths = _packet_unit_target_paths(previous_packet) or _unit_target_paths(previous_units)
+            amended_paths = _unit_target_paths(amended_units)
+            changed_paths = sorted(
+                {
+                    path
+                    for unit_id in set(previous_paths) | set(amended_paths)
+                    for path in previous_paths.get(unit_id, set()) ^ amended_paths.get(unit_id, set())
+                }
+            )
+            allowed_scope_amendments = {"packages/db/src/index.ts"}
+            if not changed_paths:
+                raise HarnessError(
+                    "developer_scope_recovery_not_needed",
+                    "The approved Developer scope already matches the current deterministic policy.",
+                    run_id=run_id,
+                )
+            if set(changed_paths) - allowed_scope_amendments:
+                raise HarnessError(
+                    "developer_scope_recovery_unsafe",
+                    f"Scope recovery attempted unsupported path changes: {changed_paths}",
+                    run_id=run_id,
+                )
+
+            projections = component_plan_projections(
+                units=amended_units,
+                design_graph=design_graph,
+                requirement_graph=requirement_graph,
+                legacy_mappings=[
+                    dict(item)
+                    for item in structured_plan.get("design_mappings", [])
+                    if isinstance(item, dict)
+                ],
+                planning_policy=planning_policy,
+            )
+            amended_plan = {
+                **structured_plan,
+                "work_units": amended_units,
+                **projections,
+            }
+            packet_version = _next_phase4_artifact_version(self.store, run_id)
+            pending_review = _dict_value(execution.get("pending_step_review"))
+            active_revision = max(1, _int_value(state.get("developer_act_revision")))
+            preserve_session = bool(_int_value(execution.get("completed_items"))) and all(
+                artifacts.get(key)
+                for key in (
+                    "developer_execution_manifest",
+                    "developer_execution_journal",
+                    "developer_execution_session",
+                )
+            )
+            revision = active_revision if preserve_session else max(2, active_revision + 1)
+            amendment_file = self.store.write_json_artifact(
+                run_id,
+                f"developer_scope_amendment_v{packet_version}.json",
+                {
+                    "schema_version": "developer_scope_amendment_v1",
+                    "run_id": run_id,
+                    "revision": revision,
+                    "amendment_version": packet_version,
+                    "work_packet_version": packet_version,
+                    "reason": "Apply deterministic package-entrypoint closure without discarding worktree changes.",
+                    "source_plan": plan_path,
+                    "source_work_packet": packet_path,
+                    "changed_paths": changed_paths,
+                    "unit_path_changes": _unit_path_changes(previous_paths, amended_paths),
+                    "superseded_step_review_call_id": str(pending_review.get("call_id") or ""),
+                    "created_at": utc_now_iso(),
+                },
+            )
+            amendment_path = self.store.relative(amendment_file)
+            workspace = self.workspace_manager.resolve(run_id)
+            target_info = self._workspace_target_info(run_id=run_id, allow_dirty=True)
+            packet = build_developer_work_packet(
+                run_id=run_id,
+                source_ref=str(state.get("source_ref") or ""),
+                issue_key=str(previous_packet.get("issue_key") or ""),
+                structured_plan=amended_plan,
+                target_repo_path=target_info.path,
+                run_workspace=workspace.to_dict(),
+                approved_plan_refs={
+                    **_dict_value(previous_packet.get("approved_plan")),
+                    "developer_scope_amendment": amendment_path,
+                },
+                canonical_requirements=[
+                    dict(item)
+                    for item in previous_packet.get("canonical_requirements", [])
+                    if isinstance(item, dict)
+                ],
+                requirement_contract=_dict_value(previous_packet.get("requirement_contract")),
+                requirement_coverage=[
+                    dict(item)
+                    for item in previous_packet.get("requirement_coverage", [])
+                    if isinstance(item, dict)
+                ],
+                effective_design_contract=_dict_value(
+                    previous_packet.get("effective_design_contract")
+                ),
+                planning_policy=planning_policy,
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
+            revised_packet_path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=packet,
+                version=packet_version,
+            )
+
+            latest_artifacts = {
+                **artifacts,
+                "developer_scope_amendment": amendment_path,
+                "developer_work_packet": revised_packet_path,
+            }
+            history = [
+                dict(item)
+                for item in state.get("developer_execution_history", [])
+                if isinstance(item, dict)
+            ]
+            if preserve_session:
+                completed_ids = [
+                    value
+                    for value in execution.get("completed_unit_ids", [])
+                    if isinstance(value, str)
+                ]
+                changed_unit_ids = {
+                    str(change.get("unit_id") or "")
+                    for change in _unit_path_changes(previous_paths, amended_paths)
+                    if "packages/db/src/index.ts" in change.get("added_paths", [])
+                }
+                reopened_ids = [value for value in completed_ids if value in changed_unit_ids]
+                remaining_completed_ids = [value for value in completed_ids if value not in changed_unit_ids]
+                ordered_unit_ids = [
+                    str(unit.get("unit_id") or "") for unit in amended_units
+                ]
+                pending_ids = [value for value in ordered_unit_ids if value not in remaining_completed_ids]
+                preserved_execution = {
+                    **execution,
+                    "status": "paused",
+                    "completed_items": len(remaining_completed_ids),
+                    "remaining_items": len(ordered_unit_ids) - len(remaining_completed_ids),
+                    "completed_units": len(remaining_completed_ids),
+                    "completed_unit_ids": remaining_completed_ids,
+                    "pending_unit_ids": pending_ids,
+                    "current_item": reopened_ids[0] if reopened_ids else pending_ids[0],
+                    "current_unit_id": reopened_ids[0] if reopened_ids else pending_ids[0],
+                    "scope_reopened_unit_ids": reopened_ids,
+                }
+                preserved_execution.pop("pending_step_review", None)
+            else:
+                for key in (
+                    "developer_execution_manifest",
+                    "developer_execution_journal",
+                    "developer_execution_session",
+                    "developer_failure_classification",
+                ):
+                    latest_artifacts.pop(key, None)
+                history.append(
+                    {
+                        "revision": revision - 1,
+                        "execution": execution,
+                        "manifest": artifacts.get("developer_execution_manifest", ""),
+                        "journal": artifacts.get("developer_execution_journal", ""),
+                        "session": artifacts.get("developer_execution_session", ""),
+                        "superseded_at": utc_now_iso(),
+                    }
+                )
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_writing" if preserve_session else "implementation_preparing",
+                    "status": "implementation_paused" if preserve_session else "implementation_ready",
+                    "latest_artifacts": latest_artifacts,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": (
+                        ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS
+                        if preserve_session
+                        else ALLOWED_IMPLEMENTATION_READY_ACTIONS
+                    ),
+                    "last_error": None,
+                    "developer_act_revision": revision,
+                    "developer_execution_history": history,
+                    "developer_execution": preserved_execution if preserve_session else {
+                        "schema_version": "developer_execution_state_v2",
+                        "contract_version": "developer_execution_units_v1",
+                        "executor": "tool_loop",
+                        "mode": "developer_act",
+                        "session_id": f"developer_act-v{revision}",
+                        "repair_iteration": 0,
+                        "session_iteration": revision,
+                        "artifact_version": revision,
+                        "status": "pending",
+                    },
+                    "summary_for_user": (
+                        f"Developer scope recovery kept act_v{revision} for run {run_id}; "
+                        f"reopened only: {', '.join(reopened_ids)}."
+                        if preserve_session
+                        else f"Developer scope recovery V{revision} prepared for run {run_id}; "
+                        f"preserved the worktree and amended: {', '.join(changed_paths)}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
 
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification and Validator for a blocked, pending-repair, or traced snapshot."""
@@ -224,7 +562,11 @@ class PhaseFourImplementationCycle:
             raise
         except HarnessError as exc:
             session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = f"{repair_scope}_repair_v{session_ordinal}" if repair_feedback else "act_v1"
+            session_name = (
+                f"{repair_scope}_repair_v{session_ordinal}"
+                if repair_feedback
+                else f"act_v{max(1, session_ordinal)}"
+            )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
@@ -246,7 +588,11 @@ class PhaseFourImplementationCycle:
             ) from exc
         except Exception as exc:
             session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = f"{repair_scope}_repair_v{session_ordinal}" if repair_feedback else "act_v1"
+            session_name = (
+                f"{repair_scope}_repair_v{session_ordinal}"
+                if repair_feedback
+                else f"act_v{max(1, session_ordinal)}"
+            )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
             journal_file = session_dir / "journal.json"
@@ -293,6 +639,7 @@ class PhaseFourImplementationCycle:
 
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
+        act_revision = max(1, _int_value(state.get("developer_act_revision")))
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(
@@ -300,23 +647,31 @@ class PhaseFourImplementationCycle:
                 run_id=run_id,
             )
             resuming = self._tool_loop_session_active(state, mode="developer_act")
-            if not resuming:
-                work_packet, upgraded_path = self._upgrade_unit_aware_work_packet(
-                    state=state,
+            work_packet, upgraded_path = self._upgrade_unit_aware_work_packet(
+                state=state,
+                run_id=run_id,
+                work_packet=work_packet,
+            )
+            if upgraded_path:
+                packet_path = upgraded_path
+                latest_artifacts["developer_work_packet"] = upgraded_path
+                state["latest_artifacts"] = latest_artifacts
+                state["developer_execution_contract_version"] = "developer_execution_units_v1"
+                state["updated_at"] = utc_now_iso()
+                self.store.write_state(state)
+            if not _has_complete_execution_unit_contract(work_packet):
+                raise HarnessError(
+                    "developer_execution_unit_contract_incomplete",
+                    (
+                        "Developer work packet omits approved execution-unit contracts. "
+                        "Rebuild the packet before starting or resuming Developer execution."
+                    ),
                     run_id=run_id,
-                    work_packet=work_packet,
                 )
-                if upgraded_path:
-                    packet_path = upgraded_path
-                    latest_artifacts["developer_work_packet"] = upgraded_path
-                    state["latest_artifacts"] = latest_artifacts
-                    state["developer_execution_contract_version"] = "developer_execution_units_v1"
-                    state["updated_at"] = utc_now_iso()
-                    self.store.write_state(state)
             target_info = self._workspace_target_info(
                 run_id=run_id,
                 work_packet=work_packet,
-                allow_dirty=resuming,
+                allow_dirty=resuming or act_revision > 1,
             )
             result = self._execute_developer_tool_loop(
                 state=state,
@@ -327,7 +682,8 @@ class PhaseFourImplementationCycle:
                 mode="developer_act",
                 current_phase="implementation_writing",
                 repair_iteration=0,
-                artifact_version=1,
+                session_iteration=act_revision,
+                artifact_version=act_revision,
                 manifest_key="developer_execution_manifest",
                 journal_key="developer_execution_journal",
             )
@@ -348,7 +704,7 @@ class PhaseFourImplementationCycle:
                 store=self.store,
                 run_id=run_id,
                 report=report,
-                version=1,
+                version=act_revision,
             )
         except DeveloperExecutionError as exc:
             if exc.manifest_path:
@@ -376,7 +732,8 @@ class PhaseFourImplementationCycle:
                         executor="tool_loop",
                         mode="developer_act",
                         repair_iteration=0,
-                        artifact_version=1,
+                        session_iteration=act_revision,
+                        artifact_version=act_revision,
                         progress=exc.progress,
                         status="paused" if paused else "blocked",
                     ),
@@ -434,11 +791,44 @@ class PhaseFourImplementationCycle:
     ) -> tuple[dict[str, object], str]:
         """Upgrade an approved Plan V4 packet before the first Developer mutation only."""
 
-        if work_packet.get("execution_units"):
+        if work_packet.get("execution_units") and _has_complete_execution_unit_contract(work_packet):
             return work_packet, ""
         artifacts = _string_dict(state.get("latest_artifacts"))
-        if any("execution_manifest" in key or "execution_journal" in key for key in artifacts):
+        has_execution_session = any(
+            "execution_manifest" in key or "execution_journal" in key for key in artifacts
+        )
+        units = [
+            item for item in work_packet.get("execution_units", [])
+            if isinstance(item, dict)
+        ]
+        context_only_upgrade = bool(units) and all(
+            {
+                "boundary_contracts",
+                "migration_impact",
+                "planned_code_targets",
+                "runtime_bindings",
+                "write_paths",
+            } <= set(unit)
+            for unit in units
+        )
+        if has_execution_session and not context_only_upgrade:
             return work_packet, ""
+        if has_execution_session:
+            version = _next_phase4_artifact_version(self.store, run_id)
+            packet = {
+                **refresh_developer_execution_context(packet=work_packet, run_id=run_id),
+                "version": f"developer_work_packet_v{version}",
+                "mode": "approved_execution_context_upgrade_v1",
+                "refreshed_at": utc_now_iso(),
+                "refreshed_from": str(work_packet.get("version") or ""),
+            }
+            path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=packet,
+                version=version,
+            )
+            return packet, path
         approved_plan = _string_dict(work_packet.get("approved_plan"))
         structured_ref = approved_plan.get("implementation_plan_structured")
         if not structured_ref:
@@ -452,7 +842,7 @@ class PhaseFourImplementationCycle:
         target_info = self._workspace_target_info(
             run_id=run_id,
             work_packet=work_packet,
-            allow_dirty=False,
+            allow_dirty=context_only_upgrade,
         )
         workspace = self.workspace_manager.resolve(run_id)
         packet = build_developer_work_packet(

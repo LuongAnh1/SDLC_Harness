@@ -128,7 +128,12 @@ MAX_VERIFICATION_DIAGNOSTIC_CHARS = 6000
 class _PhaseFourCore:
     """Điều phối Phase 4 từ plan đã duyệt tới QA và publish code review."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        developer_step_review: dict[str, object] | None = None,
+    ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
@@ -140,6 +145,7 @@ class _PhaseFourCore:
             llm_client=self.llm_client,
             repo_context_provider=self.repo_context_provider,
             verification_runner=self.verification_runner,
+            step_review=developer_step_review,
         )
         self.code_trace_validator = CodeTraceValidator(
             self.llm_client,
@@ -458,6 +464,18 @@ class _PhaseFourCore:
         """Dispatch một transition khi caller đang giữ per-run workspace lock."""
 
         state = self.store.read_state(run_id)
+        frozen_llm = _dict_value(state.get("llm"))
+        frozen_llm_mode = str(frozen_llm.get("mode") or "").strip().lower()
+        current_llm_mode = str(self.settings.llm_mode or "").strip().lower()
+        if frozen_llm_mode and frozen_llm_mode != current_llm_mode:
+            raise HarnessError(
+                "run_llm_mode_mismatch",
+                (
+                    f"Run {run_id} was created with LLM mode `{frozen_llm_mode}` but the current "
+                    f"runtime resolved `{current_llm_mode}`. Refusing to continue with a different executor."
+                ),
+                run_id=run_id,
+            )
         status = str(state.get("status"))
         if status == "implementation_ready":
             return self._continue_developer_act(state=state, run_id=run_id)
