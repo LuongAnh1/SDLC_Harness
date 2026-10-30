@@ -18,8 +18,10 @@ from sdlc_harness.agents.requirements import (
     validate_requirement_v2_projections,
 )
 from sdlc_harness.artifacts import write_requirement_v2_artifacts
+from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
+from sdlc_harness.llm.step_review import LlmStepReviewRequired
 from sdlc_harness.sources.fixtures import UseCaseSource
 from sdlc_harness.storage.runtime import RuntimeStore
 
@@ -89,6 +91,249 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
                 }
             ),
         ]
+
+    def test_step_review_pauses_before_input_and_after_output_without_skipping_action(self) -> None:
+        client = ScriptedLlmClient(self.source_actions() + [self.completion(self.payload)])
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            run_id = "run_requirement_step_review"
+            artifact_ref = ".runtime/runs/run_requirement_step_review/artifacts/use_case_packet_v1.md"
+
+            with self.assertRaises(LlmStepReviewRequired) as input_pause:
+                RequirementModelV2Refiner(
+                    client,
+                    store=store,
+                    step_review={"enabled": True, "review_input": True},
+                ).refine(
+                    self.source,
+                    run_id=run_id,
+                    source_artifact_ref=artifact_ref,
+                )
+
+            self.assertEqual(input_pause.exception.progress["review_stage"], "input")
+            self.assertEqual(client.calls, [])
+            input_exchange = json.loads(
+                (root / str(input_pause.exception.progress["exchange_path"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(input_exchange["status"], "input_pending")
+            self.assertEqual(input_exchange["raw_completion"], "")
+
+            with self.assertRaises(LlmStepReviewRequired) as output_pause:
+                RequirementModelV2Refiner(
+                    client,
+                    store=store,
+                    step_review={
+                        "enabled": True,
+                        "review_input": True,
+                        "call_id": input_pause.exception.progress["call_id"],
+                        "decision": "approve",
+                    },
+                ).refine(
+                    self.source,
+                    run_id=run_id,
+                    source_artifact_ref=artifact_ref,
+                    resume=True,
+                )
+
+            self.assertEqual(output_pause.exception.progress["review_stage"], "output")
+            self.assertEqual(len(client.calls), 1)
+
+            with self.assertRaises(LlmStepReviewRequired) as next_input_pause:
+                RequirementModelV2Refiner(
+                    client,
+                    store=store,
+                    step_review={
+                        "enabled": True,
+                        "review_input": True,
+                        "call_id": output_pause.exception.progress["call_id"],
+                        "decision": "approve",
+                    },
+                ).refine(
+                    self.source,
+                    run_id=run_id,
+                    source_artifact_ref=artifact_ref,
+                    resume=True,
+                )
+
+            self.assertEqual(next_input_pause.exception.progress["review_stage"], "input")
+            self.assertIn("requirement-refiner-0002", str(next_input_pause.exception.progress["call_id"]))
+            self.assertEqual(len(client.calls), 1)
+            journal = json.loads(
+                (store.artifact_path(run_id, "requirement_source_journal_v1.json")).read_text(encoding="utf-8")
+            )
+            self.assertEqual(journal["calls"][0]["action"], "source.list")
+
+    def test_resume_after_completed_refiner_keeps_completed_journal(self) -> None:
+        client = ScriptedLlmClient(
+            self.source_actions() + [self.as_complete(self.completion(self.payload))]
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            run_id = "run_requirement_completed_resume"
+            artifact_ref = (
+                ".runtime/runs/run_requirement_completed_resume/artifacts/use_case_packet_v1.md"
+            )
+            refiner = RequirementModelV2Refiner(client, store=store)
+
+            first = refiner.refine(
+                self.source,
+                run_id=run_id,
+                source_artifact_ref=artifact_ref,
+            )
+            call_count = len(client.calls)
+            resumed = refiner.refine(
+                self.source,
+                run_id=run_id,
+                source_artifact_ref=artifact_ref,
+                resume=True,
+            )
+
+            self.assertEqual(resumed.model.to_dict(), first.model.to_dict())
+            self.assertEqual(len(client.calls), call_count)
+            journal = json.loads(
+                store.artifact_path(run_id, "requirement_source_journal_v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(journal["status"], "completed")
+
+    def test_refiner_selects_list_navigation_and_synthesis_profiles(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            settings = load_settings(
+                root=root,
+                runtime_root=root / ".runtime",
+                overrides={
+                    "SDLC_PHASE1_REFINER_LIST_MODEL": "list-model",
+                    "SDLC_PHASE1_REFINER_NAVIGATION_MODEL": "navigation-model",
+                    "SDLC_PHASE1_REFINER_SYNTHESIS_MODEL": "synthesis-model",
+                },
+            )
+            client = ScriptedLlmClient(
+                self.source_actions() + [self.as_complete(self.completion(self.payload))]
+            )
+            client.settings = settings
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+
+            refiner = RequirementModelV2Refiner(client, store=store)
+            result = refiner.refine(
+                self.source,
+                run_id="run_requirement_profiles",
+                source_artifact_ref=(
+                    ".runtime/runs/run_requirement_profiles/artifacts/use_case_packet_v1.md"
+                ),
+            )
+
+            self.assertEqual(
+                [call["model"] for call in client.calls],
+                ["list-model", "navigation-model", "synthesis-model"],
+            )
+            self.assertEqual(
+                [call["reasoning_effort"] for call in client.calls],
+                ["none", "low", "high"],
+            )
+            self.assertEqual(
+                [call["max_tokens"] for call in client.calls],
+                [2048, 4096, 32768],
+            )
+            prompts = [str(call["prompt"]) for call in client.calls]
+            self.assertNotIn("# Requirement Model V2 Structured Output", prompts[0])
+            self.assertIn('{"action":"source.list"', prompts[0])
+            self.assertNotIn("# Requirement Model V2 Structured Output", prompts[1])
+            self.assertIn('{"action":"source.search|source.read"', prompts[1])
+            self.assertIn("# Requirement Model V2 Structured Output", prompts[2])
+            self.assertIn('{"action":"source.search|source.read|complete"', prompts[2])
+            self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
+            self.assertIn("internal application API or service endpoint", prompts[2])
+            self.assertIn(
+                "Do not mark `api` as `not_applicable` merely because the source omits",
+                prompts[2],
+            )
+
+            unrelated_model = replace(
+                result.model,
+                open_questions=[
+                    {
+                        **question,
+                        "affects": [
+                            ref for ref in question.get("affects", []) if ref != "AF-1"
+                        ],
+                    }
+                    for question in result.model.open_questions
+                ],
+            )
+            repair_prompt = refiner._action_prompt(
+                source=self.source,
+                source_count=1,
+                history=[
+                    {
+                        "action": "complete",
+                        "result": {
+                            "validation_report": {
+                                "ok": False,
+                                "issues": [],
+                                "blocking_question_ids": ["Q-1"],
+                            }
+                        },
+                    }
+                ],
+                action_index=4,
+                repair_base=unrelated_model,
+                repair_report={
+                    "ok": False,
+                    "issues": [
+                        {
+                            "code": "branch_behavior_without_clarification",
+                            "path": "flows.alternatives[0]",
+                            "message": "AF-1 is missing steps.",
+                            "subject_ref": "AF-1",
+                            "missing_fields": ["steps"],
+                        }
+                    ],
+                    "blocking_question_ids": ["Q-1"],
+                },
+                profile_name="refiner_repair",
+            )
+            self.assertIn("# Requirement Repair Delta V1", repair_prompt)
+            self.assertIn('{"action":"requirement.propose_delta"', repair_prompt)
+            self.assertNotIn("# Requirement Model V2 Structured Output", repair_prompt)
+            self.assertNotIn('"blocking_question_ids"', repair_prompt)
+            state_json = repair_prompt.split("TOOL_STATE_JSON_BEGIN\n", 1)[1].split(
+                "\nTOOL_STATE_JSON_END", 1
+            )[0]
+            repair_state = json.loads(state_json)["repair_context"]
+            self.assertNotIn(
+                "blocking_question_ids", repair_state["validation_report"]
+            )
+            self.assertEqual(
+                repair_state["repair_targets"],
+                [
+                    {
+                        "issue_code": "branch_behavior_without_clarification",
+                        "issue_path": "flows.alternatives[0]",
+                        "subject_ref": "AF-1",
+                        "missing_fields": ["steps"],
+                        "eligible_existing_question_ids": [],
+                    }
+                ],
+            )
+            repair_context = {"repair_base": result.model}
+            self.assertEqual(
+                RequirementModelV2Refiner._profile_name(
+                    session={"budgets": {"candidate_remaining": 2}},
+                    context=repair_context,
+                ),
+                "refiner_repair",
+            )
+            self.assertEqual(
+                RequirementModelV2Refiner._profile_name(
+                    session={"budgets": {"candidate_remaining": 1}},
+                    context=repair_context,
+                ),
+                "refiner_final_repair",
+            )
 
     def as_complete(self, completion: LlmCompletion) -> LlmCompletion:
         if completion.finish_reason == "length":
@@ -276,9 +521,57 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         repair_prompt = str(client.calls[3]["prompt"])
         self.assertIn("Move every AC-* ID out of scenario.requirement_refs", repair_prompt)
         self.assertIn("scenario.open_question_refs", repair_prompt)
+        self.assertIn("Every added open question must be bound in the same delta", repair_prompt)
+        self.assertIn("surface.open_question_refs", repair_prompt)
+        self.assertIn("Preserve existing question references", repair_prompt)
+        self.assertIn("repair_context.repair_targets", repair_prompt)
+        self.assertIn("eligible_existing_question_ids", repair_prompt)
+        self.assertIn("must appear in the question's `affects` list", repair_prompt)
         self.assertIn("requirement.propose_delta", repair_prompt)
         self.assertIn("Requirement Repair Delta V1", repair_prompt)
         self.assertNotIn("## Required JSON shape", repair_prompt)
+
+    def test_invalid_question_options_use_bounded_delta_repair(self) -> None:
+        invalid = deepcopy(self.payload)
+        question = invalid["open_questions"][0]
+        question.update(
+            {
+                "answer_mode": "multiple_choice",
+                "options": ["Cancel without saving", "Keep the pending operation"],
+                "recommended_option": None,
+            }
+        )
+        result, client = self.refine(
+            self.completion(invalid),
+            self.delta_action(
+                [
+                    {
+                        "op": "entity.update",
+                        "target_id": "Q-1",
+                        "fields": {
+                            "options": [
+                                {
+                                    "key": "cancel_without_saving",
+                                    "answer": "Cancel without saving",
+                                    "implication": "No pending change is committed.",
+                                },
+                                {
+                                    "key": "keep_pending",
+                                    "answer": "Keep the pending operation",
+                                    "implication": "The operation can be resumed later.",
+                                },
+                            ]
+                        },
+                    }
+                ]
+            ),
+        )
+
+        self.assertTrue(result.repaired)
+        self.assertTrue(result.final_report.ok)
+        repair_prompt = str(client.calls[3]["prompt"])
+        self.assertIn("invalid_question_option", repair_prompt)
+        self.assertIn('"key":"stable_key","answer":"User-facing answer"', repair_prompt)
 
     def test_full_model_repair_is_rejected_when_delta_base_exists(self) -> None:
         invalid = deepcopy(self.payload)

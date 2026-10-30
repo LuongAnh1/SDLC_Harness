@@ -26,6 +26,7 @@ from ..profiles import build_profile_snapshot, profile_status_metadata
 from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_entry
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
+from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
@@ -115,13 +116,44 @@ class PhaseOneWorkflow:
     sync Jira/Confluence. Niko gọi HTTP API và đọc response đã tóm tắt.
     """
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        requirement_step_review: dict[str, object] | None = None,
+    ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.llm_client = LlmClient(settings)
-        self.refiner_v2 = RequirementModelV2Refiner(self.llm_client, store=self.store)
+        self.requirement_step_review = dict(requirement_step_review or {})
+        self.refiner_v2 = RequirementModelV2Refiner(
+            self.llm_client,
+            store=self.store,
+            step_review=self.requirement_step_review,
+        )
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
         self.coverage_reviewer = RequirementCoverageReviewer(self.llm_client)
+
+    def _coverage_reviewer_for(
+        self,
+        *,
+        run_id: str,
+        revision: int,
+    ) -> RequirementCoverageReviewer:
+        if not bool(self.requirement_step_review.get("enabled")):
+            return self.coverage_reviewer
+        return RequirementCoverageReviewer(
+            ReviewableLlmClient(
+                self.llm_client,
+                store=self.store,
+                run_id=run_id,
+                review=self.requirement_step_review,
+                call_prefix=f"requirement-coverage-r{revision}",
+                execution_dir=f"requirement_execution/coverage_r{revision}_step_review",
+                error_prefix="requirement_coverage",
+                label="Requirement Coverage Reviewer",
+            )
+        )
 
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
@@ -289,7 +321,10 @@ class PhaseOneWorkflow:
                 model=policy_validation.model,
                 final_report=policy_validation.report,
             )
-            coverage = self.coverage_reviewer.review(
+            coverage = self._coverage_reviewer_for(
+                run_id=run_id,
+                revision=refinement.model.revision,
+            ).review(
                 model=refinement.model,
                 source_text_by_id=source_catalog.source_text_by_id,
                 validation_report=refinement.final_report,
@@ -406,6 +441,27 @@ class PhaseOneWorkflow:
                 path = self.store.artifact_path(run_id, filename)
                 if path.exists():
                     latest_artifacts[key] = self.store.relative(path)
+            if isinstance(exc, LlmStepReviewRequired):
+                requirement_execution = self._requirement_execution_summary(run_id)
+                requirement_execution["step_review"] = exc.progress
+                state.update(
+                    {
+                        "updated_at": utc_now_iso(),
+                        "current_phase": "requirement_drafting",
+                        "status": "requirement_paused",
+                        "last_error": exc.to_response(),
+                        "latest_artifacts": latest_artifacts,
+                        "pending_checkpoint": None,
+                        "allowed_next_actions": list(ALLOWED_REQUIREMENT_DRAFTING_ACTIONS),
+                        "requirement_execution": requirement_execution,
+                        "summary_for_user": (
+                            f"Phase 1 LLM {exc.progress['review_stage']} "
+                            f"{exc.progress['call_id']} requires operator review."
+                        ),
+                    }
+                )
+                self.store.write_state(state)
+                return self._status_response(state, created_new_run=not resume)
             if exc.error_code == "llm_transport_failed":
                 state.update(
                     {
@@ -1502,6 +1558,11 @@ class PhaseOneWorkflow:
         }
         requirement_execution = self._requirement_execution_summary(str(state.get("run_id") or ""))
         if requirement_execution is not None:
+            persisted_execution = state.get("requirement_execution")
+            if isinstance(persisted_execution, dict) and isinstance(
+                persisted_execution.get("step_review"), dict
+            ):
+                requirement_execution["step_review"] = dict(persisted_execution["step_review"])
             response["requirement_execution"] = requirement_execution
         checkpoint = response.get("pending_checkpoint")
         last_sync = response.get("last_sync")

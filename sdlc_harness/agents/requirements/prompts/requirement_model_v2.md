@@ -19,6 +19,8 @@ Source ref: `{{SOURCE_REF}}`
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, `proposed_disposition`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, `answer_mode`, `options`, `recommended_option`, `suggested_answer`, `why_it_is_safe`, `impact`, `uncertainty`, `reversible`, and `evidence_refs`.
+- For `answer_mode="short"`, return `options=[]` and `recommended_option=null`.
+- For `answer_mode="multiple_choice"`, return 2-5 option objects shaped as `{"key":"stable_key","answer":"User-facing answer","implication":"Optional impact"}`. Keys must be unique, `recommended_option` must be null or reference one option key, and bare string options are invalid.
 - Set `proposed_disposition` to `human_required`, `agent_default`, or `deferred_to_design`.
 - Use `agent_default` only for a low-impact, low-uncertainty, reversible choice in `optional_context`, `conventional_ux_behavior`, or `noncritical_recovery`. Provide `suggested_answer` (or a valid `recommended_option`), `why_it_is_safe`, and `reversible=true`.
 - When the source explicitly delegates such a conventional default, keep the unresolved choice out of `BR-*`, `AC-*`, and `QR-*` until Python accepts it as an assumption. It may reference a related flow item, but use one of the exact agent-default categories above and do not mark a scenario surface `clarification_required` solely for that choice.
@@ -81,6 +83,30 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - A scenario `open_question_refs` list must contain every open question whose `affects`
   intersects the scenario-local allowlist, and must not contain unrelated questions.
 - Every scenario must contain exactly four surfaces: `ui`, `api`, `business_rule`, and `data`.
+
+Treat these as functional surfaces, not as claims that a particular file or technology already exists:
+
+- `ui`: actor-facing interaction, presentation, input, confirmation, feedback, or client state.
+- `api`: the request, command, or query boundary through which an actor-facing client, another
+  system, or another application component invokes backend/application behavior. This includes an
+  internal application API or service endpoint; it is not limited to a public or external API.
+- `business_rule`: validation, authorization, decision, guard, policy, or orchestration that
+  determines what the system may do and which outcome follows.
+- `data`: reading, creating, changing, deleting, or preserving persisted/domain state.
+
+Surface classification rules:
+
+- When an actor-facing interaction triggers or observes backend behavior that reads or changes
+  persisted state, mark the participating `ui`, `api`, and `data` surfaces `required`. For example,
+  a user confirming deletion and the system deleting a stored record requires the application
+  request boundary even when the source does not name an endpoint.
+- Do not mark `api` as `not_applicable` merely because the source omits an HTTP method, route,
+  request schema, or public/external API. Those technical details belong to Design.
+- Use `api: not_applicable` only when the scenario can be completed without any request, command,
+  query, service, or system boundary. Use `clarification_required` only when a missing product
+  decision can change whether that boundary participates.
+- Required surfaces describe one end-to-end scenario path, not separate independent features.
+
 - Each surface uses exactly one status: `required`, `not_applicable`, or `clarification_required`, plus a non-empty reason.
 - `required` means the product behavior must address that surface; it does not mean new code must be created. Reference the scenario-local behavior or acceptance criteria that justify it.
 - `not_applicable` requires a reason and empty requirement/question references.
@@ -166,7 +192,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
   "acceptance_criteria": [{"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["BR-1"]}],
   "quality_requirements": [],
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
-  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "short|multiple_choice", "options": [], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
+  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "multiple_choice", "options": [{"key": "option_a", "answer": "First user-facing answer", "implication": "Optional impact"}, {"key": "option_b", "answer": "Second user-facing answer", "implication": null}], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
   "decisions": [],
   "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}

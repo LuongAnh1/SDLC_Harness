@@ -68,6 +68,9 @@ class BudgetedLlmClient:
         prompt: str,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> Any:
         self._reserve(system)
         completion = self.base.complete_with_metadata(
@@ -75,6 +78,9 @@ class BudgetedLlmClient:
             prompt=prompt,
             json_mode=json_mode,
             max_tokens=max_tokens,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
         )
         self._record_usage(completion)
         return completion
@@ -85,10 +91,20 @@ class BudgetedLlmClient:
         messages: list[dict[str, str]],
         json_mode: bool = False,
         max_tokens: int | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> Any:
         system = next((str(item.get("content") or "") for item in messages if item.get("role") == "system"), "")
         self._reserve(system)
-        completion = self.base.complete_messages(messages=messages, json_mode=json_mode, max_tokens=max_tokens)
+        completion = self.base.complete_messages(
+            messages=messages,
+            json_mode=json_mode,
+            max_tokens=max_tokens,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
+        )
         self._record_usage(completion)
         return completion
 
@@ -182,6 +198,9 @@ class LlmClient:
         prompt: str,
         json_mode: bool = False,
         max_tokens: int | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LlmCompletion:
         """Sinh completion và giữ finish_reason/usage cho structured-output flow."""
 
@@ -189,6 +208,9 @@ class LlmClient:
             messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
             json_mode=json_mode,
             max_tokens=max_tokens,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            timeout_seconds=timeout_seconds,
         )
 
     def complete_messages(
@@ -197,13 +219,26 @@ class LlmClient:
         messages: list[dict[str, str]],
         json_mode: bool = False,
         max_tokens: int | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LlmCompletion:
         """Complete a bounded transcript for controlled agent loops."""
 
+        selected_model = str(model or self.settings.llm_model).strip()
+        selected_effort = str(reasoning_effort or "").strip().lower()
+        if not selected_model:
+            raise HarnessError("requirement_refiner_failed", "LLM model must not be empty.")
+        if selected_effort and selected_effort not in {"none", "low", "high", "max"}:
+            raise HarnessError(
+                "requirement_refiner_failed",
+                f"Unsupported reasoning effort: {selected_effort}",
+            )
         metadata = {
             "mode": self.settings.llm_mode,
-            "model": self.settings.llm_model,
+            "model": selected_model,
             "json_mode": json_mode,
+            "reasoning_effort": selected_effort or None,
         }
         emit_current(
             category="llm",
@@ -226,6 +261,9 @@ class LlmClient:
                     messages=messages,
                     json_mode=json_mode,
                     max_tokens=max_tokens,
+                    model=selected_model,
+                    reasoning_effort=selected_effort or None,
+                    timeout_seconds=timeout_seconds,
                 )
             else:
                 raise HarnessError(
@@ -286,6 +324,9 @@ class LlmClient:
         messages: list[dict[str, str]],
         json_mode: bool = False,
         max_tokens: int | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
+        timeout_seconds: int | None = None,
     ) -> LlmCompletion:
         """Gọi Chat Completions với transcript đã được Harness kiểm soát."""
 
@@ -295,13 +336,20 @@ class LlmClient:
                 "SDLC_LLM_API_KEY is required when SDLC_LLM_MODE is not fake.",
             )
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.settings.llm_model,
-            "messages": messages,
-            "temperature": 0.1,
-        }
+        payload = {"model": model or self.settings.llm_model, "messages": messages}
         if self.settings.llm_mode == "deepseek":
-            payload["thinking"] = {"type": self.settings.llm_thinking_mode}
+            thinking_mode = (
+                "disabled"
+                if reasoning_effort == "none"
+                else ("enabled" if reasoning_effort else self.settings.llm_thinking_mode)
+            )
+            payload["thinking"] = {"type": thinking_mode}
+            if reasoning_effort and reasoning_effort != "none":
+                payload["reasoning_effort"] = reasoning_effort
+            if thinking_mode == "disabled":
+                payload["temperature"] = 0.1
+        else:
+            payload["temperature"] = 0.1
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
@@ -316,7 +364,10 @@ class LlmClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.settings.llm_timeout_seconds) as response:
+            with urllib.request.urlopen(
+                request,
+                timeout=timeout_seconds or self.settings.llm_timeout_seconds,
+            ) as response:
                 raw = response.read().decode("utf-8")
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")

@@ -10,8 +10,10 @@ from pathlib import Path
 import time
 from typing import Any, Literal
 
+from ...core.config import phase1_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient, LlmCompletion
+from ...llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ...loop import RoleToolResultV1, canonical_json_hash
 from ...sources.fixtures import UseCaseSource
 from ...storage.runtime import RuntimeStore, utc_now_iso
@@ -83,7 +85,8 @@ _REPAIRABLE_ISSUE_CODES = {
     "source_fingerprint_mismatch", "question_without_evidence",
     "source_conflict_evidence_insufficient",
     "branch_behavior_without_clarification", "acceptance_without_verifies",
-    "acceptance_placeholder",
+    "acceptance_placeholder", "invalid_answer_mode", "invalid_question_options",
+    "invalid_question_option", "duplicate_question_option", "invalid_recommended_option",
 }
 _DELTA_UNSAFE_ISSUE_CODES = {
     "required_id", "invalid_id_prefix", "duplicate_id", "invalid_type", "invalid_schema_version",
@@ -166,6 +169,7 @@ class RequirementModelV2Refiner:
         store: RuntimeStore | None = None,
         max_actions: int | None = None,
         max_action_retries: int | None = None,
+        step_review: dict[str, object] | None = None,
     ):
         self.llm_client = llm_client
         self.store = store
@@ -173,6 +177,7 @@ class RequirementModelV2Refiner:
         self.max_actions = max_actions or int(getattr(settings, "requirement_max_tool_actions", 12))
         configured_retries = int(getattr(settings, "requirement_max_action_retries", 2))
         self.max_action_retries = configured_retries if max_action_retries is None else max_action_retries
+        self.step_review = dict(step_review or {})
 
     def refine(
         self,
@@ -215,7 +220,21 @@ class RequirementModelV2Refiner:
             catalog=catalog,
             resume=resume,
         )
-        max_tokens = self._structured_max_tokens()
+        llm_settings = getattr(self.llm_client, "settings", None)
+        refiner_profiles = {
+            name: phase1_llm_call_options(
+                llm_settings,
+                name,
+                fallback_max_tokens=self._structured_max_tokens(),
+            )
+            for name in (
+                "refiner_list",
+                "refiner_navigation",
+                "refiner_synthesis",
+                "refiner_repair",
+                "refiner_final_repair",
+            )
+        }
         authority = build_requirement_session_authority(
             manifest_input_hash=str(journal.get("manifest_input_hash") or ""),
             source_fingerprints=[str(item.get("fingerprint") or "") for item in catalog.sources],
@@ -223,6 +242,7 @@ class RequirementModelV2Refiner:
             prompt_policy_sha256=self._prompt_policy_sha256(),
             llm_mode=str(getattr(getattr(self.llm_client, "settings", None), "llm_mode", "unknown")),
             llm_model=str(getattr(getattr(self.llm_client, "settings", None), "llm_model", "unknown")),
+            llm_profiles=refiner_profiles,
         )
         session, session_path = open_requirement_session(
             store=self.store,
@@ -232,7 +252,7 @@ class RequirementModelV2Refiner:
             action_retry_limit=self.max_action_retries,
             resume=resume,
         )
-        if resume:
+        if resume and str(session.get("status") or "") != "completed":
             journal["status"] = "running"
             journal["last_error"] = None
             journal["updated_at"] = utc_now_iso()
@@ -255,6 +275,21 @@ class RequirementModelV2Refiner:
             )
             raise
 
+        if (
+            str(session.get("status") or "") == "completed"
+            and context["final_model_ref"]
+            and isinstance(context["final_report"], RequirementModelV2ValidationReport)
+        ):
+            return self._result_from_context(
+                run_id=run_id,
+                model=self._read_internal_model(run_id, context["final_model_ref"]),
+                manifest_path=manifest_path,
+                journal_path=journal_path,
+                session_path=session_path,
+                context=context,
+                journal=journal,
+            )
+
         try:
             recovered = self._reconcile_pending_call(
                 run_id=run_id,
@@ -266,7 +301,6 @@ class RequirementModelV2Refiner:
                 session=session,
                 session_path=session_path,
                 context=context,
-                max_tokens=max_tokens,
             )
             if recovered is not None:
                 return recovered
@@ -277,6 +311,7 @@ class RequirementModelV2Refiner:
                     session=session,
                 )
                 action_index = int(call_id.split("-", 1)[1])
+                profile_name = self._profile_name(session=session, context=context)
                 prompt = self._action_prompt(
                     source=source,
                     source_count=len(catalog.sources),
@@ -284,10 +319,17 @@ class RequirementModelV2Refiner:
                     action_index=action_index,
                     repair_base=context["repair_base"],
                     repair_report=context["repair_report"],
+                    profile_name=profile_name,
                 )
                 started = time.monotonic()
+                request_options = refiner_profiles[profile_name]
                 try:
-                    completion = self._complete(prompt, max_tokens=max_tokens)
+                    completion = self._complete(
+                        prompt,
+                        run_id=run_id,
+                        action_index=action_index,
+                        request_options=request_options,
+                    )
                 except HarnessError as exc:
                     if exc.error_code == "llm_transport_failed":
                         set_requirement_session_status(
@@ -303,68 +345,7 @@ class RequirementModelV2Refiner:
                         self._write_journal(journal_path, journal)
                     raise
                 duration = round(time.monotonic() - started, 3)
-                completion_metadata = {
-                    "finish_reason": completion.finish_reason,
-                    "usage": deepcopy(completion.usage),
-                    "duration_seconds": duration,
-                    "max_tokens": max_tokens,
-                }
-                if completion.finish_reason.strip().lower() == "length":
-                    budgets = session["budgets"]
-                    budgets["truncated_failures"] = int(budgets["truncated_failures"]) + 1
-                    write_requirement_session(store=self.store, run_id=run_id, session=session)
-                    result = {
-                        "ok": False,
-                        "error_code": "requirement_tool_action_truncated",
-                        "message": "Return one smaller JSON action.",
-                    }
-                    context["history"].append({"action": "rejected", "result": result})
-                    self._append_journal(
-                        journal, journal_path, action_index=action_index, action="rejected",
-                        arguments={}, summary="", result=result, completion=completion, duration=duration,
-                        input_payload={"action": "rejected", "arguments": {}},
-                    )
-                    complete_requirement_call(store=self.store, run_id=run_id, session=session)
-                    if int(budgets["truncated_failures"]) > self.max_action_retries:
-                        raise HarnessError(
-                            "requirement_tool_action_truncated",
-                            "Requirement source action remained truncated after bounded retries.",
-                            run_id=run_id,
-                        )
-                    continue
-                try:
-                    action = self._parse_action(completion.content)
-                    session["budgets"]["invalid_failures"] = 0
-                    session["budgets"]["truncated_failures"] = 0
-                except HarnessError as exc:
-                    budgets = session["budgets"]
-                    budgets["invalid_failures"] = int(budgets["invalid_failures"]) + 1
-                    write_requirement_session(store=self.store, run_id=run_id, session=session)
-                    result = {"ok": False, "error_code": exc.error_code, "message": exc.message}
-                    context["history"].append({"action": "rejected", "result": result})
-                    self._append_journal(
-                        journal, journal_path, action_index=action_index, action="rejected",
-                        arguments={}, summary="", result=result, completion=completion, duration=duration,
-                        input_payload={"action": "rejected", "arguments": {}},
-                    )
-                    complete_requirement_call(store=self.store, run_id=run_id, session=session)
-                    if int(budgets["invalid_failures"]) > self.max_action_retries:
-                        raise HarnessError(
-                            "requirement_tool_action_invalid",
-                            "Requirement Refiner repeatedly returned an invalid action.",
-                            run_id=run_id,
-                        ) from exc
-                    continue
-
-                persist_requirement_action_intent(
-                    store=self.store,
-                    run_id=run_id,
-                    session=session,
-                    action=action,
-                    completion_metadata=completion_metadata,
-                    reserve_candidate=self._action_reserves_candidate(action, context=context),
-                )
-                result = self._execute_requirement_action(
+                result = self._consume_completion(
                     run_id=run_id,
                     source=source,
                     primary=primary,
@@ -375,10 +356,9 @@ class RequirementModelV2Refiner:
                     session=session,
                     session_path=session_path,
                     context=context,
-                    action=action,
                     completion=completion,
                     duration=duration,
-                    max_tokens=max_tokens,
+                    max_tokens=int(request_options["max_tokens"]),
                 )
                 if result is not None:
                     return result
@@ -387,6 +367,19 @@ class RequirementModelV2Refiner:
                 f"Requirement Refiner did not complete within {self.max_actions} actions.",
                 run_id=run_id,
             )
+        except LlmStepReviewRequired as exc:
+            set_requirement_session_status(
+                store=self.store,
+                run_id=run_id,
+                session=session,
+                status="paused",
+                error=exc,
+            )
+            journal["status"] = "paused"
+            journal["last_error"] = exc.to_response()
+            journal["updated_at"] = utc_now_iso()
+            self._write_journal(journal_path, journal)
+            raise
         except Exception as exc:
             if not (isinstance(exc, HarnessError) and exc.error_code == "llm_transport_failed"):
                 self._finish_journal_failure(journal, journal_path, exc)
@@ -408,6 +401,117 @@ class RequirementModelV2Refiner:
             )
             self._write_gap_report(run_id, gap_report)
             raise
+
+    def _consume_completion(
+        self,
+        *,
+        run_id: str,
+        source: UseCaseSource,
+        primary: dict[str, object],
+        catalog: RequirementSourceCatalog,
+        manifest_path: str,
+        journal: dict[str, object],
+        journal_path: str,
+        session: dict[str, Any],
+        session_path: str,
+        context: dict[str, Any],
+        completion: LlmCompletion,
+        duration: float,
+        max_tokens: int,
+    ) -> RequirementModelV2RefinementResult | None:
+        pending = pending_requirement_call(session, run_id=run_id)
+        action_index = int(pending["action_index"])
+        completion_metadata = {
+            "finish_reason": completion.finish_reason,
+            "usage": deepcopy(completion.usage),
+            "duration_seconds": duration,
+            "max_tokens": max_tokens,
+        }
+        if completion.finish_reason.strip().lower() == "length":
+            budgets = session["budgets"]
+            budgets["truncated_failures"] = int(budgets["truncated_failures"]) + 1
+            write_requirement_session(store=self.store, run_id=run_id, session=session)
+            result = {
+                "ok": False,
+                "error_code": "requirement_tool_action_truncated",
+                "message": "Return one smaller JSON action.",
+            }
+            context["history"].append({"action": "rejected", "result": result})
+            self._append_journal(
+                journal,
+                journal_path,
+                action_index=action_index,
+                action="rejected",
+                arguments={},
+                summary="",
+                result=result,
+                completion=completion,
+                duration=duration,
+                input_payload={"action": "rejected", "arguments": {}},
+            )
+            complete_requirement_call(store=self.store, run_id=run_id, session=session)
+            if int(budgets["truncated_failures"]) > self.max_action_retries:
+                raise HarnessError(
+                    "requirement_tool_action_truncated",
+                    "Requirement source action remained truncated after bounded retries.",
+                    run_id=run_id,
+                )
+            return None
+        try:
+            action = self._parse_action(completion.content)
+            session["budgets"]["invalid_failures"] = 0
+            session["budgets"]["truncated_failures"] = 0
+        except HarnessError as exc:
+            budgets = session["budgets"]
+            budgets["invalid_failures"] = int(budgets["invalid_failures"]) + 1
+            write_requirement_session(store=self.store, run_id=run_id, session=session)
+            result = {"ok": False, "error_code": exc.error_code, "message": exc.message}
+            context["history"].append({"action": "rejected", "result": result})
+            self._append_journal(
+                journal,
+                journal_path,
+                action_index=action_index,
+                action="rejected",
+                arguments={},
+                summary="",
+                result=result,
+                completion=completion,
+                duration=duration,
+                input_payload={"action": "rejected", "arguments": {}},
+            )
+            complete_requirement_call(store=self.store, run_id=run_id, session=session)
+            if int(budgets["invalid_failures"]) > self.max_action_retries:
+                raise HarnessError(
+                    "requirement_tool_action_invalid",
+                    "Requirement Refiner repeatedly returned an invalid action.",
+                    run_id=run_id,
+                ) from exc
+            return None
+
+        persist_requirement_action_intent(
+            store=self.store,
+            run_id=run_id,
+            session=session,
+            action=action,
+            completion_metadata=completion_metadata,
+            reserve_candidate=self._action_reserves_candidate(action, context=context),
+        )
+        return self._execute_requirement_action(
+            run_id=run_id,
+            source=source,
+            primary=primary,
+            catalog=catalog,
+            manifest_path=manifest_path,
+            journal=journal,
+            journal_path=journal_path,
+            session=session,
+            session_path=session_path,
+            context=context,
+            action=action,
+            completion=completion,
+            duration=duration,
+            max_tokens=max_tokens,
+        )
 
     def _execute_requirement_action(
         self,
@@ -978,7 +1082,6 @@ class RequirementModelV2Refiner:
         session: dict[str, Any],
         session_path: str,
         context: dict[str, Any],
-        max_tokens: int,
     ) -> RequirementModelV2RefinementResult | None:
         pending_value = session["cursor"].get("pending_call")
         if pending_value is None:
@@ -1014,7 +1117,47 @@ class RequirementModelV2Refiner:
                 manifest_path=self._manifest_ref(run_id), journal=journal, journal_path=journal_path,
                 session=session, session_path=session_path, context=context, action=action,
                 completion=completion, duration=float(metadata.get("duration_seconds") or 0.0),
-                max_tokens=int(metadata.get("max_tokens") or max_tokens),
+                max_tokens=int(metadata.get("max_tokens") or self._structured_max_tokens()),
+            )
+
+        if bool(self.step_review.get("enabled")):
+            action_index = int(pending["action_index"])
+            profile_name = self._profile_name(session=session, context=context)
+            prompt = self._action_prompt(
+                source=source,
+                source_count=len(catalog.sources),
+                history=context["history"],
+                action_index=action_index,
+                repair_base=context["repair_base"],
+                repair_report=context["repair_report"],
+                profile_name=profile_name,
+            )
+            started = time.monotonic()
+            request_options = phase1_llm_call_options(
+                getattr(self.llm_client, "settings", None),
+                profile_name,
+                fallback_max_tokens=self._structured_max_tokens(),
+            )
+            completion = self._complete(
+                prompt,
+                run_id=run_id,
+                action_index=action_index,
+                request_options=request_options,
+            )
+            return self._consume_completion(
+                run_id=run_id,
+                source=source,
+                primary=primary,
+                catalog=catalog,
+                manifest_path=self._manifest_ref(run_id),
+                journal=journal,
+                journal_path=journal_path,
+                session=session,
+                session_path=session_path,
+                context=context,
+                completion=completion,
+                duration=round(time.monotonic() - started, 3),
+                max_tokens=int(request_options["max_tokens"]),
             )
 
         result = {
@@ -1180,10 +1323,17 @@ class RequirementModelV2Refiner:
         for item in value["issues"]:
             if not isinstance(item, dict):
                 raise HarnessError("requirement_session_invalid", "Requirement validation issue is invalid.", run_id=run_id)
+            missing_fields = item.get("missing_fields")
             issues.append(
                 RequirementModelV2Issue(
                     code=str(item.get("code") or ""), path=str(item.get("path") or ""),
                     message=str(item.get("message") or ""),
+                    subject_ref=str(item.get("subject_ref") or ""),
+                    missing_fields=tuple(
+                        str(field)
+                        for field in missing_fields
+                        if isinstance(field, str) and field
+                    ) if isinstance(missing_fields, list) else (),
                 )
             )
         blocking = value.get("blocking_question_ids")
@@ -1199,6 +1349,7 @@ class RequirementModelV2Refiner:
             {
                 "model_prompt": _PROMPT_PATH.read_text(encoding="utf-8"),
                 "delta_prompt": _DELTA_PROMPT_PATH.read_text(encoding="utf-8"),
+                "composition_policy": "phase_specific_v1",
                 "clarification_disposition_policy": "clarification_disposition_v3",
                 "actions": sorted(_ACTION_NAMES),
                 "repairable_issue_codes": sorted(_REPAIRABLE_ISSUE_CODES),
@@ -1339,18 +1490,8 @@ class RequirementModelV2Refiner:
         action_index: int,
         repair_base: RequirementModelV2 | None,
         repair_report: dict[str, object] | None,
+        profile_name: str,
     ) -> str:
-        contract_path = _DELTA_PROMPT_PATH if repair_base is not None else _PROMPT_PATH
-        model_contract = contract_path.read_text(encoding="utf-8")
-        model_contract = self._replace_prompt_tokens(
-            model_contract,
-            {
-                "DATASET": source.dataset,
-                "USE_CASE": source.use_case,
-                "SOURCE_REF": "python_owned_after_tool_observation",
-                "SOURCE_TEXT": "Source text is not injected. Use source tools and cite OBS-* observations.",
-            },
-        )
         state = {
             "action_index": action_index,
             "max_actions": self.max_actions,
@@ -1358,61 +1499,197 @@ class RequirementModelV2Refiner:
             "history": history,
         }
         if repair_base is not None:
+            validation_report, repair_targets = self._repair_prompt_context(
+                repair_base=repair_base,
+                repair_report=repair_report,
+            )
+            state["history"] = self._repair_prompt_history(history)
             state["repair_context"] = {
                 "required_action": "requirement.propose_delta",
                 "delta_schema_version": DELTA_SCHEMA_VERSION,
                 "max_operations": MAX_DELTA_OPERATIONS,
                 "base_candidate_sha256": requirement_candidate_hash(repair_base),
                 "base_candidate": repair_base.to_dict(),
-                "validation_report": deepcopy(repair_report),
+                "validation_report": validation_report,
+                "repair_targets": repair_targets,
             }
-        repair_contract = (
-            "A parsed invalid candidate exists in repair_context. You MUST call "
-            "requirement.propose_delta with arguments.requirement_delta. Do not call complete. "
-            "The delta root has schema_version, base_candidate_sha256, and operations. "
-            "Operation shapes: entity.update={op,target_id,fields}; "
-            "entity.add={op,collection,temp_ref,value}; entity.remove={op,target_id}; "
-            "surface.update={op,scenario_id,surface,fields}. "
-            "Add collections: use_case.actors, preconditions, flows.main, flows.alternatives, "
-            "flows.exceptions, postconditions, business_rules, acceptance_criteria, "
-            "quality_requirements, assumptions, open_questions, evidence, and "
-            "scenario_contract.scenarios. Use temp_ref=tmp:<name> for added entities and exact "
-            "temp refs inside reference fields. Never provide or mutate stable IDs, root metadata, "
-            "provenance, decisions, validation, or effective_blocking. New or changed evidence "
-            "quotes must cite observation_ref=OBS-*. When adding an open question, also place its "
-            "temp_ref in every affected scenario.open_question_refs and in each related surface "
-            "whose requirement_refs intersects the question.affects list.\n"
-            if repair_base is not None
-            else "Call complete with arguments.requirement_model after inspecting source content.\n"
-        )
+
+        if profile_name == "refiner_list":
+            action_schema = (
+                '{"action":"source.list","arguments":{},"summary":"short reason"}'
+            )
+            directive = "This bootstrap call MUST return source.list."
+            model_contract = ""
+        elif profile_name == "refiner_navigation":
+            action_schema = (
+                '{"action":"source.search|source.read","arguments":{},'
+                '"summary":"short reason"}'
+            )
+            directive = (
+                "Inspect source content before synthesis. source.search arguments: query, optional "
+                "source_ids, optional max_results. source.read arguments: source_id, optional "
+                "start_line and line_count."
+            )
+            model_contract = ""
+        elif repair_base is not None:
+            action_schema = (
+                '{"action":"requirement.propose_delta","arguments":'
+                '{"requirement_delta":{}},"summary":"short reason"}'
+            )
+            directive = (
+                "A parsed invalid candidate exists in repair_context. You MUST call "
+                "requirement.propose_delta with arguments.requirement_delta. Do not call complete. "
+                "Fix only the validator findings and preserve valid entities and references."
+            )
+            model_contract = _DELTA_PROMPT_PATH.read_text(encoding="utf-8")
+        else:
+            action_schema = (
+                '{"action":"source.search|source.read|complete","arguments":{},'
+                '"summary":"short reason"}'
+            )
+            directive = (
+                "Use source.search/source.read when more evidence is needed. Otherwise call complete "
+                "with arguments.requirement_model. Every evidence item must use observation_ref=OBS-* "
+                "from a successful read/search result; source identity is Python-owned."
+            )
+            model_contract = _PROMPT_PATH.read_text(encoding="utf-8")
+
+        if model_contract:
+            model_contract = self._replace_prompt_tokens(
+                model_contract,
+                {
+                    "DATASET": source.dataset,
+                    "USE_CASE": source.use_case,
+                    "SOURCE_REF": "python_owned_after_tool_observation",
+                    "SOURCE_TEXT": (
+                        "Source text is not injected. Use source tools and cite OBS-* observations."
+                    ),
+                },
+            )
         return (
             "# Requirement Source Tool Loop\n\n"
             "Return exactly one JSON action object and no prose or markdown.\n"
-            "Action schema: {\"action\":\"source.list|source.search|source.read|complete|requirement.propose_delta\","
-            "\"arguments\":{},\"summary\":\"short reason\"}.\n"
-            "Call source.list first. Inspect source content before complete. "
-            "source.search arguments: query, optional source_ids, optional max_results. "
-            "source.read arguments: source_id, optional start_line and line_count. "
-            "complete arguments: requirement_model. Every evidence item in that candidate must use "
-            "observation_ref=OBS-* from a successful read/search result; source identity is Python-owned.\n\n"
-            + repair_contract
-            + "\n"
+            "Action schema: "
+            + action_schema
+            + ".\n"
+            + directive
+            + "\n\n"
             "TOOL_STATE_JSON_BEGIN\n"
             + json.dumps(state, ensure_ascii=False, indent=2)
             + "\nTOOL_STATE_JSON_END\n\n"
             + model_contract
         )
 
-    def _complete(self, prompt: str, *, max_tokens: int) -> LlmCompletion:
+    @staticmethod
+    def _repair_prompt_context(
+        *,
+        repair_base: RequirementModelV2,
+        repair_report: dict[str, object] | None,
+    ) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+        validation_report = deepcopy(repair_report)
+        if not isinstance(validation_report, dict):
+            return None, []
+        validation_report.pop("blocking_question_ids", None)
+        issues = validation_report.get("issues")
+        if not isinstance(issues, list):
+            return validation_report, []
+
+        questions = [
+            question
+            for question in repair_base.open_questions
+            if isinstance(question, dict)
+            and question.get("status") == "open"
+            and question.get("effective_blocking") is True
+            and isinstance(question.get("affects"), list)
+        ]
+        targets: list[dict[str, object]] = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            subject_ref = str(issue.get("subject_ref") or "")
+            missing_fields = issue.get("missing_fields")
+            targets.append(
+                {
+                    "issue_code": str(issue.get("code") or ""),
+                    "issue_path": str(issue.get("path") or ""),
+                    "subject_ref": subject_ref,
+                    "missing_fields": [
+                        str(field)
+                        for field in missing_fields
+                        if isinstance(field, str) and field
+                    ] if isinstance(missing_fields, list) else [],
+                    "eligible_existing_question_ids": sorted(
+                        str(question.get("id"))
+                        for question in questions
+                        if subject_ref
+                        and subject_ref in question.get("affects", [])
+                        and question.get("id")
+                    ),
+                }
+            )
+        return validation_report, targets
+
+    @staticmethod
+    def _repair_prompt_history(
+        history: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        sanitized = deepcopy(history)
+        for entry in sanitized:
+            result = entry.get("result")
+            if not isinstance(result, dict):
+                continue
+            validation_report = result.get("validation_report")
+            if isinstance(validation_report, dict):
+                validation_report.pop("blocking_question_ids", None)
+        return sanitized
+
+    @staticmethod
+    def _profile_name(*, session: dict[str, Any], context: dict[str, Any]) -> str:
+        if isinstance(context.get("repair_base"), RequirementModelV2):
+            remaining = int(session["budgets"].get("candidate_remaining") or 0)
+            return "refiner_final_repair" if remaining <= 1 else "refiner_repair"
+        if not context.get("listed"):
+            return "refiner_list"
+        if not context.get("observations"):
+            return "refiner_navigation"
+        return "refiner_synthesis"
+
+    def _complete(
+        self,
+        prompt: str,
+        *,
+        run_id: str,
+        action_index: int,
+        request_options: dict[str, object],
+    ) -> LlmCompletion:
         try:
-            return self.llm_client.complete_with_metadata(
+            client: Any = self.llm_client
+            if bool(self.step_review.get("enabled")):
+                if self.store is None:
+                    raise HarnessError(
+                        "requirement_step_review_unavailable",
+                        "Requirement step review requires RuntimeStore.",
+                        run_id=run_id,
+                    )
+                client = ReviewableLlmClient(
+                    self.llm_client,
+                    store=self.store,
+                    run_id=run_id,
+                    review=self.step_review,
+                    call_prefix="requirement-refiner",
+                    execution_dir="requirement_execution/refiner_step_review",
+                    error_prefix="requirement_refiner",
+                    label="Requirement Refiner",
+                    start_ordinal=action_index - 1,
+                )
+            return client.complete_with_metadata(
                 system=(
                     "You are Requirement Refiner V2 in a controlled read-only source loop. "
                     "Return exactly one JSON action. Never invent source identity or human decisions."
                 ),
                 prompt=prompt,
                 json_mode=True,
-                max_tokens=max_tokens,
+                **request_options,
             )
         except HarnessError:
             raise

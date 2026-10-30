@@ -1305,10 +1305,15 @@ class _FailingDesignerClient:
 class _ScriptedDesignerClient:
     def __init__(self, actions: list[dict[str, object] | str]):
         self.actions = list(actions)
+        self.prompts: list[str] = []
 
     def complete_messages(self, **_: object) -> LlmCompletion:
         action = self.actions.pop(0)
         return LlmCompletion(content=action if isinstance(action, str) else json.dumps(action))
+
+    def complete_with_metadata(self, *, prompt: str, **_: object) -> LlmCompletion:
+        self.prompts.append(prompt)
+        return self.complete_messages()
 
 
 class DesignerResumeTest(unittest.TestCase):
@@ -1602,6 +1607,104 @@ class DesignerResumeTest(unittest.TestCase):
             third = third_pause.exception.progress["pending_step_review"]
             third_exchange = json.loads((root / str(third["exchange_path"])).read_text(encoding="utf-8"))
             self.assertIn("Inspect the concrete anchor", third_exchange["prompt"])
+
+    def test_step_review_can_pause_on_input_before_calling_designer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            (target / "route.ts").write_text("export const route = '/items';\n", encoding="utf-8")
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            settings = SimpleNamespace(
+                llm_mode="deepseek",
+                design_llm_call_budget=6,
+                llm_structured_max_tokens=1000,
+            )
+            requirement = {
+                "use_case_id": "UC1",
+                "scenario_contract": {
+                    "scenarios": [{"id": "SC-1", "surfaces": {"api": {"status": "required"}}}]
+                },
+            }
+            landscape = {
+                "artifact_digest": "sha256:repo",
+                "components": [{"component_id": "api", "roots": ["."]}],
+                "anchors": [
+                    {
+                        "anchor_id": "RLA-route",
+                        "kind": "api_route",
+                        "component_id": "api",
+                        "path": "route.ts",
+                        "symbol": "route",
+                    }
+                ],
+                "scenario_matches": [
+                    {"scenario_id": "SC-1", "surface": "api", "candidate_anchor_refs": ["RLA-route"]}
+                ],
+            }
+            binding = {
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            }
+            first_client = _ScriptedDesignerClient(
+                [{"action": "landscape.search", "arguments": {"scenario_id": "SC-1"}}]
+            )
+
+            with self.assertRaises(DesignerExecutionError) as input_pause:
+                DesignerToolLoopExecutor(
+                    settings=settings,
+                    store=store,
+                    llm_client=first_client,
+                    step_review={"enabled": True, "review_input": True},
+                ).execute(
+                    run_id="run-input-step-review",
+                    requirement_model=requirement,
+                    landscape=landscape,
+                    target_path=target,
+                    snapshot_binding=binding,
+                    contract_version=GRAPH_VERSION_V1,
+                )
+
+            input_pending = input_pause.exception.progress["pending_step_review"]
+            self.assertEqual(input_pending["review_stage"], "input")
+            self.assertEqual(input_pending["owner"], "llm_pre_call")
+            self.assertTrue(str(input_pending["call_id"]).endswith("-input"))
+            self.assertEqual(first_client.prompts, [])
+
+            second_client = _ScriptedDesignerClient(
+                [{"action": "landscape.search", "arguments": {"scenario_id": "SC-1"}}]
+            )
+            with self.assertRaises(DesignerExecutionError) as output_pause:
+                DesignerToolLoopExecutor(
+                    settings=settings,
+                    store=store,
+                    llm_client=second_client,
+                    step_review={
+                        "enabled": True,
+                        "review_input": True,
+                        "call_id": input_pending["call_id"],
+                        "decision": "approve",
+                    },
+                ).execute(
+                    run_id="run-input-step-review",
+                    requirement_model=requirement,
+                    landscape=landscape,
+                    target_path=target,
+                    snapshot_binding=binding,
+                    contract_version=GRAPH_VERSION_V1,
+                )
+
+            self.assertEqual(
+                output_pause.exception.error_code,
+                "designer_step_review_required",
+                output_pause.exception.message,
+            )
+            output_pending = output_pause.exception.progress["pending_step_review"]
+            self.assertEqual(output_pending["call_id"], "designer-0001")
+            self.assertNotIn("owner", output_pending)
+            self.assertEqual(len(second_client.prompts), 1)
 
     def test_step_review_pauses_on_invalid_json_instead_of_auto_retrying(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

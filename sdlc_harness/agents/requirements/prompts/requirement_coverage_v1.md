@@ -9,6 +9,33 @@ Review each category exactly once: `functional_scope`, `domain_data`,
 `constraints_tradeoffs`, `terminology`, `completion_signals`, and `placeholders`.
 Use only `clear`, `partial`, or `missing` for coverage status.
 
+## Source-boundary gate
+
+Coverage is evaluated only within behavior that the supplied source has put in
+scope. Absence is not ambiguity. A category may be `clear` when the source says
+nothing about that category and no source-scoped clause needs such a decision.
+Use `partial` or `missing` only when a specific source clause introduces that
+category but the canonical model omits or cannot operationalize a material part
+of the clause.
+
+Every question candidate must point to an exact source-backed trigger: an explicit
+decision/check/limit whose criterion is missing, an explicit alternative or exception
+whose steps or outcome are missing, or an explicit acceptance/quality clause that
+cannot yet be tested objectively. Apply this counterfactual test: if the ambiguity
+exists only after adding a choice, policy, failure, or constraint that the source did
+not mention, do not create the candidate.
+
+- Do not infer authorization roles, ownership rules, or eligibility checks merely
+  because an actor is logged in or performs an action.
+- Treat a source-stated observable result such as deletion as the product contract;
+  do not ask about hard delete, soft delete, retention, archive, or audit unless the
+  source introduces that concern.
+- Do not invent a failure, cancellation path, integration scenario, security/privacy
+  rule, compliance rule, or quality target merely because a real system might need it.
+  A named failure does not put other possible failures in scope.
+- Do not ask for best-practice completeness. Ask only for a missing decision required
+  to implement or test behavior already introduced by the source.
+
 Return at most five material question candidates. Ask only when the answer changes
 behavior, acceptance testing, data identity, operational handling, security/privacy,
 or scope. Every question must end in `?`, explain `why_it_matters`, and reference

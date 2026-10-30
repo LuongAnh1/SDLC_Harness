@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 from typing import Any
 
+from ...core.config import phase1_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
@@ -224,11 +225,19 @@ def _semantic_analysis(
         .replace("{{REQUIREMENT_MODEL}}", json.dumps(model.to_dict(), ensure_ascii=False, indent=2))
         .replace("{{VALIDATION_REPORT}}", json.dumps(validation_report.to_dict(), ensure_ascii=False, indent=2))
     )
+    request_options = phase1_llm_call_options(
+        llm_client.settings,
+        "coverage",
+        fallback_max_tokens=int(getattr(llm_client.settings, "llm_structured_max_tokens", 8192)),
+    )
     completion = llm_client.complete_with_metadata(
-        system="You review requirement ambiguity. Return strict JSON only.",
+        system=(
+            "You review source-scoped requirement ambiguity. The supplied source closes scope: "
+            "absence alone is not a gap. Return strict JSON only."
+        ),
         prompt=prompt,
         json_mode=True,
-        max_tokens=int(getattr(llm_client.settings, "llm_structured_max_tokens", 8192)),
+        **request_options,
     )
     if completion.finish_reason.strip().lower() == "length":
         raise HarnessError(

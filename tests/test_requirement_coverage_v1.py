@@ -27,7 +27,7 @@ from sdlc_harness.agents.requirements.coverage_v1 import (
     _merge_analysis,
     _validate_analysis,
 )
-from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.config import LlmCallProfile, load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmClient, LlmCompletion
 
@@ -73,6 +73,12 @@ def test_coverage_gate_turns_unknown_branch_behavior_into_blocking_questions() -
     before = normalize_and_validate_requirement_model_v2(_payload_without_questions(), {"SRC-1": source_text})
     assert before.report.status == "invalid"
     assert "branch_behavior_without_clarification" in {item.code for item in before.report.issues}
+    branch_issue = next(
+        item
+        for item in before.report.issues
+        if item.code == "branch_behavior_without_clarification" and item.subject_ref == "AF-1"
+    )
+    assert branch_issue.missing_fields == ("steps", "outcome")
 
     result = _reviewer().review(
         model=before.model,
@@ -110,13 +116,21 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     payload = _deterministic_analysis(normalized.model)
 
     class ScriptedSemanticClient:
-        settings = SimpleNamespace(llm_mode="deepseek", llm_structured_max_tokens=8192)
+        settings = SimpleNamespace(
+            llm_mode="deepseek",
+            llm_structured_max_tokens=8192,
+            phase1_llm_profiles={
+                "coverage": LlmCallProfile("coverage-model", "high", 24576, 180)
+            },
+        )
 
         def __init__(self):
             self.calls = 0
+            self.request: dict[str, object] = {}
 
-        def complete_with_metadata(self, **_kwargs):
+        def complete_with_metadata(self, **kwargs):
             self.calls += 1
+            self.request = dict(kwargs)
             return LlmCompletion(content=json.dumps(payload), finish_reason="stop")
 
     client = ScriptedSemanticClient()
@@ -127,6 +141,18 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     )
 
     assert client.calls == 1
+    assert client.request["model"] == "coverage-model"
+    assert client.request["reasoning_effort"] == "high"
+    assert client.request["max_tokens"] == 24576
+    assert client.request["timeout_seconds"] == 180
+    assert "absence alone is not a gap" in str(client.request["system"])
+    prompt = str(client.request["prompt"])
+    assert "Absence is not ambiguity" in prompt
+    assert "Do not infer authorization roles" in prompt
+    assert "do not ask about hard delete, soft delete, retention, archive, or audit" in prompt
+    assert "A named failure does not put other possible failures in scope" in prompt
+    assert "Apply this counterfactual test" in prompt
+    assert "exists only after adding a choice" in prompt
     assert result.analysis["review_mode"] == "hybrid"
 
 

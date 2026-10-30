@@ -27,7 +27,7 @@ from sdlc_harness.artifacts import (
     write_requirement_v2_revision_artifacts,
     write_source_snapshot_v2,
 )
-from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.config import LlmCallProfile, load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import build_parser, main as cli_main
 from sdlc_harness.llm.client import LlmCompletion
@@ -385,6 +385,10 @@ class RequirementClarificationV2Test(unittest.TestCase):
             "updates": [{"requirement_id": "G-1", "fields": {"text": "changed"}}],
         }
         client = ScriptedClient([invalid, self.accepted_q4()])
+        client.settings.phase1_llm_profiles = {
+            "clarification": LlmCallProfile("clarification-model", "high", 16384, 180),
+            "clarification_repair": LlmCallProfile("repair-model", "max", 65536, 300),
+        }
         result = RequirementClarificationUpdater(client).apply(
             source_text_by_id={"SRC-1": self.source_text},
             model=self.refinement_result().model,
@@ -393,6 +397,16 @@ class RequirementClarificationV2Test(unittest.TestCase):
             answered_by="owner",
         )
         self.assertEqual(len(client.calls), 2)
+        self.assertEqual(
+            [
+                (call["model"], call["reasoning_effort"], call["max_tokens"], call["timeout_seconds"])
+                for call in client.calls
+            ],
+            [
+                ("clarification-model", "high", 16384, 180),
+                ("repair-model", "max", 65536, 300),
+            ],
+        )
         self.assertEqual(result.attempts[0].parse_status, "invalid_update")
         self.assertEqual(result.attempts[1].purpose, "repair")
 

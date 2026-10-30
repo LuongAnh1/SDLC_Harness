@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
+from ...llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ...loop import RoleToolResultV1, canonical_json_hash
 from ...storage.runtime import RuntimeStore, utc_now_iso
 from .graph import (
@@ -794,6 +795,14 @@ class DesignerToolLoopExecutor:
             observations_since_delta = int(session.get("observation_actions_since_delta") or 0)
             observation_limit = REPAIR_OBSERVATION_ACTION_LIMIT if repair_task is not None else OBSERVATION_ACTION_LIMIT
             pending_review = _dict(session.get("pending_step_review"))
+            if pending_review and str(pending_review.get("owner") or "") == "llm_pre_call":
+                session["pending_step_review"] = None
+                session["status"] = "running"
+                cursor = _dict(session.get("cursor"))
+                cursor["pending_call"] = None
+                session["cursor"] = cursor
+                _write_json_atomic(session_file, session)
+                pending_review = {}
             if pending_review:
                 call_id = str(pending_review.get("call_id") or "")
                 exchange_path = session_dir / str(pending_review.get("exchange_file") or "")
@@ -895,14 +904,59 @@ class DesignerToolLoopExecutor:
                     observation_limit=observation_limit,
                     last_review_feedback=str(session.get("last_review_feedback") or ""),
                 )
-                completion = self.llm_client.complete_messages(
-                    messages=[
-                        {"role": "system", "content": "You are SDLC Harness Designer L3. Return exactly one JSON tool action."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    json_mode=True,
-                    max_tokens=self.settings.llm_structured_max_tokens,
-                )
+                system_prompt = "You are SDLC Harness Designer L3. Return exactly one JSON tool action."
+                if bool(self.step_review.get("enabled")) and bool(self.step_review.get("review_input")):
+                    llm_client = ReviewableLlmClient(
+                        self.llm_client,
+                        store=self.store,
+                        run_id=run_id,
+                        review={**self.step_review, "review_output": False},
+                        call_prefix="designer-input",
+                        execution_dir=(
+                            f"designer_execution/{str(session.get('session_name') or 'design_v1')}/input_step_review"
+                        ),
+                        error_prefix="designer_input",
+                        label="Designer input",
+                        start_ordinal=int(cursor.get("next_action_index") or 1) - 1,
+                    )
+                    try:
+                        completion = llm_client.complete_with_metadata(
+                            system=system_prompt,
+                            prompt=prompt,
+                            json_mode=True,
+                            max_tokens=self.settings.llm_structured_max_tokens,
+                        )
+                    except LlmStepReviewRequired as exc:
+                        cursor = _dict(session.get("cursor"))
+                        cursor["pending_call"] = None
+                        session["cursor"] = cursor
+                        session["pending_step_review"] = {
+                            "call_id": str(exc.progress.get("call_id") or ""),
+                            "exchange_path": str(exc.progress.get("exchange_path") or ""),
+                            "action": {},
+                            "owner": "llm_pre_call",
+                            "review_stage": "input",
+                            "created_at": utc_now_iso(),
+                        }
+                        session["status"] = "review_required"
+                        _write_json_atomic(session_file, session)
+                        raise self._step_review_required(
+                            run_id=run_id,
+                            call_id=str(exc.progress.get("call_id") or ""),
+                            session=session,
+                            session_file=session_file,
+                            session_dir=session_dir,
+                            journal_file=journal_file,
+                        ) from exc
+                else:
+                    completion = self.llm_client.complete_messages(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": prompt},
+                        ],
+                        json_mode=True,
+                        max_tokens=self.settings.llm_structured_max_tokens,
+                    )
                 exchange_path = _write_designer_exchange(
                     session_dir=session_dir,
                     call_id=call_id,
@@ -1741,7 +1795,7 @@ def _designer_prompt(
         "as unconditional calls in the main success sequence. "
         "Start from delta_scaffold and replace every angle-bracket placeholder.\n\n"
         "Action JSON: {\"action\":\"tool.id\",\"arguments\":{...}}\n\n"
-        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
 
 

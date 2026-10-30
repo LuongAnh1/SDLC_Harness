@@ -62,8 +62,10 @@ _UPDATE_FIELDS: dict[str, frozenset[str]] = {
     ),
     "Q": frozenset(
         {
-            "question", "category", "proposed_blocking", "affects", "depends_on",
-            "answer_guidance", "evidence_refs",
+            "question", "category", "proposed_disposition", "proposed_blocking",
+            "affects", "depends_on", "answer_guidance", "answer_mode", "options",
+            "recommended_option", "suggested_answer", "why_it_is_safe", "impact",
+            "uncertainty", "reversible", "evidence_refs",
         }
     ),
     "E": frozenset({"location", "quote", "observation_ref"}),

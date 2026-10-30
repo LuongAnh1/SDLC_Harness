@@ -278,6 +278,39 @@ class PhaseOneTest(unittest.TestCase):
         )
         self.assertTrue((run_dir / "sync" / "tool_sync_report_v1.json").exists())
 
+    def test_requirement_step_review_surfaces_input_and_output_pause_in_workflow_state(self) -> None:
+        first = PhaseOneWorkflow(
+            self.settings,
+            requirement_step_review={"enabled": True, "review_input": True},
+        ).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
+
+        self.assertEqual(first["status"], "requirement_paused")
+        run_id = str(first["run_id"])
+        state = RuntimeStore(repo_root=self.repo_root, runtime_root=self.runtime_root).read_state(run_id)
+        input_review = state["requirement_execution"]["step_review"]
+        self.assertEqual(input_review["review_stage"], "input")
+        self.assertTrue(str(input_review["call_id"]).endswith("-input"))
+        self.assertEqual(first["requirement_execution"]["step_review"], input_review)
+        exchange = json.loads((self.repo_root / str(input_review["exchange_path"])).read_text(encoding="utf-8"))
+        self.assertEqual(exchange["raw_completion"], "")
+
+        second = PhaseOneWorkflow(
+            self.settings,
+            requirement_step_review={
+                "enabled": True,
+                "review_input": True,
+                "call_id": input_review["call_id"],
+                "decision": "approve",
+            },
+        ).continue_requirement_run(run_id=run_id)
+
+        self.assertEqual(second["status"], "requirement_paused")
+        state = RuntimeStore(repo_root=self.repo_root, runtime_root=self.runtime_root).read_state(run_id)
+        output_review = state["requirement_execution"]["step_review"]
+        self.assertEqual(output_review["review_stage"], "output")
+        self.assertFalse(str(output_review["call_id"]).endswith("-input"))
+        self.assertEqual(second["requirement_execution"]["step_review"], output_review)
+
     def test_new_run_defers_terminology_only_question_and_keeps_it_in_handoff(self) -> None:
         workflow = PhaseOneWorkflow(self.settings)
 

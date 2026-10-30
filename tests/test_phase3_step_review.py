@@ -33,6 +33,97 @@ class _FakeClient:
 
 
 class PhaseThreeStepReviewTest(unittest.TestCase):
+    def test_input_review_pauses_before_provider_then_keeps_output_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(['{"action":"repo.read","arguments":{"path":"package.json"}}'])
+
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-input-review",
+                review={"review_input": True},
+            )
+            with self.assertRaises(LlmStepReviewRequired) as input_pause:
+                first.complete(system="planner", prompt="build plan")
+
+            self.assertEqual(input_pause.exception.progress["review_stage"], "input")
+            self.assertTrue(str(input_pause.exception.progress["call_id"]).endswith("-input"))
+            self.assertEqual(base.prompts, [])
+            exchange = json.loads(
+                (root / str(input_pause.exception.progress["exchange_path"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(exchange["status"], "input_pending")
+            self.assertEqual(exchange["raw_completion"], "")
+
+            approved_input = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-input-review",
+                review={
+                    "review_input": True,
+                    "call_id": input_pause.exception.progress["call_id"],
+                    "decision": "approve",
+                },
+            )
+            with self.assertRaises(LlmStepReviewRequired) as output_pause:
+                approved_input.complete(system="planner", prompt="build plan")
+
+            self.assertEqual(output_pause.exception.progress["review_stage"], "output")
+            self.assertEqual(base.prompts, ["build plan"])
+
+            approved_output = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-input-review",
+                review={
+                    "review_input": True,
+                    "call_id": output_pause.exception.progress["call_id"],
+                    "decision": "approve",
+                },
+            )
+            self.assertIn("package.json", approved_output.complete(system="planner", prompt="build plan"))
+            self.assertEqual(len(base.prompts), 1)
+
+    def test_rejected_input_creates_new_input_checkpoint_without_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(['{"plan":"unused"}'])
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-input-reject",
+                review={"review_input": True},
+            )
+            with self.assertRaises(LlmStepReviewRequired) as first_pause:
+                first.complete(system="planner", prompt="build plan")
+
+            rejected = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-input-reject",
+                review={
+                    "review_input": True,
+                    "call_id": first_pause.exception.progress["call_id"],
+                    "decision": "reject",
+                    "note": "Include the approved acceptance binding.",
+                },
+            )
+            with self.assertRaises(LlmStepReviewRequired) as retry_pause:
+                rejected.complete(system="planner", prompt="build plan")
+
+            self.assertEqual(retry_pause.exception.progress["review_stage"], "input")
+            self.assertIn("-a02-input", str(retry_pause.exception.progress["call_id"]))
+            self.assertEqual(base.prompts, [])
+            session = json.loads(
+                (store.run_dir("run-input-reject") / "implementation_plan_execution" / "step_review_session_v1.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual([item["status"] for item in session["calls"]], ["input_rejected", "input_pending"])
+
     def test_metadata_exchange_persists_and_replays_input_output(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

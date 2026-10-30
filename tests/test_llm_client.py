@@ -105,6 +105,36 @@ class LlmClientPayloadTests(unittest.TestCase):
 
         self.assertNotIn("thinking", captured)
 
+    def test_per_call_deepseek_profile_overrides_model_effort_tokens_and_timeout(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            captured: dict[str, object] = {}
+            captured_timeout = 0
+
+            def fake_urlopen(request, *, timeout):
+                nonlocal captured_timeout
+                captured.update(json.loads(request.data.decode("utf-8")))
+                captured_timeout = timeout
+                return _FakeResponse()
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                LlmClient(self._settings(root, mode="deepseek")).complete_with_metadata(
+                    system="system",
+                    prompt="prompt",
+                    json_mode=True,
+                    model="deepseek-v4-pro",
+                    reasoning_effort="max",
+                    max_tokens=65536,
+                    timeout_seconds=300,
+                )
+
+        self.assertEqual(captured["model"], "deepseek-v4-pro")
+        self.assertEqual(captured["thinking"], {"type": "enabled"})
+        self.assertEqual(captured["reasoning_effort"], "max")
+        self.assertEqual(captured["max_tokens"], 65536)
+        self.assertNotIn("temperature", captured)
+        self.assertEqual(captured_timeout, 300)
+
 
 class JsonUtilsTests(unittest.TestCase):
     def test_parse_first_json_object_requires_all_expected_keys(self) -> None:

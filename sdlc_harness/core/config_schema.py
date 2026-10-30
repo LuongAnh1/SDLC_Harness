@@ -10,6 +10,16 @@ from .errors import HarnessError
 
 MASKED_SECRET_VALUE = "********"
 _PROJECT_PROFILE_OPTIONS = list_project_profile_ids()
+PHASE1_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "refiner_list": {"label": "Refiner source list", "effort": "none", "max_tokens": 2048, "timeout": 90},
+    "refiner_navigation": {"label": "Refiner source navigation", "effort": "low", "max_tokens": 4096, "timeout": 90},
+    "refiner_synthesis": {"label": "Refiner synthesis", "effort": "high", "max_tokens": 32768, "timeout": 180},
+    "refiner_repair": {"label": "Refiner repair", "effort": "high", "max_tokens": 32768, "timeout": 180},
+    "refiner_final_repair": {"label": "Refiner final repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
+    "coverage": {"label": "Requirement coverage", "effort": "high", "max_tokens": 24576, "timeout": 180},
+    "clarification": {"label": "Clarification update", "effort": "high", "max_tokens": 16384, "timeout": 180},
+    "clarification_repair": {"label": "Clarification repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
+}
 
 
 def _field(
@@ -45,6 +55,51 @@ def _field(
     if options:
         value["options"] = list(options)
     return value
+
+
+def _phase1_llm_fields() -> tuple[dict[str, object], ...]:
+    fields: list[dict[str, object]] = []
+    for profile_name, defaults in PHASE1_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE1_{profile_name.upper()}"
+        label = str(defaults["label"])
+        fields.extend(
+            (
+                _field(
+                    f"{prefix}_MODEL",
+                    f"{label} model",
+                    "string",
+                    "",
+                    "Để trống để dùng SDLC_LLM_MODEL; có thể chọn model riêng cho call này.",
+                ),
+                _field(
+                    f"{prefix}_THINKING_EFFORT",
+                    f"{label} thinking",
+                    "enum",
+                    defaults["effort"],
+                    "Mức reasoning riêng cho call Phase 1.",
+                    options=("none", "low", "high", "max"),
+                ),
+                _field(
+                    f"{prefix}_MAX_TOKENS",
+                    f"{label} max tokens",
+                    "integer",
+                    defaults["max_tokens"],
+                    "Trần output gồm cả reasoning và JSON cuối.",
+                    minimum=1024,
+                    maximum=384000,
+                ),
+                _field(
+                    f"{prefix}_TIMEOUT_SECONDS",
+                    f"{label} timeout",
+                    "integer",
+                    defaults["timeout"],
+                    "Timeout riêng cho call Phase 1, tính bằng giây.",
+                    minimum=1,
+                    maximum=1800,
+                ),
+            )
+        )
+    return tuple(fields)
 
 
 CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
@@ -117,6 +172,12 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET", "Implementation call budget", "integer", 6, "Ngân sách call cho Code Validator.", minimum=2),
             _field("SDLC_QA_REPAIR_LIMIT", "QA repair limit", "integer", 1, "Số vòng sửa code sau QA.", minimum=0),
         ),
+    },
+    {
+        "id": "phase1_llm",
+        "label": "Phase 1 LLM",
+        "description": "Model, thinking effort, output budget và timeout theo từng loại call Requirement.",
+        "fields": _phase1_llm_fields(),
     },
     {
         "id": "target",

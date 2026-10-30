@@ -1080,6 +1080,54 @@ class OnlyClass {
         self.assertEqual(resumed["status"], "waiting_design_approval")
         self.assertTrue(resumed["latest_artifacts"]["design_artifact"].endswith("design_artifact_v2.md"))
 
+    def test_design_validator_can_review_input_before_provider_call(self) -> None:
+        settings = replace(self.settings, design_validation_trials=1)
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        PhaseTwoWorkflow(settings).approve_checkpoint(run_id=run_id)
+
+        paused_input = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={"enabled": True, "review_input": True},
+        ).revalidate_design(run_id=run_id)
+
+        self.assertEqual(paused_input["status"], "design_paused", paused_input)
+        state = PhaseTwoWorkflow(settings).store.read_state(run_id)
+        input_review = state["designer_execution"]["validator_step_review"]
+        self.assertEqual(input_review["review_stage"], "input")
+        self.assertTrue(str(input_review["call_id"]).endswith("-input"))
+        exchange = json.loads((self.repo_root / str(input_review["exchange_path"])).read_text(encoding="utf-8"))
+        self.assertEqual(exchange["status"], "input_pending")
+        self.assertEqual(exchange["raw_completion"], "")
+
+        paused_output = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={
+                "enabled": True,
+                "review_input": True,
+                "call_id": input_review["call_id"],
+                "decision": "approve",
+            },
+        ).continue_design(run_id=run_id)
+
+        self.assertEqual(paused_output["status"], "design_paused", paused_output)
+        state = PhaseTwoWorkflow(settings).store.read_state(run_id)
+        output_review = state["designer_execution"]["validator_step_review"]
+        self.assertEqual(output_review["review_stage"], "output")
+        self.assertFalse(str(output_review["call_id"]).endswith("-input"))
+
+        resumed = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={
+                "enabled": True,
+                "review_input": True,
+                "call_id": output_review["call_id"],
+                "decision": "approve",
+            },
+        ).continue_design(run_id=run_id)
+
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+
     def test_revalidate_design_recovers_feedback_from_latest_finding_ledger(self) -> None:
         created = self._create_phase1_run()
         PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))

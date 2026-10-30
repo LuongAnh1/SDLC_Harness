@@ -13,8 +13,23 @@ import os
 from pathlib import Path
 
 from ..profiles import get_project_profile
-from .config_schema import CONFIG_SECTIONS, config_field_index, serialize_config_value
+from .config_schema import (
+    CONFIG_SECTIONS,
+    PHASE1_LLM_PROFILE_DEFAULTS,
+    config_field_index,
+    serialize_config_value,
+)
 from .runtime_config import RuntimeConfigStore
+
+
+@dataclass(frozen=True)
+class LlmCallProfile:
+    """Provider controls for one named LLM call type."""
+
+    model: str
+    thinking_effort: str
+    max_tokens: int
+    timeout_seconds: int
 
 
 @dataclass(frozen=True)
@@ -32,6 +47,7 @@ class Settings:
     llm_timeout_seconds: int
     llm_structured_max_tokens: int
     llm_context_window_tokens: int
+    phase1_llm_profiles: dict[str, LlmCallProfile]
     requirement_max_tool_actions: int
     requirement_max_action_retries: int
     developer_max_actions_per_item: int
@@ -101,14 +117,70 @@ def _bool_value(raw: str | None, *, default: bool = False) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _int_value(raw: str | None, *, default: int, minimum: int = 0) -> int:
+def _int_value(
+    raw: str | None,
+    *,
+    default: int,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int:
     if raw is None:
         return default
     try:
         value = int(raw.strip())
     except ValueError:
         return default
-    return max(minimum, value)
+    normalized = max(minimum, value)
+    return min(maximum, normalized) if maximum is not None else normalized
+
+
+def _phase1_llm_profiles(
+    merged: dict[str, str],
+    *,
+    default_model: str,
+) -> dict[str, LlmCallProfile]:
+    profiles: dict[str, LlmCallProfile] = {}
+    for profile_name, defaults in PHASE1_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE1_{profile_name.upper()}"
+        effort_default = str(defaults["effort"])
+        effort = merged.get(f"{prefix}_THINKING_EFFORT", effort_default).strip().lower()
+        if effort not in {"none", "low", "high", "max"}:
+            effort = effort_default
+        profiles[profile_name] = LlmCallProfile(
+            model=merged.get(f"{prefix}_MODEL", "").strip() or default_model,
+            thinking_effort=effort,
+            max_tokens=_int_value(
+                merged.get(f"{prefix}_MAX_TOKENS"),
+                default=int(defaults["max_tokens"]),
+                minimum=1024,
+                maximum=384000,
+            ),
+            timeout_seconds=_int_value(
+                merged.get(f"{prefix}_TIMEOUT_SECONDS"),
+                default=int(defaults["timeout"]),
+                minimum=1,
+                maximum=1800,
+            ),
+        )
+    return profiles
+
+
+def phase1_llm_call_options(
+    settings: object,
+    profile_name: str,
+    *,
+    fallback_max_tokens: int = 8192,
+) -> dict[str, object]:
+    profiles = getattr(settings, "phase1_llm_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, LlmCallProfile):
+        return {"max_tokens": fallback_max_tokens}
+    return {
+        "model": profile.model,
+        "reasoning_effort": profile.thinking_effort,
+        "max_tokens": profile.max_tokens,
+        "timeout_seconds": profile.timeout_seconds,
+    }
 
 
 def resolve_config(
@@ -214,6 +286,7 @@ def load_settings(
     target_worktree_root = Path(worktree_root_raw) if worktree_root_raw else target_repo_path.parent / f"{target_repo_path.name}-worktrees"
     if not target_worktree_root.is_absolute():
         target_worktree_root = root_path / target_worktree_root
+    llm_model = merged.get("SDLC_LLM_MODEL", "deepseek-flash")
     return Settings(
         repo_root=root_path,
         runtime_root=runtime_path,
@@ -221,11 +294,12 @@ def load_settings(
         llm_mode=merged.get("SDLC_LLM_MODE", "fake").strip().lower() or "fake",
         llm_api_key=merged.get("SDLC_LLM_API_KEY", ""),
         llm_base_url=merged.get("SDLC_LLM_BASE_URL", "https://api.deepseek.com"),
-        llm_model=merged.get("SDLC_LLM_MODEL", "deepseek-flash"),
+        llm_model=llm_model,
         llm_thinking_mode=llm_thinking_mode,
         llm_timeout_seconds=_int_value(merged.get("SDLC_LLM_TIMEOUT_SECONDS"), default=90, minimum=1),
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
+        phase1_llm_profiles=_phase1_llm_profiles(merged, default_model=llm_model),
         requirement_max_tool_actions=_int_value(merged.get("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS"), default=12, minimum=3),
         requirement_max_action_retries=_int_value(merged.get("SDLC_REQUIREMENT_MAX_ACTION_RETRIES"), default=2, minimum=0),
         developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),

@@ -132,6 +132,28 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.llm_thinking_mode, "disabled")
 
+    def test_phase1_llm_profiles_have_safe_defaults_and_individual_overrides(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODEL": "global-model",
+                "SDLC_PHASE1_COVERAGE_MODEL": "coverage-model",
+                "SDLC_PHASE1_COVERAGE_THINKING_EFFORT": "max",
+                "SDLC_PHASE1_COVERAGE_MAX_TOKENS": "49152",
+                "SDLC_PHASE1_COVERAGE_TIMEOUT_SECONDS": "240",
+            },
+        )
+
+        self.assertEqual(settings.phase1_llm_profiles["refiner_list"].thinking_effort, "none")
+        self.assertEqual(settings.phase1_llm_profiles["refiner_list"].max_tokens, 2048)
+        self.assertEqual(settings.phase1_llm_profiles["refiner_synthesis"].model, "global-model")
+        coverage = settings.phase1_llm_profiles["coverage"]
+        self.assertEqual(
+            (coverage.model, coverage.thinking_effort, coverage.max_tokens, coverage.timeout_seconds),
+            ("coverage-model", "max", 49152, 240),
+        )
+
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             env_path = self.root / ".env"

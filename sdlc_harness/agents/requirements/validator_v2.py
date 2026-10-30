@@ -78,9 +78,20 @@ class RequirementModelV2Issue:
     code: str
     path: str
     message: str
+    subject_ref: str = ""
+    missing_fields: tuple[str, ...] = ()
 
-    def to_dict(self) -> dict[str, str]:
-        return {"code": self.code, "path": self.path, "message": self.message}
+    def to_dict(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "code": self.code,
+            "path": self.path,
+            "message": self.message,
+        }
+        if self.subject_ref:
+            payload["subject_ref"] = self.subject_ref
+        if self.missing_fields:
+            payload["missing_fields"] = list(self.missing_fields)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -985,6 +996,8 @@ def _validate_semantics(data: dict[str, Any], issues: list[RequirementModelV2Iss
                         f"Branch {item_id} is missing {', '.join(missing)} and must link "
                         "an open blocking clarification question."
                     ),
+                    subject_ref=item_id,
+                    missing_fields=tuple(missing),
                 )
     for index, item in enumerate(_dict_list(data.get("acceptance_criteria"))):
         text = str(item.get("text") or "")
@@ -1102,5 +1115,21 @@ def _contains_exception_term(value: str) -> bool:
     return any(term in normalized for term in EXCEPTION_TERMS)
 
 
-def _add(issues: list[RequirementModelV2Issue], code: str, path: str, message: str) -> None:
-    issues.append(RequirementModelV2Issue(code=code, path=path, message=message))
+def _add(
+    issues: list[RequirementModelV2Issue],
+    code: str,
+    path: str,
+    message: str,
+    *,
+    subject_ref: str = "",
+    missing_fields: tuple[str, ...] = (),
+) -> None:
+    issues.append(
+        RequirementModelV2Issue(
+            code=code,
+            path=path,
+            message=message,
+            subject_ref=subject_ref,
+            missing_fields=missing_fields,
+        )
+    )

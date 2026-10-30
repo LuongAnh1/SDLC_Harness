@@ -28,10 +28,11 @@ def build_requirement_session_authority(
     prompt_policy_sha256: str,
     llm_mode: str,
     llm_model: str,
+    llm_profiles: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Tạo authority input bắt biến mà resume phải giữ nguyên."""
 
-    return {
+    authority = {
         "manifest_input_hash": manifest_input_hash,
         "source_fingerprints": sorted(source_fingerprints),
         "requirement_contract_version": requirement_contract_version,
@@ -39,6 +40,9 @@ def build_requirement_session_authority(
         "llm_mode": llm_mode,
         "llm_model": llm_model,
     }
+    if llm_profiles is not None:
+        authority["llm_profiles"] = deepcopy(llm_profiles)
+    return authority
 
 
 def open_requirement_session(
@@ -106,6 +110,10 @@ def open_requirement_session(
             "Requirement loop session already exists; use continue_run to resume it.",
             run_id=run_id,
         )
+    if session["status"] == "completed":
+        # Downstream Phase 1 LLM review may pause after refinement. Replaying the
+        # completed result must not reopen the tool loop or consume more budget.
+        return session, store.relative(path)
     if session["status"] not in {"running", "paused", "created"}:
         raise HarnessError(
             "requirement_session_not_resumable",

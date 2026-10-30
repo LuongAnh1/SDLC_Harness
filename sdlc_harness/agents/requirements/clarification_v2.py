@@ -11,6 +11,7 @@ import re
 import unicodedata
 from typing import Any, Literal
 
+from ...core.config import phase1_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient, LlmCompletion
 from ...llm.json_utils import parse_first_json_object
@@ -244,7 +245,7 @@ class RequirementClarificationUpdater:
                 run_id=model.run_id,
             )
         prompt = self._prompt(source_text, model, question, answer_text)
-        max_tokens = self._structured_max_tokens()
+        fallback_max_tokens = self._structured_max_tokens()
         attempts: list[ClarificationAttempt] = []
         issue = ""
         for attempt_number in (1, 2):
@@ -254,7 +255,12 @@ class RequirementClarificationUpdater:
                 + issue
                 + "\nReturn a complete corrected JSON delta only."
             )
-            completion = self._complete(attempt_prompt, max_tokens=max_tokens)
+            request_options = phase1_llm_call_options(
+                getattr(self.llm_client, "settings", None),
+                "clarification" if attempt_number == 1 else "clarification_repair",
+                fallback_max_tokens=fallback_max_tokens,
+            )
+            completion = self._complete(attempt_prompt, request_options=request_options)
             if completion.finish_reason.strip().lower() == "length":
                 issue = "Structured clarification output was truncated."
                 attempts.append(self._attempt(attempt_number, purpose, completion, "truncated", issue))
@@ -461,7 +467,12 @@ class RequirementClarificationUpdater:
             )
         return validation
 
-    def _complete(self, prompt: str, *, max_tokens: int) -> LlmCompletion:
+    def _complete(
+        self,
+        prompt: str,
+        *,
+        request_options: dict[str, object],
+    ) -> LlmCompletion:
         try:
             return self.llm_client.complete_with_metadata(
                 system=(
@@ -470,7 +481,7 @@ class RequirementClarificationUpdater:
                 ),
                 prompt=prompt,
                 json_mode=True,
-                max_tokens=max_tokens,
+                **request_options,
             )
         except HarnessError:
             raise

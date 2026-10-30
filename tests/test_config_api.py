@@ -76,7 +76,10 @@ class ConfigApiTests(unittest.TestCase):
         status, payload = self.request("/api/v1/config", token=self.token)
         self.assertEqual(status, 200)
         self.assertEqual(payload["version"], "runtime_config_v1")
-        self.assertEqual([section["id"] for section in payload["sections"]], ["api", "llm", "validation", "target", "sync"])
+        self.assertEqual(
+            [section["id"] for section in payload["sections"]],
+            ["api", "llm", "validation", "phase1_llm", "target", "sync"],
+        )
         self.assertNotIn("hidden-llm-secret", json.dumps(payload))
         target_section = next(section for section in payload["sections"] if section["id"] == "target")
         profile_field = next(
