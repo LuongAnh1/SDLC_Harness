@@ -245,6 +245,7 @@ class ApplicationServiceTests(unittest.TestCase):
             ("approve-checkpoint", {"run_id": "run_1"}),
             ("continue-run", {"run_id": "run_1"}),
             ("revalidate-design", {"run_id": "run_1"}),
+            ("restart-design", {"run_id": "run_1"}),
             ("revalidate-requirement", {"run_id": "run_1"}),
             ("revalidate-implementation-plan", {"run_id": "run_1"}),
             ("revalidate-implementation", {"run_id": "run_1"}),
@@ -426,11 +427,13 @@ class ApplicationServiceTests(unittest.TestCase):
             patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four,
         ):
             phase_two.return_value.revalidate_design.return_value = {"ok": True}
+            phase_two.return_value.restart_design.return_value = {"ok": True}
             phase_three.return_value.revalidate_implementation_plan.return_value = {"ok": True}
             phase_four.return_value.continue_until_implementation_checkpoint.return_value = {"ok": True}
             phase_four.return_value.revalidate_implementation.return_value = {"ok": True}
 
             self.service.execute(self.command("revalidate-design", {"run_id": "run_1"}))
+            self.service.execute(self.command("restart-design", {"run_id": "run_1"}))
             self.service.execute(
                 self.command("revalidate-implementation-plan", {"run_id": "run_1"})
             )
@@ -440,6 +443,7 @@ class ApplicationServiceTests(unittest.TestCase):
             )
 
         phase_two.return_value.revalidate_design.assert_called_once_with(run_id="run_1")
+        phase_two.return_value.restart_design.assert_called_once_with(run_id="run_1")
         phase_three.return_value.revalidate_implementation_plan.assert_called_once_with(
             run_id="run_1"
         )

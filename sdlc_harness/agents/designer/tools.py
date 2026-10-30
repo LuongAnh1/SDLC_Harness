@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ...core.errors import HarnessError
 from ...repo_context import CodeGraphContextProvider
 from .graph import apply_designer_delta
+from .uiux import UiUxGuidanceProvider, guidance_evidence_ref
 
 
 MAX_RESULTS = 20
 MAX_READ_LINES = 200
 MAX_FILE_CHARS = 8_000
 MAX_OUTPUT_CHARS = 12_000
+_SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9_.$:/# -]{1,200}$")
+_SAFE_FILE_FILTER = re.compile(r"^[A-Za-z0-9_./*-]{0,200}$")
 
 
 class DesignerToolRegistry:
@@ -28,12 +33,17 @@ class DesignerToolRegistry:
         landscape: dict[str, object],
         graph: dict[str, object],
         fake_mode: bool,
+        uiux_provider: UiUxGuidanceProvider | None = None,
+        uiux_mode: str = "off",
+        expected_codegraph_digest: str = "",
     ):
         self.run_id = run_id
         self.target_path = target_path.resolve()
         self.landscape = landscape
         self.graph = graph
         self.codegraph = CodeGraphContextProvider(fake_mode=fake_mode)
+        self.uiux_provider = uiux_provider
+        self.uiux_mode = uiux_mode
         roots = {
             str(root)
             for component in _dicts(landscape.get("components"))
@@ -50,10 +60,27 @@ class DesignerToolRegistry:
             for node in _dicts(graph.get("nodes"))
             for ref in _strings(_dict(node.get("runtime_binding")).get("evidence_refs"))
         }
+        self.observed_guidance_refs = {
+            ref
+            for node in _dicts(graph.get("nodes"))
+            for ref in _strings(_dict(_dict(node.get("surface_contract")).get("experience_contract")).get("guidance_refs"))
+        }
+        if expected_codegraph_digest:
+            current = self.codegraph.snapshot_readonly(self.target_path)
+            if str(current.get("artifact_digest") or "") != expected_codegraph_digest:
+                raise HarnessError(
+                    "target_repo_codegraph_stale",
+                    "CodeGraph snapshot changed after Repo Discovery.",
+                    run_id=self.run_id,
+                )
 
     @property
     def valid_evidence_refs(self) -> set[str]:
         return {*self.anchors, *self.observed_evidence_refs}
+
+    @property
+    def valid_guidance_refs(self) -> set[str]:
+        return set(self.observed_guidance_refs)
 
     def execute(self, tool_id: str, arguments: object) -> tuple[dict[str, object], list[str]]:
         args = dict(arguments) if isinstance(arguments, dict) else {}
@@ -67,6 +94,8 @@ class DesignerToolRegistry:
             return self._record_evidence(self._repo_read(args))
         if tool_id == "codegraph.query":
             return self._record_evidence(self._codegraph_query(args))
+        if tool_id == "uiux.search_guidance":
+            return self._record_guidance(self._uiux_search(args))
         if tool_id == "design.inspect_partition":
             return self._record_evidence(self._inspect_partition(args))
         if tool_id == "design.propose_delta":
@@ -74,6 +103,7 @@ class DesignerToolRegistry:
                 self.graph,
                 args.get("delta"),
                 valid_evidence_refs=self.valid_evidence_refs,
+                valid_guidance_refs=self.valid_guidance_refs,
             )
             self.graph = candidate
             return {
@@ -92,6 +122,14 @@ class DesignerToolRegistry:
         self.observed_evidence_refs.update(refs)
         return output, refs
 
+    def _record_guidance(
+        self,
+        result: tuple[dict[str, object], list[str]],
+    ) -> tuple[dict[str, object], list[str]]:
+        output, refs = result
+        self.observed_guidance_refs.update(refs)
+        return output, refs
+
     def component_for_path(self, relative: str) -> str:
         normalized = relative.strip().replace("\\", "/")
         matches = [
@@ -106,6 +144,9 @@ class DesignerToolRegistry:
 
     def register_evidence_refs(self, refs: list[str]) -> None:
         self.observed_evidence_refs.update(ref for ref in refs if ref)
+
+    def register_guidance_refs(self, refs: list[str]) -> None:
+        self.observed_guidance_refs.update(ref for ref in refs if ref)
 
     def _landscape_search(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         query = str(args.get("query") or "").strip().casefold()
@@ -200,13 +241,42 @@ class DesignerToolRegistry:
         }, [ref]
 
     def _codegraph_query(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+        operation = str(args.get("operation") or "explore").strip().lower()
         query = str(args.get("query") or "").strip()
-        if not query or len(query) > 1000:
+        symbol = str(args.get("symbol") or "").strip()
+        if operation == "explore" and (not query or len(query) > 1000):
             raise HarnessError("designer_tool_input_invalid", "codegraph.query query is empty or too long.", run_id=self.run_id)
+        if operation == "symbols" and (not query or len(query) > 200):
+            raise HarnessError("designer_tool_input_invalid", "CodeGraph symbol query is empty or too long.", run_id=self.run_id)
+        if operation in {"callers", "callees", "impact"} and not _SAFE_SYMBOL.fullmatch(symbol):
+            raise HarnessError("designer_tool_input_invalid", "CodeGraph symbol is invalid.", run_id=self.run_id)
+        file_filter = str(args.get("filter") or "").strip().replace("\\", "/")
+        pattern = str(args.get("pattern") or "").strip().replace("\\", "/")
+        if operation == "files" and (
+            not _SAFE_FILE_FILTER.fullmatch(file_filter) or not _SAFE_FILE_FILTER.fullmatch(pattern)
+        ):
+            raise HarnessError("designer_tool_input_invalid", "CodeGraph file filter is invalid.", run_id=self.run_id)
         try:
-            output = self.codegraph.query_readonly(self.target_path, query)
+            if operation == "explore":
+                raw_output: object = self.codegraph.query_readonly(self.target_path, query)
+            else:
+                raw_output = self.codegraph.query_structured(
+                    self.target_path,
+                    operation=operation,
+                    query=query,
+                    symbol=symbol,
+                    kind=str(args.get("kind") or "").strip(),
+                    limit=int(args.get("limit") or 10),
+                    depth=int(args.get("depth") or 2),
+                    file_filter=file_filter,
+                    pattern=pattern,
+                )
         except HarnessError as exc:
-            if exc.error_code not in {"target_repo_codegraph_missing", "target_repo_codegraph_failed"}:
+            if exc.error_code not in {
+                "target_repo_codegraph_missing",
+                "target_repo_codegraph_failed",
+                "target_repo_codegraph_stale",
+            }:
                 raise
             return {
                 "status": "unavailable",
@@ -215,16 +285,51 @@ class DesignerToolRegistry:
                 "message": "Existing CodeGraph evidence is unavailable; use landscape/repo read tools instead.",
                 "truncated": False,
             }, []
-        sanitized = output.replace(str(self.target_path), "<workspace>").replace(str(self.target_path).replace("\\", "/"), "<workspace>")
+        serialized = (
+            raw_output
+            if isinstance(raw_output, str)
+            else json.dumps(raw_output, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+        sanitized = serialized.replace(str(self.target_path), "<workspace>").replace(str(self.target_path).replace("\\", "/"), "<workspace>")
         output_digest = "sha256:" + hashlib.sha256(sanitized.encode("utf-8")).hexdigest()
         ref = f"codegraph:{output_digest}"
         return {
             "status": "available",
+            "operation": operation,
             "query_digest": "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest(),
             "evidence": sanitized[:MAX_OUTPUT_CHARS],
             "truncated": len(sanitized) > MAX_OUTPUT_CHARS,
             "evidence_ref": ref,
         }, [ref]
+
+    def _uiux_search(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+        if self.uiux_mode != "enforce" or self.uiux_provider is None:
+            raise HarnessError(
+                "designer_tool_input_invalid",
+                "uiux.search_guidance is unavailable for this run.",
+                run_id=self.run_id,
+            )
+        query = str(args.get("query") or "").strip().casefold()
+        private_terms = {
+            value.casefold()
+            for anchor in self.anchors.values()
+            for value in (
+                str(anchor.get("symbol") or "").strip(),
+                Path(str(anchor.get("path") or "")).stem.strip(),
+            )
+            if len(value.strip()) >= 4
+        }
+        if any(term in query for term in private_terms):
+            raise HarnessError(
+                "designer_tool_input_invalid",
+                "uiux.search_guidance query must not contain repository-private paths or symbols.",
+                run_id=self.run_id,
+            )
+        output = self.uiux_provider.search(args)
+        refs = [] if bool(output.get("no_match")) else [guidance_evidence_ref(output)]
+        if refs:
+            output = {**output, "evidence_ref": refs[0]}
+        return output, refs
 
     def _inspect_partition(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         scenario_id = str(args.get("scenario_id") or "").strip()

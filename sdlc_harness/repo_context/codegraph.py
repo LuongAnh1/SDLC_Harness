@@ -9,6 +9,8 @@ Developer LLM lập implementation plan.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,8 @@ from ..core.errors import HarnessError
 
 MAX_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 45
+CODEGRAPH_SNAPSHOT_VERSION = "repo_codegraph_snapshot_v1"
+_STRUCTURED_OPERATIONS = frozenset({"symbols", "callers", "callees", "impact", "files"})
 
 
 @dataclass(frozen=True)
@@ -108,6 +112,74 @@ class CodeGraphContextProvider:
             timeout_seconds=self.timeout_seconds,
         )
 
+    def query_structured(
+        self,
+        target_path: Path,
+        *,
+        operation: str,
+        query: str = "",
+        symbol: str = "",
+        kind: str = "",
+        limit: int = 10,
+        depth: int = 2,
+        file_filter: str = "",
+        pattern: str = "",
+    ) -> dict[str, object]:
+        """Run one allowlisted CodeGraph JSON query against an existing index."""
+
+        self.require_index(target_path)
+        normalized = operation.strip().lower()
+        if normalized not in _STRUCTURED_OPERATIONS:
+            raise HarnessError("target_repo_codegraph_failed", f"Unsupported CodeGraph operation: {operation}")
+        if self.fake_mode:
+            return {
+                "operation": normalized,
+                "results": [],
+                "fake": True,
+            }
+        bounded_limit = min(20, max(1, int(limit)))
+        bounded_depth = min(5, max(1, int(depth)))
+        if normalized == "symbols":
+            command = ["query", query, "--limit", str(bounded_limit), "--json"]
+            if kind:
+                command.extend(["--kind", kind])
+        elif normalized in {"callers", "callees"}:
+            command = [normalized, symbol, "--limit", str(bounded_limit), "--json"]
+        elif normalized == "impact":
+            command = ["impact", symbol, "--depth", str(bounded_depth), "--json"]
+        else:
+            command = ["files", "--format", "flat", "--json"]
+            if file_filter:
+                command.extend(["--filter", file_filter])
+            if pattern:
+                command.extend(["--pattern", pattern])
+        return _run_codegraph_json(
+            target_path=target_path,
+            command=command,
+            timeout_seconds=self.timeout_seconds,
+        )
+
+    def snapshot_readonly(self, target_path: Path) -> dict[str, object]:
+        """Return a stable freshness snapshot without mutating the index."""
+
+        self.require_index(target_path)
+        if self.fake_mode:
+            return _with_snapshot_digest(
+                {
+                    "schema_version": CODEGRAPH_SNAPSHOT_VERSION,
+                    "status": "fresh",
+                    "version": "fake",
+                    "file_count": 0,
+                    "node_count": 0,
+                    "edge_count": 0,
+                    "languages": [],
+                    "extraction_version": 0,
+                }
+            )
+        return _validated_snapshot(
+            _run_codegraph_status(target_path=target_path, timeout_seconds=self.timeout_seconds)
+        )
+
     def prepare_index(self, target_path: Path) -> dict[str, object]:
         """Khởi tạo index cho đúng snapshot worktree trước khi thu context."""
 
@@ -124,17 +196,35 @@ class CodeGraphContextProvider:
         after = (target_path / ".codegraph").exists()
         smoke = None
         if after and not self.fake_mode:
+            if not initialized:
+                _run_codegraph_sync(target_path=target_path, timeout_seconds=self.timeout_seconds)
+            status = _run_codegraph_status(target_path=target_path, timeout_seconds=self.timeout_seconds)
+            snapshot = _validated_snapshot(status)
             smoke = _run_codegraph_explore(
                 target_path=target_path,
                 query="project structure entrypoints tests",
                 timeout_seconds=self.timeout_seconds,
             )
+        elif after:
+            snapshot = _with_snapshot_digest({
+                "schema_version": CODEGRAPH_SNAPSHOT_VERSION,
+                "status": "fresh",
+                "version": "fake",
+                "file_count": 0,
+                "node_count": 0,
+                "edge_count": 0,
+                "languages": [],
+                "extraction_version": 0,
+            })
+        else:
+            snapshot = {}
         return {
             "codegraph_exists_before": before,
             "codegraph_exists_after": after,
             "codegraph_initialized": initialized,
             "smoke_ok": bool(after),
             "smoke_excerpt": _truncate(smoke or "", limit=2000),
+            "snapshot": snapshot,
         }
 
 
@@ -168,6 +258,118 @@ def _run_codegraph_explore(*, target_path: Path, query: str, timeout_seconds: in
         "target_repo_codegraph_failed",
         "CodeGraph command was not found. Install CodeGraph or run through the expected local toolchain.",
     )
+
+
+def _run_codegraph_sync(*, target_path: Path, timeout_seconds: int) -> None:
+    _run_codegraph_command(
+        target_path=target_path,
+        arguments=["sync", ".", "--quiet"],
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _run_codegraph_status(*, target_path: Path, timeout_seconds: int) -> dict[str, object]:
+    return _run_codegraph_json(
+        target_path=target_path,
+        command=["status", ".", "--json"],
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def _run_codegraph_json(
+    *,
+    target_path: Path,
+    command: list[str],
+    timeout_seconds: int,
+) -> dict[str, object]:
+    raw = _run_codegraph_command(
+        target_path=target_path,
+        arguments=command,
+        timeout_seconds=timeout_seconds,
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned invalid JSON.") from exc
+    if not isinstance(payload, dict):
+        raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned an invalid JSON object.")
+    return payload
+
+
+def _run_codegraph_command(
+    *,
+    target_path: Path,
+    arguments: list[str],
+    timeout_seconds: int,
+) -> str:
+    for prefix in (["rtk", "codegraph"], ["codegraph"]):
+        try:
+            completed = subprocess.run(
+                [*prefix, *arguments],
+                cwd=str(target_path),
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=timeout_seconds,
+            )
+            return completed.stdout.strip()
+        except FileNotFoundError:
+            continue
+        except subprocess.TimeoutExpired as exc:
+            raise HarnessError(
+                "target_repo_codegraph_failed",
+                f"CodeGraph command timed out after {timeout_seconds}s.",
+            ) from exc
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or "").strip()
+            raise HarnessError(
+                "target_repo_codegraph_failed",
+                f"CodeGraph command failed: {_truncate(detail, limit=500)}",
+            ) from exc
+    raise HarnessError(
+        "target_repo_codegraph_failed",
+        "CodeGraph command was not found. Install CodeGraph or run through the expected local toolchain.",
+    )
+
+
+def _validated_snapshot(status: dict[str, object]) -> dict[str, object]:
+    index = status.get("index") if isinstance(status.get("index"), dict) else {}
+    pending = status.get("pendingChanges") if isinstance(status.get("pendingChanges"), dict) else {}
+    pending_total = sum(int(pending.get(key) or 0) for key in ("added", "modified", "removed"))
+    stale_reasons: list[str] = []
+    if not bool(status.get("initialized")):
+        stale_reasons.append("not_initialized")
+    if str(index.get("state") or "") != "complete":
+        stale_reasons.append("index_incomplete")
+    if bool(index.get("reindexRecommended")):
+        stale_reasons.append("reindex_recommended")
+    mismatch = status.get("worktreeMismatch")
+    if mismatch is not None and mismatch is not False and mismatch != "":
+        stale_reasons.append("worktree_mismatch")
+    if pending_total:
+        stale_reasons.append("pending_changes")
+    if stale_reasons:
+        raise HarnessError(
+            "target_repo_codegraph_stale",
+            "CodeGraph index is not fresh after sync: " + ", ".join(stale_reasons),
+        )
+    return _with_snapshot_digest({
+        "schema_version": CODEGRAPH_SNAPSHOT_VERSION,
+        "status": "fresh",
+        "version": str(status.get("version") or ""),
+        "file_count": int(status.get("fileCount") or 0),
+        "node_count": int(status.get("nodeCount") or 0),
+        "edge_count": int(status.get("edgeCount") or 0),
+        "languages": sorted(str(item) for item in status.get("languages", []) if str(item)),
+        "extraction_version": int(index.get("currentExtractionVersion") or 0),
+    })
+
+
+def _with_snapshot_digest(value: dict[str, object]) -> dict[str, object]:
+    payload = {key: item for key, item in value.items() if key != "artifact_digest"}
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return {**payload, "artifact_digest": "sha256:" + hashlib.sha256(encoded).hexdigest()}
 
 
 def _run_codegraph_init(*, target_path: Path, timeout_seconds: int) -> None:

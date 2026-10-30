@@ -323,6 +323,23 @@ class ProfileRegistryTests(unittest.TestCase):
         )
         self.assertIn("Vertical Design contract", str(public_run_summary(state, "Continue this run.")))
 
+    def test_profiled_paused_design_advertises_restart_for_persisted_runs(self) -> None:
+        state = {
+            "run_id": "run_paused",
+            "status": "design_paused",
+            "designer_contract_version": "vertical_design_graph_v1",
+            "profile_snapshot": build_profile_snapshot(
+                project_profile_id="typescript_fullstack_v1",
+                target_remote="https://github.com/example/target.git",
+                target_base_branch="main",
+            ).to_dict(),
+        }
+
+        self.assertEqual(
+            public_allowed_actions(state, ["continue_run", "get_status", "cancel_run"]),
+            ["continue_run", "restart_design", "get_status", "cancel_run"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

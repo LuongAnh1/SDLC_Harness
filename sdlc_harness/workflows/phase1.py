@@ -76,7 +76,14 @@ from ..agents.requirements.session_v1 import (
     read_requirement_session,
     requirement_session_summary,
 )
-from ..agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION_V1, SUPPORTED_GRAPH_VERSIONS
+from ..agents.designer import (
+    DESIGNER_CONTRACT_STATE_KEY,
+    GRAPH_VERSION_V1,
+    SUPPORTED_GRAPH_VERSIONS,
+    UIUX_CONTRACT_STATE_KEY,
+    UIUX_CONTRACT_VERSION,
+    UIUX_MODE_STATE_KEY,
+)
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint, sync_implementation_plan_checkpoint, sync_requirement_checkpoint
@@ -211,6 +218,10 @@ class PhaseOneWorkflow:
                 run_id=run_id,
             )
         state[DESIGNER_CONTRACT_STATE_KEY] = designer_contract_version
+        state[UIUX_MODE_STATE_KEY] = self.settings.uiux_skill_mode
+        state[UIUX_CONTRACT_STATE_KEY] = (
+            UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
+        )
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
             COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
@@ -1537,6 +1548,8 @@ class PhaseOneWorkflow:
             ),
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
+            UIUX_MODE_STATE_KEY: state.get(UIUX_MODE_STATE_KEY, "off"),
+            UIUX_CONTRACT_STATE_KEY: state.get(UIUX_CONTRACT_STATE_KEY, ""),
             VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
             IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: resolve_implementation_plan_contract(state),
             "vertical_trace_mode": state.get("vertical_trace_mode"),

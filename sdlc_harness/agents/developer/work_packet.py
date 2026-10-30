@@ -302,6 +302,7 @@ def _build_execution_units(
             "migration_impact": migration,
             "runtime_bindings": _dict_items(item.get("runtime_bindings")),
             "boundary_contracts": _dict_items(item.get("boundary_contracts")),
+            "surface_contracts": _dict_items(item.get("surface_contracts")),
             "write_paths": write_paths,
             "test_target_paths": list(
                 dict.fromkeys(

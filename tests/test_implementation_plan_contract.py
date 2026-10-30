@@ -108,6 +108,64 @@ def test_execution_unit_adds_shared_boundary_dependency_targets_as_read_context(
     assert consumer["contract_anchor_paths"] == [provider_path, contract_path]
 
 
+def test_execution_unit_preserves_approved_ui_experience_contract() -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    source_path = "apps/web/src/CulturalHeritageInsertionForm.tsx"
+    experience = {
+        "schema_version": "ui_experience_contract_v1",
+        "component_structure": ["Form, confirmation dialog, and result feedback."],
+        "feedback": [{"trigger": "submit", "response": "Show pending then success or error."}],
+        "accessibility": ["Keep labels and keyboard focus visible."],
+        "responsive": ["Avoid horizontal overflow on small screens."],
+        "focus_flow": ["Move focus into the dialog and restore it on close."],
+        "guidance_refs": ["uiux:sha256:guidance"],
+    }
+
+    units = _build_execution_units(
+        structured_plan={
+            "implementation_signature_contract": {"entries": []},
+            "work_units": [
+                {
+                    "unit_id": "WU-UI",
+                    "order": 1,
+                    "scenario_id": "SC-1",
+                    "component_id": "web",
+                    "surfaces": ["ui"],
+                    "depends_on": [],
+                    "design_node_ids": ["VDN-UI"],
+                    "design_edge_ids": [],
+                    "planned_code_targets": [
+                        {"path": source_path, "symbol": "CulturalHeritageInsertionForm"}
+                    ],
+                    "surface_contracts": [
+                        {
+                            "design_node_id": "VDN-UI",
+                            "surface": "ui",
+                            "surface_contract": {
+                                "schema_version": "design_surface_contract_v1",
+                                "surface": "ui",
+                                "experience_contract": experience,
+                            },
+                        }
+                    ],
+                    "test_intents": [],
+                }
+            ],
+        },
+        allowed_paths=[source_path],
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+        run_id="run_ui_contract",
+    )
+
+    assert units[0]["surface_contracts"][0]["surface_contract"]["experience_contract"] == experience
+
+
 def _graphs():
     class_graph = {
         "nodes": [

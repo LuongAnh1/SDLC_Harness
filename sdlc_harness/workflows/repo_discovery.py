@@ -17,12 +17,14 @@ from ..workspaces import RunWorkspaceManager
 REPO_DISCOVERY_CONTRACT_STATE_KEY = "repo_discovery_contract_version"
 REPO_DISCOVERY_CONTRACT_VERSION = "repo_landscape_v1"
 REPO_LANDSCAPE_FILENAME = "repo_landscape_v1.json"
+REPO_CODEGRAPH_SNAPSHOT_FILENAME = "repo_codegraph_snapshot_v1.json"
 _RETRYABLE_ERRORS = {
     "run_workspace_locked",
     "workspace_fetch_failed",
     "workspace_creation_failed",
     "workspace_lock_failed",
     "target_repo_codegraph_failed",
+    "target_repo_codegraph_stale",
 }
 
 
@@ -51,7 +53,12 @@ class RepoDiscoveryWorkflow:
                 run_id=run_id,
             )
         existing = _dict_value(state.get("latest_artifacts")).get("repo_landscape")
-        if isinstance(existing, str) and existing.strip():
+        codegraph_ref = _dict_value(state.get("latest_artifacts")).get("repo_codegraph_snapshot")
+        needs_codegraph_snapshot = (
+            str(state.get("designer_uiux_mode") or "off") == "enforce"
+            and not (isinstance(codegraph_ref, str) and codegraph_ref.strip())
+        )
+        if isinstance(existing, str) and existing.strip() and not needs_codegraph_snapshot:
             path = self._artifact_path(existing, run_id=run_id)
             try:
                 stored = json.loads(path.read_text(encoding="utf-8"))
@@ -95,12 +102,18 @@ class RepoDiscoveryWorkflow:
             workspace = self.workspace_manager.create_for_run(run_id)
             state = self.store.read_state(run_id)
             snapshot = ProfileSnapshotV1.from_dict(state.get("profile_snapshot"), run_id=run_id)
-            query: Callable[[Path, str], str] | None = None
-            if (Path(workspace.worktree_path) / ".codegraph").is_dir():
-                query = self.codegraph.query_readonly
+            target_path = Path(workspace.worktree_path)
+            codegraph_report = self.codegraph.prepare_index(target_path)
+            codegraph_snapshot = _dict_value(codegraph_report.get("snapshot"))
+            codegraph_path = self.store.write_json_artifact(
+                run_id,
+                REPO_CODEGRAPH_SNAPSHOT_FILENAME,
+                codegraph_snapshot,
+            )
+            query: Callable[[Path, str], str] | None = self.codegraph.query_readonly
             payload = build_repo_landscape(
                 run_id=run_id,
-                target_path=Path(workspace.worktree_path),
+                target_path=target_path,
                 workspace=workspace,
                 snapshot=snapshot,
                 requirement_model=requirement_model,
@@ -114,12 +127,19 @@ class RepoDiscoveryWorkflow:
             state.update(
                 {
                     "updated_at": utc_now_iso(),
-                    "latest_artifacts": {**artifacts, "repo_landscape": self.store.relative(path)},
+                    "repo_codegraph_snapshot_digest": codegraph_snapshot.get("artifact_digest"),
+                    "latest_artifacts": {
+                        **artifacts,
+                        "repo_landscape": self.store.relative(path),
+                        "repo_codegraph_snapshot": self.store.relative(codegraph_path),
+                    },
                     "quality_reports": {
                         **quality,
                         "repo_discovery": {
                             "status": "passed" if int(summary.get("blocking_count") or 0) == 0 else "blocked",
                             "artifact": self.store.relative(path),
+                            "codegraph_snapshot": self.store.relative(codegraph_path),
+                            "codegraph_status": codegraph_snapshot.get("status"),
                             "mode": _dict_value(payload.get("discovery")).get("mode"),
                             **summary,
                         },

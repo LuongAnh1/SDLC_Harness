@@ -182,8 +182,9 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     assert unit_contract["hard_constraints"] == [
         "Approved signatures are immutable and override conflicting prose objectives.",
         "Preserve each qualified_name, parameter list, async flag, and return_type exactly.",
-        "Treat planned code targets, migration impact, runtime bindings, and boundary mappings as approved execution constraints.",
+        "Treat planned code targets, migration impact, runtime bindings, boundary mappings, and surface contracts as approved execution constraints.",
         "Preserve each boundary input/output/error mapping and runtime attachment; inspect related approved paths instead of inventing a different contract.",
+        "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
             "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
         "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
     ]

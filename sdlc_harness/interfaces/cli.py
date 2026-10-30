@@ -80,6 +80,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_sync_mode_argument(revalidate_design)
     revalidate_design.add_argument("--runtime-root", default=None)
 
+    restart_design = subparsers.add_parser("restart-design")
+    restart_design.add_argument("--run-id", required=True)
+    restart_design.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    restart_design.add_argument("--design-repair-limit", default=None)
+    restart_design.add_argument("--design-validation-trials", default=None)
+    restart_design.add_argument("--design-llm-call-budget", default=None)
+    restart_design.add_argument(
+        "--designer-contract-version",
+        choices=["vertical_design_graph_v1", "vertical_design_graph_v2"],
+        default=None,
+    )
+    restart_design.add_argument("--uiux-skill-mode", choices=["off", "enforce"], default=None)
+    restart_design.add_argument("--uiux-skill-root", default=None)
+    restart_design.add_argument("--uiux-skill-timeout-seconds", default=None)
+    restart_design.add_argument("--vertical-trace-mode", choices=["shadow", "enforce"], default=None)
+    _add_sync_mode_argument(restart_design)
+    restart_design.add_argument("--runtime-root", default=None)
+
     revalidate_requirement = subparsers.add_parser("revalidate-requirement")
     revalidate_requirement.add_argument("--run-id", required=True)
     revalidate_requirement.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
@@ -144,6 +162,7 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "revalidate-implementation": ("run_id",),
     "revalidate-implementation-plan": ("run_id",),
     "revalidate-design": ("run_id",),
+    "restart-design": ("run_id",),
     "revalidate-requirement": ("run_id",),
     "clarify-more": ("run_id",),
     "approve-checkpoint": ("run_id", "checkpoint_id"),
@@ -158,6 +177,11 @@ _SETTINGS_OVERRIDE_ARGUMENTS: dict[str, str] = {
     "design_repair_limit": "SDLC_DESIGN_REPAIR_LIMIT",
     "design_validation_trials": "SDLC_DESIGN_VALIDATION_TRIALS",
     "design_llm_call_budget": "SDLC_DESIGN_LLM_CALL_BUDGET",
+    "designer_contract_version": "SDLC_DESIGNER_CONTRACT_VERSION",
+    "uiux_skill_mode": "SDLC_UIUX_SKILL_MODE",
+    "uiux_skill_root": "SDLC_UIUX_SKILL_ROOT",
+    "uiux_skill_timeout_seconds": "SDLC_UIUX_SKILL_TIMEOUT_SECONDS",
+    "vertical_trace_mode": "SDLC_VERTICAL_TRACE_MODE",
     "implementation_plan_repair_limit": "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
     "implementation_repair_limit": "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
     "qa_repair_limit": "SDLC_QA_REPAIR_LIMIT",

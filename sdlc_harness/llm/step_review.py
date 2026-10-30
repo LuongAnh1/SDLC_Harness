@@ -498,10 +498,7 @@ def _resume_prompt_hash(
 
 def _parsed_output(raw: str) -> object:
     try:
-        return parse_first_json_object(
-            final_response_text(raw),
-            expected_keys={"action", "arguments"},
-        )
+        return parse_first_json_object(final_response_text(raw))
     except json.JSONDecodeError:
         return None
 

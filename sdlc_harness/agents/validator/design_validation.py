@@ -15,6 +15,7 @@ from itertools import combinations
 import re
 from typing import Any
 
+from ...core.config import phase2_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
 from ...llm.step_review import LlmStepReviewRequired
@@ -33,6 +34,7 @@ class DesignFinding:
     severity: str
     message: str
     expected_change: str
+    claim_ids: list[str] = field(default_factory=list)
     requirement_ids: list[str] = field(default_factory=list)
     diagram_ids: list[str] = field(default_factory=list)
     evidence: list[dict[str, str]] = field(default_factory=list)
@@ -55,6 +57,7 @@ class DesignFinding:
             "severity": self.severity,
             "message": self.message,
             "expected_change": self.expected_change,
+            "claim_ids": self.claim_ids,
             "requirement_ids": self.requirement_ids,
             "diagram_ids": self.diagram_ids,
             "evidence": self.evidence,
@@ -172,6 +175,19 @@ class DesignValidator:
         repair_iterations: int = 0,
         validation_trials: int = 1,
     ) -> DesignValidationResult:
+        canonical = _canonical_requirement_dict(canonical_requirement)
+        review_claims = _semantic_review_claims(canonical)
+        valid_requirement_ids = {
+            requirement_id
+            for claim in review_claims
+            for requirement_id in _string_items(claim.get("requirement_ids"))
+        }
+        valid_requirement_ids.update(
+            str(claim.get("scenario_id") or "")
+            for claim in review_claims
+            if str(claim.get("scenario_id") or "")
+        )
+        valid_subject_refs = _vertical_design_subject_refs(vertical_design_graph)
         rule_findings = _rule_findings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -188,8 +204,6 @@ class DesignValidator:
             trial_id = f"trial-{index + 1}"
             try:
                 payload = self._semantic_review(
-                    requirement_packet=requirement_packet,
-                    design_artifact=design_artifact,
                     class_graph=class_graph,
                     sequence_graph=sequence_graph,
                     traceability=traceability,
@@ -197,8 +211,19 @@ class DesignValidator:
                     vertical_trace=vertical_trace,
                     vertical_design_graph=vertical_design_graph,
                     rule_review=rule_payload,
+                    review_claims=review_claims,
                 )
-                normalized = _normalize_llm_findings(payload)
+                _validate_semantic_assessments(
+                    payload,
+                    claims=review_claims,
+                    valid_subject_refs=valid_subject_refs,
+                )
+                normalized = _normalize_llm_findings(
+                    payload,
+                    valid_claim_ids={str(item.get("claim_id") or "") for item in review_claims},
+                    valid_requirement_ids=valid_requirement_ids,
+                    valid_subject_refs=valid_subject_refs,
+                )
                 if requested_trials > 1:
                     normalized = _prepare_consensus_trial(normalized, trial_id=trial_id)
                 trial_payloads.append(
@@ -265,8 +290,6 @@ class DesignValidator:
     def _semantic_review(
         self,
         *,
-        requirement_packet: str,
-        design_artifact: str,
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         traceability: TraceabilityResult,
@@ -274,70 +297,88 @@ class DesignValidator:
         vertical_trace: dict[str, object] | None,
         vertical_design_graph: dict[str, object] | None,
         rule_review: dict[str, object],
+        review_claims: list[dict[str, object]],
     ) -> dict[str, object]:
-        canonical = (
-            canonical_requirement.to_dict()
-            if canonical_requirement is not None and hasattr(canonical_requirement, "to_dict")
-            else canonical_requirement
-        )
-        prompt = f"""Design Semantic Review v2
+        canonical = _canonical_requirement_dict(canonical_requirement)
+        prompt = f"""Design Semantic Review v3
 
-Compare the approved requirements with the complete class and sequence design.
-The deterministic findings are evidence, but you must also examine behavior.
+Review the approved Requirement against the canonical Vertical Design Graph.
+
+Source-of-truth order:
+1. Canonical Requirement review claims define required behavior.
+2. Runtime-bound Vertical Design Graph defines the Design.
+3. Requirement-to-Design mapping and deterministic review provide structural evidence.
+4. Class and sequence graphs are derived compatibility projections. They may expose a contradiction but never override items 1-3.
+
+Review every claim exactly once. Do not infer a missing behavior only because a derived projection omits detail that is present in the canonical Vertical Design Graph.
 
 Return one JSON object only:
 {{
   "ok": true,
   "summary": "short summary",
+  "assessments": [
+    {{
+      "claim_id": "SC-1:MF-1",
+      "status": "satisfied|missing|contradicted|uncertain",
+      "design_refs": ["exact VDN-* or VDE-* id"],
+      "reason": "short evidence-backed decision"
+    }}
+  ],
   "findings": [
     {{
       "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption",
+      "category": "behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
       "severity": "blocking|warning",
       "message": "specific contradiction or ambiguity",
       "expected_change": "specific UML correction",
+      "claim_ids": ["SC-1:MF-1"],
       "requirement_ids": ["MAIN-1"],
       "diagram_ids": ["sequence_diagram_1"],
-      "subject_ref": "sequence_diagram_1:event-or-fragment-id",
+      "subject_ref": "exact VDN-* or VDE-* id",
       "evidence": [{{"source": "requirement|design", "ref": "stable id", "excerpt": "short exact evidence"}}]
     }}
   ]
 }}
 
+Assessment contract:
+- Return exactly one assessment for every supplied claim_id and no invented claim IDs.
+- satisfied assessments require at least one exact Design node/edge ID in design_refs.
+- missing, contradicted, and uncertain assessments require a finding bound through claim_ids.
+- Finding requirement_ids and subject_ref must use exact IDs supplied below.
+
 Blocking policy:
 - Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
 - Block a sequence call whose receiver contract is inconsistent with the class design.
 - Block success, cancellation, and failure paths that reach the wrong terminal state.
-- Block a flow that requires human confirmation before persistence when the sequence omits the return-to-human and separate confirmation interaction.
+- Block persistence before required human confirmation only when neither the UI contract nor the interaction path represents that confirmation before the write.
+- Do not require a preliminary backend verification round trip unless the approved requirement explicitly requires it.
 - Block transaction/rollback ambiguity only when the approved requirement or the design itself explicitly promises atomicity, all-or-nothing behavior, or a single consistency boundary.
 - If transaction behavior is merely an architectural improvement not required by either input, emit a warning.
+- For each Vertical Design UI node, review its experience contract: component structure, observable feedback,
+  accessibility, responsive behavior, and focus flow must agree with the approved interaction and states.
+- Block a UI experience issue only when it omits or contradicts approved behavior, makes a required state or
+  outcome unobservable, or makes the approved interaction impossible. Visual polish and aesthetic preferences
+  are warnings unless the approved requirement explicitly makes them mandatory.
+- UI/UX guidance references are design evidence, not new Requirements; never promote a recommendation into a blocker by itself.
+- Review authorization against the approved Requirement. Use authorization_required as the typed Design decision; do not infer it from prose labels.
 - Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
-- Give every finding a stable subject_ref naming the UML node, message, fragment, or class contract being judged.
+- Give every finding an exact Vertical Design node or edge ID as subject_ref.
 - An uncertainty without evidence is a warning, not a blocker.
 
-Canonical Requirement V2:
-{json.dumps(canonical or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+Canonical Requirement review packet:
+{json.dumps(_canonical_requirement_review_view(canonical, review_claims), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-Requirement packet:
-{_excerpt(requirement_packet, 7000)}
+Canonical Vertical Design Graph semantic view:
+{json.dumps(_vertical_design_review_view(vertical_design_graph), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-Design artifact:
-{_excerpt(design_artifact, 9000)}
+Requirement-to-Design mapping view:
+{json.dumps(_vertical_trace_review_view(vertical_trace), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-Class graph:
+Compatibility class projection:
 {json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-Sequence graph:
+Compatibility sequence projection:
 {json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Traceability:
-{json.dumps({"class_trace": traceability.class_trace, "sequence_trace": traceability.sequence_trace}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Canonical vertical Requirement-to-Design trace (bounded, deterministic):
-{json.dumps(vertical_trace or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Runtime-bound Vertical Design Graph V2 (deterministic gate already passed):
-{json.dumps(vertical_design_graph or {}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Deterministic review:
 {json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -472,13 +513,257 @@ def _structural_findings(
     return findings
 
 
-def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
+def _canonical_requirement_dict(value: object | None) -> dict[str, object]:
+    if value is not None and hasattr(value, "to_dict"):
+        value = value.to_dict()
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _semantic_review_claims(canonical: dict[str, object]) -> list[dict[str, object]]:
+    if not canonical:
+        return []
+    records: dict[str, dict[str, object]] = {}
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            record_id = str(value.get("id") or "").strip()
+            if record_id:
+                current = records.get(record_id)
+                if current is None or len(_record_statement(value)) > len(_record_statement(current)):
+                    records[record_id] = value
+            for nested in value.values():
+                visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                visit(nested)
+
+    visit(canonical)
+    claims: list[dict[str, object]] = []
+    claimed_requirements: set[str] = set()
+    scenarios = _dict_items(_dict_value(canonical.get("scenario_contract")).get("scenarios"))
+    for scenario in scenarios:
+        scenario_id = str(scenario.get("id") or "").strip()
+        if not scenario_id:
+            continue
+        refs = _merged_string_values(
+            [_string_items(scenario.get("requirement_refs")), _string_items(scenario.get("acceptance_refs"))]
+        )
+        for requirement_id in refs:
+            claimed_requirements.add(requirement_id)
+            claims.append(
+                {
+                    "claim_id": f"{scenario_id}:{requirement_id}",
+                    "claim_type": "requirement",
+                    "scenario_id": scenario_id,
+                    "requirement_ids": [requirement_id],
+                    "statement": _record_statement(records.get(requirement_id, {})) or requirement_id,
+                }
+            )
+        for surface, raw_contract in sorted(_dict_value(scenario.get("surfaces")).items()):
+            contract = _dict_value(raw_contract)
+            if str(contract.get("status") or "") != "required":
+                continue
+            claims.append(
+                {
+                    "claim_id": f"{scenario_id}:surface:{surface}",
+                    "claim_type": "required_surface",
+                    "scenario_id": scenario_id,
+                    "requirement_ids": _string_items(contract.get("requirement_refs")),
+                    "surface": str(surface),
+                    "statement": str(contract.get("reason") or f"{surface} is required.").strip(),
+                }
+            )
+    for section in ("preconditions", "postconditions", "quality_requirements"):
+        for record in _dict_items(canonical.get(section)):
+            requirement_id = str(record.get("id") or "").strip()
+            if not requirement_id or requirement_id in claimed_requirements:
+                continue
+            claims.append(
+                {
+                    "claim_id": f"GLOBAL:{requirement_id}",
+                    "claim_type": section.rstrip("s"),
+                    "scenario_id": "",
+                    "requirement_ids": [requirement_id],
+                    "statement": _record_statement(record) or requirement_id,
+                }
+            )
+    return claims
+
+
+def _record_statement(record: dict[str, object]) -> str:
+    parts = []
+    for key in ("text", "trigger", "action", "outcome", "target", "name", "reason", "description"):
+        value = record.get(key)
+        if isinstance(value, (str, int, float)) and str(value).strip():
+            parts.append(str(value).strip())
+    return " ".join(parts)
+
+
+def _canonical_requirement_review_view(
+    canonical: dict[str, object], claims: list[dict[str, object]]
+) -> dict[str, object]:
+    return {
+        "schema_version": "design_semantic_requirement_view_v1",
+        "use_case": canonical.get("use_case") or {},
+        "claims": claims,
+        "assumptions": canonical.get("assumptions") or [],
+        "open_questions": canonical.get("open_questions") or [],
+        "decisions": canonical.get("decisions") or [],
+    }
+
+
+def _vertical_design_review_view(value: dict[str, object] | None) -> dict[str, object]:
+    graph = _dict_value(value)
+    node_keys = (
+        "id",
+        "scenario_id",
+        "component_id",
+        "surface",
+        "kind",
+        "name",
+        "semantic_key",
+        "disposition",
+        "requirement_refs",
+        "contract",
+        "surface_contract",
+        "runtime_binding",
+    )
+    edge_keys = (
+        "id",
+        "scenario_id",
+        "order",
+        "from",
+        "to",
+        "kind",
+        "label",
+        "terminal",
+        "branch_group",
+        "requirement_refs",
+        "boundary_contract",
+    )
+    return {
+        "schema_version": "vertical_design_semantic_view_v1",
+        "graph_digest": graph.get("artifact_digest"),
+        "nodes": [
+            {key: node[key] for key in node_keys if key in node}
+            for node in _dict_items(graph.get("nodes"))
+        ],
+        "edges": [
+            {key: edge[key] for key in edge_keys if key in edge}
+            for edge in _dict_items(graph.get("edges"))
+        ],
+        "unresolved_items": graph.get("unresolved_items") or [],
+    }
+
+
+def _vertical_trace_review_view(value: dict[str, object] | None) -> dict[str, object]:
+    trace = _dict_value(value)
+    nodes = {str(item.get("id") or ""): item for item in _dict_items(trace.get("nodes"))}
+    mappings = []
+    for edge in _dict_items(trace.get("edges")):
+        if str(edge.get("kind") or "") not in {"realizes", "depends_on"}:
+            continue
+        source_id = str(edge.get("from") or "")
+        target_id = str(edge.get("to") or "")
+        mappings.append(
+            {
+                "kind": str(edge.get("kind") or ""),
+                "from": source_id,
+                "from_kind": str(nodes.get(source_id, {}).get("kind") or ""),
+                "to": target_id,
+                "to_kind": str(nodes.get(target_id, {}).get("kind") or ""),
+            }
+        )
+    return {
+        "schema_version": "vertical_trace_semantic_mapping_v1",
+        "graph_digest": trace.get("graph_digest") or trace.get("artifact_digest"),
+        "mappings": mappings,
+    }
+
+
+def _vertical_design_subject_refs(value: dict[str, object] | None) -> set[str]:
+    graph = _dict_value(value)
+    return {
+        str(item.get("id") or "")
+        for item in [*_dict_items(graph.get("nodes")), *_dict_items(graph.get("edges"))]
+        if str(item.get("id") or "")
+    }
+
+
+def _validate_semantic_assessments(
+    payload: dict[str, object],
+    *,
+    claims: list[dict[str, object]],
+    valid_subject_refs: set[str],
+) -> None:
+    if not claims:
+        return
+    expected = {str(item.get("claim_id") or "") for item in claims}
+    assessments = _dict_items(payload.get("assessments"))
+    received = [str(item.get("claim_id") or "") for item in assessments]
+    if len(received) != len(set(received)) or set(received) != expected:
+        raise HarnessError(
+            "design_semantic_review_failed",
+            "Design semantic validator must assess every supplied claim exactly once.",
+        )
+    findings_by_claim = {
+        claim_id
+        for finding in _dict_items(payload.get("findings"))
+        for claim_id in _string_items(finding.get("claim_ids"))
+    }
+    for assessment in assessments:
+        claim_id = str(assessment.get("claim_id") or "")
+        status = str(assessment.get("status") or "").strip().lower()
+        if status not in {"satisfied", "missing", "contradicted", "uncertain"}:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic assessment {claim_id} has an invalid status.",
+            )
+        design_refs = _string_items(assessment.get("design_refs"))
+        if any(ref not in valid_subject_refs for ref in design_refs):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic assessment {claim_id} cites an unknown Design ref.",
+            )
+        if status == "satisfied" and not design_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Satisfied Design semantic assessment {claim_id} requires Design evidence.",
+            )
+        if status != "satisfied" and claim_id not in findings_by_claim:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Non-satisfied Design semantic assessment {claim_id} requires an actionable finding.",
+            )
+
+
+def _normalize_llm_findings(
+    payload: dict[str, object],
+    *,
+    valid_claim_ids: set[str] | None = None,
+    valid_requirement_ids: set[str] | None = None,
+    valid_subject_refs: set[str] | None = None,
+) -> list[DesignFinding]:
+    strict_claim_ids = {item for item in (valid_claim_ids or set()) if item}
+    strict_requirement_ids = {item for item in (valid_requirement_ids or set()) if item}
+    strict_subject_refs = {item for item in (valid_subject_refs or set()) if item}
     findings: list[DesignFinding] = []
     for index, raw in enumerate(_dict_items(payload.get("findings")), start=1):
         severity = str(raw.get("severity") or "warning").strip().lower()
         if severity not in {"blocking", "warning"}:
             severity = "warning"
+        claim_ids = _string_items(raw.get("claim_ids"))
         requirement_ids = _string_items(raw.get("requirement_ids"))
+        if strict_claim_ids and (not claim_ids or any(item not in strict_claim_ids for item in claim_ids)):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                "Design semantic finding contains a missing or unknown claim_id.",
+            )
+        if strict_requirement_ids and any(item not in strict_requirement_ids for item in requirement_ids):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                "Design semantic finding contains an unknown Requirement ID.",
+            )
         if severity == "blocking" and not requirement_ids:
             severity = "warning"
         evidence = []
@@ -494,6 +779,30 @@ def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
         subject_ref = str(raw.get("subject_ref") or "").strip()
         if not subject_ref:
             subject_ref = _subject_ref_from_evidence(evidence, diagram_ids)
+        if strict_subject_refs and subject_ref not in strict_subject_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                "Design semantic finding subject_ref is not an exact Vertical Design node or edge ID.",
+            )
+        if strict_requirement_ids or strict_subject_refs:
+            for item in evidence:
+                source = item["source"]
+                ref = item["ref"]
+                if source == "requirement" and ref not in strict_requirement_ids:
+                    raise HarnessError(
+                        "design_semantic_review_failed",
+                        "Design semantic finding cites an unknown Requirement evidence ref.",
+                    )
+                if source in {"design", "design_graph"} and ref not in strict_subject_refs:
+                    raise HarnessError(
+                        "design_semantic_review_failed",
+                        "Design semantic finding cites an unknown Design evidence ref.",
+                    )
+                if source not in {"requirement", "design", "design_graph"}:
+                    raise HarnessError(
+                        "design_semantic_review_failed",
+                        "Design semantic finding evidence source is unsupported.",
+                    )
         findings.append(
             DesignFinding(
                 finding_id=str(raw.get("id") or f"SEM-{index:03d}").strip(),
@@ -501,6 +810,7 @@ def _normalize_llm_findings(payload: dict[str, object]) -> list[DesignFinding]:
                 severity=severity,
                 message=str(raw.get("message") or "Semantic design issue.").strip(),
                 expected_change=str(raw.get("expected_change") or "Correct the design consistently.").strip(),
+                claim_ids=claim_ids,
                 requirement_ids=requirement_ids,
                 diagram_ids=diagram_ids,
                 evidence=evidence,
@@ -535,6 +845,7 @@ def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) ->
                 severity=severity,
                 message=finding.message,
                 expected_change=finding.expected_change,
+                claim_ids=finding.claim_ids,
                 requirement_ids=finding.requirement_ids,
                 diagram_ids=finding.diagram_ids,
                 evidence=finding.evidence,
@@ -590,6 +901,7 @@ def _aggregate_semantic_trials(
                 severity=severity,
                 message=representative.message,
                 expected_change=representative.expected_change,
+                claim_ids=_merged_string_values(item.claim_ids for _trial, item in votes),
                 requirement_ids=_merged_string_values(item.requirement_ids for _trial, item in votes),
                 diagram_ids=_merged_string_values(item.diagram_ids for _trial, item in votes),
                 evidence=_merged_evidence(item.evidence for _trial, item in votes),
@@ -728,18 +1040,7 @@ def _class_symbols(class_graph: dict[str, object]) -> dict[str, set[str]]:
 
 def _matching_classes(node_id: str, label: str, classes: dict[str, set[str]]) -> list[str]:
     candidates = {_normalize_symbol(node_id), _normalize_symbol(label)} - {""}
-    exact = [name for name in classes if _normalize_symbol(name) in candidates]
-    if exact:
-        return exact
-    return [
-        name
-        for name in classes
-        if any(
-            _normalize_symbol(name).endswith(candidate) or candidate.endswith(_normalize_symbol(name))
-            for candidate in candidates
-            if len(candidate) >= 4
-        )
-    ]
+    return [name for name in classes if _normalize_symbol(name) in candidates]
 
 
 def _operation_name(message: str) -> str:
@@ -768,15 +1069,14 @@ def _dict_items(value: object) -> list[dict[str, Any]]:
     return [item for item in value if isinstance(item, dict)]
 
 
+def _dict_value(value: object) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
 def _string_items(value: object) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _excerpt(value: str, limit: int) -> str:
-    text = value.strip()
-    return text if len(text) <= limit else text[:limit].rstrip() + "\n... truncated ..."
 
 
 def _complete_json(llm_client: Any, *, system: str, prompt: str) -> str:
@@ -788,7 +1088,11 @@ def _complete_json(llm_client: Any, *, system: str, prompt: str) -> str:
             system=system,
             prompt=prompt,
             json_mode=True,
-            max_tokens=max_tokens,
+            **phase2_llm_call_options(
+                settings,
+                "design_validator",
+                fallback_max_tokens=max_tokens,
+            ),
         )
         return str(completion.content)
     return str(llm_client.complete(system=system, prompt=prompt))

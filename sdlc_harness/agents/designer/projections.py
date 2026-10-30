@@ -280,6 +280,31 @@ def _render_markdown(
         if not _dicts(surface_view.get(key)):
             lines.append("| — | Not applicable | — | No required surface in this use case. |")
         lines.append("")
+    ui_experiences = []
+    for item in _dicts(surface_view.get("ui")):
+        experience = _dict(_dict(item.get("surface_contract")).get("experience_contract"))
+        if experience:
+            ui_experiences.append((item, experience))
+    if ui_experiences:
+        lines.extend(["## UI Experience", ""])
+        for item, experience in ui_experiences:
+            feedback = "; ".join(
+                f"{row.get('trigger')}: {row.get('response')}"
+                for row in _dicts(experience.get("feedback"))
+            )
+            lines.extend(
+                [
+                    f"### {item.get('scenario_id', '')} — {item.get('name', '')}",
+                    "",
+                    f"- Component structure: {'; '.join(_strings(experience.get('component_structure'))) or 'n/a'}",
+                    f"- Feedback: {feedback or 'n/a'}",
+                    f"- Accessibility: {'; '.join(_strings(experience.get('accessibility'))) or 'n/a'}",
+                    f"- Responsive: {'; '.join(_strings(experience.get('responsive'))) or 'n/a'}",
+                    f"- Focus flow: {'; '.join(_strings(experience.get('focus_flow'))) or 'n/a'}",
+                    f"- Guidance evidence: {', '.join(_strings(experience.get('guidance_refs'))) or 'n/a'}",
+                    "",
+                ]
+            )
     lines.extend(["## Change Impact", "", "| Scenario | Surface | Element | Decision | Evidence |", "| --- | --- | --- | --- | --- |"]) 
     for item in _dicts(surface_view.get("change_impact")):
         evidence = ", ".join(_strings(item.get("evidence_refs"))) or str(item.get("evidence_reason") or "")

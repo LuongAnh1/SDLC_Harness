@@ -23,8 +23,8 @@ def fake_completion(prompt: str) -> str:
         return fake_traceability_class(prompt)
     if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
         return fake_traceability_sequence(prompt)
-    if "Design Semantic Review v2" in prompt:
-        return fake_design_semantic_review()
+    if "Design Semantic Review v3" in prompt:
+        return fake_design_semantic_review(prompt)
     if "Progressive Semantic Claim Review" in prompt:
         return fake_progressive_semantic_review(prompt)
     if "Progressive Targeted Repair Verification" in prompt:
@@ -505,18 +505,71 @@ def fake_implementation_plan_review() -> str:
     )
 
 
-def fake_design_semantic_review() -> str:
+def fake_design_semantic_review(prompt: str = "") -> str:
     """Semantic design review fixture for offline Phase 2 tests."""
+
+    requirement_view = _json_object_after_marker(prompt, "Canonical Requirement review packet:\n")
+    design_view = _json_object_after_marker(prompt, "Canonical Vertical Design Graph semantic view:\n")
+    claims = requirement_view.get("claims") if isinstance(requirement_view.get("claims"), list) else []
+    nodes = design_view.get("nodes") if isinstance(design_view.get("nodes"), list) else []
+    assessments = []
+    for raw_claim in claims:
+        if not isinstance(raw_claim, dict):
+            continue
+        scenario_id = str(raw_claim.get("scenario_id") or "")
+        surface = str(raw_claim.get("surface") or "")
+        requirement_ids = {
+            str(item) for item in raw_claim.get("requirement_ids", []) if str(item)
+        }
+        candidates = [
+            item
+            for item in nodes
+            if isinstance(item, dict)
+            and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
+            and (not surface or str(item.get("surface") or "") == surface)
+            and (
+                not requirement_ids
+                or requirement_ids.intersection(str(ref) for ref in item.get("requirement_refs", []))
+            )
+        ]
+        if not candidates:
+            candidates = [
+                item
+                for item in nodes
+                if isinstance(item, dict)
+                and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
+            ]
+        design_ref = str(candidates[0].get("id") or "") if candidates else ""
+        assessments.append(
+            {
+                "claim_id": str(raw_claim.get("claim_id") or ""),
+                "status": "satisfied",
+                "design_refs": [design_ref] if design_ref else [],
+                "reason": "Fake Design evidence satisfies the claim.",
+            }
+        )
 
     return json.dumps(
         {
             "ok": True,
             "summary": "The fake design is behaviorally consistent with the approved requirement.",
+            "assessments": assessments,
             "findings": [],
         },
         ensure_ascii=False,
         indent=2,
     )
+
+
+def _json_object_after_marker(prompt: str, marker: str) -> dict[str, object]:
+    if marker not in prompt:
+        return {}
+    text = prompt.split(marker, 1)[1].lstrip()
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 def fake_developer_implementation_plan(prompt: str = "") -> str:

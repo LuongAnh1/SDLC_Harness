@@ -154,6 +154,37 @@ class RuntimeConfigTests(unittest.TestCase):
             ("coverage-model", "max", 49152, 240),
         )
 
+    def test_phase2_llm_profiles_have_long_running_defaults_and_individual_overrides(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODEL": "global-model",
+                "SDLC_PHASE2_DESIGNER_DELTA_MODEL": "delta-model",
+                "SDLC_PHASE2_DESIGNER_DELTA_THINKING_EFFORT": "max",
+                "SDLC_PHASE2_DESIGNER_DELTA_MAX_TOKENS": "49152",
+                "SDLC_PHASE2_DESIGNER_DELTA_TIMEOUT_SECONDS": "420",
+            },
+        )
+
+        investigation = settings.phase2_llm_profiles["designer_investigation"]
+        self.assertEqual(
+            (
+                investigation.model,
+                investigation.thinking_effort,
+                investigation.max_tokens,
+                investigation.timeout_seconds,
+            ),
+            ("global-model", "low", 8192, 180),
+        )
+        delta = settings.phase2_llm_profiles["designer_delta"]
+        self.assertEqual(
+            (delta.model, delta.thinking_effort, delta.max_tokens, delta.timeout_seconds),
+            ("delta-model", "max", 49152, 420),
+        )
+        self.assertEqual(settings.phase2_llm_profiles["designer_repair"].timeout_seconds, 600)
+        self.assertEqual(settings.phase2_llm_profiles["design_validator"].max_tokens, 32768)
+
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             env_path = self.root / ".env"

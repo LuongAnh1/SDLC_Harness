@@ -90,6 +90,7 @@ class ApplicationService:
             "revalidate-implementation",
             "revalidate-implementation-plan",
             "revalidate-design",
+            "restart-design",
             "revalidate-requirement",
             "clarify-more",
             "challenge-assumption",
@@ -259,6 +260,10 @@ class ApplicationService:
             )
         if name == "revalidate-design":
             return PhaseTwoWorkflow(settings).revalidate_design(
+                run_id=self._required_text(command, "run_id")
+            )
+        if name == "restart-design":
+            return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
             )
         if name == "revalidate-requirement":

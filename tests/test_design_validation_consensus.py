@@ -1,16 +1,42 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from sdlc_harness.agents.validator import DesignValidator, TraceabilityResult
+from sdlc_harness.core.config import LlmCallProfile
+from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import LlmCompletion
 
 
 class StaticLlmClient:
     def __init__(self, responses: list[str]):
         self.responses = list(responses)
+        self.prompts: list[str] = []
 
     def complete(self, *, system: str, prompt: str) -> str:
+        self.prompts.append(prompt)
         return self.responses.pop(0)
+
+
+class MetadataLlmClient:
+    def __init__(self):
+        self.calls: list[dict[str, object]] = []
+        self.settings = SimpleNamespace(
+            llm_structured_max_tokens=8192,
+            phase2_llm_profiles={
+                "design_validator": LlmCallProfile(
+                    model="validator-model",
+                    thinking_effort="high",
+                    max_tokens=32768,
+                    timeout_seconds=300,
+                )
+            },
+        )
+
+    def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.calls.append(dict(kwargs))
+        return LlmCompletion(content=semantic_response())
 
 
 def semantic_response(*findings: dict[str, object]) -> str:
@@ -57,6 +83,67 @@ def empty_traceability() -> TraceabilityResult:
     )
 
 
+def strict_review_inputs() -> tuple[dict[str, object], dict[str, object]]:
+    canonical = {
+        "use_case": {"id": "UC-1", "name": "Delete item"},
+        "scenario_contract": {
+            "scenarios": [
+                {
+                    "id": "SC-1",
+                    "name": "Delete after confirmation",
+                    "kind": "main",
+                    "requirement_refs": ["MF-1"],
+                    "acceptance_refs": ["AC-1"],
+                    "surfaces": {
+                        "ui": {
+                            "status": "required",
+                            "reason": "The operator confirms deletion.",
+                            "requirement_refs": ["MF-1", "AC-1"],
+                        }
+                    },
+                }
+            ]
+        },
+        "flows": {"main": [{"id": "MF-1", "action": "Confirm and delete the item."}]},
+        "acceptance_criteria": [{"id": "AC-1", "text": "The confirmed item is deleted."}],
+        "preconditions": [],
+        "postconditions": [],
+        "quality_requirements": [],
+        "assumptions": [],
+        "open_questions": [],
+        "decisions": [],
+    }
+    graph = {
+        "artifact_digest": "sha256:design",
+        "nodes": [
+            {
+                "id": "VDN-ui",
+                "scenario_id": "SC-1",
+                "component_id": "web",
+                "surface": "ui",
+                "kind": "ui_interaction",
+                "requirement_refs": ["MF-1", "AC-1"],
+                "surface_contract": {"transitions": [{"action": "confirm deletion"}]},
+            }
+        ],
+        "edges": [],
+        "unresolved_items": [],
+    }
+    return canonical, graph
+
+
+def strict_assessments(*, design_ref: str = "VDN-ui") -> list[dict[str, object]]:
+    return [
+        {
+            "claim_id": claim_id,
+            "status": "satisfied",
+            "design_refs": [design_ref],
+            "reason": "The UI contract represents the approved behavior.",
+        }
+        for claim_id in ("SC-1:MF-1", "SC-1:AC-1", "SC-1:surface:ui")
+    ]
+
+
 def review(responses: list[str]):
     return DesignValidator(StaticLlmClient(responses)).review(
         requirement_packet="approved requirement",
@@ -66,6 +153,169 @@ def review(responses: list[str]):
         traceability=empty_traceability(),
         validation_trials=3,
     )
+
+
+def test_semantic_validator_uses_its_phase2_llm_profile() -> None:
+    client = MetadataLlmClient()
+
+    result = DesignValidator(client).review(
+        requirement_packet="approved requirement",
+        design_artifact="approved design",
+        class_graph={"nodes": []},
+        sequence_graph={"sequenceDiagrams": []},
+        traceability=empty_traceability(),
+        validation_trials=1,
+    )
+
+    assert result.ok
+    assert len(client.calls) == 1
+    assert {
+        key: client.calls[0][key]
+        for key in ("model", "reasoning_effort", "max_tokens", "timeout_seconds")
+    } == {
+        "model": "validator-model",
+        "reasoning_effort": "high",
+        "max_tokens": 32768,
+        "timeout_seconds": 300,
+    }
+    prompt = str(client.calls[0]["prompt"])
+    assert "neither the UI contract nor the interaction path represents that confirmation" in prompt
+    assert "Do not require a preliminary backend verification round trip" in prompt
+    assert "return-to-human and separate confirmation interaction" not in prompt
+
+
+def test_semantic_validator_uses_compact_canonical_source_order_and_claims() -> None:
+    canonical, graph = strict_review_inputs()
+    client = StaticLlmClient(
+        [
+            json.dumps(
+                {
+                    "ok": True,
+                    "summary": "all claims covered",
+                    "assessments": strict_assessments(),
+                    "findings": [],
+                }
+            )
+        ]
+    )
+
+    result = DesignValidator(client).review(
+        requirement_packet="REQUIREMENT_PACKET_SENTINEL",
+        design_artifact="DESIGN_MARKDOWN_SENTINEL",
+        class_graph={"nodes": []},
+        sequence_graph={"sequenceDiagrams": []},
+        traceability=empty_traceability(),
+        canonical_requirement=canonical,
+        vertical_design_graph=graph,
+        validation_trials=1,
+    )
+
+    assert result.ok
+    prompt = client.prompts[0]
+    assert "Source-of-truth order:" in prompt
+    assert "Canonical Requirement review packet:" in prompt
+    assert "Canonical Vertical Design Graph semantic view:" in prompt
+    assert "REQUIREMENT_PACKET_SENTINEL" not in prompt
+    assert "DESIGN_MARKDOWN_SENTINEL" not in prompt
+    assert "Compatibility trace summary:" not in prompt
+
+
+def test_semantic_validator_rejects_missing_claim_or_unknown_design_ref() -> None:
+    canonical, graph = strict_review_inputs()
+    missing_claim = StaticLlmClient(
+        [
+            json.dumps(
+                {
+                    "ok": True,
+                    "summary": "incomplete",
+                    "assessments": strict_assessments()[:-1],
+                    "findings": [],
+                }
+            )
+        ]
+    )
+    unknown_ref = StaticLlmClient(
+        [
+            json.dumps(
+                {
+                    "ok": True,
+                    "summary": "bad ref",
+                    "assessments": strict_assessments(design_ref="VDN-invented"),
+                    "findings": [],
+                }
+            )
+        ]
+    )
+
+    for client in (missing_claim, unknown_ref):
+        try:
+            DesignValidator(client).review(
+                requirement_packet="approved requirement",
+                design_artifact="approved design",
+                class_graph={"nodes": []},
+                sequence_graph={"sequenceDiagrams": []},
+                traceability=empty_traceability(),
+                canonical_requirement=canonical,
+                vertical_design_graph=graph,
+                validation_trials=1,
+            )
+        except HarnessError as exc:
+            assert exc.error_code == "design_semantic_review_failed"
+        else:
+            raise AssertionError("Invalid semantic assessment contract was accepted.")
+
+
+def test_semantic_validator_rejects_finding_with_invented_requirement_ref() -> None:
+    canonical, graph = strict_review_inputs()
+    assessments = strict_assessments()
+    assessments[0] = {**assessments[0], "status": "contradicted"}
+    client = StaticLlmClient(
+        [
+            json.dumps(
+                {
+                    "ok": False,
+                    "summary": "invented evidence",
+                    "assessments": assessments,
+                    "findings": [
+                        {
+                            "id": "SEM-001",
+                            "category": "behavior_order",
+                            "severity": "blocking",
+                            "message": "The behavior is contradicted.",
+                            "expected_change": "Correct the behavior.",
+                            "claim_ids": ["SC-1:MF-1"],
+                            "requirement_ids": ["REQ-INVENTED"],
+                            "diagram_ids": [],
+                            "subject_ref": "VDN-ui",
+                            "evidence": [
+                                {
+                                    "source": "requirement",
+                                    "ref": "REQ-INVENTED",
+                                    "excerpt": "invented",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+        ]
+    )
+
+    try:
+        DesignValidator(client).review(
+            requirement_packet="approved requirement",
+            design_artifact="approved design",
+            class_graph={"nodes": []},
+            sequence_graph={"sequenceDiagrams": []},
+            traceability=empty_traceability(),
+            canonical_requirement=canonical,
+            vertical_design_graph=graph,
+            validation_trials=1,
+        )
+    except HarnessError as exc:
+        assert exc.error_code == "design_semantic_review_failed"
+    else:
+        raise AssertionError("Invented Requirement evidence was accepted.")
 
 
 def test_two_of_three_blocker_reaches_quorum() -> None:

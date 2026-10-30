@@ -16,6 +16,7 @@ from ..profiles import get_project_profile
 from .config_schema import (
     CONFIG_SECTIONS,
     PHASE1_LLM_PROFILE_DEFAULTS,
+    PHASE2_LLM_PROFILE_DEFAULTS,
     config_field_index,
     serialize_config_value,
 )
@@ -48,6 +49,7 @@ class Settings:
     llm_structured_max_tokens: int
     llm_context_window_tokens: int
     phase1_llm_profiles: dict[str, LlmCallProfile]
+    phase2_llm_profiles: dict[str, LlmCallProfile]
     requirement_max_tool_actions: int
     requirement_max_action_retries: int
     developer_max_actions_per_item: int
@@ -56,7 +58,14 @@ class Settings:
     design_repair_limit: int
     design_validation_trials: int
     design_llm_call_budget: int
+    designer_partition_action_budget: int
+    designer_scenario_repair_action_budget: int
+    designer_finalization_action_budget: int
+    designer_global_action_hard_cap: int
     designer_contract_version: str
+    uiux_skill_mode: str
+    uiux_skill_root: Path | None
+    uiux_skill_timeout_seconds: int
     vertical_trace_mode: str
     implementation_plan_repair_limit: int
     implementation_repair_limit: int
@@ -183,6 +192,55 @@ def phase1_llm_call_options(
     }
 
 
+def _phase2_llm_profiles(
+    merged: dict[str, str],
+    *,
+    default_model: str,
+) -> dict[str, LlmCallProfile]:
+    profiles: dict[str, LlmCallProfile] = {}
+    for profile_name, defaults in PHASE2_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE2_{profile_name.upper()}"
+        effort_default = str(defaults["effort"])
+        effort = merged.get(f"{prefix}_THINKING_EFFORT", effort_default).strip().lower()
+        if effort not in {"none", "low", "high", "max"}:
+            effort = effort_default
+        profiles[profile_name] = LlmCallProfile(
+            model=merged.get(f"{prefix}_MODEL", "").strip() or default_model,
+            thinking_effort=effort,
+            max_tokens=_int_value(
+                merged.get(f"{prefix}_MAX_TOKENS"),
+                default=int(defaults["max_tokens"]),
+                minimum=1024,
+                maximum=384000,
+            ),
+            timeout_seconds=_int_value(
+                merged.get(f"{prefix}_TIMEOUT_SECONDS"),
+                default=int(defaults["timeout"]),
+                minimum=1,
+                maximum=1800,
+            ),
+        )
+    return profiles
+
+
+def phase2_llm_call_options(
+    settings: object,
+    profile_name: str,
+    *,
+    fallback_max_tokens: int = 8192,
+) -> dict[str, object]:
+    profiles = getattr(settings, "phase2_llm_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, LlmCallProfile):
+        return {"max_tokens": fallback_max_tokens}
+    return {
+        "model": profile.model,
+        "reasoning_effort": profile.thinking_effort,
+        "max_tokens": profile.max_tokens,
+        "timeout_seconds": profile.timeout_seconds,
+    }
+
+
 def resolve_config(
     *,
     root: Path | None = None,
@@ -275,6 +333,13 @@ def load_settings(
     ).strip()
     if designer_contract_version not in {"vertical_design_graph_v1", "vertical_design_graph_v2"}:
         designer_contract_version = "vertical_design_graph_v1"
+    uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
+    if uiux_skill_mode not in {"off", "enforce"}:
+        uiux_skill_mode = "off"
+    uiux_skill_root_raw = merged.get("SDLC_UIUX_SKILL_ROOT", "").strip()
+    uiux_skill_root = Path(uiux_skill_root_raw).expanduser() if uiux_skill_root_raw else None
+    if uiux_skill_root is not None and not uiux_skill_root.is_absolute():
+        uiux_skill_root = root_path / uiux_skill_root
     project_profile_id = get_project_profile(
         project_profile_raw or "typescript_fullstack_v1"
     ).profile_id
@@ -300,6 +365,7 @@ def load_settings(
         llm_structured_max_tokens=_int_value(merged.get("SDLC_LLM_STRUCTURED_MAX_TOKENS"), default=8192, minimum=1024),
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
         phase1_llm_profiles=_phase1_llm_profiles(merged, default_model=llm_model),
+        phase2_llm_profiles=_phase2_llm_profiles(merged, default_model=llm_model),
         requirement_max_tool_actions=_int_value(merged.get("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS"), default=12, minimum=3),
         requirement_max_action_retries=_int_value(merged.get("SDLC_REQUIREMENT_MAX_ACTION_RETRIES"), default=2, minimum=0),
         developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),
@@ -307,8 +373,36 @@ def load_settings(
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
         design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
-        design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=28, minimum=1),
+        design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=128, minimum=1),
+        designer_partition_action_budget=_int_value(
+            merged.get("SDLC_DESIGNER_PARTITION_ACTION_BUDGET"),
+            default=8,
+            minimum=1,
+        ),
+        designer_scenario_repair_action_budget=_int_value(
+            merged.get("SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET"),
+            default=4,
+            minimum=0,
+        ),
+        designer_finalization_action_budget=_int_value(
+            merged.get("SDLC_DESIGNER_FINALIZATION_ACTION_BUDGET"),
+            default=4,
+            minimum=0,
+        ),
+        designer_global_action_hard_cap=_int_value(
+            merged.get("SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP"),
+            default=128,
+            minimum=1,
+        ),
         designer_contract_version=designer_contract_version,
+        uiux_skill_mode=uiux_skill_mode,
+        uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
+        uiux_skill_timeout_seconds=_int_value(
+            merged.get("SDLC_UIUX_SKILL_TIMEOUT_SECONDS"),
+            default=30,
+            minimum=1,
+            maximum=300,
+        ),
         vertical_trace_mode=vertical_trace_mode,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),

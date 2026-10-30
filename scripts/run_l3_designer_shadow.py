@@ -58,10 +58,12 @@ def main() -> int:
     parser.add_argument("--revalidate-run-id")
     parser.add_argument("--review-run-id")
     parser.add_argument("--step-review", action="store_true")
+    parser.add_argument("--review-input", action="store_true")
+    parser.add_argument("--review-output", action="store_true")
     parser.add_argument("--review-call-id")
     parser.add_argument("--review-decision", choices=("approve", "reject"))
     parser.add_argument("--review-note", default="")
-    parser.add_argument("--design-call-budget", type=int, default=28)
+    parser.add_argument("--design-call-budget", type=int, default=128)
     parser.add_argument("--design-repair-limit", type=int, default=3)
     parser.add_argument("--vertical-trace-mode", choices=("shadow", "enforce"), default="shadow")
     args = parser.parse_args()
@@ -70,6 +72,8 @@ def main() -> int:
         raise HarnessError("l3_shadow_args_invalid", "Choose either --revalidate-run-id or --review-run-id.")
     if args.review_run_id and not args.step_review:
         raise HarnessError("l3_shadow_args_invalid", "--review-run-id requires --step-review.")
+    if (args.review_input or args.review_output) and not args.step_review:
+        raise HarnessError("l3_shadow_args_invalid", "--review-input/--review-output require --step-review.")
     if bool(args.review_call_id) != bool(args.review_decision):
         raise HarnessError(
             "l3_shadow_args_invalid",
@@ -138,6 +142,8 @@ def main() -> int:
     started = perf_counter()
     workflow = PhaseTwoWorkflow(settings, designer_step_review={
         "enabled": bool(args.step_review),
+        "review_input": bool(args.review_input),
+        "review_output": bool(args.review_output),
         "call_id": str(args.review_call_id or ""),
         "decision": str(args.review_decision or ""),
         "note": str(args.review_note or ""),

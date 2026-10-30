@@ -34,11 +34,16 @@ from sdlc_harness.agents.designer.execution import (
     _activate_repair_target,
     _active_partition,
     _active_repair_task,
+    _action_budget_exhausted_message,
     _composition_repair_findings,
+    _consume_action,
     _delta_invalid_message,
+    _designer_action_budget_policy,
+    _designer_llm_profile_name,
     _designer_prompt,
-    _initial_action_budget,
+    _uiux_guidance_status,
     _mark_repair_targets_completed,
+    _new_action_budgets,
     _parse_designer_tool_action,
     _prompt_observations,
     _repair_target_present,
@@ -252,7 +257,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
                 },
             }
         ]
-        missing_confirmation = _sequence_behavior_findings(
+        local_ui_confirmation = _sequence_behavior_findings(
             nodes=confirmation_nodes,
             edges=[
                 {"scenario_id": "SC-1", "kind": "calls", "order": 1, "from": "VDN-ui", "to": "VDN-api", "terminal": False},
@@ -260,16 +265,60 @@ class VerticalDesignGraphTest(unittest.TestCase):
                 {"scenario_id": "SC-1", "kind": "returns", "order": 3, "from": "VDN-db", "to": "VDN-ui", "terminal": True},
             ],
         )
-        self.assertIn(
+        self.assertNotIn(
             "confirmation_interaction_missing",
-            {item["category"] for item in missing_confirmation},
+            {item["category"] for item in local_ui_confirmation},
         )
 
-    def test_new_designer_version_inherits_workflow_llm_usage(self) -> None:
-        self.assertEqual(
-            _initial_action_budget(SimpleNamespace(limit=36, used=23), configured_limit=36),
-            {"limit": 36, "used": 23},
+    def test_designer_action_budget_is_derived_from_configured_workload_policy(self) -> None:
+        policy = _designer_action_budget_policy(
+            settings=SimpleNamespace(
+                designer_partition_action_budget=7,
+                designer_scenario_repair_action_budget=3,
+                designer_finalization_action_budget=2,
+                designer_global_action_hard_cap=30,
+            ),
+            requirement_model={
+                "use_case_id": "UC1",
+                "scenario_contract": {
+                    "scenarios": [{"id": "SC-1", "surfaces": {"api": {"status": "required"}}}]
+                },
+            },
+            landscape={
+                "components": [{"component_id": "api", "roots": ["."]}],
+                "anchors": [],
+                "scenario_matches": [],
+            },
         )
+
+        self.assertEqual(policy["partition_count"], 1)
+        self.assertEqual(policy["scenario_count"], 1)
+        self.assertEqual(policy["calculated_global_limit"], 12)
+
+    def test_partition_action_budget_resets_for_each_partition(self) -> None:
+        budgets = _new_action_budgets(
+            {
+                "partition_limit": 2,
+                "scenario_repair_limit": 1,
+                "finalization_limit": 1,
+                "calculated_global_limit": 6,
+            }
+        )
+        session = {
+            "budgets": budgets,
+            "active_action_budget_scope": {"kind": "partition", "key": "SC-1|web"},
+        }
+
+        _consume_action(session)
+        _consume_action(session)
+        self.assertIn("SC-1|web", _action_budget_exhausted_message(session))
+        session["active_action_budget_scope"] = {"kind": "partition", "key": "SC-2|web"}
+        self.assertEqual(_action_budget_exhausted_message(session), "")
+        _consume_action(session)
+
+        used = session["budgets"]["partition_action"]["used_by_key"]
+        self.assertEqual(used, {"SC-1|web": 2, "SC-2|web": 1})
+        self.assertEqual(session["budgets"]["action"]["used"], 3)
 
     def test_invalid_evidence_and_stale_precondition_are_rejected(self) -> None:
         graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
@@ -476,7 +525,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
             str(item["category"])
             for item in design_bundle_findings(wrong_surface_owner, landscape=wrong_landscape)
         }
-        self.assertIn("surface_component_mismatch", categories)
+        self.assertNotIn("surface_component_mismatch", categories)
 
         node = designed["nodes"][0]
         invented_binding = json.loads(json.dumps(node["runtime_binding"]))
@@ -959,6 +1008,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
                 {"status": "404", "outcome": "record not found"},
             ],
             "authorization": "authenticated operator",
+            "authorization_required": True,
         }
 
     @staticmethod
@@ -1317,6 +1367,35 @@ class _ScriptedDesignerClient:
 
 
 class DesignerResumeTest(unittest.TestCase):
+    def test_designer_llm_profile_tracks_investigation_delta_and_repair(self) -> None:
+        self.assertEqual(
+            _designer_llm_profile_name(
+                repair_task=None,
+                source_observation_refs=[],
+                observations_since_delta=0,
+                observation_limit=3,
+            ),
+            "designer_investigation",
+        )
+        self.assertEqual(
+            _designer_llm_profile_name(
+                repair_task=None,
+                source_observation_refs=["OBS-1"],
+                observations_since_delta=1,
+                observation_limit=3,
+            ),
+            "designer_delta",
+        )
+        self.assertEqual(
+            _designer_llm_profile_name(
+                repair_task={"target_id": "repair-1"},
+                source_observation_refs=[],
+                observations_since_delta=0,
+                observation_limit=6,
+            ),
+            "designer_repair",
+        )
+
     def test_designer_action_normalizes_only_schema_valid_extra_closing_brace(self) -> None:
         payload = {
             "action": "design.propose_delta",
@@ -1390,12 +1469,241 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertTrue(prompt.startswith("Your previous action was rejected."))
         self.assertIn(message, prompt)
         self.assertIn("Do not resend the rejected delta unchanged.", prompt)
-        self.assertIn("null means the branch already has its one canonical parent", prompt)
         self.assertIn("completion_claims must be objects shaped exactly", prompt)
         self.assertIn("a returns edge must not map only the response", prompt)
-        self.assertIn("write_scope.allow_add_node is false, never use add_node", prompt)
-        self.assertIn("separate outgoing confirmation interaction", prompt)
+        self.assertIn("represent that confirmation in the UI surface contract", prompt)
+        self.assertIn("Do not invent a preliminary backend verification round trip", prompt)
+        self.assertNotIn("separate outgoing confirmation interaction", prompt)
         self.assertIn("never bind a query operation to a create/update/delete callable", prompt)
+
+    def test_designer_prompt_has_unambiguous_flow_and_tool_contracts(self) -> None:
+        prompt = _designer_prompt(
+            requirement_model={},
+            landscape={},
+            graph={"schema_version": GRAPH_VERSION, "nodes": [], "edges": [], "partitions": []},
+            observations=[],
+            repair_feedback=[],
+            active_partition=None,
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action="",
+        )
+
+        self.assertNotIn("For an alternative or Every scenario", prompt)
+        self.assertIn("design.propose_delta(delta); complete()", prompt)
+        self.assertIn(
+            'completion_claims must be objects shaped exactly like {"scenario_id":"SC-1","surfaces":["ui","api"]}',
+            prompt,
+        )
+        self.assertNotIn('"surfaces":["ui|api|business_rule|data|interaction"]', prompt)
+        self.assertIn("schema_version exactly design_surface_contract_v1", prompt)
+        self.assertIn("never put Requirement provenance E-*", prompt)
+        self.assertIn("For disposition=add, leave node.evidence_refs empty", prompt)
+        self.assertNotIn("active_repair_task write_scope", prompt)
+        self.assertNotIn("active_partition.branch_parent_requirement", prompt)
+        self.assertNotIn("Start from delta_scaffold", prompt)
+
+    def test_designer_prompt_isolates_active_scenario_requirement_behavior(self) -> None:
+        requirement = {
+            "schema_version": "requirement_model_v2",
+            "revision": 4,
+            "run_id": "run-1",
+            "use_case": {"id": "UC-1", "name": "Delete cultural heritage"},
+            "scenario_contract": {
+                "scenarios": [
+                    {
+                        "id": "SC-1",
+                        "kind": "main",
+                        "name": "Delete after confirmation",
+                        "actor_refs": ["ACT-1"],
+                        "surfaces": {
+                            "api": {
+                                "status": "required",
+                                "requirement_refs": ["MF-4", "BR-1", "AC-1"],
+                            }
+                        },
+                    },
+                    {
+                        "id": "SC-3",
+                        "kind": "exception",
+                        "name": "Connection interruption",
+                        "surfaces": {
+                            "api": {
+                                "status": "required",
+                                "requirement_refs": ["EF-1", "AC-3"],
+                            }
+                        },
+                    },
+                ]
+            },
+            "flows": {
+                "main": [{"id": "MF-4", "action": "Delete the selected item."}],
+                "alternatives": [],
+                "exceptions": [{"id": "EF-1", "outcome": "Roll back after connection interruption."}],
+            },
+            "business_rules": [{"id": "BR-1", "text": "Delete only after confirmation."}],
+            "acceptance_criteria": [
+                {"id": "AC-1", "text": "The confirmed item is deleted."},
+                {"id": "AC-3", "text": "The interrupted operation is rolled back."},
+            ],
+        }
+        active_partition = {
+            "partition": {"use_case_id": "UC-1", "scenario_id": "SC-1", "component_id": "api"},
+            "missing_surfaces": ["api"],
+            "surface_work": [
+                {
+                    "surface": "api",
+                    "requirement_refs": ["MF-4", "BR-1", "AC-1"],
+                    "contract": {
+                        "status": "required",
+                        "requirement_refs": ["MF-4", "BR-1", "AC-1"],
+                    },
+                }
+            ],
+        }
+
+        prompt = _designer_prompt(
+            requirement_model=requirement,
+            landscape={},
+            graph={"schema_version": GRAPH_VERSION, "nodes": [], "edges": [], "partitions": []},
+            observations=[],
+            repair_feedback=[],
+            active_partition=active_partition,
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action="",
+            last_review_feedback="SC-3 rollback behavior belongs to the exception scenario.",
+        )
+
+        payload = json.loads(prompt.rsplit("\n\n", 1)[-1])
+        active_slice = payload["active_requirement_slice"]
+        self.assertNotIn("requirement", payload)
+        self.assertEqual(
+            active_slice["allowed_requirement_refs"],
+            ["MF-4", "BR-1", "AC-1"],
+        )
+        self.assertEqual(
+            {item["id"] for item in active_slice["requirements"]},
+            {"MF-4", "BR-1", "AC-1"},
+        )
+        self.assertEqual(
+            payload["requirement_context"]["scenario_index"],
+            [
+                {"id": "SC-1", "kind": "main", "required_surfaces": ["api"]},
+                {"id": "SC-3", "kind": "exception", "required_surfaces": ["api"]},
+            ],
+        )
+        self.assertNotIn("roll back", prompt.casefold())
+        self.assertNotIn("rollback", prompt.casefold())
+        self.assertIn("navigation-only", prompt)
+        self.assertIn("may only implement IDs listed in allowed_requirement_refs", prompt)
+        self.assertIn("mixed sibling-scenario behavior into SC-1", payload["last_review_feedback"])
+
+    def test_designer_prompt_scopes_uiux_instructions_to_active_ui_work(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "snapshot_binding": {"designer_uiux_mode": "enforce"},
+            "nodes": [],
+            "edges": [],
+            "partitions": [],
+        }
+        backend_prompt = _designer_prompt(
+            requirement_model={},
+            landscape={},
+            graph=graph,
+            observations=[],
+            repair_feedback=[],
+            active_partition={"missing_surfaces": ["api"], "surface_work": [{"surface": "api"}]},
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action="",
+            uiux_mode="enforce",
+        )
+        ui_prompt = _designer_prompt(
+            requirement_model={},
+            landscape={},
+            graph=graph,
+            observations=[],
+            repair_feedback=[],
+            active_partition={"missing_surfaces": ["ui"], "surface_work": [{"surface": "ui"}]},
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action="",
+            uiux_mode="enforce",
+        )
+
+        self.assertNotIn("uiux.search_guidance", backend_prompt)
+        self.assertIn("uiux.search_guidance(query,mode=domain,domain=ux|icons|react)", ui_prompt)
+        self.assertIn("uiux.search_guidance(query,mode=stack,stack=react)", ui_prompt)
+        self.assertIn("one dominant intent in 2-5 meaningful generic ASCII terms", ui_prompt)
+        self.assertIn("must not restore focus to that removed element", ui_prompt)
+        self.assertIn("If the active scenario itself owns a cancel/close path", ui_prompt)
+        self.assertIn("Never add cancel/close behavior from another scenario", ui_prompt)
+        self.assertIn("For an alternative or exception scenario", ui_prompt)
+        self.assertIn("active_partition.branch_parent_requirement", ui_prompt)
+        self.assertIn("Start from delta_scaffold", ui_prompt)
+        self.assertIn("Graph projection identity and runtime target identity are separate", ui_prompt)
+        self.assertIn("confirm and cancel in one dialog", ui_prompt)
+        self.assertIn("even when its contract only describes the main outcome", ui_prompt)
+        self.assertIn("sharing a runtime target never copies sibling requirement refs", ui_prompt)
+        self.assertNotIn("already implements the branch outcome", ui_prompt)
+
+    def test_uiux_guidance_status_requires_stack_after_domain_retry(self) -> None:
+        guidance = [
+            {
+                "mode": "domain",
+                "selector": "ux",
+                "count": 3,
+                "evidence_refs": [f"uiux:sha256:{index}"],
+            }
+            for index in range(2)
+        ]
+
+        status = _uiux_guidance_status(guidance, source_inspected=True)
+
+        self.assertEqual(status["domain"]["attempts"], 2)
+        self.assertEqual(status["domain"]["retry_remaining"], 0)
+        self.assertEqual(
+            status["required_next_action"],
+            {
+                "action": "uiux.search_guidance",
+                "arguments": {"mode": "stack", "stack": "react"},
+            },
+        )
+
+    def test_uiux_prompt_puts_current_tool_state_before_general_instructions(self) -> None:
+        guidance = [
+            {
+                "mode": "domain",
+                "selector": "ux",
+                "count": 3,
+                "evidence_refs": [f"uiux:sha256:{index}"],
+            }
+            for index in range(2)
+        ]
+        prompt = _designer_prompt(
+            requirement_model={},
+            landscape={},
+            graph={
+                "schema_version": GRAPH_VERSION,
+                "snapshot_binding": {"designer_uiux_mode": "enforce"},
+                "nodes": [],
+                "edges": [],
+                "partitions": [],
+            },
+            observations=[],
+            repair_feedback=[],
+            active_partition={"missing_surfaces": ["ui"], "surface_work": [{"surface": "ui"}]},
+            repair_task=None,
+            observations_since_delta=2,
+            last_invalid_action="",
+            uiux_mode="enforce",
+            active_guidance=guidance,
+            source_inspected=True,
+        )
+
+        self.assertLess(prompt.index("CURRENT UI/UX TOOL STATE"), prompt.index("Investigate frozen AS-IS evidence"))
+        self.assertIn('"mode":"stack","stack":"react"', prompt)
 
     def test_repair_prompt_uses_graph_summary_and_six_read_actions(self) -> None:
         repair_task = {
@@ -1487,6 +1795,75 @@ class DesignerResumeTest(unittest.TestCase):
 
         self.assertEqual(observations[0], source_observation)
         self.assertEqual(len(observations), 9)
+
+    def test_prompt_observations_scope_construction_memory_to_active_partition(self) -> None:
+        web_ref = "repo:apps/web/src/App.tsx#L1@sha256:web"
+        api_ref = "repo:apps/api/src/app.ts#L1@sha256:api"
+        session = {
+            "active_partition_key": "SC-1|web",
+            "active_component_id": "web",
+            "active_repair_target_id": "",
+            "observations": [],
+            "source_observations": {"web": [web_ref], "api": [api_ref]},
+            "repair_observations": {},
+        }
+        DesignerToolLoopExecutor._record_observation(
+            session,
+            {
+                "tool_id": "repo.read",
+                "status": "succeeded",
+                "evidence_refs": [web_ref],
+                "output": {"path": "apps/web/src/App.tsx", "content": "web source"},
+            },
+        )
+        DesignerToolLoopExecutor._record_observation(
+            session,
+            {
+                "tool_id": "uiux.search_guidance",
+                "status": "succeeded",
+                "evidence_refs": ["uiux:sha256:web"],
+                "output": {"results": [{"Issue": "Focus"}]},
+            },
+        )
+        DesignerToolLoopExecutor._record_observation(
+            session,
+            {
+                "tool_id": "design.propose_delta",
+                "status": "operator_rejected",
+                "arguments": {"delta": {"partition": {"scenario_id": "SC-1", "component_id": "web"}}},
+            },
+        )
+
+        session["active_partition_key"] = "SC-1|api"
+        session["active_component_id"] = "api"
+        DesignerToolLoopExecutor._record_observation(
+            session,
+            {
+                "tool_id": "repo.read",
+                "status": "succeeded",
+                "evidence_refs": [api_ref],
+                "output": {"path": "apps/api/src/app.ts", "content": "api source"},
+            },
+        )
+        DesignerToolLoopExecutor._record_observation(
+            session,
+            {
+                "tool_id": "design.propose_delta",
+                "status": "operator_rejected",
+                "arguments": {"delta": {"out_of_scope_behavior": "must not return to the prompt"}},
+            },
+        )
+
+        observations = _prompt_observations(
+            session,
+            repair_task=None,
+            active_component_id="api",
+        )
+
+        self.assertEqual([item["tool_id"] for item in observations], ["repo.read"])
+        self.assertEqual(observations[0]["component_id"], "api")
+        self.assertEqual(observations[0]["partition_key"], "SC-1|api")
+        self.assertEqual(observations[0]["output"]["content"], "api source")
 
     def test_step_review_pauses_before_tool_and_resumes_saved_action(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -1615,10 +1992,14 @@ class DesignerResumeTest(unittest.TestCase):
             target.mkdir()
             (target / "route.ts").write_text("export const route = '/items';\n", encoding="utf-8")
             store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
-            settings = SimpleNamespace(
-                llm_mode="deepseek",
-                design_llm_call_budget=6,
-                llm_structured_max_tokens=1000,
+            settings = load_settings(
+                root=root,
+                runtime_root=root / ".runtime",
+                overrides={
+                    "SDLC_LLM_MODE": "deepseek",
+                    "SDLC_LLM_API_KEY": "test-only",
+                    "SDLC_DESIGN_LLM_CALL_BUDGET": "6",
+                },
             )
             requirement = {
                 "use_case_id": "UC1",
@@ -1672,6 +2053,19 @@ class DesignerResumeTest(unittest.TestCase):
             self.assertEqual(input_pending["owner"], "llm_pre_call")
             self.assertTrue(str(input_pending["call_id"]).endswith("-input"))
             self.assertEqual(first_client.prompts, [])
+            input_exchange = json.loads(
+                (root / str(input_pending["exchange_path"])).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                input_exchange["request_options"],
+                {
+                    "json_mode": True,
+                    "max_tokens": 8192,
+                    "model": "deepseek-flash",
+                    "reasoning_effort": "low",
+                    "timeout_seconds": 180,
+                },
+            )
 
             second_client = _ScriptedDesignerClient(
                 [{"action": "landscape.search", "arguments": {"scenario_id": "SC-1"}}]
@@ -1886,6 +2280,7 @@ class DesignerResumeTest(unittest.TestCase):
                             {"name": "location"},
                         ],
                         "authorization": "authenticated operator",
+                        "authorization_required": True,
                         "responses": [
                             {"status": "201", "outcome": "created"},
                             {"status": "409", "outcome": "duplicate"},
@@ -2137,6 +2532,58 @@ class DesignerResumeTest(unittest.TestCase):
         api_scaffold = second["delta_scaffold"]["operations"][1]["node"]["runtime_binding"]
         self.assertEqual(api_scaffold["attachment"]["owner_ref"], "RLA-api-app")
         self.assertTrue(api_scaffold["target"]["path"].startswith("<new profile-owned"))
+
+        graph["partitions"] = [
+            {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web", "coverage": {"ui": "covered"}},
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": "api",
+                "coverage": {"api": "covered", "business_rule": "covered"},
+            },
+        ]
+        graph["nodes"] = [
+            {"id": "VDN-ui", "scenario_id": "SC-1", "component_id": "web", "surface": "ui"},
+            {"id": "VDN-api", "scenario_id": "SC-1", "component_id": "api", "surface": "api"},
+            {
+                "id": "VDN-rule",
+                "scenario_id": "SC-1",
+                "component_id": "api",
+                "surface": "business_rule",
+                "runtime_binding": {"target": {"symbol": "confirmDeletion"}},
+            },
+        ]
+        graph["edges"] = [
+            {"id": "VDE-1", "scenario_id": "SC-1", "order": 1, "from": "VDN-ui", "to": "VDN-api", "kind": "calls", "label": "submit", "terminal": False},
+            {"id": "VDE-2", "scenario_id": "SC-1", "order": 2, "from": "VDN-api", "to": "VDN-rule", "kind": "calls", "label": "confirm", "terminal": False},
+            {"id": "VDE-3", "scenario_id": "SC-1", "order": 3, "from": "VDN-rule", "to": "VDN-api", "kind": "returns", "label": "confirmed", "terminal": False},
+            {"id": "VDE-4", "scenario_id": "SC-1", "order": 4, "from": "VDN-api", "to": "VDN-ui", "kind": "returns", "label": "success", "terminal": True},
+        ]
+
+        third = _active_partition(requirement_model=requirement, landscape=landscape, graph=graph)
+
+        self.assertEqual(third["partition"]["component_id"], "database")
+        self.assertEqual(third["missing_surfaces"], ["data"])
+        self.assertEqual(
+            third["path_insertion"]["downstream_edge_ids_in_order"],
+            ["VDE-3", "VDE-4"],
+        )
+        insertion_ops = third["delta_scaffold"]["operations"][2:]
+        self.assertEqual(
+            [(item["op"], item.get("edge_id")) for item in insertion_ops[:2]],
+            [("remove_edge", "VDE-3"), ("remove_edge", "VDE-4")],
+        )
+        self.assertEqual(
+            [(item["edge"]["from"], item["edge"]["to"], item["edge"]["kind"]) for item in insertion_ops[2:4]],
+            [
+                ("VDN-rule", "tmp:SC-1:data", "writes"),
+                ("tmp:SC-1:data", "VDN-rule", "returns"),
+            ],
+        )
+        self.assertEqual(
+            [(item["edge"]["from"], item["edge"]["to"], item["edge"]["terminal"]) for item in insertion_ops[4:]],
+            [("VDN-rule", "VDN-api", False), ("VDN-api", "VDN-ui", True)],
+        )
 
     def test_active_partition_seeds_v2_branch_parent_edge(self) -> None:
         requirement = {

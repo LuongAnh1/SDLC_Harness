@@ -8,7 +8,7 @@ import tempfile
 from types import SimpleNamespace
 import unittest
 
-from sdlc_harness.llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
+from sdlc_harness.llm.step_review import LlmStepReviewRequired, ReviewableLlmClient, _parsed_output
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.storage.runtime import RuntimeStore
@@ -33,6 +33,12 @@ class _FakeClient:
 
 
 class PhaseThreeStepReviewTest(unittest.TestCase):
+    def test_parsed_output_accepts_validator_json_not_only_tool_actions(self) -> None:
+        self.assertEqual(
+            _parsed_output('{"ok":true,"findings":[]}'),
+            {"ok": True, "findings": []},
+        )
+
     def test_input_review_pauses_before_provider_then_keeps_output_review(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

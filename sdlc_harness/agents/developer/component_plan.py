@@ -41,6 +41,7 @@ _IMMUTABLE_UNIT_FIELDS = {
     "depends_on",
     "runtime_bindings",
     "boundary_contracts",
+    "surface_contracts",
 }
 
 
@@ -174,6 +175,14 @@ def build_component_work_units(
                 }
             )
         surfaces = sorted({str(item.get("surface") or "") for item in group_nodes if item.get("surface")})
+        surface_contracts = [
+            {
+                "design_node_id": str(node.get("id") or ""),
+                "surface": str(node.get("surface") or ""),
+                "surface_contract": _dict(node.get("surface_contract")),
+            }
+            for node in group_nodes
+        ]
         unit: dict[str, object] = {
             "unit_id": unit_id,
             "order": 0,
@@ -192,6 +201,7 @@ def build_component_work_units(
             "repo_evidence_refs": evidence_refs,
             "runtime_bindings": runtime_bindings,
             "boundary_contracts": [],
+            "surface_contracts": surface_contracts,
         }
         if "data" in surfaces:
             intents = sorted(
@@ -281,6 +291,10 @@ def build_component_work_units(
         unit["boundary_contracts"] = sorted(
             _dicts(unit.get("boundary_contracts")),
             key=lambda item: str(item.get("design_edge_id") or ""),
+        )
+        unit["surface_contracts"] = sorted(
+            _dicts(unit.get("surface_contracts")),
+            key=lambda item: str(item.get("design_node_id") or ""),
         )
     return sorted(units, key=lambda item: int(item.get("order") or 0))
 

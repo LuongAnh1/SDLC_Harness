@@ -177,6 +177,7 @@ class WriteApiTests(unittest.TestCase):
             ("continue_run", {"implementation_repair_limit": 4, "qa_repair_limit": 2}, "continue-run"),
             ("sync_run", {}, "sync-run"),
             ("revalidate_design", {"design_validation_trials": 3, "design_llm_call_budget": 8}, "revalidate-design"),
+            ("restart_design", {"design_repair_limit": 3}, "restart-design"),
             ("revalidate_requirement", {}, "revalidate-requirement"),
             ("clarify_more", {}, "clarify-more"),
             (

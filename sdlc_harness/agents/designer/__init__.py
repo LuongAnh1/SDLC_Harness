@@ -38,6 +38,14 @@ from .plantuml import (
     parse_design_model,
 )
 from .projections import build_deterministic_trace, projection_manifest, render_design_projections
+from .uiux import (
+    UIUX_CONTRACT_STATE_KEY,
+    UIUX_CONTRACT_VERSION,
+    UIUX_EXPERIENCE_CONTRACT_VERSION,
+    UIUX_MODE_STATE_KEY,
+    UIUX_MODES,
+    UiUxGuidanceProvider,
+)
 
 __all__ = [
     "ClassDiagramParser",
@@ -61,6 +69,12 @@ __all__ = [
     "RUNTIME_BINDING_VERSION",
     "SUPPORTED_GRAPH_VERSIONS",
     "SURFACE_CONTRACT_VERSION",
+    "UIUX_CONTRACT_STATE_KEY",
+    "UIUX_CONTRACT_VERSION",
+    "UIUX_EXPERIENCE_CONTRACT_VERSION",
+    "UIUX_MODE_STATE_KEY",
+    "UIUX_MODES",
+    "UiUxGuidanceProvider",
     "ParsedDesign",
     "SequenceDiagramParser",
     "apply_designer_delta",

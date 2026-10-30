@@ -1090,6 +1090,9 @@ Rules:
 - When another data unit already owns the same schema migration, mark a read-only
   consumer `not_required` and explain that it uses the approved shared schema.
 - Do not invent Requirement, Design, component, dependency or work-unit IDs.
+- Treat each work unit's `surface_contracts` as immutable approved behavior. For UI work,
+  make the objective, targets, and tests realize its component structure, feedback,
+  accessibility, responsive behavior, focus flow, and guidance references.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
   wiring, except approved shared-contract files and data schema/migration artifacts.
 - When Web and API cross a boundary and the profile has a contracts component, add an
@@ -2667,6 +2670,31 @@ def _markdown_plan(
             for test in _dict_items(unit.get("test_intents")):
                 lines.append(
                     f"- Test `{test.get('stage_id', '')}`: {test.get('intent', '')}"
+                )
+            for binding in _dict_items(unit.get("surface_contracts")):
+                if str(binding.get("surface") or "") != "ui":
+                    continue
+                experience = _object_dict(
+                    _object_dict(binding.get("surface_contract")).get("experience_contract")
+                )
+                if not experience:
+                    continue
+                structure = "; ".join(_string_items(experience.get("component_structure")))
+                accessibility = "; ".join(_string_items(experience.get("accessibility")))
+                responsive = "; ".join(_string_items(experience.get("responsive")))
+                focus_flow = "; ".join(_string_items(experience.get("focus_flow")))
+                feedback = "; ".join(
+                    f"{item.get('trigger')}: {item.get('response')}"
+                    for item in _dict_items(experience.get("feedback"))
+                )
+                lines.extend(
+                    [
+                        f"- UI structure: {structure or 'n/a'}",
+                        f"- UI feedback: {feedback or 'n/a'}",
+                        f"- Accessibility: {accessibility or 'n/a'}",
+                        f"- Responsive: {responsive or 'n/a'}",
+                        f"- Focus flow: {focus_flow or 'n/a'}",
+                    ]
                 )
 
     lines.extend(

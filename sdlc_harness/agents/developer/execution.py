@@ -2144,6 +2144,7 @@ def _build_manifest(
                     "migration_impact": _dict_value(unit.get("migration_impact")),
                     "runtime_bindings": _dict_items(unit.get("runtime_bindings")),
                     "boundary_contracts": _dict_items(unit.get("boundary_contracts")),
+                    "surface_contracts": _dict_items(unit.get("surface_contracts")),
                     "required_stage_ids": _string_items(unit.get("required_stage_ids")),
                     "test_target_paths": _string_items(unit.get("test_target_paths")),
                     "signature_entry_ids": unit_signature_ids,
@@ -2641,14 +2642,16 @@ def _action_prompt(
             "migration_impact": _dict_value(item.get("migration_impact")),
             "runtime_bindings": _dict_items(item.get("runtime_bindings")),
             "boundary_contracts": _dict_items(item.get("boundary_contracts")),
+            "surface_contracts": _dict_items(item.get("surface_contracts")),
             "required_stage_ids": item.get("required_stage_ids", []),
             "test_target_paths": item.get("test_target_paths", []),
             "approved_signatures": _item_approved_signatures(item),
             "hard_constraints": [
                 "Approved signatures are immutable and override conflicting prose objectives.",
                 "Preserve each qualified_name, parameter list, async flag, and return_type exactly.",
-                "Treat planned code targets, migration impact, runtime bindings, and boundary mappings as approved execution constraints.",
+                "Treat planned code targets, migration impact, runtime bindings, boundary mappings, and surface contracts as approved execution constraints.",
                 "Preserve each boundary input/output/error mapping and runtime attachment; inspect related approved paths instead of inventing a different contract.",
+                "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
                 "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
                 "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
             ],
@@ -4300,6 +4303,7 @@ def _prompt_execution_task(item: dict[str, object], *, context_paths: list[str])
         "migration_impact",
         "planned_code_targets",
         "runtime_bindings",
+        "surface_contracts",
     }
     visible_item = {
         key: value

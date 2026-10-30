@@ -92,6 +92,9 @@ def public_allowed_actions(
         and not _has_retired_designer_contract(state)
         and not _has_retired_developer_executor(state)
     ):
+        if str(state.get("status") or "") == "design_paused" and "restart_design" not in normalized:
+            insert_at = normalized.index("continue_run") + 1 if "continue_run" in normalized else 0
+            normalized.insert(insert_at, "restart_design")
         return normalized
     return [action for action in normalized if action in LEGACY_RETIRED_VISIBLE_ACTIONS]
 

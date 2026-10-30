@@ -11,7 +11,11 @@ from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
     GRAPH_VERSION_V1,
     SUPPORTED_GRAPH_VERSIONS,
+    UIUX_CONTRACT_STATE_KEY,
+    UIUX_CONTRACT_VERSION,
+    UIUX_MODE_STATE_KEY,
     DesignerExecutionError,
+    DesignerExecutionResult,
     DesignerToolLoopExecutor,
     build_deterministic_trace,
     design_bundle_findings,
@@ -58,6 +62,38 @@ ALLOWED_DESIGN_ACTIONS = [
     "cancel_run",
     "get_status",
 ]
+
+ALLOWED_DESIGN_PAUSED_ACTIONS = [
+    "continue_run",
+    "restart_design",
+    "get_status",
+    "cancel_run",
+]
+
+_PHASE2_ARTIFACT_KEYS = frozenset(
+    {
+        "designer_analysis",
+        "design_artifact",
+        "requirement_graph",
+        "class_diagram_graph",
+        "sequence_diagram_graph",
+        "requirement_design_trace",
+        "missing_design_links",
+        "design_validation_report",
+        "design_quality_report",
+        "vertical_design_graph",
+        "design_component_view",
+        "design_surface_view",
+        "vertical_trace_graph",
+        "vertical_trace_validation",
+        "design_projection_manifest",
+        "design_finding_ledger",
+    }
+)
+
+_PHASE2_QUALITY_KEYS = frozenset(
+    {"design_validation", "design_vertical_graph", "design_bundle", "vertical_trace"}
+)
 
 DESIGN_ROUTING_ERROR_CODES = frozenset(
     {
@@ -181,7 +217,12 @@ class PhaseTwoWorkflow:
             and status == "design_blocked"
             and phase.startswith("design_")
         )
-        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_plan_step_review and not recoverable_plan_checkpoint and not recoverable_vertical_design_block and (
+        recoverable_paused_design = (
+            status == "design_paused"
+            and phase.startswith("design_")
+            and bool(_string_dict(state.get("latest_artifacts")).get("vertical_design_graph"))
+        )
+        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_plan_step_review and not recoverable_plan_checkpoint and not recoverable_vertical_design_block and not recoverable_paused_design and (
             phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
         ):
             raise HarnessError(
@@ -189,6 +230,8 @@ class PhaseTwoWorkflow:
                 f"Run is not waiting on a design checkpoint: {run_id}",
                 run_id=run_id,
             )
+        if recoverable_paused_design:
+            self._supersede_pending_design_step_review(state=state, run_id=run_id)
         if recoverable_plan_step_review:
             self._supersede_pending_plan_step_review(run_id=run_id)
         if recoverable_plan_checkpoint:
@@ -247,7 +290,77 @@ class PhaseTwoWorkflow:
             existing_graph=existing_graph,
             session_ordinal=session_ordinal,
             initial_repair_feedback=initial_repair_feedback,
+            validate_existing_first=True,
         )
+
+    def _supersede_pending_design_step_review(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+    ) -> None:
+        """Keep the audit trail while discarding a paused call from stale validation policy."""
+
+        execution = _dict_value(state.get("designer_execution"))
+        pending = _dict_value(execution.get("pending_step_review"))
+        if not pending:
+            pending = _dict_value(execution.get("validator_step_review"))
+        exchange_ref = str(pending.get("exchange_path") or "")
+        if not exchange_ref:
+            return
+        exchange_path = Path(exchange_ref)
+        resolved = (
+            exchange_path.resolve()
+            if exchange_path.is_absolute()
+            else (self.store.repo_root / exchange_path).resolve()
+        )
+        try:
+            resolved.relative_to(self.store.run_dir(run_id).resolve())
+        except ValueError as exc:
+            raise HarnessError(
+                "design_step_review_corrupted",
+                "Pending Design review exchange is outside the run directory.",
+                run_id=run_id,
+            ) from exc
+        session_path = resolved.parent / "step_review_session_v1.json"
+        try:
+            exchange = json.loads(resolved.read_text(encoding="utf-8"))
+            session = json.loads(session_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise HarnessError(
+                "design_step_review_corrupted",
+                "Pending Design review exchange cannot be superseded safely.",
+                run_id=run_id,
+            ) from exc
+        if not isinstance(exchange, dict) or not isinstance(session, dict):
+            raise HarnessError(
+                "design_step_review_corrupted",
+                "Pending Design review exchange has an invalid structure.",
+                run_id=run_id,
+            )
+        call_id = str(exchange.get("call_id") or "")
+        calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
+        matched = False
+        for call in calls:
+            if str(call.get("call_id") or "") != call_id:
+                continue
+            matched = True
+            if str(call.get("status") or "") in {"input_pending", "pending"}:
+                call["status"] = "superseded"
+                call["superseded_at"] = utc_now_iso()
+                call["superseded_reason"] = "design_revalidation_policy_changed"
+                exchange = dict(call)
+            break
+        if not matched:
+            raise HarnessError(
+                "design_step_review_corrupted",
+                "Pending Design review call is missing from its session.",
+                run_id=run_id,
+            )
+        session["calls"] = calls
+        session["updated_at"] = utc_now_iso()
+        _write_json_atomic(resolved, exchange)
+        _write_json_atomic(session_path, session)
 
     def _supersede_pending_plan_step_review(
         self,
@@ -317,6 +430,76 @@ class PhaseTwoWorkflow:
             session_ordinal=int(execution.get("session_ordinal") or 1),
             initial_repair_iteration=int(execution.get("repair_iteration") or 0),
             initial_repair_feedback=_dict_items(state.get("designer_repair_feedback")),
+            validate_existing_first=bool(_dict_value(execution.get("validator_step_review"))),
+        )
+
+    def restart_design(self, *, run_id: str) -> dict[str, object]:
+        """Abandon a paused Designer session and restart from the approved Requirement."""
+
+        self._reset_design_runtime()
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") != "design_paused":
+            raise HarnessError(
+                "design_restart_not_allowed",
+                f"Design can only restart from status 'design_paused', not {state.get('status')!r}.",
+                run_id=run_id,
+            )
+        approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
+        contract_version = str(self.settings.designer_contract_version)
+        if contract_version not in SUPPORTED_GRAPH_VERSIONS:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Unsupported configured Designer contract: {contract_version}",
+                run_id=run_id,
+            )
+        if self.settings.vertical_trace_mode not in VERTICAL_TRACE_MODES:
+            raise HarnessError(
+                "vertical_trace_mode_invalid",
+                f"Unsupported configured vertical trace mode: {self.settings.vertical_trace_mode}",
+                run_id=run_id,
+            )
+
+        previous_execution = _dict_value(state.get("designer_execution"))
+        versions = _design_versions(state)
+        start_version = _next_design_version(self.store.run_dir(run_id) / "artifacts")
+        session_ordinal = max(start_version, int(previous_execution.get("session_ordinal") or 0) + 1)
+        artifacts = _string_dict(state.get("latest_artifacts"))
+        quality_reports = _dict_value(state.get("quality_reports"))
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "current_phase": "design_restarting",
+                "status": "design_restarting",
+                "latest_artifacts": {
+                    key: value for key, value in artifacts.items() if key not in _PHASE2_ARTIFACT_KEYS
+                },
+                "quality_reports": {
+                    key: value for key, value in quality_reports.items() if key not in _PHASE2_QUALITY_KEYS
+                },
+                "pending_checkpoint": None,
+                "allowed_next_actions": ["get_status", "cancel_run"],
+                "last_error": None,
+                "designer_repair_feedback": [],
+                "traceability_diagnostics": [],
+                "summary_for_user": "Đang chạy lại Design từ Requirement đã duyệt bằng cấu hình hiện tại.",
+                DESIGNER_CONTRACT_STATE_KEY: contract_version,
+                UIUX_MODE_STATE_KEY: self.settings.uiux_skill_mode,
+                UIUX_CONTRACT_STATE_KEY: (
+                    UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
+                ),
+                VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
+                VERTICAL_TRACE_MODE_STATE_KEY: self.settings.vertical_trace_mode,
+            }
+        )
+        state.pop(DESIGN_BUNDLE_STATE_KEY, None)
+        self.store.write_state(state)
+        return self._run_vertical_design(
+            state=state,
+            approved=approved,
+            start_version=start_version,
+            existing_versions=versions,
+            existing_graph=None,
+            session_ordinal=session_ordinal,
         )
 
 
@@ -332,6 +515,7 @@ class PhaseTwoWorkflow:
         session_ordinal: int | None = None,
         initial_repair_iteration: int = 0,
         initial_repair_feedback: list[dict[str, object]] | None = None,
+        validate_existing_first: bool = False,
     ) -> dict[str, object]:
         """Run the repo-aware Designer loop and publish compatibility projections."""
 
@@ -343,6 +527,14 @@ class PhaseTwoWorkflow:
                 f"Unsupported pinned Designer contract: {design_contract_version}",
                 run_id=run_id,
             )
+        uiux_mode = str(state.get(UIUX_MODE_STATE_KEY) or "off")
+        uiux_contract_version = str(state.get(UIUX_CONTRACT_STATE_KEY) or "")
+        if uiux_mode == "enforce" and uiux_contract_version != UIUX_CONTRACT_VERSION:
+            raise HarnessError(
+                "designer_uiux_contract_missing",
+                "Run requires UI/UX guidance but has no supported pinned UI/UX contract.",
+                run_id=run_id,
+            )
         design_bundle_version = design_bundle_version_for(design_contract_version)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         landscape = self.repo_discovery.run(
@@ -351,6 +543,8 @@ class PhaseTwoWorkflow:
         )
         if landscape is None:
             return self._status_response(self.store.read_state(run_id), created_new_run=False)
+        state = self.store.read_state(run_id)
+        artifact_paths = _string_dict(state.get("latest_artifacts"))
         workspace = RunWorkspaceManager(self.settings).resolve(run_id)
         snapshot_binding = _vertical_snapshot_binding(
             state=state,
@@ -389,19 +583,39 @@ class PhaseTwoWorkflow:
         for repair_iteration in range(initial_repair_iteration, self.settings.design_repair_limit + 1):
             relative_iteration = repair_iteration - initial_repair_iteration
             version = start_version + relative_iteration
-            ordinal = base_ordinal + relative_iteration
+            validation_only_iteration = (
+                validate_existing_first and relative_iteration == 0 and graph is not None
+            )
+            ordinal_offset = (
+                max(0, relative_iteration - 1)
+                if validate_existing_first and graph is not None
+                else relative_iteration
+            )
+            ordinal = base_ordinal + ordinal_offset
             state.update(
                 {
                     "updated_at": utc_now_iso(),
-                    "current_phase": "design_investigating" if repair_iteration == 0 else "design_repairing",
-                    "status": "design_investigating" if repair_iteration == 0 else "design_repairing",
+                    "current_phase": (
+                        "design_validating"
+                        if validation_only_iteration
+                        else ("design_investigating" if repair_iteration == 0 else "design_repairing")
+                    ),
+                    "status": (
+                        "design_validating"
+                        if validation_only_iteration
+                        else ("design_investigating" if repair_iteration == 0 else "design_repairing")
+                    ),
                     "pending_checkpoint": None,
                     "allowed_next_actions": ["get_status", "cancel_run"],
                     "last_error": None,
                     "summary_for_user": (
+                        "Design Validator đang kiểm tra lại vertical Design graph hiện có."
+                        if validation_only_iteration
+                        else (
                         "Designer đang khảo sát frozen repository evidence và dựng vertical Design graph."
                         if repair_iteration == 0
                         else f"Designer đang sửa partition bị chặn, vòng {repair_iteration}/{self.settings.design_repair_limit}."
+                        )
                     ),
                     "designer_execution": {
                         "contract_version": design_contract_version,
@@ -410,7 +624,7 @@ class PhaseTwoWorkflow:
                         "design_version": version,
                         "repair_iteration": repair_iteration,
                     },
-                    "designer_repair_feedback": repair_feedback,
+                    "designer_repair_feedback": [] if validation_only_iteration else repair_feedback,
                 }
             )
             self.store.write_state(state)
@@ -437,8 +651,22 @@ class PhaseTwoWorkflow:
                 )
                 self.store.write_state(current)
 
-            try:
-                execution = self.designer_tool_loop.execute(
+            if validation_only_iteration:
+                execution = DesignerExecutionResult(
+                    graph=graph,
+                    session_path="",
+                    manifest_path="",
+                    journal_path="",
+                    delta_paths=[],
+                    progress={
+                        "status": "validating_existing",
+                        "graph_revision": graph.get("revision"),
+                        "graph_digest": graph.get("artifact_digest"),
+                    },
+                )
+            else:
+                try:
+                    execution = self.designer_tool_loop.execute(
                     run_id=run_id,
                     requirement_model=approved.canonical_model.to_dict(),
                     landscape=landscape,
@@ -449,12 +677,14 @@ class PhaseTwoWorkflow:
                     session_ordinal=ordinal,
                     on_progress=on_progress,
                     contract_version=design_contract_version,
-                )
-            except DesignerExecutionError as exc:
-                state = self.store.read_state(run_id)
-                human_required = exc.error_code == "designer_human_required"
-                state.update(
-                    {
+                    uiux_mode=uiux_mode,
+                    uiux_contract_version=uiux_contract_version,
+                    )
+                except DesignerExecutionError as exc:
+                    state = self.store.read_state(run_id)
+                    human_required = exc.error_code == "designer_human_required"
+                    state.update(
+                        {
                         "updated_at": utc_now_iso(),
                         "current_phase": "design_review" if human_required else "design_investigating",
                         "status": (
@@ -464,7 +694,7 @@ class PhaseTwoWorkflow:
                         ),
                         "pending_checkpoint": None,
                         "allowed_next_actions": (
-                            ["continue_run", "get_status", "cancel_run"]
+                            ALLOWED_DESIGN_PAUSED_ACTIONS
                             if exc.retriable
                             else (
                                 ["get_status", "cancel_run"]
@@ -490,10 +720,10 @@ class PhaseTwoWorkflow:
                                 else f"Designer bị chặn: {exc.message}"
                             )
                         ),
-                    }
-                )
-                self.store.write_state(state)
-                return self._status_response(state, created_new_run=False)
+                        }
+                    )
+                    self.store.write_state(state)
+                    return self._status_response(state, created_new_run=False)
 
             graph = execution.graph
             state = self.store.read_state(run_id)
@@ -617,7 +847,7 @@ class PhaseTwoWorkflow:
                             "current_phase": "design_validating",
                             "status": "design_paused",
                             "pending_checkpoint": None,
-                            "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                            "allowed_next_actions": ALLOWED_DESIGN_PAUSED_ACTIONS,
                             "last_error": exc.to_response(),
                             "designer_execution": {
                                 "contract_version": design_contract_version,
@@ -789,11 +1019,15 @@ class PhaseTwoWorkflow:
                 break
             current_digest = str(graph.get("artifact_digest") or "")
             current_blocker_keys = frozenset(item.canonical_key for item in validation.blocking_findings)
-            repair_stalled = _design_repair_stalled(
-                prior_digest=prior_digest,
-                current_digest=current_digest,
-                prior_blocker_keys=prior_blocker_keys,
-                current_blocker_keys=current_blocker_keys,
+            repair_stalled = (
+                False
+                if validation_only_iteration
+                else _design_repair_stalled(
+                    prior_digest=prior_digest,
+                    current_digest=current_digest,
+                    prior_blocker_keys=prior_blocker_keys,
+                    current_blocker_keys=current_blocker_keys,
+                )
             )
             if repair_iteration >= self.settings.design_repair_limit or repair_stalled:
                 break
@@ -995,6 +1229,8 @@ class PhaseTwoWorkflow:
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             REPO_DISCOVERY_CONTRACT_STATE_KEY: state.get(REPO_DISCOVERY_CONTRACT_STATE_KEY),
             DESIGNER_CONTRACT_STATE_KEY: state.get(DESIGNER_CONTRACT_STATE_KEY),
+            UIUX_MODE_STATE_KEY: state.get(UIUX_MODE_STATE_KEY, "off"),
+            UIUX_CONTRACT_STATE_KEY: state.get(UIUX_CONTRACT_STATE_KEY, ""),
             DESIGN_BUNDLE_STATE_KEY: state.get(DESIGN_BUNDLE_STATE_KEY),
             VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
             VERTICAL_TRACE_MODE_STATE_KEY: state.get(VERTICAL_TRACE_MODE_STATE_KEY),
@@ -1129,6 +1365,10 @@ def _vertical_snapshot_binding(
         "requirement_digest": requirement_digest,
         "repo_landscape_artifact_ref": artifacts.get("repo_landscape"),
         "repo_landscape_digest": landscape.get("artifact_digest"),
+        "repo_codegraph_snapshot_artifact_ref": artifacts.get("repo_codegraph_snapshot"),
+        "repo_codegraph_snapshot_digest": state.get("repo_codegraph_snapshot_digest"),
+        "designer_uiux_mode": state.get(UIUX_MODE_STATE_KEY, "off"),
+        "designer_uiux_contract_version": state.get(UIUX_CONTRACT_STATE_KEY, ""),
         "project_profile_id": profile.get("project_profile_id"),
         "project_profile_schema": profile.get("project_profile_schema"),
         "language_profile_id": profile.get("language_profile_id"),

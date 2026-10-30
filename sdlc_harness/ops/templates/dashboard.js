@@ -4,6 +4,7 @@ const ACTION_LABELS = {
   continue_run: "Chạy tiếp",
   sync_run: "Đồng bộ lại",
   revalidate_design: "Kiểm tra lại design",
+  restart_design: "Chạy lại design từ Requirement",
   revalidate_implementation_plan: "Kiểm tra lại plan",
   revalidate_implementation: "Kiểm tra lại implementation",
   adopt_run_workspace: "Nhận workspace",

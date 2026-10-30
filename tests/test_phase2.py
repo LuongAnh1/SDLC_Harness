@@ -14,7 +14,12 @@ import unittest
 from unittest.mock import patch
 
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.designer import DesignDraft, DesignerAgent, parse_design_model
+from sdlc_harness.agents.designer import (
+    DesignDraft,
+    DesignerAgent,
+    DesignerToolLoopExecutor,
+    parse_design_model,
+)
 from sdlc_harness.agents.validator import (
     DesignFinding,
     DesignValidationResult,
@@ -290,12 +295,26 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertEqual(self.settings.design_repair_limit, 2)
         self.assertEqual(self.settings.design_validation_trials, 3)
         self.assertEqual(self.settings.design_llm_call_budget, 16)
+        self.assertEqual(self.settings.designer_partition_action_budget, 8)
+        self.assertEqual(self.settings.designer_scenario_repair_action_budget, 4)
+        self.assertEqual(self.settings.designer_finalization_action_budget, 4)
+        self.assertEqual(self.settings.designer_global_action_hard_cap, 128)
         settings = load_settings(
             root=self.repo_root,
             runtime_root=self.runtime_root,
-            overrides={"SDLC_DESIGN_REPAIR_LIMIT": "0"},
+            overrides={
+                "SDLC_DESIGN_REPAIR_LIMIT": "0",
+                "SDLC_DESIGNER_PARTITION_ACTION_BUDGET": "9",
+                "SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET": "5",
+                "SDLC_DESIGNER_FINALIZATION_ACTION_BUDGET": "3",
+                "SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP": "144",
+            },
         )
         self.assertEqual(settings.design_repair_limit, 0)
+        self.assertEqual(settings.designer_partition_action_budget, 9)
+        self.assertEqual(settings.designer_scenario_repair_action_budget, 5)
+        self.assertEqual(settings.designer_finalization_action_budget, 3)
+        self.assertEqual(settings.designer_global_action_hard_cap, 144)
 
     def test_step_review_decision_survives_design_runtime_reset(self) -> None:
         review = {
@@ -309,6 +328,59 @@ class PhaseTwoTest(unittest.TestCase):
         workflow._reset_design_runtime()
 
         self.assertEqual(workflow.designer_tool_loop.step_review, review)
+
+    def test_restart_design_uses_approved_requirement_and_current_design_contract(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        review = {"enabled": True, "review_input": True, "review_output": True}
+        paused = PhaseTwoWorkflow(
+            self.settings,
+            designer_step_review=review,
+        ).approve_checkpoint(run_id=run_id)
+        self.assertEqual(paused["status"], "design_paused")
+        approved_artifacts = dict(
+            PhaseTwoWorkflow(self.settings).store.read_state(run_id)["approved_artifacts"]
+        )
+        first_ordinal = int(paused["designer_execution"]["session_ordinal"])
+
+        restart_settings = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                **self._target_overrides(),
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                "SDLC_DESIGNER_CONTRACT_VERSION": "vertical_design_graph_v2",
+                "SDLC_UIUX_SKILL_MODE": "enforce",
+                "SDLC_VERTICAL_TRACE_MODE": "enforce",
+            },
+        )
+        restarted = PhaseTwoWorkflow(
+            restart_settings,
+            designer_step_review=review,
+        ).restart_design(run_id=run_id)
+
+        self.assertEqual(restarted["status"], "design_paused")
+        restarted_state = PhaseTwoWorkflow(restart_settings).store.read_state(run_id)
+        self.assertEqual(restarted_state["approved_artifacts"], approved_artifacts)
+        self.assertEqual(restarted["designer_contract_version"], "vertical_design_graph_v2")
+        self.assertEqual(restarted["designer_uiux_mode"], "enforce")
+        self.assertEqual(restarted["designer_uiux_contract_version"], "uiux_pro_max_search_v1")
+        second_ordinal = int(restarted["designer_execution"]["session_ordinal"])
+        self.assertGreater(second_ordinal, first_ordinal)
+        run_dir = PhaseTwoWorkflow(restart_settings).store.run_dir(run_id)
+        self.assertTrue((run_dir / "designer_execution" / f"design_v{first_ordinal}").is_dir())
+        self.assertTrue((run_dir / "designer_execution" / f"design_v{second_ordinal}").is_dir())
+        self.assertIn("restart_design", restarted["allowed_next_actions"])
+
+    def test_restart_design_rejects_non_paused_run(self) -> None:
+        created = self._create_phase1_run()
+
+        with self.assertRaises(HarnessError) as context:
+            PhaseTwoWorkflow(self.settings).restart_design(run_id=str(created["run_id"]))
+
+        self.assertEqual(context.exception.error_code, "design_restart_not_allowed")
 
     def test_production_flow_blocks_safely_when_tight_budget_cannot_converge(self) -> None:
         settings = load_settings(
@@ -1050,6 +1122,94 @@ class OnlyClass {
         self.assertTrue(response["latest_artifacts"]["design_validation_report"].endswith("design_validation_report_v2.json"))
         self.assertEqual(response["quality_reports"]["design_validation"]["versions"], ["v1", "v2"])
         self.assertNotEqual(initial["pending_checkpoint"]["artifact_ref"], response["pending_checkpoint"]["artifact_ref"])
+
+    def test_revalidate_paused_design_supersedes_stale_call_and_validates_existing_graph_first(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        workflow = PhaseTwoWorkflow(self.settings)
+        workflow.approve_checkpoint(run_id=run_id)
+        run_dir = workflow.store.run_dir(run_id)
+        review_dir = run_dir / "designer_execution" / "design_v99" / "input_step_review"
+        review_dir.mkdir(parents=True)
+        exchange_path = review_dir / "exchange_designer-input-0001-a01.json"
+        stale_call = {
+            "call_id": "designer-input-0001-a01",
+            "ordinal": 1,
+            "attempt": 1,
+            "status": "input_pending",
+        }
+        exchange_path.write_text(json.dumps(stale_call), encoding="utf-8")
+        (review_dir / "step_review_session_v1.json").write_text(
+            json.dumps({"calls": [stale_call]}),
+            encoding="utf-8",
+        )
+        state = workflow.store.read_state(run_id)
+        state.update(
+            {
+                "current_phase": "design_investigating",
+                "status": "design_paused",
+                "designer_repair_feedback": [
+                    {
+                        "id": "STALE-001",
+                        "category": "obsolete_policy",
+                        "severity": "blocking",
+                    }
+                ],
+                "designer_execution": {
+                    "status": "review_required",
+                    "session_ordinal": 99,
+                    "design_version": 2,
+                    "pending_step_review": {
+                        "call_id": "designer-input-0001-a01-input",
+                        "exchange_path": str(exchange_path),
+                        "review_stage": "input",
+                    },
+                },
+            }
+        )
+        workflow.store.write_state(state)
+
+        with patch.object(
+            DesignerToolLoopExecutor,
+            "execute",
+            side_effect=AssertionError("Designer must not run before revalidation"),
+        ):
+            paused = PhaseTwoWorkflow(
+                replace(self.settings, design_validation_trials=1),
+                designer_step_review={"enabled": True, "review_input": True},
+            ).revalidate_design(run_id=run_id)
+
+        self.assertEqual(paused["status"], "design_paused", paused)
+        self.assertEqual(paused["last_error"]["error_code"], "design_validator_step_review_required")
+        latest_state = workflow.store.read_state(run_id)
+        self.assertEqual(latest_state["designer_repair_feedback"], [])
+        pending = latest_state["designer_execution"]["validator_step_review"]
+        self.assertIn("design_validator_execution", str(pending["exchange_path"]))
+        stale_session = json.loads(
+            (review_dir / "step_review_session_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(stale_session["calls"][0]["status"], "superseded")
+
+        with patch.object(
+            DesignerToolLoopExecutor,
+            "execute",
+            side_effect=AssertionError("Designer must not run while resuming Validator"),
+        ):
+            paused_output = PhaseTwoWorkflow(
+                replace(self.settings, design_validation_trials=1),
+                designer_step_review={
+                    "enabled": True,
+                    "review_input": True,
+                    "call_id": pending["call_id"],
+                    "decision": "approve",
+                },
+            ).continue_design(run_id=run_id)
+
+        self.assertEqual(paused_output["status"], "design_paused", paused_output)
+        output_review = workflow.store.read_state(run_id)["designer_execution"][
+            "validator_step_review"
+        ]
+        self.assertEqual(output_review["review_stage"], "output")
 
     def test_design_validator_step_review_pauses_and_replays_approved_output(self) -> None:
         settings = replace(self.settings, design_validation_trials=1)

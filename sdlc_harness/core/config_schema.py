@@ -20,6 +20,32 @@ PHASE1_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     "clarification": {"label": "Clarification update", "effort": "high", "max_tokens": 16384, "timeout": 180},
     "clarification_repair": {"label": "Clarification repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
 }
+PHASE2_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "designer_investigation": {
+        "label": "Designer investigation",
+        "effort": "low",
+        "max_tokens": 8192,
+        "timeout": 180,
+    },
+    "designer_delta": {
+        "label": "Designer graph delta",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 300,
+    },
+    "designer_repair": {
+        "label": "Designer repair",
+        "effort": "max",
+        "max_tokens": 65536,
+        "timeout": 600,
+    },
+    "design_validator": {
+        "label": "Design semantic validator",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 300,
+    },
+}
 
 
 def _field(
@@ -102,6 +128,51 @@ def _phase1_llm_fields() -> tuple[dict[str, object], ...]:
     return tuple(fields)
 
 
+def _phase2_llm_fields() -> tuple[dict[str, object], ...]:
+    fields: list[dict[str, object]] = []
+    for profile_name, defaults in PHASE2_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE2_{profile_name.upper()}"
+        label = str(defaults["label"])
+        fields.extend(
+            (
+                _field(
+                    f"{prefix}_MODEL",
+                    f"{label} model",
+                    "string",
+                    "",
+                    "Để trống để dùng SDLC_LLM_MODEL; có thể chọn model riêng cho call này.",
+                ),
+                _field(
+                    f"{prefix}_THINKING_EFFORT",
+                    f"{label} thinking",
+                    "enum",
+                    defaults["effort"],
+                    "Mức reasoning riêng cho call Phase 2.",
+                    options=("none", "low", "high", "max"),
+                ),
+                _field(
+                    f"{prefix}_MAX_TOKENS",
+                    f"{label} max tokens",
+                    "integer",
+                    defaults["max_tokens"],
+                    "Trần output gồm cả reasoning và JSON cuối.",
+                    minimum=1024,
+                    maximum=384000,
+                ),
+                _field(
+                    f"{prefix}_TIMEOUT_SECONDS",
+                    f"{label} timeout",
+                    "integer",
+                    defaults["timeout"],
+                    "Timeout riêng cho call Phase 2, tính bằng giây.",
+                    minimum=1,
+                    maximum=1800,
+                ),
+            )
+        )
+    return tuple(fields)
+
+
 CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
     {
         "id": "api",
@@ -149,7 +220,11 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_DEVELOPER_MAX_ACTION_RETRIES", "Action retries", "integer", 2, "Số lần thử lại action lỗi hoặc bị cắt.", minimum=0),
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 3, "Số vòng Designer sửa design.", minimum=0),
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
-            _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call budget", "integer", 28, "Ngân sách call LLM cho design validation và repo-aware Designer loop.", minimum=1),
+            _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call hard cap", "integer", 128, "Cầu dao tổng cho call LLM của Phase 2; action Designer còn được giới hạn theo policy bên dưới.", minimum=1),
+            _field("SDLC_DESIGNER_PARTITION_ACTION_BUDGET", "Designer actions per partition", "integer", 8, "Số action tối đa cho mỗi scenario/component partition; partition mới bắt đầu bộ đếm riêng.", minimum=1),
+            _field("SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET", "Designer repair actions per scenario", "integer", 4, "Số action dành riêng cho nối graph và repair của mỗi scenario.", minimum=0),
+            _field("SDLC_DESIGNER_FINALIZATION_ACTION_BUDGET", "Designer finalization actions", "integer", 4, "Số action dự phòng để hoàn tất toàn bộ Design sau các partition.", minimum=0),
+            _field("SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP", "Designer global action hard cap", "integer", 128, "Chặn trước khi chạy nếu ngân sách tính từ số partition/scenario vượt ngưỡng vận hành này.", minimum=1),
             _field(
                 "SDLC_DESIGNER_CONTRACT_VERSION",
                 "Designer contract",
@@ -178,6 +253,43 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
         "label": "Phase 1 LLM",
         "description": "Model, thinking effort, output budget và timeout theo từng loại call Requirement.",
         "fields": _phase1_llm_fields(),
+    },
+    {
+        "id": "phase2_llm",
+        "label": "Phase 2 LLM",
+        "description": "Model, thinking effort, output budget và timeout theo từng loại call Design.",
+        "fields": _phase2_llm_fields(),
+    },
+    {
+        "id": "phase2_tools",
+        "label": "Phase 2 tools",
+        "description": "CodeGraph và UI/UX guidance cho repo-aware Designer.",
+        "fields": (
+            _field(
+                "SDLC_UIUX_SKILL_MODE",
+                "UI/UX skill mode",
+                "enum",
+                "off",
+                "Off giữ hành vi cũ; enforce bắt buộc guidance cho UI partition của run mới.",
+                options=("off", "enforce"),
+            ),
+            _field(
+                "SDLC_UIUX_SKILL_ROOT",
+                "UI/UX skill root",
+                "path",
+                "",
+                "Thư mục chứa scripts/search.py của ui-ux-pro-max; không được công khai trong artifact.",
+            ),
+            _field(
+                "SDLC_UIUX_SKILL_TIMEOUT_SECONDS",
+                "UI/UX skill timeout",
+                "integer",
+                30,
+                "Timeout cho một lượt search read-only.",
+                minimum=1,
+                maximum=300,
+            ),
+        ),
     },
     {
         "id": "target",
