@@ -181,6 +181,11 @@ def test_semantic_validator_uses_its_phase2_llm_profile() -> None:
     prompt = str(client.calls[0]["prompt"])
     assert "neither the UI contract nor the interaction path represents that confirmation" in prompt
     assert "Do not require a preliminary backend verification round trip" in prompt
+    assert "A business rule does not imply backend placement" in prompt
+    assert "a call into another application requires an explicit API/transport surface" in prompt
+    assert 'ref must be an exact Requirement ID from requirement_ids' in prompt
+    assert 'never a composite claim_id such as "SC-1:MF-1"' in prompt
+    assert 'ref must be an exact VDN-* or VDE-* ID' in prompt
     assert "return-to-human and separate confirmation interaction" not in prompt
 
 

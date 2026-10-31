@@ -203,6 +203,8 @@ def normalize_typescript_type(value: object) -> str:
 
     text = re.sub(r"\s+", " ", str(value or "").strip())
     text = re.sub(r"\s*([<>{}\[\](),|&?:])\s*", r"\1", text)
+    # TypeScript permits the final object member separator to be omitted.
+    text = re.sub(r";(?=})", "", text)
     return text
 
 

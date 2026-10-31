@@ -15,6 +15,7 @@ import re
 from typing import Any
 
 from ..requirements import RequirementModelV2
+from ...core.config import phase3_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
@@ -106,12 +107,14 @@ class DeveloperPlanAgent:
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
         )
-        raw = self.llm_client.complete(
+        raw = _complete_phase3_json(
+            self.llm_client,
             system=(
                 "You are SDLC Harness Developer.plan. Return JSON only. "
                 "Create a concrete implementation plan, but do not write code."
             ),
             prompt=prompt,
+            profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
         )
         try:
             return _parse_developer_plan_payload(raw)
@@ -957,17 +960,44 @@ class DeveloperPlanAgent:
             repair_feedback=repair_feedback,
             previous_review=previous_review,
         )
-        raw = self.llm_client.complete(
+        raw = _complete_phase3_json(
+            self.llm_client,
             system=(
                 "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
                 "Return JSON only and never change Harness-owned work-unit identity."
             ),
             prompt=prompt,
+            profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
         )
         try:
             return _parse_component_plan_payload(raw)
         except HarnessError as exc:
             return {"_developer_llm_parse_error": exc.message}
+
+
+def _complete_phase3_json(
+    llm_client: Any,
+    *,
+    system: str,
+    prompt: str,
+    profile_name: str,
+) -> str:
+    complete_with_metadata = getattr(llm_client, "complete_with_metadata", None)
+    if callable(complete_with_metadata):
+        settings = getattr(llm_client, "settings", None)
+        fallback_max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
+        completion = complete_with_metadata(
+            system=system,
+            prompt=prompt,
+            json_mode=True,
+            **phase3_llm_call_options(
+                settings,
+                profile_name,
+                fallback_max_tokens=fallback_max_tokens,
+            ),
+        )
+        return str(completion.content)
+    return str(llm_client.complete(system=system, prompt=prompt))
 
 
 def _component_plan_prompt(
@@ -1093,6 +1123,16 @@ Rules:
 - Treat each work unit's `surface_contracts` as immutable approved behavior. For UI work,
   make the objective, targets, and tests realize its component structure, feedback,
   accessibility, responsive behavior, focus flow, and guidance references.
+- A UI objective is only executable when it names every non-empty experience-contract
+  category. Map focus/navigation, accessibility, responsive rules, feedback, data source,
+  authentication, and runtime attachment to exact code and test targets instead of hiding
+  them behind a happy-path summary.
+- Do not claim responsive coverage from CSS class names without an owned or verified style
+  implementation. Do not claim interaction/focus coverage from static markup alone; use the
+  repository's actual DOM-capable test convention or report the plan as non-executable.
+- For every boundary, identify the owner of required auth and input mappings plus the caller
+  that supplies them. A completed dependency ID without its component/surface/artifacts is
+  not sufficient execution evidence.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
   wiring, except approved shared-contract files and data schema/migration artifacts.
 - When Web and API cross a boundary and the profile has a contracts component, add an

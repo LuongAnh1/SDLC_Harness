@@ -598,6 +598,30 @@ def test_typescript_signature_comparator_only_normalizes_whitespace(policies) ->
     assert [item["type"] for item in findings] == ["contract_signature_mismatch"]
 
 
+def test_typescript_signature_comparator_ignores_optional_final_object_member_semicolon(
+    policies,
+) -> None:
+    planning, _ = policies
+    contract = copy.deepcopy(_contract(planning))
+    contract["entries"][0]["parameters"][0]["type"] = (
+        "FastifyRequest<{ Params: { culturalHeritageId: string }; "
+        "Body: { confirmed: boolean } }>"
+    )
+    contract["digest"] = implementation_signature_contract_digest(contract)
+    actual = _actual_symbol()
+    actual["parameters"][0]["type"] = (
+        "FastifyRequest<{\n"
+        "  Params: { culturalHeritageId: string };\n"
+        "  Body: { confirmed: boolean };\n"
+        "}>"
+    )
+
+    assert deterministic_typescript_contract_findings(
+        work_packet={"implementation_signature_contract": contract},
+        ast_evidence=_evidence(planning, [actual]),
+    ) == []
+
+
 def test_typescript_signature_comparator_requires_exact_qualified_owner(policies) -> None:
     planning, _ = policies
     actual = _actual_symbol()

@@ -46,6 +46,42 @@ PHASE2_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "timeout": 300,
     },
 }
+PHASE3_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "developer_plan": {
+        "label": "Implementation plan developer",
+        "effort": "high",
+        "max_tokens": 49152,
+        "timeout": 420,
+    },
+    "plan_validator": {
+        "label": "Implementation plan semantic validator",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 300,
+    },
+    "developer_repair": {
+        "label": "Implementation plan developer repair",
+        "effort": "max",
+        "max_tokens": 65536,
+        "timeout": 600,
+    },
+}
+PHASE4_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "developer_action": {
+        "label": "Developer action",
+        "model": "deepseek-flash",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 600,
+    },
+    "developer_repair": {
+        "label": "Developer repair action",
+        "model": "deepseek-flash",
+        "effort": "max",
+        "max_tokens": 32768,
+        "timeout": 600,
+    },
+}
 
 
 def _field(
@@ -173,6 +209,96 @@ def _phase2_llm_fields() -> tuple[dict[str, object], ...]:
     return tuple(fields)
 
 
+def _phase3_llm_fields() -> tuple[dict[str, object], ...]:
+    fields: list[dict[str, object]] = []
+    for profile_name, defaults in PHASE3_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE3_{profile_name.upper()}"
+        label = str(defaults["label"])
+        fields.extend(
+            (
+                _field(
+                    f"{prefix}_MODEL",
+                    f"{label} model",
+                    "string",
+                    "",
+                    "Để trống để dùng SDLC_LLM_MODEL; có thể chọn model riêng cho call này.",
+                ),
+                _field(
+                    f"{prefix}_THINKING_EFFORT",
+                    f"{label} thinking",
+                    "enum",
+                    defaults["effort"],
+                    "Mức reasoning riêng cho call Phase 3.",
+                    options=("none", "low", "high", "max"),
+                ),
+                _field(
+                    f"{prefix}_MAX_TOKENS",
+                    f"{label} max tokens",
+                    "integer",
+                    defaults["max_tokens"],
+                    "Trần output gồm cả reasoning và JSON cuối.",
+                    minimum=1024,
+                    maximum=384000,
+                ),
+                _field(
+                    f"{prefix}_TIMEOUT_SECONDS",
+                    f"{label} timeout",
+                    "integer",
+                    defaults["timeout"],
+                    "Timeout riêng cho call Phase 3, tính bằng giây.",
+                    minimum=1,
+                    maximum=1800,
+                ),
+            )
+        )
+    return tuple(fields)
+
+
+def _phase4_llm_fields() -> tuple[dict[str, object], ...]:
+    fields: list[dict[str, object]] = []
+    for profile_name, defaults in PHASE4_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE4_{profile_name.upper()}"
+        label = str(defaults["label"])
+        fields.extend(
+            (
+                _field(
+                    f"{prefix}_MODEL",
+                    f"{label} model",
+                    "string",
+                    defaults["model"],
+                    "Model riêng cho call Developer Phase 4; có thể cấu hình lại ở runtime.",
+                ),
+                _field(
+                    f"{prefix}_THINKING_EFFORT",
+                    f"{label} thinking",
+                    "enum",
+                    defaults["effort"],
+                    "Mức reasoning riêng cho call Developer Phase 4.",
+                    options=("none", "low", "high", "max"),
+                ),
+                _field(
+                    f"{prefix}_MAX_TOKENS",
+                    f"{label} max tokens",
+                    "integer",
+                    defaults["max_tokens"],
+                    "Trần output gồm cả reasoning và JSON action cuối.",
+                    minimum=1024,
+                    maximum=384000,
+                ),
+                _field(
+                    f"{prefix}_TIMEOUT_SECONDS",
+                    f"{label} timeout",
+                    "integer",
+                    defaults["timeout"],
+                    "Timeout riêng cho call Developer Phase 4, tính bằng giây.",
+                    minimum=1,
+                    maximum=1800,
+                ),
+            )
+        )
+    return tuple(fields)
+
+
 CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
     {
         "id": "api",
@@ -217,7 +343,10 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS", "Requirement tool actions", "integer", 12, "Số action tối đa cho Requirement source loop.", minimum=3),
             _field("SDLC_REQUIREMENT_MAX_ACTION_RETRIES", "Requirement action retries", "integer", 2, "Số lần thử lại action Requirement sai hoặc bị cắt.", minimum=0),
             _field("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM", "Actions per item", "integer", 24, "Số action tối đa cho mỗi work item.", minimum=1),
+            _field("SDLC_DEVELOPER_VERIFICATION_REPAIR_ACTION_RESERVE", "Verification repair reserve", "integer", 6, "Số action dự phòng được mở một lần sau khi verification phát hiện lỗi implementation.", minimum=0),
             _field("SDLC_DEVELOPER_MAX_ACTION_RETRIES", "Action retries", "integer", 2, "Số lần thử lại action lỗi hoặc bị cắt.", minimum=0),
+            _field("SDLC_DEVELOPER_PACKAGE_TOOL_TIMEOUT_SECONDS", "Package tool timeout", "integer", 120, "Timeout cho npm workspace dependency tool.", minimum=1),
+            _field("SDLC_DEVELOPER_WORKING_MEMORY_EVIDENCE_CHARS", "Working-memory evidence chars", "integer", 96000, "Ngân sách ký tự cho source evidence trong mỗi Developer input.", minimum=8000),
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 3, "Số vòng Designer sửa design.", minimum=0),
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
             _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call hard cap", "integer", 128, "Cầu dao tổng cho call LLM của Phase 2; action Designer còn được giới hạn theo policy bên dưới.", minimum=1),
@@ -233,6 +362,9 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Pin V1 mặc định; chỉ bật V2 có chủ đích cho controlled L3.8 run trước cutover.",
                 options=("vertical_design_graph_v1", "vertical_design_graph_v2"),
             ),
+            _field("SDLC_DESIGN_STEP_REVIEW_ENABLED", "Pause Design LLM steps", "boolean", False, "Dừng Phase 2 tại từng input/output LLM để người vận hành kiểm tra."),
+            _field("SDLC_DESIGN_STEP_REVIEW_INPUT_ENABLED", "Review Design LLM input", "boolean", True, "Dừng trước khi gửi từng input LLM của Phase 2."),
+            _field("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED", "Review Design LLM output", "boolean", True, "Dừng sau khi nhận từng output LLM của Phase 2."),
             _field(
                 "SDLC_VERTICAL_TRACE_MODE",
                 "Vertical trace mode",
@@ -242,6 +374,9 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 options=("shadow", "enforce"),
             ),
             _field("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", "Plan repair limit", "integer", 2, "Số vòng sửa implementation plan.", minimum=0),
+            _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED", "Pause implementation-plan LLM steps", "boolean", False, "Dừng Phase 3 tại từng input/output LLM để người vận hành kiểm tra."),
+            _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED", "Review implementation-plan LLM input", "boolean", True, "Dừng trước khi gửi từng input LLM của Phase 3."),
+            _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED", "Review implementation-plan LLM output", "boolean", True, "Dừng sau khi nhận từng output LLM của Phase 3."),
             _field("SDLC_IMPLEMENTATION_REPAIR_LIMIT", "Implementation repair limit", "integer", 2, "Số vòng Developer, Verification và Validator.", minimum=0),
             _field("SDLC_IMPLEMENTATION_VALIDATION_TRIALS", "Implementation validation trials", "integer", 3, "Số semantic trial của Code Validator.", minimum=2),
             _field("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET", "Implementation call budget", "integer", 6, "Ngân sách call cho Code Validator.", minimum=2),
@@ -259,6 +394,18 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
         "label": "Phase 2 LLM",
         "description": "Model, thinking effort, output budget và timeout theo từng loại call Design.",
         "fields": _phase2_llm_fields(),
+    },
+    {
+        "id": "phase3_llm",
+        "label": "Phase 3 LLM",
+        "description": "Model, thinking effort, output budget và timeout theo từng loại call Implementation Plan.",
+        "fields": _phase3_llm_fields(),
+    },
+    {
+        "id": "phase4_llm",
+        "label": "Phase 4 Developer LLM",
+        "description": "Model, thinking effort, output budget và timeout cho Developer action và repair.",
+        "fields": _phase4_llm_fields(),
     },
     {
         "id": "phase2_tools",

@@ -122,6 +122,44 @@ class RuntimeConfigTests(unittest.TestCase):
 
         self.assertEqual(settings.vertical_trace_mode, "enforce")
 
+    def test_implementation_plan_step_review_defaults_and_overrides(self) -> None:
+        default = load_settings(root=self.root, runtime_root=self.runtime_root)
+        overridden = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED": "1",
+                "SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED": "0",
+                "SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED": "1",
+            },
+        )
+
+        self.assertFalse(default.implementation_plan_step_review_enabled)
+        self.assertTrue(default.implementation_plan_step_review_input_enabled)
+        self.assertTrue(default.implementation_plan_step_review_output_enabled)
+        self.assertTrue(overridden.implementation_plan_step_review_enabled)
+        self.assertFalse(overridden.implementation_plan_step_review_input_enabled)
+        self.assertTrue(overridden.implementation_plan_step_review_output_enabled)
+
+    def test_design_step_review_defaults_and_overrides(self) -> None:
+        default = load_settings(root=self.root, runtime_root=self.runtime_root)
+        overridden = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_DESIGN_STEP_REVIEW_ENABLED": "1",
+                "SDLC_DESIGN_STEP_REVIEW_INPUT_ENABLED": "0",
+                "SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED": "1",
+            },
+        )
+
+        self.assertFalse(default.design_step_review_enabled)
+        self.assertTrue(default.design_step_review_input_enabled)
+        self.assertTrue(default.design_step_review_output_enabled)
+        self.assertTrue(overridden.design_step_review_enabled)
+        self.assertFalse(overridden.design_step_review_input_enabled)
+        self.assertTrue(overridden.design_step_review_output_enabled)
+
     def test_invalid_thinking_mode_from_non_api_source_falls_back_to_disabled(self) -> None:
         (self.root / ".env").write_text(
             "SDLC_LLM_THINKING_MODE=unexpected\n",
@@ -184,6 +222,72 @@ class RuntimeConfigTests(unittest.TestCase):
         )
         self.assertEqual(settings.phase2_llm_profiles["designer_repair"].timeout_seconds, 600)
         self.assertEqual(settings.phase2_llm_profiles["design_validator"].max_tokens, 32768)
+
+    def test_phase3_llm_profiles_have_long_running_defaults_and_individual_overrides(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODEL": "global-model",
+                "SDLC_PHASE3_DEVELOPER_PLAN_MODEL": "plan-model",
+                "SDLC_PHASE3_DEVELOPER_REPAIR_THINKING_EFFORT": "high",
+                "SDLC_PHASE3_DEVELOPER_REPAIR_MAX_TOKENS": "49152",
+                "SDLC_PHASE3_DEVELOPER_REPAIR_TIMEOUT_SECONDS": "480",
+            },
+        )
+
+        plan = settings.phase3_llm_profiles["developer_plan"]
+        validator = settings.phase3_llm_profiles["plan_validator"]
+        repair = settings.phase3_llm_profiles["developer_repair"]
+        self.assertEqual(
+            (plan.model, plan.thinking_effort, plan.max_tokens, plan.timeout_seconds),
+            ("plan-model", "high", 49152, 420),
+        )
+        self.assertEqual(
+            (validator.model, validator.thinking_effort, validator.max_tokens, validator.timeout_seconds),
+            ("global-model", "high", 32768, 300),
+        )
+        self.assertEqual(
+            (repair.model, repair.thinking_effort, repair.max_tokens, repair.timeout_seconds),
+            ("global-model", "high", 49152, 480),
+        )
+
+    def test_phase4_llm_profiles_have_action_and_repair_defaults_with_individual_overrides(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime_root,
+            overrides={
+                "SDLC_LLM_MODEL": "global-model",
+                "SDLC_PHASE4_DEVELOPER_ACTION_MODEL": "action-model",
+                "SDLC_PHASE4_DEVELOPER_REPAIR_THINKING_EFFORT": "high",
+                "SDLC_PHASE4_DEVELOPER_REPAIR_MAX_TOKENS": "32768",
+                "SDLC_PHASE4_DEVELOPER_REPAIR_TIMEOUT_SECONDS": "480",
+            },
+        )
+
+        action_profile = settings.phase4_llm_profiles["developer_action"]
+        repair_profile = settings.phase4_llm_profiles["developer_repair"]
+        self.assertEqual(
+            (
+                action_profile.model,
+                action_profile.thinking_effort,
+                action_profile.max_tokens,
+                action_profile.timeout_seconds,
+            ),
+            ("action-model", "high", 32768, 600),
+        )
+        self.assertEqual(
+            (
+                repair_profile.model,
+                repair_profile.thinking_effort,
+                repair_profile.max_tokens,
+                repair_profile.timeout_seconds,
+            ),
+            ("deepseek-flash", "high", 32768, 480),
+        )
+        fields = config_field_index()
+        self.assertIn("SDLC_PHASE4_DEVELOPER_ACTION_MAX_TOKENS", fields)
+        self.assertIn("SDLC_PHASE4_DEVELOPER_REPAIR_TIMEOUT_SECONDS", fields)
 
     def test_unknown_project_profile_from_non_api_sources_fails_closed(self) -> None:
         with patch.dict(os.environ, {}, clear=True):

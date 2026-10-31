@@ -10,10 +10,12 @@ import subprocess
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from sdlc_harness.agents.developer.execution import (
     DeveloperExecutionError,
     DeveloperToolLoopExecutor,
+    _developer_action_limit,
     _action_memory,
     _action_prompt,
     _build_manifest,
@@ -21,17 +23,21 @@ from sdlc_harness.agents.developer.execution import (
     _current_mutated_sources,
     _database_entrypoint_journal_reopen_ids,
     _diagnostic_repeat_count,
+    _execute_action,
     _execution_phase,
     _merge_context_only_manifest,
     _merge_database_entrypoint_scope_manifest,
+    _merge_dependency_manifest_scope_manifest,
     _new_journal,
     _new_test_context_policy_error,
     _parse_action,
     _prior_attempt_feedback,
     _prepare_patch_text,
     _reopen_database_entrypoint_items,
+    _search_code,
     _selected_repair_paths,
     _step_review_start_ordinal,
+    _supersede_pending_step_review,
     _timeout_diagnostic_completion_error,
     _timeout_diagnostic_action_limit,
     _timeout_diagnostic_state,
@@ -44,6 +50,7 @@ from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.profiles import VerificationStagePolicy
+from sdlc_harness.repo_context import CodeGraphContextProvider
 from sdlc_harness.storage.runtime import RuntimeStore
 
 
@@ -52,8 +59,10 @@ class ScriptedLlm:
         self.responses = list(responses)
         self.prompts: list[str] = []
         self.systems: list[str] = []
+        self.calls: list[dict[str, object]] = []
 
     def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.calls.append(dict(kwargs))
         self.systems.append(str(kwargs.get("system") or ""))
         self.prompts.append(str(kwargs.get("prompt") or ""))
         if not self.responses:
@@ -97,8 +106,120 @@ class DeveloperToolLoopTest(unittest.TestCase):
             },
         )
 
+    def test_pending_package_dependency_forces_only_approved_package_action(self) -> None:
+        rejected = _action_policy_error(
+            action={"action": "repo.read", "arguments": {"path": "node_modules/@example/db"}},
+            history=[],
+            seen_observations=set(),
+            mutated=False,
+            action_index=1,
+            max_actions=8,
+            pending_package_dependency_ids=["DEP-EXAMPLE"],
+        )
+        allowed = _action_policy_error(
+            action={
+                "action": "package.ensure_workspace_dependency",
+                "arguments": {"dependency_id": "DEP-EXAMPLE"},
+            },
+            history=[],
+            seen_observations=set(),
+            mutated=False,
+            action_index=1,
+            max_actions=8,
+            pending_package_dependency_ids=["DEP-EXAMPLE"],
+        )
+
+        self.assertEqual(rejected["error"], "package_dependency_required")
+        self.assertEqual(allowed, None)
+
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_repo_search_prunes_generated_state_but_allows_one_dependency_package(self) -> None:
+        source = self.repo / "src" / "app.ts"
+        dependency = self.repo / "node_modules" / "@example" / "client" / "index.d.ts"
+        graph_state = self.repo / ".codegraph" / "metadata.json"
+        source.parent.mkdir(parents=True)
+        dependency.parent.mkdir(parents=True)
+        graph_state.parent.mkdir(parents=True)
+        source.write_text("const sourceSignal = 'ETOUR';\n", encoding="utf-8")
+        dependency.write_text("export type DependencySignal = string;\n", encoding="utf-8")
+        graph_state.write_text('{"GraphSignal": true}\n', encoding="utf-8")
+
+        source_result = _search_code(self.repo, {"query": "ETOUR"}, run_id="run-search")
+        default_dependency_result = _search_code(
+            self.repo,
+            {"query": "DependencySignal"},
+            run_id="run-search",
+        )
+        scoped_dependency_result = _search_code(
+            self.repo,
+            {"query": "DependencySignal", "prefix": "node_modules/@example/client"},
+            run_id="run-search",
+        )
+        broad_dependency_result = _search_code(
+            self.repo,
+            {"query": "DependencySignal", "prefix": "node_modules"},
+            run_id="run-search",
+        )
+        graph_result = _search_code(
+            self.repo,
+            {"query": "GraphSignal", "prefix": ".codegraph"},
+            run_id="run-search",
+        )
+
+        self.assertEqual([hit["path"] for hit in source_result["hits"]], ["src/app.ts"])
+        self.assertEqual(default_dependency_result["hits"], [])
+        self.assertEqual(
+            [hit["path"] for hit in scoped_dependency_result["hits"]],
+            ["node_modules/@example/client/index.d.ts"],
+        )
+        self.assertEqual(broad_dependency_result["error"], "dependency_search_scope_required")
+        self.assertEqual(graph_result["error"], "codegraph_search_not_supported")
+
+    def test_repo_search_stops_at_the_file_scan_limit(self) -> None:
+        source_dir = self.repo / "src"
+        source_dir.mkdir()
+        (source_dir / "a.ts").write_text("const first = true;\n", encoding="utf-8")
+        (source_dir / "b.ts").write_text("const second = 'target';\n", encoding="utf-8")
+
+        with patch(
+            "sdlc_harness.agents.developer.execution._SEARCH_MAX_SCANNED_FILES",
+            1,
+        ):
+            result = _search_code(self.repo, {"query": "target"}, run_id="run-search")
+
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["truncation_reason"], "file_limit")
+        self.assertEqual(result["hits"], [])
+
+    def test_codegraph_symbols_accepts_file_scope(self) -> None:
+        (self.repo / ".codegraph").mkdir()
+
+        result = _execute_action(
+            action={
+                "action": "codegraph.query",
+                "arguments": {
+                    "operation": "symbols",
+                    "file": "src/Main.ts",
+                    "limit": 80,
+                },
+            },
+            run_id="run-codegraph-symbols-file",
+            work_packet={},
+            repo_root=self.repo,
+            item_paths=["src/Main.ts"],
+            item={"required_stage_ids": []},
+            session_dir=self.runtime,
+            max_write_chars=18_000,
+            repo_context_provider=CodeGraphContextProvider(fake_mode=True),
+            verification_runner=SimpleNamespace(),
+            verification_policy=None,
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["operation"], "symbols")
+        self.assertEqual(result["resolved_operation"], "node")
 
     def work_packet(self) -> dict[str, object]:
         paths = ["src/Main.java", "src/MainTest.java"]
@@ -524,6 +645,33 @@ class DeveloperToolLoopTest(unittest.TestCase):
             24,
         )
 
+    def test_verification_repair_reserve_stays_active_after_repaired_stage_passes(self) -> None:
+        history = [
+            {
+                "action": "verification.run_stage",
+                "result": {
+                    "stage_id": "typecheck",
+                    "status": "failed",
+                    "failure_kind": "implementation",
+                },
+            },
+            {"action": "repo.replace_text", "result": {"ok": True, "path": "src/Main.ts"}},
+            {
+                "action": "verification.run_stage",
+                "result": {"stage_id": "typecheck", "status": "passed", "failure_kind": ""},
+            },
+        ]
+
+        self.assertEqual(
+            _developer_action_limit(
+                configured_max_actions=24,
+                timeout_action_reserve=6,
+                verification_repair_action_reserve=6,
+                history=history,
+            ),
+            30,
+        )
+
     def test_step_review_new_attempt_continues_after_approved_history(self) -> None:
         session_path = self.repo / "step_review_session_v1.json"
         session_path.write_text(
@@ -549,26 +697,64 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
     def test_step_review_pending_exchange_keeps_resume_cursor(self) -> None:
         session_path = self.repo / "step_review_session_v1.json"
-        session_path.write_text(
+        for status in ("input_pending", "input_approved", "pending"):
+            with self.subTest(status=status):
+                session_path.write_text(
+                    json.dumps(
+                        {
+                            "calls": [
+                                {"ordinal": 24, "status": "approved"},
+                                {"ordinal": 25, "status": status},
+                            ]
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    _step_review_start_ordinal(
+                        session_path=session_path,
+                        requested_cursor=24,
+                        run_id="run-test",
+                    ),
+                    24,
+                )
+
+    def test_scope_migration_supersedes_input_pending_exchange(self) -> None:
+        session_dir = self.repo / "developer_execution" / "act_v1"
+        review_dir = session_dir / "step_review" / "wu-api"
+        review_dir.mkdir(parents=True)
+        review_file = review_dir / "step_review_session_v1.json"
+        review_file.write_text(
             json.dumps(
                 {
                     "calls": [
-                        {"ordinal": 24, "status": "approved"},
-                        {"ordinal": 25, "status": "pending"},
+                        {
+                            "call_id": "developer-wu-api-0005-a01",
+                            "ordinal": 5,
+                            "status": "input_pending",
+                        }
                     ]
                 }
             ),
             encoding="utf-8",
         )
+        journal = {
+            "pending_step_review": {
+                "call_id": "developer-wu-api-0005-a01-input",
+            }
+        }
 
-        self.assertEqual(
-            _step_review_start_ordinal(
-                session_path=session_path,
-                requested_cursor=24,
-                run_id="run-test",
-            ),
-            24,
+        _supersede_pending_step_review(
+            session_dir=session_dir,
+            journal=journal,
+            reason="package_dependency_scope_reopened",
         )
+
+        updated = json.loads(review_file.read_text(encoding="utf-8"))
+        self.assertEqual(updated["calls"][0]["status"], "superseded")
+        self.assertNotIn("pending_step_review", journal)
+        self.assertTrue((review_dir / "exchange_developer-wu-api-0005-a01.json").is_file())
 
     def test_patch_hunk_count_mismatch_is_rejected_before_git_apply(self) -> None:
         with self.assertRaises(HarnessError) as caught:
@@ -660,6 +846,11 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(context["test_authoring_policy"]["new_test_targets"], ["src/Main.test.ts"])
         self.assertIn("rules", context["test_authoring_policy"])
         self.assertIn("shape-only fake", prompt)
+        self.assertIn("codegraph.query", prompt)
+        self.assertIn("affected_tests", prompt)
+        self.assertIn("never expands execution_unit_contract.write_paths", prompt)
+        available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
+        self.assertNotIn("package.ensure_workspace_dependency", available)
 
     def test_repair_episode_survives_mutations_until_the_failed_stage_passes(self) -> None:
         failed = {
@@ -803,6 +994,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
         return packet
 
     def test_unit_aware_execution_uses_plan_units_and_durable_session(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["component_id"] = "api"
+        packet["execution_units"][0]["surfaces"] = ["api"]
         llm = ScriptedLlm(
             [
                 action(
@@ -836,7 +1030,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         result = self.executor(llm).execute(
             run_id="run_units",
-            work_packet=self.unit_packet(),
+            work_packet=packet,
             target_path=self.repo,
         )
 
@@ -853,18 +1047,388 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("The action is not executed until the Harness returns its tool result", llm.systems[0])
         self.assertIn("end the response immediately", llm.prompts[0])
         self.assertIn("Treat authoritative_sources as the single verified current", llm.prompts[0])
-        source_unit = self.unit_packet()["execution_units"][0]
+        self.assertEqual(llm.calls[0]["model"], "deepseek-flash")
+        self.assertEqual(llm.calls[0]["reasoning_effort"], "high")
+        self.assertEqual(llm.calls[0]["max_tokens"], 32768)
+        self.assertEqual(llm.calls[0]["timeout_seconds"], 600)
+        source_unit = packet["execution_units"][0]
         execution_context = json.loads(llm.prompts[0].split("Execution context:\n", 1)[1])
         prompt_contract = execution_context["execution_unit_contract"]
-        for field in (
-            "planned_code_targets",
-            "migration_impact",
-            "runtime_bindings",
-            "boundary_contracts",
-        ):
+        for field in ("planned_code_targets", "migration_impact"):
             self.assertEqual(manifest["items"][0][field], source_unit[field])
             self.assertEqual(prompt_contract[field], source_unit[field])
+        self.assertEqual(
+            prompt_contract["behavior_contract_source"],
+            "active_focus.mandatory_obligations",
+        )
+        for field in ("runtime_bindings", "boundary_contracts", "surface_contracts"):
+            self.assertNotIn(field, prompt_contract)
         self.assertNotIn("boundary_contracts", execution_context["execution_task"])
+        dependency_context = json.loads(llm.prompts[2].split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            dependency_context["dependency_receipts"],
+            [
+                {
+                    "unit_id": "WU-001",
+                    "status": "completed",
+                    "title": "Implement behavior",
+                    "component_id": "api",
+                    "surfaces": ["api"],
+                    "write_paths": ["src/Main.java"],
+                    "planned_code_targets": source_unit["planned_code_targets"],
+                }
+            ],
+        )
+        self.assertIn("Parameter names are evidence rather than contract", llm.prompts[0])
+
+    def test_completion_requires_test_target_mutation_for_test_intents(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        unit["write_paths"] = ["src/Main.java", "src/MainTest.java"]
+        unit["test_target_paths"] = ["src/MainTest.java"]
+        unit["test_intents"] = [
+            {
+                "stage_id": "unit",
+                "intent": "Verify the newly approved behavior.",
+                "acceptance_refs": ["AC-1"],
+                "target_paths": ["src/MainTest.java"],
+            }
+        ]
+        packet["execution_units"] = [unit]
+
+        test_file = self.repo / "src" / "MainTest.java"
+        test_file.parent.mkdir(parents=True, exist_ok=True)
+        test_file.write_text("class MainTest {}\n", encoding="utf-8")
+        test_sha256 = hashlib.sha256(test_file.read_bytes()).hexdigest()
+
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": "",
+                        "content": "class Main { int approved = 1; }\n",
+                    },
+                ),
+                action(
+                    "repo.read",
+                    {"path": "src/MainTest.java", "start_line": 1, "end_line": 20},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "Existing tests pass.",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."},
+                            {
+                                "path": "src/MainTest.java",
+                                "status": "verified_unchanged",
+                                "reason": "The existing test is sufficient.",
+                            },
+                        ],
+                    },
+                ),
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/MainTest.java",
+                        "expected_sha256": test_sha256,
+                        "content": "class MainTest { int coversApprovedBehavior = 1; }\n",
+                    },
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "Implementation and its planned test are complete.",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."},
+                            {
+                                "path": "src/MainTest.java",
+                                "status": "mutated",
+                                "reason": "Added coverage for the planned test intent.",
+                            },
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_test_intent_mutation",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        first_completion = journal["items"][0]["actions"][2]
+        self.assertEqual(
+            first_completion["completion_gate"],
+            {
+                "status": "rejected",
+                "reason": "test_intent_evidence_missing",
+                "missing_test_mutations": ["src/MainTest.java"],
+            },
+        )
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertIn(
+            "When test_intents are present, every listed test_target_path must be mutated",
+            llm.prompts[0],
+        )
+
+    def test_unit_aware_replace_text_requires_one_exact_match_and_redacts_payloads(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        source = self.repo / "src/Main.java"
+        source.parent.mkdir(parents=True)
+        source.write_text("class Main { int value = 1; int other = 1; }\n", encoding="utf-8")
+        before_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.replace_text",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": before_sha256,
+                        "old_text": " = 1;",
+                        "new_text": " = 2;",
+                    },
+                ),
+                action(
+                    "repo.replace_text",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": before_sha256,
+                        "old_text": "int value = 1;",
+                        "new_text": "int value = 2;",
+                    },
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "exact block replaced",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Updated value."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_replace_text",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        self.assertEqual(
+            source.read_text(encoding="utf-8"),
+            "class Main { int value = 2; int other = 1; }\n",
+        )
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        actions = journal["items"][0]["actions"]
+        self.assertEqual(actions[0]["tool_result"]["error"], "replace_text_ambiguous")
+        self.assertEqual(actions[0]["tool_result"]["match_count"], 2)
+        self.assertEqual(actions[1]["tool_result"]["replacements"], 1)
+        journal_arguments = actions[1]["tool_call"]["arguments"]
+        self.assertNotIn("old_text", journal_arguments)
+        self.assertNotIn("new_text", journal_arguments)
+        self.assertIn("old_text_sha256", journal_arguments)
+        self.assertIn("new_text_sha256", journal_arguments)
+        self.assertIn("repo.replace_text", llm.prompts[0])
+
+    def test_unit_aware_replace_text_matches_prompt_lf_against_crlf_file(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        source = self.repo / "src/Main.java"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"class Main {\r\n  int value = 1;\r\n}\r\n")
+        before_sha256 = hashlib.sha256(source.read_bytes()).hexdigest()
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.replace_text",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": before_sha256,
+                        "old_text": "class Main {\n  int value = 1;\n}",
+                        "new_text": "class Main {\n  int value = 2;\n}",
+                    },
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "LF payload replaced the CRLF block",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Updated value."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_replace_text_crlf",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        self.assertEqual(source.read_bytes(), b"class Main {\r\n  int value = 2;\r\n}\r\n")
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(journal["items"][0]["actions"][0]["tool_result"]["replacements"], 1)
+
+    def test_ui_obligations_are_promoted_into_active_focus(self) -> None:
+        item = {
+            "id": "WU-UI",
+            "title": "Implement UI",
+            "objective": "Implement the happy path.",
+            "paths": ["apps/web/src/View.tsx", "apps/web/src/View.test.tsx"],
+            "context_paths": ["apps/web/src/View.tsx", "apps/web/src/View.test.tsx"],
+            "files": [
+                {"path": "apps/web/src/View.tsx"},
+                {"path": "apps/web/src/View.test.tsx"},
+            ],
+            "surfaces": ["ui"],
+            "required_stage_ids": [],
+            "runtime_bindings": [
+                {
+                    "runtime_kind": "ui_component",
+                    "target": {"path": "apps/web/src/View.tsx", "symbol": "View"},
+                    "attachment": {"owner_path": "apps/web/src/App.tsx", "owner_symbol": "App"},
+                }
+            ],
+            "boundary_contracts": [
+                {
+                    "design_edge_id": "EDGE-UI-API",
+                    "consumer_operation": "submitDelete",
+                    "provider_operation": "DELETE /items/{id}",
+                    "auth_mapping": [{"from": "session", "to": "authenticated user", "required": True}],
+                    "input_mapping": [{"from": "selectedId", "to": "id", "required": True}],
+                    "response_mapping": [{"from": "200 deleted", "to": "success status", "required": True}],
+                }
+            ],
+            "surface_contracts": [
+                {
+                    "surface": "ui",
+                    "surface_contract": {
+                        "entrypoint": "View rendered by App",
+                        "transitions": [{"from": "ready", "to": "confirmed", "action": "confirm"}],
+                        "experience_contract": {
+                            "component_structure": ["App renders View"],
+                            "feedback": [{"trigger": "confirm", "response": "announce success"}],
+                            "accessibility": ["Success uses role=status"],
+                            "responsive": ["Dialog fills small viewports"],
+                            "focus_flow": ["Focus stays inside the open dialog"],
+                        },
+                    },
+                }
+            ],
+        }
+        prompt = _action_prompt(
+            item=item,
+            manifest={
+                "version": "developer_execution_manifest_v8",
+                "mode": "act",
+                "base_sha": "base",
+                "run_id": "run-ui-obligations",
+                "items": [item],
+            },
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        obligations = context["active_focus"]["mandatory_obligations"]
+        self.assertEqual(obligations["ui"]["focus_flow"], ["Focus stays inside the open dialog"])
+        self.assertEqual(obligations["ui"]["responsive"], ["Dialog fills small viewports"])
+        self.assertEqual(obligations["boundaries"][0]["provider_operation"], "DELETE /items/{id}")
+        self.assertEqual(obligations["runtime_wiring"][0]["attachment"]["owner_symbol"], "App")
+        self.assertEqual(
+            context["execution_unit_contract"]["behavior_contract_source"],
+            "active_focus.mandatory_obligations",
+        )
+        self.assertNotIn("surface_contracts", context["execution_unit_contract"])
+        self.assertNotIn("runtime_bindings", context["execution_unit_contract"])
+        self.assertNotIn("boundary_contracts", context["execution_unit_contract"])
+        self.assertEqual(
+            context["execution_task"]["files"],
+            [
+                {"path": "apps/web/src/View.tsx"},
+                {"path": "apps/web/src/View.test.tsx"},
+            ],
+        )
+        self.assertNotIn("requirements", context["execution_task"])
+        self.assertNotIn("test_intents", context["execution_task"])
+        self.assertIn("exactly one tool action", context["next_action"]["response_scope"])
+        self.assertIn("before verification or completion", context["next_action"]["consistency_boundary"])
+        self.assertEqual(prompt.count("Focus stays inside the open dialog"), 1)
+        self.assertNotIn("internally consistent and buildable", prompt)
+        self.assertFalse(context["test_authoring_policy"]["repository_evidence_satisfied"])
+        self.assertIn("single canonical behavior checklist", prompt)
+        self.assertIn("Do not design, serialize, or validate the whole unit", prompt)
+        self.assertIn("CSS class names alone do not prove responsive behavior", prompt)
+        self.assertIn("Never add production props", prompt)
+
+    def test_action_prompt_promotes_requirements_and_test_intents_once(self) -> None:
+        requirement = {"id": "AC-1", "content": "The operator can cancel the pending operation."}
+        test_intent = {
+            "stage_id": "unit",
+            "intent": "Verify cancellation leaves the record unchanged.",
+            "acceptance_refs": ["AC-1"],
+            "target_paths": ["src/View.test.tsx"],
+        }
+        prompt = _action_prompt(
+            item={
+                "id": "WU-CANCEL",
+                "title": "Implement cancellation",
+                "objective": "Implement cancellation.",
+                "paths": ["src/View.tsx", "src/View.test.tsx"],
+                "context_paths": ["src/View.tsx", "src/View.test.tsx"],
+                "files": [
+                    {
+                        "path": "src/View.tsx",
+                        "requirements": [requirement],
+                        "test_intents": [test_intent],
+                    },
+                    {
+                        "path": "src/View.test.tsx",
+                        "requirements": [requirement],
+                        "test_intents": [test_intent],
+                    },
+                ],
+                "requirements": [requirement, requirement],
+                "test_intents": [test_intent, test_intent],
+                "required_stage_ids": ["unit"],
+            },
+            manifest={
+                "version": "developer_execution_manifest_v8",
+                "mode": "act",
+                "base_sha": "base",
+            },
+            history=[],
+            target_path=self.repo,
+            max_write_chars=30000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        obligations = context["active_focus"]["mandatory_obligations"]
+
+        self.assertEqual(obligations["requirements"], [requirement])
+        self.assertEqual(obligations["test_intents"], [test_intent])
+        self.assertNotIn("requirements", context["execution_task"])
+        self.assertNotIn("test_intents", context["execution_task"])
+        self.assertEqual(prompt.count(requirement["content"]), 1)
+        self.assertEqual(prompt.count(test_intent["intent"]), 1)
 
     def test_unit_context_paths_are_read_only_and_visible_in_prompt(self) -> None:
         packet = self.unit_packet()
@@ -1128,6 +1692,89 @@ class DeveloperToolLoopTest(unittest.TestCase):
                 "wu-001_a001_002.json",
             ],
         )
+
+    def test_resume_revalidates_stale_signature_rejection_without_calling_llm(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                ),
+                action("repo.read", {"path": "src/Main.java"}),
+            ]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as write_pause:
+            self.executor(llm, step_review={"enabled": True}).execute(
+                run_id="run-signature-revalidation",
+                work_packet=packet,
+                target_path=self.repo,
+            )
+        with self.assertRaises(DeveloperExecutionError) as complete_pause:
+            self.executor(
+                llm,
+                step_review={
+                    "enabled": True,
+                    "call_id": write_pause.exception.progress["pending_step_review"]["call_id"],
+                    "decision": "approve",
+                },
+            ).execute(
+                run_id="run-signature-revalidation",
+                work_packet=packet,
+                target_path=self.repo,
+            )
+
+        with patch(
+            "sdlc_harness.agents.developer.execution._unit_signature_evidence",
+            side_effect=[
+                {"status": "failed", "findings": [{"type": "contract_signature_mismatch"}]},
+                {"status": "passed", "findings": []},
+            ],
+        ):
+            with self.assertRaises(DeveloperExecutionError) as stale_pause:
+                self.executor(
+                    llm,
+                    step_review={
+                        "enabled": True,
+                        "call_id": complete_pause.exception.progress["pending_step_review"]["call_id"],
+                        "decision": "approve",
+                    },
+                ).execute(
+                    run_id="run-signature-revalidation",
+                    work_packet=packet,
+                    target_path=self.repo,
+                )
+
+            result = self.executor(llm, step_review={"enabled": True}).execute(
+                run_id="run-signature-revalidation",
+                work_packet=packet,
+                target_path=self.repo,
+            )
+
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        gate = journal["items"][0]["actions"][-1]["completion_gate"]
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertEqual(gate["status"], "passed")
+        self.assertTrue(gate["revalidated"])
+        self.assertNotIn("pending_step_review", journal)
+        stale_exchange = json.loads(
+            (self.root / stale_pause.exception.progress["pending_step_review"]["exchange_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(stale_exchange["status"], "superseded")
+        self.assertEqual(len(llm.prompts), 3)
 
     def test_transport_failure_preserves_approved_actions_for_same_attempt_resume(self) -> None:
         packet = self.unit_packet()
@@ -1649,6 +2296,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
                 "SDLC_LLM_MODE": "deepseek",
                 "SDLC_LLM_API_KEY": "test-only",
                 "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "3",
+                "SDLC_DEVELOPER_VERIFICATION_REPAIR_ACTION_RESERVE": "0",
             },
         )
         packet = self.unit_packet()
@@ -1733,6 +2381,77 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(failure["version"], "developer_failure_classification_v1")
         self.assertEqual(failure["class"], "implementation_defect")
         self.assertEqual(failure["unit_id"], "WU-001")
+
+    def test_unit_budget_resume_preserves_worktree_and_working_memory(self) -> None:
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "1",
+            },
+        )
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        first_llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
+                )
+            ]
+        )
+
+        with self.assertRaises(DeveloperExecutionError) as caught:
+            self.executor(first_llm).execute(
+                run_id="run_unit_budget_resume",
+                work_packet=packet,
+                target_path=self.repo,
+            )
+
+        self.assertEqual(caught.exception.error_code, "developer_action_limit_exceeded")
+        self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
+        journal_path = self.root / caught.exception.journal_path
+        journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        self.assertEqual(journal["items"][0]["status"], "review_required")
+        self.assertEqual(journal["items"][0]["attempts"], 1)
+
+        self.settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={
+                "SDLC_LLM_MODE": "deepseek",
+                "SDLC_LLM_API_KEY": "test-only",
+                "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": "2",
+            },
+        )
+        resumed_llm = ScriptedLlm(
+            [
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                )
+            ]
+        )
+
+        result = self.executor(resumed_llm).execute(
+            run_id="run_unit_budget_resume",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        self.assertEqual(result.progress["completed_items"], 1)
+        self.assertIn('"history_count":1', resumed_llm.prompts[0])
+        self.assertIn('"origin":"worktree_after_mutation"', resumed_llm.prompts[0])
+        resumed_journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        self.assertEqual(resumed_journal["items"][0]["attempts"], 1)
+        self.assertEqual(resumed_journal["items"][0].get("attempt_history", []), [])
 
     def test_truncated_execution_unit_rolls_back_and_can_resume(self) -> None:
         first_llm = ScriptedLlm(
@@ -1974,6 +2693,237 @@ class DeveloperToolLoopTest(unittest.TestCase):
             ],
         )
 
+    def test_repo_read_reports_partial_content_and_working_memory_omits_unread_tail(self) -> None:
+        target = self.repo / "src" / "Large.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            "\n".join(f"export const value{index} = '{'x' * 60}';" for index in range(350)) + "\n",
+            encoding="utf-8",
+        )
+        executor = self.executor(ScriptedLlm([]))
+
+        result = _execute_action(
+            action={"action": "repo.read", "arguments": {"path": "src/Large.ts"}},
+            run_id="run-read-partial",
+            work_packet={},
+            repo_root=self.repo,
+            item_paths=["src/Large.ts"],
+            item={},
+            session_dir=self.runtime / "runs" / "run-read-partial",
+            max_write_chars=30000,
+            repo_context_provider=executor.repo_context_provider,
+            verification_runner=executor.verification_runner,
+            verification_policy=None,
+        )
+
+        self.assertTrue(result["truncated"])
+        self.assertTrue(result["has_more"])
+        self.assertLess(result["end_line"], result["requested_end_line"])
+        self.assertEqual(result["next_start_line"], result["end_line"] + 1)
+        memory = _action_memory(
+            [{"action": "repo.read", "arguments": {"path": "src/Large.ts"}, "result": result}],
+            target_item_paths=["src/Large.ts"],
+            max_evidence_chars=24000,
+        )
+        self.assertEqual(memory["inspected_sources"][0]["end_line"], result["end_line"])
+        self.assertEqual(memory["omitted_sources"][0]["path"], "src/Large.ts")
+        self.assertEqual(memory["omitted_sources"][0]["start_line"], result["next_start_line"])
+        self.assertEqual(memory["omitted_sources"][0]["reason"], "repo_read_partial")
+
+    def test_working_memory_detects_legacy_read_clipped_mid_line(self) -> None:
+        target = self.repo / "src" / "Legacy.ts"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("\n".join(f"line {index}" for index in range(350)) + "\n", encoding="utf-8")
+        content = ("1: first\n" + "2: " + "x" * 12000)[:12000]
+        history = [
+                {
+                    "action": "repo.read",
+                    "arguments": {"path": "src/Legacy.ts"},
+                    "result": {
+                        "ok": True,
+                        "path": "src/Legacy.ts",
+                        "start_line": 1,
+                        "end_line": 301,
+                        "content": content,
+                    },
+                }
+            ]
+        memory = _action_memory(
+            history,
+            target_item_paths=["src/Legacy.ts"],
+            max_evidence_chars=24000,
+        )
+
+        self.assertTrue(memory["inspected_sources"][0]["truncated"])
+        self.assertEqual(memory["inspected_sources"][0]["end_line"], 1)
+        self.assertEqual(memory["omitted_sources"][0]["start_line"], 2)
+        self.assertEqual(memory["omitted_sources"][0]["reason"], "repo_read_partial")
+        prompt = _action_prompt(
+            item={"id": "WU-001", "paths": ["src/Legacy.ts"]},
+            manifest={"version": "developer_execution_manifest_v8", "mode": "act", "base_sha": "base"},
+            history=history,
+            target_path=self.repo,
+            max_write_chars=30000,
+            force_incremental=False,
+            action_index=2,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            working_memory_evidence_chars=24000,
+        )
+        projected = json.loads(prompt.split("Execution context:\n", 1)[1])["working_memory"]
+        self.assertEqual(projected["authoritative_sources"][0]["total_lines"], 350)
+        self.assertEqual(projected["omitted_sources"][0]["end_line"], 350)
+
+    def test_action_prompt_keeps_latest_full_read_before_older_large_sources(self) -> None:
+        view_path = self.repo / "src" / "View.tsx"
+        test_path = self.repo / "src" / "View.test.tsx"
+        view_path.parent.mkdir(parents=True, exist_ok=True)
+        view_path.write_text("view", encoding="utf-8")
+        test_path.write_text("test", encoding="utf-8")
+        latest_test_content = "latest-test:" + "T" * 9000
+        history = [
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.tsx", "start_line": 1, "end_line": 120},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.tsx",
+                    "start_line": 1,
+                    "end_line": 120,
+                    "content": "A" * 12000,
+                },
+            },
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.tsx", "start_line": 121, "end_line": 240},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.tsx",
+                    "start_line": 121,
+                    "end_line": 240,
+                    "content": "B" * 12000,
+                },
+            },
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.test.tsx", "start_line": 1, "end_line": 50},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.test.tsx",
+                    "start_line": 1,
+                    "end_line": 50,
+                    "content": "obsolete-test-header",
+                },
+            },
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.test.tsx"},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.test.tsx",
+                    "start_line": 1,
+                    "end_line": 100,
+                    "content": latest_test_content,
+                },
+            },
+        ]
+
+        prompt = _action_prompt(
+            item={"id": "WU-001", "paths": ["src/View.tsx", "src/View.test.tsx"]},
+            manifest={"version": "developer_execution_manifest_v8", "mode": "act", "base_sha": "base"},
+            history=history,
+            target_path=self.repo,
+            max_write_chars=30000,
+            force_incremental=False,
+            action_index=5,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            working_memory_evidence_chars=24000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        memory = context["working_memory"]
+
+        self.assertEqual(memory["authoritative_sources"][0]["path"], "src/View.test.tsx")
+        self.assertEqual(memory["authoritative_sources"][0]["content"], latest_test_content)
+        self.assertNotIn("obsolete-test-header", prompt)
+        self.assertEqual(memory["omitted_sources"][0]["path"], "src/View.tsx")
+        self.assertEqual(memory["omitted_sources"][0]["reason"], "working_memory_evidence_budget")
+        self.assertIn("its bytes are not present in this prompt", prompt)
+
+    def test_action_prompt_does_not_mark_full_mutated_source_as_omitted(self) -> None:
+        view_path = self.repo / "src" / "View.tsx"
+        view_path.parent.mkdir(parents=True, exist_ok=True)
+        current_content = "current line\n" * 1200
+        view_path.write_text(current_content, encoding="utf-8")
+        current_sha256 = hashlib.sha256(view_path.read_bytes()).hexdigest()
+        history = [
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.tsx", "start_line": 1, "end_line": 120},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.tsx",
+                    "start_line": 1,
+                    "end_line": 120,
+                    "content": "A" * 12000,
+                },
+            },
+            {
+                "action": "repo.read",
+                "arguments": {"path": "src/View.tsx", "start_line": 121, "end_line": 240},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.tsx",
+                    "start_line": 121,
+                    "end_line": 240,
+                    "content": "B" * 12000,
+                },
+            },
+            {
+                "action": "repo.replace_text",
+                "arguments": {"path": "src/View.tsx"},
+                "result": {
+                    "ok": True,
+                    "path": "src/View.tsx",
+                    "sha256": current_sha256,
+                    "replacements": 1,
+                },
+            },
+        ]
+
+        prompt = _action_prompt(
+            item={"id": "WU-001", "paths": ["src/View.tsx"]},
+            manifest={"version": "developer_execution_manifest_v8", "mode": "act", "base_sha": "base"},
+            history=history,
+            target_path=self.repo,
+            max_write_chars=30000,
+            force_incremental=False,
+            action_index=4,
+            max_actions=24,
+            mutated=True,
+            context_window_tokens=128000,
+            working_memory_evidence_chars=24000,
+        )
+        memory = json.loads(prompt.split("Execution context:\n", 1)[1])["working_memory"]
+
+        self.assertEqual(
+            [source["path"] for source in memory["authoritative_sources"]],
+            ["src/View.tsx"],
+        )
+        self.assertEqual(memory["authoritative_sources"][0]["content"], current_content)
+        self.assertNotIn("omitted_sources", memory)
+
+    def test_developer_working_memory_evidence_budget_is_configurable(self) -> None:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=self.runtime,
+            overrides={"SDLC_DEVELOPER_WORKING_MEMORY_EVIDENCE_CHARS": "64000"},
+        )
+
+        self.assertEqual(settings.developer_working_memory_evidence_chars, 64000)
+
     def test_action_memory_soft_caps_ledger_without_dropping_mutation_or_verification_state(self) -> None:
         history = [
             {
@@ -2041,6 +2991,44 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(len(conclusions), 1)
         self.assertEqual(conclusions[0]["summary"], "Current implementation contains the guard.")
         self.assertNotIn("Old implementation", json.dumps(memory))
+
+    def test_action_memory_marks_graph_evidence_stale_after_mutation(self) -> None:
+        history = [
+            {
+                "action": "codegraph.query",
+                "arguments": {"operation": "impact", "symbol": "save"},
+                "result": {
+                    "ok": True,
+                    "operation": "impact",
+                    "snapshot_digest": "sha256:before",
+                    "results": [{"file": "src/Main.ts"}],
+                },
+            },
+            {
+                "action": "repo.write_file",
+                "arguments": {"path": "src/Main.ts"},
+                "result": {"ok": True, "path": "src/Main.ts", "sha256": "sha256:new"},
+            },
+            {
+                "action": "codegraph.query",
+                "arguments": {"operation": "affected_tests", "files": ["src/Main.ts"]},
+                "result": {
+                    "ok": True,
+                    "operation": "affected_tests",
+                    "snapshot_digest": "sha256:after",
+                    "index_synced": True,
+                    "results": [{"file": "src/Main.test.ts"}],
+                },
+            },
+        ]
+
+        memory = _action_memory(history, target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
+
+        self.assertEqual(memory["projection"]["version"], "developer_working_memory_projection_v3")
+        self.assertFalse(memory["graph_evidence"][0]["fresh"])
+        self.assertEqual(memory["graph_evidence"][0]["stale_after_action"], 2)
+        self.assertTrue(memory["graph_evidence"][1]["fresh"])
+        self.assertEqual(memory["graph_evidence"][1]["operation"], "affected_tests")
 
     def test_signature_findings_survive_working_memory_and_resume(self) -> None:
         findings = [{"path": "src/Main.ts", "message": "Expected method save(id)."}]
@@ -2401,6 +3389,10 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(result.progress["completed_items"], 1)
         self.assertEqual(main_path.read_text(encoding="utf-8"), "class Main {}\n")
         self.assertTrue((self.repo / "src" / "MainTest.java").exists())
+        self.assertEqual(llm.calls[0]["model"], "deepseek-flash")
+        self.assertEqual(llm.calls[0]["reasoning_effort"], "max")
+        self.assertEqual(llm.calls[0]["max_tokens"], 32768)
+        self.assertEqual(llm.calls[0]["timeout_seconds"], 600)
 
     def test_repair_resume_accepts_persisted_scope_when_only_selection_policy_changed(self) -> None:
         run_id = "run_selection_policy_migration"
@@ -2675,6 +3667,171 @@ class DeveloperToolLoopTest(unittest.TestCase):
             manifest_path="manifest.json",
             journal_path="journal.json",
         )
+
+    def test_dependency_manifest_scope_upgrade_adds_only_declared_consumer_manifest(self) -> None:
+        manifest_path = "apps/api/package.json"
+        target = self.repo / manifest_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"name":"@example/api","dependencies":{}}\n', encoding="utf-8")
+        packet = self.unit_packet()
+        existing = _build_manifest(
+            run_id="run_dependency_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+        candidate_packet = json.loads(json.dumps(packet))
+        candidate_packet["output_contract"]["allowed_paths"].append(manifest_path)
+        candidate_packet["proposed_files"].append(
+            {"path": manifest_path, "operation": "update", "purpose": "Declare dependency."}
+        )
+        candidate_unit = candidate_packet["execution_units"][0]
+        candidate_unit["write_paths"].append(manifest_path)
+        candidate_unit.setdefault("context_paths", list(candidate_unit["write_paths"][:-1])).append(
+            manifest_path
+        )
+        candidate_unit["package_dependencies"] = [
+            {
+                "unit_id": candidate_unit["unit_id"],
+                "manifest_path": manifest_path,
+                "dependency_name": "@example/storage",
+                "dependency_spec": "1.2.3",
+                "provider_manifest_path": "packages/storage/package.json",
+                "provider_symbol": "persistWidget",
+            }
+        ]
+        candidate_unit["input_digest"] = "sha256:dependency-scope"
+        candidate = _build_manifest(
+            run_id="run_dependency_scope",
+            work_packet=candidate_packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+
+        upgrade = _merge_dependency_manifest_scope_manifest(existing, candidate)
+
+        self.assertIsNotNone(upgrade)
+        assert upgrade is not None
+        merged, affected = upgrade
+        self.assertEqual(affected, [candidate_unit["unit_id"]])
+        self.assertIn(manifest_path, merged["workspace_allowed_paths"])
+        self.assertIn(manifest_path, merged["items"][0]["paths"])
+
+    def test_dependency_tool_migration_does_not_reopen_unit_that_only_loses_legacy_manifest(self) -> None:
+        manifest_path = "apps/api/package.json"
+        target = self.repo / manifest_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('{"name":"@example/api","dependencies":{}}\n', encoding="utf-8")
+        legacy_packet = self.unit_packet()
+        legacy_packet["output_contract"]["allowed_paths"].append(manifest_path)
+        legacy_packet["proposed_files"].append(
+            {"path": manifest_path, "operation": "update", "purpose": "Declare dependency."}
+        )
+        legacy_unit = legacy_packet["execution_units"][0]
+        legacy_unit["write_paths"].append(manifest_path)
+        legacy_unit.setdefault("context_paths", list(legacy_unit["write_paths"][:-1])).append(
+            manifest_path
+        )
+        legacy_unit["package_dependencies"] = [
+            {
+                "unit_id": "WU-OTHER",
+                "manifest_path": manifest_path,
+                "dependency_name": "@example/storage",
+                "dependency_spec": "1.2.3",
+                "provider_manifest_path": "packages/storage/package.json",
+                "provider_symbol": "persistWidget",
+            }
+        ]
+        legacy_unit["input_digest"] = "sha256:legacy-dependency-scope"
+        existing = _build_manifest(
+            run_id="run_dependency_tool_scope",
+            work_packet=legacy_packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+        candidate_packet = self.unit_packet()
+        candidate = _build_manifest(
+            run_id="run_dependency_tool_scope",
+            work_packet=candidate_packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+
+        upgrade = _merge_dependency_manifest_scope_manifest(existing, candidate)
+
+        self.assertIsNotNone(upgrade)
+        assert upgrade is not None
+        merged, reopened = upgrade
+        self.assertEqual(reopened, [])
+        self.assertNotIn(manifest_path, merged["workspace_allowed_paths"])
+        self.assertNotIn(manifest_path, merged["items"][0]["paths"])
+
+    def test_package_tool_paths_are_workspace_allowed_but_not_developer_write_paths(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        unit["package_dependencies"] = [
+            {
+                "dependency_id": "DEP-EXAMPLE",
+                "consumer_manifest_path": "apps/api/package.json",
+                "lockfile_path": "package-lock.json",
+            }
+        ]
+
+        manifest = _build_manifest(
+            run_id="run_package_tool_paths",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+
+        self.assertIn("apps/api/package.json", manifest["workspace_allowed_paths"])
+        self.assertIn("package-lock.json", manifest["workspace_allowed_paths"])
+        self.assertNotIn("apps/api/package.json", manifest["items"][0]["paths"])
+        self.assertNotIn("package-lock.json", manifest["items"][0]["paths"])
+
+    def test_package_tool_allow_list_only_migration_is_compatible(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["package_dependencies"] = [
+            {
+                "dependency_id": "DEP-EXAMPLE",
+                "consumer_manifest_path": "apps/api/package.json",
+                "lockfile_path": "package-lock.json",
+            }
+        ]
+        candidate = _build_manifest(
+            run_id="run_package_allow_list",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="act",
+            repair_feedback=None,
+            repair_iteration=0,
+        )
+        existing = json.loads(json.dumps(candidate))
+        existing["input_hash"] = "sha256:legacy-package-allow-list"
+        existing["workspace_allowed_paths"] = [
+            path
+            for path in existing["workspace_allowed_paths"]
+            if path not in {"apps/api/package.json", "package-lock.json"}
+        ]
+
+        upgrade = _merge_dependency_manifest_scope_manifest(existing, candidate)
+
+        self.assertIsNotNone(upgrade)
+        assert upgrade is not None
+        merged, reopened = upgrade
+        self.assertEqual(reopened, [])
+        self.assertIn("apps/api/package.json", merged["workspace_allowed_paths"])
+        self.assertIn("package-lock.json", merged["workspace_allowed_paths"])
 
     def test_no_change_completion_is_rejected_outside_repair_mode(self) -> None:
         packet = self.work_packet()

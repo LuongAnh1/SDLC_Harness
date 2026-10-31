@@ -25,6 +25,7 @@ from .graph import (
     apply_designer_delta,
     completion_findings,
     delta_version_for,
+    graph_digest,
     new_vertical_design_graph,
     validate_vertical_design_graph,
 )
@@ -65,6 +66,7 @@ COMPOSITION_REPAIR_CODES = frozenset(
         "planned_target_conflicts_as_is",
         "runtime_path_disconnected",
         "boundary_contract_mismatch",
+        "runtime_boundary_unreachable",
         "runtime_operation_binding_mismatch",
         "duplicate_runtime_api_operation",
     }
@@ -234,6 +236,11 @@ class DesignerToolLoopExecutor:
                 contract_version=contract_version,
             )
             graph = validate_vertical_design_graph(graph, expected_run_id=run_id, expected_binding=snapshot_binding)
+            graph, reconciled_stale_partitions = _reconcile_stale_placeholder_partitions(
+                requirement_model=requirement_model,
+                landscape=landscape,
+                graph=graph,
+            )
             session = {
                 "schema_version": SESSION_VERSION,
                 "run_id": run_id,
@@ -256,6 +263,7 @@ class DesignerToolLoopExecutor:
                 "invalid_actions_by_target": {},
                 "active_repair_target_id": "",
                 "repair_targets_completed": [],
+                "reconciled_stale_partitions": reconciled_stale_partitions,
                 "exchange_paths": [],
                 "pending_step_review": None,
                 "last_review_feedback": "",
@@ -929,7 +937,10 @@ class DesignerToolLoopExecutor:
                     landscape=landscape,
                 )
             )
-            effective_repair_feedback = repair_feedback or inline_feedback
+            effective_repair_feedback = _applicable_repair_feedback(
+                repair_feedback or inline_feedback,
+                graph=registry.graph,
+            )
             repair_task = _active_repair_task(
                 repair_feedback=effective_repair_feedback,
                 graph=registry.graph,
@@ -938,7 +949,10 @@ class DesignerToolLoopExecutor:
                 ),
                 landscape=landscape,
                 source="validator_feedback" if repair_feedback else "inline_composition",
+                active_partition=active_partition,
             )
+            if repair_task is not None and not _repair_task_has_mutation_path(repair_task):
+                repair_task = None
             _activate_repair_target(session, str((repair_task or {}).get("target_id") or ""))
             active_component_id = str(
                 _dict((repair_task or {}).get("partition")).get("component_id")
@@ -957,7 +971,7 @@ class DesignerToolLoopExecutor:
             )
             session["active_partition_key"] = active_partition_key
             session["ui_guidance_required"] = ui_guidance_required
-            if repair_feedback and repair_task is None and _strings(session.get("delta_paths")):
+            if repair_feedback and repair_task is None and active_partition is None:
                 return
             if not repair_feedback and active_partition is None and repair_task is None:
                 return
@@ -1083,7 +1097,7 @@ class DesignerToolLoopExecutor:
                         repair_task=repair_task,
                         active_component_id=active_component_id,
                     ),
-                    repair_feedback=effective_repair_feedback,
+                    repair_feedback=([] if active_partition is not None else effective_repair_feedback),
                     active_partition=active_partition,
                     repair_task=repair_task,
                     observations_since_delta=observations_since_delta,
@@ -1249,6 +1263,10 @@ class DesignerToolLoopExecutor:
             arguments = action.get("arguments")
             graph_is_v2 = str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
             source_refs = _source_observation_refs(session, active_component_id)
+            exact_deterministic_repair = _is_exact_deterministic_repair_delta(
+                arguments=arguments,
+                repair_task=repair_task,
+            )
             if tool_id == "uiux.search_guidance":
                 args = _dict(arguments)
                 if registry.uiux_mode != "enforce" or not ui_guidance_required:
@@ -1331,7 +1349,13 @@ class DesignerToolLoopExecutor:
                     )
                     _write_json_atomic(session_file, session)
                     continue
-            if graph_is_v2 and tool_id == "design.propose_delta" and active_component_id and not source_refs:
+            if (
+                graph_is_v2
+                and tool_id == "design.propose_delta"
+                and active_component_id
+                and not source_refs
+                and not exact_deterministic_repair
+            ):
                 if observations_since_delta >= observation_limit:
                     raise HarnessError(
                         "design_evidence_insufficient",
@@ -1403,7 +1427,7 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
-            if graph_is_v2 and tool_id == "design.propose_delta" and active_component_id:
+            if graph_is_v2 and tool_id == "design.propose_delta" and active_component_id and source_refs:
                 arguments = _attach_source_observations(arguments, component_id=active_component_id, refs=source_refs)
             if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id != "design.propose_delta":
                 self._invalid_action(
@@ -2450,8 +2474,12 @@ def _designer_prompt(
         "finding is boundary_contract_mismatch, submit exactly the delta_scaffold operations: keep each replacement "
         "edge's from, to, kind, and label unchanged, and do not add or reorder unrelated edges. When every active "
         "repair finding is runtime_operation_binding_mismatch, submit exactly the delta_scaffold update_node operation "
-        "and preserve every runtime_binding field except the corrected target symbol. Use its exact partition identity, "
-        "preserve required_coverage, and add or update a node for every listed surface. In repair mode, assign every edge "
+        "and preserve every runtime_binding field except the corrected target symbol. Use its exact partition identity "
+        "and preserve required_coverage. "
+        "When every active repair finding is runtime_boundary_unreachable, submit exactly the delta_scaffold removals; "
+        "do not invent an API or try to mutate a node's component identity. The next construction partition will place "
+        "the still-required surface in a runtime-feasible component. "
+        "For other repairs, preserve required_coverage and add or update a node for every listed surface. In repair mode, assign every edge "
         "to the scenario named by the finding, even when an endpoint is reused from another scenario partition. Edge "
         "order is assigned from add_edge operation order. To change an existing scenario order, remove every "
         "obsolete/current edge first using exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"}; never put an edge "
@@ -2545,6 +2573,11 @@ def _designer_prompt(
         "For service and persistence_adapter providers, when boundary_contract.provider_operation is a concrete "
         "identifier, runtime_binding.target.symbol must expose that exact callable. A file may host multiple symbols; "
         "never bind a query operation to a create/update/delete callable. "
+        "A boundary_contract describes data mapping but does not make a direct cross-application call executable. "
+        "Code in one apps/* application may call a non-API provider in another apps/* application only through an "
+        "explicit approved transport surface. Business rules do not imply backend placement: when UI is required and "
+        "API/data are not applicable, keep the rule in the UI application or an importable shared package. Never add a "
+        "server endpoint merely to repair a scenario whose approved API surface is not_applicable. "
         "Sequence projections are linear within each scenario: only calls/reads/writes/returns become messages. Every "
         "scenario with a UI surface needs actual behavior beyond depends_on, exactly one terminal edge at the "
         "final observable outcome, and a continuous ordered message path. If the requirement requires human confirmation "
@@ -2942,6 +2975,83 @@ def _data_path_insertion_scaffold(
     )
 
 
+def _reconcile_stale_placeholder_partitions(
+    *,
+    requirement_model: dict[str, object],
+    landscape: dict[str, object],
+    graph: dict[str, object],
+) -> tuple[dict[str, object], list[str]]:
+    """Drop empty placeholders left behind by an older surface-routing policy."""
+
+    anchors = {
+        str(item.get("anchor_id") or ""): item
+        for item in _dicts(landscape.get("anchors"))
+        if str(item.get("anchor_id") or "")
+    }
+    matches = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or "")): _strings(
+            item.get("candidate_anchor_refs")
+        )
+        for item in _dicts(landscape.get("scenario_matches"))
+    }
+    required_by_scenario = {
+        str(scenario.get("id") or ""): _required_surface_set(scenario)
+        for scenario in _scenarios(requirement_model)
+        if str(scenario.get("id") or "")
+    }
+    nodes = _dicts(graph.get("nodes"))
+    retained: list[dict[str, object]] = []
+    removed: list[str] = []
+    changed = False
+    for partition in _dicts(graph.get("partitions")):
+        scenario_id = str(partition.get("scenario_id") or "")
+        component_id = str(partition.get("component_id") or "")
+        coverage = dict(_dict(partition.get("coverage")))
+        materialized = (
+            bool(_strings(partition.get("source_observation_refs")))
+            or any(str(value or "") in {"covered", "no_change"} for value in coverage.values())
+            or any(
+                str(node.get("scenario_id") or "") == scenario_id
+                and str(node.get("component_id") or "") == component_id
+                for node in nodes
+            )
+        )
+        if materialized:
+            retained.append(partition)
+            continue
+        required_surfaces = required_by_scenario.get(scenario_id, set())
+        remaining_coverage = {
+            surface: status
+            for surface, status in coverage.items()
+            if surface in required_surfaces
+            and _component_for_missing_surface(
+                scenario_id=scenario_id,
+                surface=surface,
+                required_surfaces=required_surfaces,
+                matches=matches,
+                anchors=anchors,
+                landscape=landscape,
+            )
+            == component_id
+        }
+        if remaining_coverage:
+            if remaining_coverage != coverage:
+                partition = {**partition, "coverage": remaining_coverage}
+                changed = True
+            retained.append(partition)
+            continue
+        removed.append(f"{scenario_id}|{component_id}")
+        changed = True
+
+    if not changed:
+        return graph, []
+    reconciled = json.loads(json.dumps(graph))
+    reconciled["partitions"] = retained
+    reconciled["revision"] = int(reconciled.get("revision") or 0) + 1
+    reconciled["artifact_digest"] = graph_digest(reconciled)
+    return reconciled, removed
+
+
 def _active_partition(
     *,
     requirement_model: dict[str, object],
@@ -2983,6 +3093,7 @@ def _active_partition(
         component_id = _component_for_missing_surface(
             scenario_id=scenario_id,
             surface=missing[0],
+            required_surfaces=required,
             matches=matches,
             anchors=anchors,
             landscape=landscape,
@@ -2993,6 +3104,7 @@ def _active_partition(
             if _component_for_missing_surface(
                 scenario_id=scenario_id,
                 surface=surface,
+                required_surfaces=required,
                 matches=matches,
                 anchors=anchors,
                 landscape=landscape,
@@ -3263,11 +3375,15 @@ def _active_repair_task(
     completed_targets: list[str],
     landscape: dict[str, object] | None = None,
     source: str = "validator_feedback",
+    active_partition: dict[str, object] | None = None,
 ) -> dict[str, object] | None:
-    if not repair_feedback:
+    if active_partition is not None or not repair_feedback:
         return None
     nodes = _dicts(graph.get("nodes"))
     nodes_by_id = {str(item.get("id") or ""): item for item in nodes}
+    repair_feedback = _applicable_repair_feedback(repair_feedback, graph=graph)
+    if not repair_feedback:
+        return None
     targets = _repair_work_targets(repair_feedback, nodes_by_id=nodes_by_id)
     target = next((item for item in targets if str(item.get("target_id") or "") not in set(completed_targets)), None)
     if not isinstance(target, dict):
@@ -3501,6 +3617,34 @@ def _repair_delta_scaffold(
                     "changes": {"runtime_binding": runtime_binding},
                 }
             )
+    elif codes and codes <= {"runtime_boundary_unreachable"}:
+        invalid_node_ids = {
+            str(item.get("subject_ref") or "")
+            for item in findings
+            if str(item.get("subject_ref") or "") in nodes_by_id
+        }
+        if operations and operations[0].get("op") == "set_partition_coverage":
+            repair_coverage = dict(_dict(operations[0].get("coverage")))
+            for node_id in invalid_node_ids:
+                surface = str(nodes_by_id[node_id].get("surface") or "")
+                if surface:
+                    repair_coverage[surface] = "missing"
+            operations[0]["coverage"] = repair_coverage
+        incident_edge_ids = [
+            str(item.get("id") or "")
+            for item in target_edges
+            if str(item.get("from") or "") in invalid_node_ids
+            or str(item.get("to") or "") in invalid_node_ids
+        ]
+        operations.extend(
+            {"op": "remove_edge", "edge_id": edge_id}
+            for edge_id in incident_edge_ids
+            if edge_id
+        )
+        operations.extend(
+            {"op": "remove_node", "node_id": node_id}
+            for node_id in sorted(invalid_node_ids)
+        )
     elif "runtime_path_disconnected" in codes:
         operations.append(
             {
@@ -3539,6 +3683,23 @@ def _repair_delta_scaffold(
         "completion_claims": [],
         "unresolved_items": [],
     }
+
+
+def _is_exact_deterministic_repair_delta(
+    *,
+    arguments: object,
+    repair_task: dict[str, object] | None,
+) -> bool:
+    if repair_task is None:
+        return False
+    codes = {
+        str(item.get("code") or item.get("category") or "")
+        for item in _dicts(repair_task.get("findings"))
+    }
+    return (
+        codes == {"runtime_boundary_unreachable"}
+        and _dict(arguments).get("delta") == repair_task.get("delta_scaffold")
+    )
 
 
 def _boundary_contract_repair_scaffold(
@@ -3647,6 +3808,88 @@ def _repair_work_targets(
     if not targets:
         return [{"target_id": "global", "scenario_id": "", "component_id": ""}]
     return targets
+
+
+def _repair_finding_still_applies(
+    finding: dict[str, object],
+    *,
+    nodes_by_id: dict[str, dict[str, object]],
+    materialized_partition_keys: set[str],
+    covered_surface_keys: set[tuple[str, str]],
+) -> bool:
+    category = str(finding.get("code") or finding.get("category") or "")
+    subject_ref = str(finding.get("subject_ref") or "")
+    if category == "design_investigation_missing":
+        return subject_ref.casefold() in materialized_partition_keys
+    if category == "required_surface_missing":
+        parts = subject_ref.casefold().split(":")
+        if parts and parts[0] == "surf":
+            parts = parts[1:]
+        return len(parts) < 2 or (parts[0], parts[1]) not in covered_surface_keys
+    return not (
+        category == "runtime_boundary_unreachable"
+        and subject_ref.startswith("VDN-")
+        and subject_ref not in nodes_by_id
+    )
+
+
+def _applicable_repair_feedback(
+    repair_feedback: list[dict[str, object]],
+    *,
+    graph: dict[str, object],
+) -> list[dict[str, object]]:
+    nodes = _dicts(graph.get("nodes"))
+    nodes_by_id = {str(item.get("id") or ""): item for item in nodes}
+    node_surface_keys = {
+        (str(node.get("scenario_id") or "").casefold(), str(node.get("surface") or "").casefold())
+        for node in nodes
+        if str(node.get("scenario_id") or "") and str(node.get("surface") or "")
+    }
+    covered_surface_keys = {
+        (str(partition.get("scenario_id") or "").casefold(), str(surface).casefold())
+        for partition in _dicts(graph.get("partitions"))
+        for surface, status in _dict(partition.get("coverage")).items()
+        if str(status or "") in {"covered", "no_change"}
+        and (str(partition.get("scenario_id") or "").casefold(), str(surface).casefold())
+        in node_surface_keys
+    }
+    materialized_partition_keys = {
+        f"{scenario_id}@{component_id}".casefold()
+        for partition in _dicts(graph.get("partitions"))
+        for scenario_id in [str(partition.get("scenario_id") or "")]
+        for component_id in [str(partition.get("component_id") or "")]
+        if any(
+            str(value or "") in {"covered", "no_change"}
+            for value in _dict(partition.get("coverage")).values()
+        )
+        or any(
+            str(node.get("scenario_id") or "") == scenario_id
+            and str(node.get("component_id") or "") == component_id
+            for node in nodes
+        )
+    }
+    return [
+        finding
+        for finding in repair_feedback
+        if _repair_finding_still_applies(
+            finding,
+            nodes_by_id=nodes_by_id,
+            materialized_partition_keys=materialized_partition_keys,
+            covered_surface_keys=covered_surface_keys,
+        )
+    ]
+
+
+def _repair_task_has_mutation_path(repair_task: dict[str, object]) -> bool:
+    scope = _dict(repair_task.get("write_scope"))
+    if (
+        bool(scope.get("allow_add_node"))
+        or bool(_strings(scope.get("writable_node_ids")))
+        or bool(_strings(scope.get("removable_edge_ids")))
+    ):
+        return True
+    operations = _dicts(_dict(repair_task.get("delta_scaffold")).get("operations"))
+    return any(str(item.get("op") or "") != "set_partition_coverage" for item in operations)
 
 
 def _ambiguous_branch_parent_excess_edge_ids(findings: list[dict[str, object]]) -> set[str]:
@@ -3859,10 +4102,17 @@ def _component_for_missing_surface(
     *,
     scenario_id: str,
     surface: str,
+    required_surfaces: set[str] | None = None,
     matches: dict[tuple[str, str], list[str]],
     anchors: dict[str, dict[str, object]],
     landscape: dict[str, object],
 ) -> str:
+    local_ui_rule = (
+        surface == "business_rule"
+        and "ui" in (required_surfaces or set())
+        and "api" not in (required_surfaces or set())
+        and "data" not in (required_surfaces or set())
+    )
     candidates = [
         anchors[ref]
         for ref in matches.get((scenario_id, surface), [])
@@ -3874,7 +4124,13 @@ def _component_for_missing_surface(
         "business_rule": ("api", "backend", "service", "domain"),
         "data": ("database", "db", "persistence"),
         "interaction": ("api", "backend", "web", "frontend"),
-    }.get(surface, ())
+    }.get("ui" if local_ui_rule else surface, ())
+    if local_ui_rule:
+        candidates = [
+            item
+            for item in candidates
+            if any(alias in str(item.get("component_id") or "").casefold() for alias in preferred_components)
+        ]
     candidates.sort(
         key=lambda item: (
             next(
@@ -3889,7 +4145,18 @@ def _component_for_missing_surface(
             str(item.get("anchor_id") or ""),
         )
     )
-    return str(candidates[0].get("component_id") or "") if candidates else _default_component(landscape, hint=surface)
+    if candidates:
+        return str(candidates[0].get("component_id") or "")
+    components = sorted(
+        str(item.get("component_id") or "")
+        for item in _dicts(landscape.get("components"))
+        if str(item.get("component_id") or "")
+    )
+    for alias in preferred_components:
+        match = next((item for item in components if alias in item.casefold()), "")
+        if match:
+            return match
+    return _default_component(landscape, hint="ui" if local_ui_rule else surface)
 
 
 def _composition_owner_candidates(
@@ -3903,7 +4170,7 @@ def _composition_owner_candidates(
     preferred_kinds = {
         "ui": ("ui_component", "ui_entrypoint", "source_file"),
         "api": ("service_symbol", "api_route", "source_file"),
-        "business_rule": ("service_symbol", "api_route", "source_file"),
+        "business_rule": ("service_symbol", "ui_component", "ui_entrypoint", "api_route", "source_file"),
         "data": ("service_symbol", "source_file", "data_model", "data_operation"),
         "interaction": ("service_symbol", "ui_component", "source_file"),
     }.get(surface, ("service_symbol", "source_file"))
@@ -3912,6 +4179,7 @@ def _composition_owner_candidates(
         for item in _dicts(landscape.get("anchors"))
         if str(item.get("component_id") or "") == component_id
         and str(item.get("anchor_id") or "")
+        and str(item.get("symbol") or "")
         and str(item.get("kind") or "") not in {"test", "manifest", "verification_config", "migration"}
     ]
 
@@ -4013,7 +4281,7 @@ def _required_partition_keys(
         for item in _dicts(landscape.get("scenario_matches"))
     }
     keys = {
-        f"{scenario_id}|{_component_for_missing_surface(scenario_id=scenario_id, surface=surface, matches=matches, anchors=anchors, landscape=landscape)}"
+        f"{scenario_id}|{_component_for_missing_surface(scenario_id=scenario_id, surface=surface, required_surfaces=_required_surface_set(scenario), matches=matches, anchors=anchors, landscape=landscape)}"
         for scenario in _scenarios(requirement_model)
         for scenario_id in [str(scenario.get("id") or "")]
         for surface in _required_surface_set(scenario)

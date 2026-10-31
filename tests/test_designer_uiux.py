@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 import pytest
 
@@ -92,6 +93,100 @@ def test_codegraph_snapshot_fails_closed_when_pending_changes_remain() -> None:
         _validated_snapshot(status)
 
     assert error.value.error_code == "target_repo_codegraph_stale"
+
+
+def test_codegraph_sync_if_stale_refreshes_pending_changes() -> None:
+    stale = {
+        "initialized": True,
+        "version": "1.5.0",
+        "fileCount": 2,
+        "nodeCount": 3,
+        "edgeCount": 4,
+        "languages": ["typescript"],
+        "pendingChanges": {"added": 0, "modified": 1, "removed": 0},
+        "worktreeMismatch": None,
+        "index": {
+            "state": "complete",
+            "reindexRecommended": False,
+            "currentExtractionVersion": 24,
+        },
+    }
+    fresh = json.loads(json.dumps(stale))
+    fresh["pendingChanges"]["modified"] = 0
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / ".codegraph").mkdir()
+        provider = CodeGraphContextProvider()
+        with (
+            patch(
+                "sdlc_harness.repo_context.codegraph._run_codegraph_status",
+                side_effect=[stale, fresh],
+            ),
+            patch("sdlc_harness.repo_context.codegraph._run_codegraph_sync") as sync,
+        ):
+            result = provider.sync_if_stale(target)
+
+    assert result["synced"] is True
+    assert result["snapshot"]["status"] == "fresh"
+    sync.assert_called_once()
+
+
+def test_codegraph_affected_tests_uses_bounded_structured_query() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / ".codegraph").mkdir()
+        provider = CodeGraphContextProvider()
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_json",
+            return_value={"tests": ["src/Main.test.ts"]},
+        ) as run:
+            result = provider.query_capability(
+                target,
+                operation="affected_tests",
+                files=["src/Main.ts"],
+                depth=99,
+            )
+
+    assert result == {"tests": ["src/Main.test.ts"]}
+    assert run.call_args.kwargs["command"] == [
+        "affected",
+        "src/Main.ts",
+        "--depth",
+        "5",
+        "--json",
+    ]
+
+
+def test_codegraph_symbols_file_uses_bounded_node_capability() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / ".codegraph").mkdir()
+        provider = CodeGraphContextProvider()
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_command",
+            return_value="symbol map",
+        ) as run:
+            result = provider.query_capability(
+                target,
+                operation="symbols",
+                file="apps/web/src/View.tsx",
+                limit=80,
+            )
+
+    assert result == {
+        "operation": "symbols",
+        "resolved_operation": "node",
+        "evidence": "symbol map",
+        "truncated": False,
+    }
+    assert run.call_args.kwargs["arguments"] == [
+        "node",
+        "--file",
+        "apps/web/src/View.tsx",
+        "--symbols-only",
+        "--limit",
+        "80",
+    ]
 
 
 def test_fake_designer_enforces_ui_experience_and_human_projection() -> None:

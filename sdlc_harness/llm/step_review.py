@@ -89,6 +89,36 @@ class ReviewableLlmClient:
             raise TypeError("Reviewable metadata completion did not return LlmCompletion.")
         return result
 
+    def supersede_existing_exchanges(self, *, reason: str) -> bool:
+        """Invalidate replayable exchanges while preserving the review audit trail."""
+
+        session = self._read_session()
+        calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
+        replayable_statuses = {
+            "prepared",
+            "input_pending",
+            "input_approved",
+            "pending",
+            "approved",
+            "completed",
+        }
+        changed = False
+        for call in calls:
+            previous_status = str(call.get("status") or "")
+            if previous_status not in replayable_statuses:
+                continue
+            call["status"] = "superseded"
+            call["superseded_from_status"] = previous_status
+            call["superseded_at"] = utc_now_iso()
+            call["superseded_reason"] = reason
+            call_id = str(call.get("call_id") or "")
+            if call_id:
+                _write_json(self.root / f"exchange_{call_id}.json", call)
+            changed = True
+        if changed:
+            self._write_session({**session, "calls": calls})
+        return changed
+
     def _complete(
         self,
         *,
@@ -403,10 +433,12 @@ class ReviewableLlmClient:
         if with_metadata:
             completion = self.base.complete_with_metadata(system=system, prompt=prompt, **options)
             raw = str(completion.content or "")
+            reasoning_content = str(completion.reasoning_content or "")
             finish_reason = str(completion.finish_reason or "")
             usage = dict(completion.usage or {})
         else:
             raw = self.base.complete(system=system, prompt=prompt)
+            reasoning_content = ""
             finish_reason = ""
             usage = {}
         exchange.update(
@@ -414,6 +446,7 @@ class ReviewableLlmClient:
                 "status": "pending" if self.review_output else "completed",
                 "provider_called_at": utc_now_iso(),
                 "raw_completion": raw,
+                "reasoning_content": reasoning_content,
                 "parsed_output": _parsed_output(raw),
                 "request_options": options,
                 "finish_reason": finish_reason,
@@ -497,10 +530,19 @@ def _resume_prompt_hash(
 
 
 def _parsed_output(raw: str) -> object:
+    text = final_response_text(raw)
     try:
-        return parse_first_json_object(final_response_text(raw))
+        parsed = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        # A response that starts as JSON but is malformed must not fall through
+        # to a valid nested object and misrepresent that object as the output.
+        if text.lstrip().startswith("{"):
+            return None
+        try:
+            return parse_first_json_object(text)
+        except json.JSONDecodeError:
+            return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _replay_completion(exchange: dict[str, object], *, with_metadata: bool) -> str | LlmCompletion:
@@ -512,6 +554,7 @@ def _replay_completion(exchange: dict[str, object], *, with_metadata: bool) -> s
         content=raw,
         finish_reason=str(exchange.get("finish_reason") or ""),
         usage=dict(usage) if isinstance(usage, dict) else {},
+        reasoning_content=str(exchange.get("reasoning_content") or ""),
     )
 
 

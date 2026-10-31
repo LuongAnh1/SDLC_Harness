@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 import json
 from typing import Any
 
+from ...core.config import phase3_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
@@ -785,13 +786,27 @@ class ImplementationPlanValidator:
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
         )
-        raw = client.complete(
-            system=(
-                "You are SDLC Harness Validator.review_plan. Return JSON only. "
-                "Be strict about requirement/design coverage, implementation clarity, and tests."
-            ),
-            prompt=prompt,
+        system = (
+            "You are SDLC Harness Validator.review_plan. Return JSON only. "
+            "Be strict about requirement/design coverage, implementation clarity, and tests."
         )
+        complete_with_metadata = getattr(client, "complete_with_metadata", None)
+        if callable(complete_with_metadata):
+            settings = getattr(client, "settings", None)
+            fallback_max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
+            completion = complete_with_metadata(
+                system=system,
+                prompt=prompt,
+                json_mode=True,
+                **phase3_llm_call_options(
+                    settings,
+                    "plan_validator",
+                    fallback_max_tokens=fallback_max_tokens,
+                ),
+            )
+            raw = str(completion.content)
+        else:
+            raw = client.complete(system=system, prompt=prompt)
         try:
             return _parse_llm_review_payload(raw)
         except HarnessError as exc:
@@ -953,6 +968,14 @@ Component-aware V4 boundaries:
   convention, require the plan to use it if otherwise Web/API/data boundaries would
   have to invent incompatible shapes. Attach supporting files to an approved unit;
   require upstream Design change only when no approved unit can own them.
+- For every UI surface, verify that the objective, exact code targets, and test intents
+  cover every non-empty experience-contract category: component structure, feedback,
+  accessibility, responsive behavior, and focus flow. CSS class names without owned or
+  verified style rules do not implement responsive behavior; static markup alone does not
+  verify interaction or focus navigation.
+- Verify that required boundary auth/input mappings and runtime attachments have an explicit
+  owner/caller target. A dependency ID without its component, surfaces, and produced artifacts
+  is not sufficient evidence that downstream wiring is executable.
 - A required migration needs a concrete migration artifact, not only a schema file.
   Only approved Requirement/Vertical Design behavior and established repo conventions
   may create a blocker.

@@ -762,6 +762,16 @@ def _runtime_composition_findings(
     for partition in partitions:
         scenario_id = str(partition.get("scenario_id") or "")
         component_id = str(partition.get("component_id") or "")
+        materialized = any(
+            str(value or "") in {"covered", "no_change"}
+            for value in _dict_value(partition.get("coverage")).values()
+        ) or any(
+            str(node.get("scenario_id") or "") == scenario_id
+            and str(node.get("component_id") or "") == component_id
+            for node in nodes
+        )
+        if not materialized:
+            continue
         if not _strings(partition.get("source_observation_refs")):
             findings.append(
                 _composition_finding(
@@ -937,6 +947,7 @@ def _runtime_composition_findings(
             )
 
     checked_operation_bindings: set[tuple[str, str, str]] = set()
+    checked_runtime_boundaries: set[tuple[str, str, str]] = set()
     for edge in edges:
         source = nodes_by_id.get(str(edge.get("from") or ""), {})
         target = nodes_by_id.get(str(edge.get("to") or ""), {})
@@ -946,6 +957,42 @@ def _runtime_composition_findings(
         if crosses_boundary:
             contract = _dict_value(edge.get("boundary_contract"))
             provider = source if str(edge.get("kind") or "") == "returns" else target
+            consumer = target if str(edge.get("kind") or "") == "returns" else source
+            provider_target = _dict_value(_dict_value(provider.get("runtime_binding")).get("target"))
+            consumer_target = _dict_value(_dict_value(consumer.get("runtime_binding")).get("target"))
+            provider_path = str(provider_target.get("path") or "")
+            consumer_path = str(consumer_target.get("path") or "")
+            provider_app = provider_path.split("/", 2)[:2] if provider_path.startswith("apps/") else []
+            consumer_app = consumer_path.split("/", 2)[:2] if consumer_path.startswith("apps/") else []
+            boundary_key = (
+                str(edge.get("scenario_id") or ""),
+                str(provider.get("id") or ""),
+                str(consumer.get("component_id") or ""),
+            )
+            if (
+                provider_app
+                and consumer_app
+                and provider_app != consumer_app
+                and str(provider.get("surface") or "") != "api"
+                and boundary_key not in checked_runtime_boundaries
+            ):
+                checked_runtime_boundaries.add(boundary_key)
+                findings.append(
+                    _composition_finding(
+                        "runtime_boundary_unreachable",
+                        str(provider.get("id") or edge.get("id") or ""),
+                        (
+                            f"Runtime path {consumer_path} cannot directly call non-API provider "
+                            f"{provider_path} across application components."
+                        ),
+                        (
+                            "Make the call executable without inventing transport: keep caller-local logic in the "
+                            "caller application or an importable shared package, or use an explicit API/transport "
+                            "surface only when the approved scenario requires one."
+                        ),
+                        node=provider,
+                    )
+                )
             diagnostics = _boundary_contract_diagnostics(contract, provider)
             if diagnostics["mismatches"]:
                 expected_change = "; ".join(str(item) for item in diagnostics["mismatches"])

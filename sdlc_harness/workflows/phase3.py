@@ -89,7 +89,12 @@ class PhaseThreeWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.llm_client = LlmClient(settings)
-        self.plan_step_review = dict(plan_step_review or {})
+        self.plan_step_review = {
+            "enabled": settings.implementation_plan_step_review_enabled,
+            "review_input": settings.implementation_plan_step_review_input_enabled,
+            "review_output": settings.implementation_plan_step_review_output_enabled,
+            **dict(plan_step_review or {}),
+        }
         self.developer = DeveloperPlanAgent(self.llm_client)
         self.validator = ImplementationPlanValidator(self.llm_client)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
@@ -134,6 +139,14 @@ class PhaseThreeWorkflow:
                 f"Run has no pending Phase 3 step review: {run_id}",
                 run_id=run_id,
             )
+        pinned_review = state.get("implementation_plan_step_review")
+        if isinstance(pinned_review, dict):
+            decision = {
+                key: self.plan_step_review[key]
+                for key in ("call_id", "decision", "note")
+                if self.plan_step_review.get(key) is not None
+            }
+            self.plan_step_review = {**pinned_review, **decision, "enabled": True}
         with self.workspace_manager.locked_workspace(run_id):
             try:
                 return self._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
@@ -145,17 +158,29 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
-        if str(state.get("current_phase") or "") != "implementation_planning" or status not in {
-            "waiting_implementation_plan_review",
-            "blocked",
-        }:
+        last_error = _dict_value(state.get("last_error"))
+        recoverable_step_review_drift = (
+            status == "failed"
+            and str(last_error.get("error_code") or "") == "implementation_plan_step_review_drift"
+        )
+        if (
+            str(state.get("current_phase") or "") != "implementation_planning"
+            or (
+                status not in {"waiting_implementation_plan_review", "blocked"}
+                and not recoverable_step_review_drift
+            )
+        ):
             raise HarnessError(
                 "implementation_plan_revalidation_not_allowed",
                 f"Run is not waiting on an implementation plan: {run_id}",
                 run_id=run_id,
             )
         with self.workspace_manager.locked_workspace(run_id):
-            return self._revalidate_implementation_plan_locked(run_id=run_id)
+            self._configure_plan_llm(run_id=run_id, supersede_existing=True)
+            try:
+                return self._revalidate_implementation_plan_locked(run_id=run_id)
+            except LlmStepReviewRequired as exc:
+                return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
 
     def _revalidate_implementation_plan_locked(self, *, run_id: str) -> dict[str, object]:
         state = self.store.read_state(run_id)
@@ -428,7 +453,7 @@ class PhaseThreeWorkflow:
         state = self.store.read_state(run_id)
         if not resume_step_review:
             self._require_design_checkpoint(state, run_id=run_id, checkpoint_id=checkpoint_id)
-        self._configure_plan_llm(run_id=run_id)
+        self._configure_plan_llm(run_id=run_id, supersede_existing=not resume_step_review)
         frozen_requirement, requirement_graph = self._read_phase3_inputs(state=state, run_id=run_id)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         requirement_path = frozen_requirement.approved_artifacts["requirement_packet"]
@@ -759,15 +784,17 @@ class PhaseThreeWorkflow:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
-    def _configure_plan_llm(self, *, run_id: str) -> None:
+    def _configure_plan_llm(self, *, run_id: str, supersede_existing: bool = False) -> None:
         if not bool(self.plan_step_review.get("enabled")):
             return
-        client: object = ReviewableLlmClient(
+        client = ReviewableLlmClient(
             self.llm_client,
             store=self.store,
             run_id=run_id,
             review=self.plan_step_review,
         )
+        if supersede_existing:
+            client.supersede_existing_exchanges(reason="upstream_design_checkpoint_changed")
         self.developer.llm_client = client
         self.validator.llm_client = client
 
@@ -785,7 +812,12 @@ class PhaseThreeWorkflow:
                 "status": "implementation_plan_step_review_required",
                 "pending_checkpoint": None,
                 "pending_step_review": progress,
-                "allowed_next_actions": ["get_status", "cancel_run"],
+                "implementation_plan_step_review": {
+                    "enabled": True,
+                    "review_input": bool(self.plan_step_review.get("review_input", True)),
+                    "review_output": bool(self.plan_step_review.get("review_output", True)),
+                },
+                "allowed_next_actions": ["continue_run", "revalidate_design", "get_status", "cancel_run"],
                 "last_error": None,
                 "summary_for_user": (
                     f"Phase 3 paused for LLM exchange review: {progress.get('call_id')}."

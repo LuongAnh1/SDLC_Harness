@@ -18,6 +18,7 @@ from sdlc_harness.agents.designer import (
     DesignDraft,
     DesignerAgent,
     DesignerToolLoopExecutor,
+    new_vertical_design_graph,
     parse_design_model,
 )
 from sdlc_harness.agents.validator import (
@@ -283,6 +284,58 @@ class PhaseTwoTest(unittest.TestCase):
             requested_by="test",
         )
 
+    def test_blocked_session_graph_uses_session_ordinal_when_versions_diverge(self) -> None:
+        workflow = PhaseTwoWorkflow(self.settings)
+        graph = new_vertical_design_graph(
+            run_id=self.run_id,
+            snapshot_binding={"requirement_digest": "sha256:req"},
+        )
+        session_dir = (
+            workflow.store.run_dir(self.run_id)
+            / "designer_execution"
+            / "design_v11"
+        )
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "designer_loop_session_v1.json").write_text(
+            json.dumps({"graph": graph}),
+            encoding="utf-8",
+        )
+
+        recovered = workflow._blocked_session_graph(
+            state={"designer_execution": {"design_version": 10, "session_ordinal": 11}},
+            run_id=self.run_id,
+        )
+
+        self.assertEqual(recovered, graph)
+
+    def test_blocked_session_graph_prefers_persisted_validator_input(self) -> None:
+        workflow = PhaseTwoWorkflow(self.settings)
+        graph = new_vertical_design_graph(
+            run_id=self.run_id,
+            snapshot_binding={"requirement_digest": "sha256:req"},
+        )
+        graph_path = (
+            workflow.store.run_dir(self.run_id)
+            / "design_validator_execution"
+            / "design_v11"
+            / "vertical_design_graph_input.json"
+        )
+        graph_path.parent.mkdir(parents=True, exist_ok=True)
+        graph_path.write_text(json.dumps(graph), encoding="utf-8")
+
+        recovered = workflow._blocked_session_graph(
+            state={
+                "designer_execution": {
+                    "design_version": 11,
+                    "session_ordinal": 12,
+                    "validation_graph_path": workflow.store.relative(graph_path),
+                }
+            },
+            run_id=self.run_id,
+        )
+
+        self.assertEqual(recovered, graph)
+
     def _target_overrides(self) -> dict[str, str]:
         return {
             "SDLC_TARGET_REPO_PATH": str(self.target.canonical),
@@ -327,7 +380,32 @@ class PhaseTwoTest(unittest.TestCase):
 
         workflow._reset_design_runtime()
 
-        self.assertEqual(workflow.designer_tool_loop.step_review, review)
+        self.assertEqual(
+            workflow.designer_tool_loop.step_review,
+            {
+                "enabled": True,
+                "review_input": True,
+                "review_output": True,
+                "call_id": "designer-0001",
+                "decision": "approve",
+                "note": "",
+            },
+        )
+
+    def test_step_review_defaults_come_from_runtime_settings(self) -> None:
+        settings = replace(
+            self.settings,
+            design_step_review_enabled=True,
+            design_step_review_input_enabled=False,
+            design_step_review_output_enabled=True,
+        )
+
+        workflow = PhaseTwoWorkflow(settings)
+
+        self.assertEqual(
+            workflow.designer_step_review,
+            {"enabled": True, "review_input": False, "review_output": True},
+        )
 
     def test_restart_design_uses_approved_requirement_and_current_design_contract(self) -> None:
         created = self._create_phase1_run()
@@ -1211,6 +1289,45 @@ class OnlyClass {
         ]
         self.assertEqual(output_review["review_stage"], "output")
 
+    def test_supersede_pending_designer_output_uses_loop_session(self) -> None:
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        workflow = PhaseTwoWorkflow(self.settings)
+        run_dir = workflow.store.run_dir(run_id)
+        review_dir = run_dir / "designer_execution" / "design_v99"
+        review_dir.mkdir(parents=True)
+        exchange_path = review_dir / "designer_exchange_designer-0001.json"
+        exchange_path.write_text(
+            json.dumps({"call_id": "designer-0001", "status": "review_required"}),
+            encoding="utf-8",
+        )
+        session_path = review_dir / "designer_loop_session_v1.json"
+        session_path.write_text(
+            json.dumps(
+                {
+                    "status": "review_required",
+                    "pending_step_review": {"call_id": "designer-0001"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        state = workflow.store.read_state(run_id)
+        state["designer_execution"] = {
+            "pending_step_review": {
+                "call_id": "designer-0001",
+                "exchange_path": workflow.store.relative(exchange_path),
+            }
+        }
+
+        workflow._supersede_pending_design_step_review(state=state, run_id=run_id)
+
+        exchange = json.loads(exchange_path.read_text(encoding="utf-8"))
+        session = json.loads(session_path.read_text(encoding="utf-8"))
+        self.assertEqual(exchange["status"], "superseded")
+        self.assertEqual(exchange["superseded_reason"], "design_revalidation_policy_changed")
+        self.assertIsNone(session["pending_step_review"])
+        self.assertEqual(session["status"], "superseded")
+
     def test_design_validator_step_review_pauses_and_replays_approved_output(self) -> None:
         settings = replace(self.settings, design_validation_trials=1)
         created = self._create_phase1_run()
@@ -1219,7 +1336,7 @@ class OnlyClass {
 
         paused = PhaseTwoWorkflow(
             settings,
-            designer_step_review={"enabled": True},
+            designer_step_review={"enabled": True, "review_input": False},
         ).revalidate_design(run_id=run_id)
 
         self.assertEqual(paused["status"], "design_paused", paused)
@@ -1363,19 +1480,29 @@ class OnlyClass {
         )
         workflow.store.write_state(state)
         execution_root = workflow.store.run_dir(run_id) / "implementation_plan_execution"
-        call = {
+        approved_call = {
             "call_id": "implementation-plan-0001-a01",
             "ordinal": 1,
+            "attempt": 1,
+            "status": "approved",
+            "raw_completion": "{}",
+        }
+        pending_call = {
+            "call_id": "implementation-plan-0002-a01",
+            "ordinal": 2,
             "attempt": 1,
             "status": "pending",
             "raw_completion": "{}",
         }
         execution_root.mkdir(parents=True, exist_ok=True)
         (execution_root / "step_review_session_v1.json").write_text(
-            json.dumps({"calls": [call]}, ensure_ascii=False), encoding="utf-8"
+            json.dumps({"calls": [approved_call, pending_call]}, ensure_ascii=False), encoding="utf-8"
         )
         (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
-            json.dumps(call, ensure_ascii=False), encoding="utf-8"
+            json.dumps(approved_call, ensure_ascii=False), encoding="utf-8"
+        )
+        (execution_root / "exchange_implementation-plan-0002-a01.json").write_text(
+            json.dumps(pending_call, ensure_ascii=False), encoding="utf-8"
         )
 
         response = workflow.revalidate_design(run_id=run_id)
@@ -1384,10 +1511,9 @@ class OnlyClass {
         session = json.loads(
             (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
         )
-        self.assertEqual(session["calls"][0]["status"], "superseded")
-        self.assertEqual(
-            session["calls"][0]["superseded_reason"],
-            "upstream_design_revalidation",
+        self.assertEqual([item["status"] for item in session["calls"]], ["superseded", "superseded"])
+        self.assertTrue(
+            all(item["superseded_reason"] == "upstream_design_revalidation" for item in session["calls"])
         )
 
     def test_revalidate_design_supersedes_unapproved_plan_checkpoint(self) -> None:

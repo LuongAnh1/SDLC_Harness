@@ -78,7 +78,18 @@ class ConfigApiTests(unittest.TestCase):
         self.assertEqual(payload["version"], "runtime_config_v1")
         self.assertEqual(
             [section["id"] for section in payload["sections"]],
-            ["api", "llm", "validation", "phase1_llm", "phase2_llm", "phase2_tools", "target", "sync"],
+            [
+                "api",
+                "llm",
+                "validation",
+                "phase1_llm",
+                "phase2_llm",
+                "phase3_llm",
+                "phase4_llm",
+                "phase2_tools",
+                "target",
+                "sync",
+            ],
         )
         self.assertNotIn("hidden-llm-secret", json.dumps(payload))
         target_section = next(section for section in payload["sections"] if section["id"] == "target")
@@ -98,6 +109,13 @@ class ConfigApiTests(unittest.TestCase):
         )
         self.assertEqual(vertical_trace_field["value"], "enforce")
         self.assertEqual(vertical_trace_field["source"], "default")
+        design_step_review_field = next(
+            field
+            for field in validation_section["fields"]
+            if field["name"] == "SDLC_DESIGN_STEP_REVIEW_ENABLED"
+        )
+        self.assertFalse(design_step_review_field["value"])
+        self.assertEqual(design_step_review_field["source"], "default")
         path_field = next(
             field for field in target_section["fields"] if field["name"] == "SDLC_TARGET_REPO_PATH"
         )

@@ -117,7 +117,12 @@ class PhaseTwoWorkflow:
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_discovery = RepoDiscoveryWorkflow(settings)
-        self.designer_step_review = dict(designer_step_review or {})
+        self.designer_step_review = {
+            "enabled": settings.design_step_review_enabled,
+            "review_input": settings.design_step_review_input_enabled,
+            "review_output": settings.design_step_review_output_enabled,
+            **dict(designer_step_review or {}),
+        }
         self._reset_design_runtime()
 
     def _reset_design_runtime(self) -> None:
@@ -233,7 +238,10 @@ class PhaseTwoWorkflow:
         if recoverable_paused_design:
             self._supersede_pending_design_step_review(state=state, run_id=run_id)
         if recoverable_plan_step_review:
-            self._supersede_pending_plan_step_review(run_id=run_id)
+            self._supersede_pending_plan_step_review(
+                run_id=run_id,
+                include_approved=True,
+            )
         if recoverable_plan_checkpoint:
             self._supersede_pending_plan_step_review(
                 run_id=run_id,
@@ -258,9 +266,13 @@ class PhaseTwoWorkflow:
             self.store.write_state(state)
         approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
         versions = _design_versions(state)
-        existing_graph = self._latest_vertical_graph(state, run_id=run_id, required=False)
-        if existing_graph is None and recoverable_vertical_design_block:
-            existing_graph = self._blocked_session_graph(state=state, run_id=run_id)
+        existing_graph = (
+            self._blocked_session_graph(state=state, run_id=run_id)
+            if recoverable_vertical_design_block or recoverable_paused_design
+            else None
+        )
+        if existing_graph is None:
+            existing_graph = self._latest_vertical_graph(state, run_id=run_id, required=False)
         if existing_graph is None:
             raise HarnessError(
                 "vertical_design_graph_missing",
@@ -322,7 +334,11 @@ class PhaseTwoWorkflow:
                 "Pending Design review exchange is outside the run directory.",
                 run_id=run_id,
             ) from exc
-        session_path = resolved.parent / "step_review_session_v1.json"
+        review_session_path = resolved.parent / "step_review_session_v1.json"
+        designer_session_path = resolved.parent / "designer_loop_session_v1.json"
+        session_path = (
+            review_session_path if review_session_path.exists() else designer_session_path
+        )
         try:
             exchange = json.loads(resolved.read_text(encoding="utf-8"))
             session = json.loads(session_path.read_text(encoding="utf-8"))
@@ -339,6 +355,26 @@ class PhaseTwoWorkflow:
                 run_id=run_id,
             )
         call_id = str(exchange.get("call_id") or "")
+        if session_path == designer_session_path:
+            session_pending = _dict_value(session.get("pending_step_review"))
+            if (
+                str(session_pending.get("call_id") or "") != call_id
+                or str(exchange.get("status") or "") != "review_required"
+            ):
+                raise HarnessError(
+                    "design_step_review_corrupted",
+                    "Pending Designer output review does not match its loop session.",
+                    run_id=run_id,
+                )
+            exchange["status"] = "superseded"
+            exchange["superseded_at"] = utc_now_iso()
+            exchange["superseded_reason"] = "design_revalidation_policy_changed"
+            session["pending_step_review"] = None
+            session["status"] = "superseded"
+            session["updated_at"] = utc_now_iso()
+            _write_json_atomic(resolved, exchange)
+            _write_json_atomic(session_path, session)
+            return
         calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
         matched = False
         for call in calls:
@@ -426,7 +462,10 @@ class PhaseTwoWorkflow:
             approved=approved,
             start_version=int(execution.get("design_version") or _next_design_version(self.store.run_dir(run_id) / "artifacts")),
             existing_versions=_design_versions(state),
-            existing_graph=self._latest_vertical_graph(state, run_id=run_id, required=False),
+            existing_graph=(
+                self._blocked_session_graph(state=state, run_id=run_id)
+                or self._latest_vertical_graph(state, run_id=run_id, required=False)
+            ),
             session_ordinal=int(execution.get("session_ordinal") or 1),
             initial_repair_iteration=int(execution.get("repair_iteration") or 0),
             initial_repair_feedback=_dict_items(state.get("designer_repair_feedback")),
@@ -726,6 +765,14 @@ class PhaseTwoWorkflow:
                     return self._status_response(state, created_new_run=False)
 
             graph = execution.graph
+            validation_graph_file = (
+                self.store.run_dir(run_id)
+                / "design_validator_execution"
+                / f"design_v{version}"
+                / "vertical_design_graph_input.json"
+            )
+            _write_json_atomic(validation_graph_file, graph)
+            validation_graph_path = self.store.relative(validation_graph_file)
             state = self.store.read_state(run_id)
             state.update(
                 {
@@ -737,6 +784,7 @@ class PhaseTwoWorkflow:
                         "status": "validating",
                         "session_ordinal": ordinal,
                         "design_version": version,
+                        "validation_graph_path": validation_graph_path,
                         **execution.progress,
                         "repair_iteration": repair_iteration,
                     },
@@ -854,6 +902,7 @@ class PhaseTwoWorkflow:
                                 "status": "validator_review_required",
                                 "session_ordinal": ordinal,
                                 "design_version": version,
+                                "validation_graph_path": validation_graph_path,
                                 **execution.progress,
                                 "repair_iteration": repair_iteration,
                                 "validator_step_review": exc.progress,
@@ -1168,13 +1217,38 @@ class PhaseTwoWorkflow:
         """Recover the last validated graph after invalid-action exhaustion."""
 
         execution = _dict_value(state.get("designer_execution"))
-        version = int(execution.get("design_version") or 0)
-        if version < 1:
+        validation_graph_ref = str(execution.get("validation_graph_path") or "")
+        if validation_graph_ref:
+            validation_graph_path = Path(validation_graph_ref)
+            resolved = (
+                validation_graph_path.resolve()
+                if validation_graph_path.is_absolute()
+                else (self.store.repo_root / validation_graph_path).resolve()
+            )
+            try:
+                resolved.relative_to(self.store.run_dir(run_id).resolve())
+            except ValueError as exc:
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    "Validator input graph escapes its run directory.",
+                    run_id=run_id,
+                ) from exc
+            try:
+                payload = json.loads(resolved.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    "Validator input graph is not valid JSON.",
+                    run_id=run_id,
+                ) from exc
+            return validate_vertical_design_graph(payload, expected_run_id=run_id)
+        session_ordinal = int(execution.get("session_ordinal") or execution.get("design_version") or 0)
+        if session_ordinal < 1:
             return None
         path = (
             self.store.run_dir(run_id)
             / "designer_execution"
-            / f"design_v{version}"
+            / f"design_v{session_ordinal}"
             / "designer_loop_session_v1.json"
         )
         try:

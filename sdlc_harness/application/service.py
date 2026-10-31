@@ -246,8 +246,53 @@ class ApplicationService:
             if str(state.get("status") or "") == "repo_discovery_paused":
                 return PhaseTwoWorkflow(settings).continue_repo_discovery(run_id=run_id)
             if str(state.get("status") or "") == "design_paused":
-                return PhaseTwoWorkflow(settings).continue_design(run_id=run_id)
-            return PhaseFourWorkflow(settings).continue_until_implementation_checkpoint(
+                review: dict[str, object] = {}
+                for argument_name, review_key in (
+                    ("step_review_call_id", "call_id"),
+                    ("step_review_decision", "decision"),
+                    ("step_review_note", "note"),
+                ):
+                    value = self._optional_text(command, argument_name)
+                    if value is not None:
+                        review[review_key] = value
+                return PhaseTwoWorkflow(
+                    settings,
+                    designer_step_review={"enabled": True, **review} if review else None,
+                ).continue_design(run_id=run_id)
+            if str(state.get("status") or "") == "implementation_plan_step_review_required":
+                review: dict[str, object] = {"enabled": True}
+                for argument_name, review_key in (
+                    ("step_review_call_id", "call_id"),
+                    ("step_review_decision", "decision"),
+                    ("step_review_note", "note"),
+                ):
+                    value = self._optional_text(command, argument_name)
+                    if value is not None:
+                        review[review_key] = value
+                return PhaseThreeWorkflow(
+                    settings,
+                    plan_step_review=review,
+                ).continue_implementation_plan_step_review(run_id=run_id)
+            developer_review: dict[str, object] = {}
+            review_all = bool(command.arguments.get("step_review"))
+            if review_all or bool(command.arguments.get("step_review_input")):
+                developer_review["review_input"] = True
+            if review_all or bool(command.arguments.get("step_review_output")):
+                developer_review["review_output"] = True
+            for argument_name, review_key in (
+                ("step_review_call_id", "call_id"),
+                ("step_review_decision", "decision"),
+                ("step_review_note", "note"),
+            ):
+                value = self._optional_text(command, argument_name)
+                if value is not None:
+                    developer_review[review_key] = value
+            if developer_review:
+                developer_review["enabled"] = True
+            return PhaseFourWorkflow(
+                settings,
+                developer_step_review=developer_review or None,
+            ).continue_until_implementation_checkpoint(
                 run_id=run_id
             )
         if name == "revalidate-implementation":

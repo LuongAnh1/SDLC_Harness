@@ -35,17 +35,21 @@ from sdlc_harness.agents.designer.execution import (
     _active_partition,
     _active_repair_task,
     _action_budget_exhausted_message,
+    _applicable_repair_feedback,
     _composition_repair_findings,
     _consume_action,
     _delta_invalid_message,
     _designer_action_budget_policy,
     _designer_llm_profile_name,
     _designer_prompt,
+    _is_exact_deterministic_repair_delta,
+    _repair_task_has_mutation_path,
     _uiux_guidance_status,
     _mark_repair_targets_completed,
     _new_action_budgets,
     _parse_designer_tool_action,
     _prompt_observations,
+    _reconcile_stale_placeholder_partitions,
     _repair_target_present,
     _repair_targets,
     _validate_repair_delta_scope,
@@ -418,6 +422,23 @@ class VerticalDesignGraphTest(unittest.TestCase):
         categories = {str(item["category"]) for item in design_bundle_findings(designed)}
         self.assertIn("design_investigation_missing", categories)
         self.assertIn("runtime_binding_missing", categories)
+
+    def test_v2_bundle_ignores_unmaterialized_placeholder_partition(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-v2-placeholder", snapshot_binding=self.binding)
+        graph["partitions"] = [
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-2",
+                "component_id": "api",
+                "coverage": {"business_rule": "missing"},
+                "source_observation_refs": [],
+            }
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+
+        categories = {str(item["category"]) for item in design_bundle_findings(graph)}
+
+        self.assertNotIn("design_investigation_missing", categories)
 
     def test_v2_runtime_binding_is_evidence_backed_and_relation_checked(self) -> None:
         graph = new_vertical_design_graph(run_id="run-v2-valid", snapshot_binding=self.binding)
@@ -801,6 +822,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
         findings = design_bundle_findings(graph, landscape=landscape)
         categories = {str(item["category"]) for item in findings}
         self.assertIn("boundary_contract_mismatch", categories)
+        self.assertNotIn("runtime_boundary_unreachable", categories)
         boundary_finding = next(item for item in findings if item["category"] == "boundary_contract_mismatch")
         diagnostics = boundary_finding["contract_diagnostics"]
         self.assertEqual(diagnostics["expected_provider_operation"], "DELETE /cultural-heritage/{id}")
@@ -957,6 +979,10 @@ class VerticalDesignGraphTest(unittest.TestCase):
         }
 
         findings = design_bundle_findings(graph, landscape=landscape)
+        self.assertNotIn(
+            "runtime_boundary_unreachable",
+            {str(item["category"]) for item in findings},
+        )
         mismatch = next(
             item for item in findings if item["category"] == "runtime_operation_binding_mismatch"
         )
@@ -2583,6 +2609,341 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(
             [(item["edge"]["from"], item["edge"]["to"], item["edge"]["terminal"]) for item in insertion_ops[4:]],
             [("VDN-rule", "VDN-api", False), ("VDN-api", "VDN-ui", True)],
+        )
+
+    def test_reconcile_removes_only_stale_empty_routing_placeholder(self) -> None:
+        requirement = {
+            "use_case_id": "UC1",
+            "scenario_contract": {
+                "scenarios": [
+                    {
+                        "id": "SC-2",
+                        "surfaces": {
+                            "ui": {"status": "required", "requirement_refs": ["AF-1"]},
+                            "api": {"status": "not_applicable", "requirement_refs": []},
+                            "business_rule": {"status": "required", "requirement_refs": ["AF-1"]},
+                            "data": {"status": "not_applicable", "requirement_refs": []},
+                        },
+                    }
+                ]
+            },
+        }
+        landscape = {
+            "components": [
+                {"component_id": "web", "roots": ["apps/web/src"]},
+                {"component_id": "api", "roots": ["apps/api/src"]},
+            ],
+            "anchors": [
+                {
+                    "anchor_id": "RLA-web",
+                    "component_id": "web",
+                    "kind": "ui_component",
+                    "path": "apps/web/src/App.tsx",
+                    "symbol": "App",
+                }
+            ],
+            "scenario_matches": [],
+        }
+        graph = new_vertical_design_graph(
+            run_id="run-stale-placeholder",
+            snapshot_binding={
+                "requirement_digest": "req",
+                "repo_landscape_digest": "repo",
+                "workspace_ref": "workspace",
+                "base_sha": "abc",
+            },
+        )
+        graph["partitions"] = [
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "coverage": {"ui": "covered"},
+                "source_observation_refs": ["repo:web"],
+            },
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-2",
+                "component_id": "api",
+                "coverage": {"business_rule": "missing"},
+                "source_observation_refs": [],
+            },
+        ]
+        graph["nodes"] = [
+            {"id": "VDN-ui", "scenario_id": "SC-2", "component_id": "web", "surface": "ui"}
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        stale_feedback = [
+            {
+                "category": "design_investigation_missing",
+                "subject_ref": "SC-2@api",
+            }
+        ]
+
+        reconciled, removed = _reconcile_stale_placeholder_partitions(
+            requirement_model=requirement,
+            landscape=landscape,
+            graph=graph,
+        )
+
+        self.assertEqual(removed, ["SC-2|api"])
+        self.assertEqual(
+            [(item["scenario_id"], item["component_id"]) for item in reconciled["partitions"]],
+            [("SC-2", "web")],
+        )
+        self.assertEqual(reconciled["revision"], graph["revision"] + 1)
+        self.assertNotEqual(reconciled["artifact_digest"], graph["artifact_digest"])
+        self.assertEqual(_applicable_repair_feedback(stale_feedback, graph=graph), [])
+
+        materialized = json.loads(json.dumps(graph))
+        materialized["nodes"].append(
+            {
+                "id": "VDN-api-rule",
+                "scenario_id": "SC-2",
+                "component_id": "api",
+                "surface": "business_rule",
+            }
+        )
+        kept, removed = _reconcile_stale_placeholder_partitions(
+            requirement_model=requirement,
+            landscape=landscape,
+            graph=materialized,
+        )
+        self.assertEqual(removed, [])
+        self.assertEqual(kept, materialized)
+        self.assertEqual(_applicable_repair_feedback(stale_feedback, graph=materialized), stale_feedback)
+        self.assertIsNone(
+            _active_repair_task(
+                repair_feedback=stale_feedback,
+                graph=materialized,
+                completed_targets=[],
+                active_partition={"partition": {"scenario_id": "SC-2", "component_id": "web"}},
+            )
+        )
+
+        missing_surface_feedback = [
+            {
+                "category": "required_surface_missing",
+                "subject_ref": "SURF:SC-2:business_rule",
+            }
+        ]
+        completed = json.loads(json.dumps(graph))
+        completed["partitions"][0]["coverage"]["business_rule"] = "covered"
+        completed["nodes"].append(
+            {
+                "id": "VDN-web-rule",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "surface": "business_rule",
+            }
+        )
+        self.assertEqual(
+            _applicable_repair_feedback(missing_surface_feedback, graph=completed),
+            [],
+        )
+
+        covered_without_node = json.loads(json.dumps(completed))
+        covered_without_node["nodes"] = [
+            node for node in covered_without_node["nodes"] if node["surface"] != "business_rule"
+        ]
+        self.assertEqual(
+            _applicable_repair_feedback(missing_surface_feedback, graph=covered_without_node),
+            missing_surface_feedback,
+        )
+
+        node_without_coverage = json.loads(json.dumps(completed))
+        node_without_coverage["partitions"][0]["coverage"]["business_rule"] = "missing"
+        self.assertEqual(
+            _applicable_repair_feedback(missing_surface_feedback, graph=node_without_coverage),
+            missing_surface_feedback,
+        )
+
+    def test_ui_only_business_rule_is_routed_to_web(self) -> None:
+        requirement = {
+            "use_case_id": "UC1",
+            "scenario_contract": {
+                "scenarios": [
+                    {
+                        "id": "SC-2",
+                        "surfaces": {
+                            "ui": {"status": "required", "requirement_refs": ["AF-1"]},
+                            "api": {"status": "not_applicable", "requirement_refs": []},
+                            "business_rule": {"status": "required", "requirement_refs": ["AF-1"]},
+                            "data": {"status": "not_applicable", "requirement_refs": []},
+                        },
+                    }
+                ]
+            },
+        }
+        landscape = {
+            "components": [
+                {"component_id": "web", "roots": ["apps/web/src"]},
+                {"component_id": "api", "roots": ["apps/api/src"]},
+            ],
+            "anchors": [
+                {"anchor_id": "RLA-file", "component_id": "web", "kind": "source_file", "path": "apps/web/src/App.tsx", "symbol": ""},
+                {"anchor_id": "RLA-web", "component_id": "web", "kind": "ui_component", "path": "apps/web/src/App.tsx", "symbol": "App"},
+                {"anchor_id": "RLA-api-rule", "component_id": "api", "kind": "service_symbol", "path": "apps/api/src/cancel.ts", "symbol": "cancelDeletion"},
+            ],
+            "scenario_matches": [
+                {"scenario_id": "SC-2", "surface": "business_rule", "candidate_anchor_refs": ["RLA-api-rule"]},
+            ],
+        }
+        graph = new_vertical_design_graph(
+            run_id="run-local-rule",
+            snapshot_binding={"requirement_digest": "req", "repo_landscape_digest": "repo", "workspace_ref": "workspace", "base_sha": "abc"},
+        )
+        graph["partitions"] = [
+            {"use_case_id": "UC1", "scenario_id": "SC-2", "component_id": "web", "coverage": {"ui": "covered"}}
+        ]
+        graph["nodes"] = [{"id": "VDN-ui", "scenario_id": "SC-2", "component_id": "web", "surface": "ui"}]
+
+        active = _active_partition(requirement_model=requirement, landscape=landscape, graph=graph)
+
+        self.assertEqual(active["partition"]["component_id"], "web")
+        self.assertEqual(active["missing_surfaces"], ["business_rule"])
+        self.assertEqual(active["surface_work"][0]["candidate_anchors"], [])
+        self.assertEqual(
+            active["surface_work"][0]["composition_owner_candidates"][0]["anchor_id"],
+            "RLA-web",
+        )
+        self.assertEqual(
+            active["delta_scaffold"]["operations"][1]["node"]["runtime_binding"]["attachment"],
+            {
+                "relation": "called_by",
+                "owner_ref": "RLA-web",
+                "owner_path": "apps/web/src/App.tsx",
+                "owner_symbol": "App",
+            },
+        )
+
+    def test_cross_application_non_api_provider_is_not_runtime_reachable(self) -> None:
+        graph = new_vertical_design_graph(
+            run_id="run-unreachable-boundary",
+            snapshot_binding={"requirement_digest": "req", "repo_landscape_digest": "repo", "workspace_ref": "workspace", "base_sha": "abc"},
+        )
+        graph["partitions"] = [
+            {"use_case_id": "UC1", "scenario_id": "SC-2", "component_id": "web", "coverage": {"ui": "covered"}, "source_observation_refs": ["repo:web"]},
+            {"use_case_id": "UC1", "scenario_id": "SC-2", "component_id": "api", "coverage": {"business_rule": "covered"}, "source_observation_refs": ["repo:api"]},
+        ]
+        graph["nodes"] = [
+            {
+                "id": "VDN-ui", "use_case_id": "UC1", "scenario_id": "SC-2", "component_id": "web",
+                "semantic_key": "SC-2:web:ui", "name": "Cancel dialog", "kind": "ui_interaction", "surface": "ui",
+                "disposition": "add", "requirement_refs": ["AF-1"], "evidence_refs": [], "evidence_reason": "New UI.",
+                "contract": "Cancel the pending deletion.",
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION, "runtime_kind": "ui_component",
+                    "target": {"component_id": "web", "path": "apps/web/src/DeleteView.tsx", "symbol": "DeleteView"},
+                    "attachment": {"relation": "rendered_by", "owner_ref": "RLA-web", "owner_path": "apps/web/src/App.tsx", "owner_symbol": "App"},
+                    "evidence_refs": ["RLA-web"],
+                },
+            },
+            {
+                "id": "VDN-rule", "use_case_id": "UC1", "scenario_id": "SC-2", "component_id": "api",
+                "semantic_key": "SC-2:api:business_rule", "name": "Cancel rule", "kind": "business_rule", "surface": "business_rule",
+                "disposition": "add", "requirement_refs": ["AF-1"], "evidence_refs": [], "evidence_reason": "New rule.",
+                "contract": "Abort the local pending deletion.",
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION, "runtime_kind": "service",
+                    "target": {"component_id": "api", "path": "apps/api/src/cancel.ts", "symbol": "cancelDeletion"},
+                    "attachment": {"relation": "called_by", "owner_ref": "RLA-api", "owner_path": "apps/api/src/app.ts", "owner_symbol": "createApp"},
+                    "evidence_refs": ["RLA-api"],
+                },
+            },
+        ]
+        graph["edges"] = [
+            {
+                "id": "VDE-cancel", "from": "VDN-ui", "to": "VDN-rule", "kind": "calls", "label": "confirm cancellation",
+                "scenario_id": "SC-2", "order": 1, "terminal": True,
+                "boundary_contract": {
+                    "schema_version": BOUNDARY_CONTRACT_VERSION, "consumer_operation": "confirmCancellation",
+                    "provider_operation": "cancelDeletion", "input_mapping": [{"from": "confirmed", "to": "confirmed", "required": True}],
+                    "auth_mapping": [], "response_mapping": [{"from": "cancelled", "to": "controls enabled", "required": True}], "error_mapping": [],
+                },
+            }
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        landscape = {
+            "components": [
+                {"component_id": "web", "roots": ["apps/web/src"]},
+                {"component_id": "api", "roots": ["apps/api/src"]},
+            ],
+            "anchors": [],
+        }
+
+        findings = design_bundle_findings(graph, landscape=landscape)
+        finding = next(item for item in findings if item["category"] == "runtime_boundary_unreachable")
+
+        self.assertEqual(finding["subject_ref"], "VDN-rule")
+        self.assertNotIn("add an API", str(finding["expected_change"]))
+        repair_task = _active_repair_task(
+            repair_feedback=[finding],
+            graph=graph,
+            completed_targets=[],
+            landscape=landscape,
+        )
+        self.assertEqual(
+            repair_task["delta_scaffold"]["operations"],
+            [
+                {"op": "set_partition_coverage", "coverage": {"business_rule": "missing"}},
+                {"op": "remove_edge", "edge_id": "VDE-cancel"},
+                {"op": "remove_node", "node_id": "VDN-rule"},
+            ],
+        )
+        arguments = {"delta": repair_task["delta_scaffold"]}
+        self.assertTrue(
+            _is_exact_deterministic_repair_delta(
+                arguments=arguments,
+                repair_task=repair_task,
+            )
+        )
+        changed = json.loads(json.dumps(arguments))
+        changed["delta"]["operations"] = changed["delta"]["operations"][:-1]
+        self.assertFalse(
+            _is_exact_deterministic_repair_delta(
+                arguments=changed,
+                repair_task=repair_task,
+            )
+        )
+        repaired_graph = json.loads(json.dumps(graph))
+        repaired_graph["nodes"] = [item for item in repaired_graph["nodes"] if item["id"] != "VDN-rule"]
+        repaired_graph["edges"] = []
+        self.assertIsNone(
+            _active_repair_task(
+                repair_feedback=[finding],
+                graph=repaired_graph,
+                completed_targets=["SC-2@api"],
+                landscape=landscape,
+            )
+        )
+        self.assertFalse(
+            _repair_task_has_mutation_path(
+                {
+                    "write_scope": {
+                        "allow_add_node": False,
+                        "writable_node_ids": [],
+                        "removable_edge_ids": [],
+                    },
+                    "delta_scaffold": {
+                        "operations": [
+                            {"op": "set_partition_coverage", "coverage": {"business_rule": "missing"}}
+                        ]
+                    },
+                }
+            )
+        )
+        self.assertTrue(
+            _repair_task_has_mutation_path(
+                {
+                    "write_scope": {
+                        "allow_add_node": True,
+                        "writable_node_ids": [],
+                        "removable_edge_ids": [],
+                    },
+                    "delta_scaffold": {"operations": []},
+                }
+            )
         )
 
     def test_active_partition_seeds_v2_branch_parent_edge(self) -> None:

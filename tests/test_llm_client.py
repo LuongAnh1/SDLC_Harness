@@ -25,7 +25,15 @@ class _FakeResponse:
     def read(self) -> bytes:
         return json.dumps(
             {
-                "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+                "choices": [
+                    {
+                        "message": {
+                            "content": "ok",
+                            "reasoning_content": "provider reasoning",
+                        },
+                        "finish_reason": "stop",
+                    }
+                ],
                 "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
             }
         ).encode("utf-8")
@@ -118,7 +126,7 @@ class LlmClientPayloadTests(unittest.TestCase):
                 return _FakeResponse()
 
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                LlmClient(self._settings(root, mode="deepseek")).complete_with_metadata(
+                completion = LlmClient(self._settings(root, mode="deepseek")).complete_with_metadata(
                     system="system",
                     prompt="prompt",
                     json_mode=True,
@@ -134,6 +142,7 @@ class LlmClientPayloadTests(unittest.TestCase):
         self.assertEqual(captured["max_tokens"], 65536)
         self.assertNotIn("temperature", captured)
         self.assertEqual(captured_timeout, 300)
+        self.assertEqual(completion.reasoning_content, "provider reasoning")
 
 
 class JsonUtilsTests(unittest.TestCase):

@@ -20,7 +20,10 @@ from ..core.errors import HarnessError
 MAX_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 45
 CODEGRAPH_SNAPSHOT_VERSION = "repo_codegraph_snapshot_v1"
-_STRUCTURED_OPERATIONS = frozenset({"symbols", "callers", "callees", "impact", "files"})
+_STRUCTURED_OPERATIONS = frozenset(
+    {"symbols", "callers", "callees", "impact", "affected_tests", "files"}
+)
+_CAPABILITY_OPERATIONS = _STRUCTURED_OPERATIONS | {"node", "explore"}
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,7 @@ class CodeGraphContextProvider:
         depth: int = 2,
         file_filter: str = "",
         pattern: str = "",
+        files: list[str] | None = None,
     ) -> dict[str, object]:
         """Run one allowlisted CodeGraph JSON query against an existing index."""
 
@@ -147,6 +151,12 @@ class CodeGraphContextProvider:
             command = [normalized, symbol, "--limit", str(bounded_limit), "--json"]
         elif normalized == "impact":
             command = ["impact", symbol, "--depth", str(bounded_depth), "--json"]
+        elif normalized == "affected_tests":
+            bounded_files = [str(item).strip().replace("\\", "/") for item in (files or [])]
+            bounded_files = [item for item in bounded_files if item][:20]
+            if not bounded_files:
+                raise HarnessError("target_repo_codegraph_failed", "Affected-tests query requires files.")
+            command = ["affected", *bounded_files, "--depth", str(bounded_depth), "--json"]
         else:
             command = ["files", "--format", "flat", "--json"]
             if file_filter:
@@ -158,6 +168,98 @@ class CodeGraphContextProvider:
             command=command,
             timeout_seconds=self.timeout_seconds,
         )
+
+    def query_capability(
+        self,
+        target_path: Path,
+        *,
+        operation: str,
+        query: str = "",
+        symbol: str = "",
+        file: str = "",
+        files: list[str] | None = None,
+        kind: str = "",
+        limit: int = 10,
+        depth: int = 2,
+        file_filter: str = "",
+        pattern: str = "",
+    ) -> dict[str, object]:
+        """Run one bounded CodeGraph capability and normalize text/JSON output."""
+
+        normalized = operation.strip().lower()
+        requested_operation = normalized
+        if normalized not in _CAPABILITY_OPERATIONS:
+            raise HarnessError("target_repo_codegraph_failed", f"Unsupported CodeGraph operation: {operation}")
+        self.require_index(target_path)
+        file_symbol_map = normalized == "symbols" and bool(file) and not query
+        if file_symbol_map:
+            normalized = "node"
+        if normalized in _STRUCTURED_OPERATIONS:
+            return self.query_structured(
+                target_path,
+                operation=normalized,
+                query=query,
+                symbol=symbol,
+                kind=kind,
+                limit=limit,
+                depth=depth,
+                file_filter=file_filter,
+                pattern=pattern,
+                files=files,
+            )
+        if self.fake_mode:
+            result = {
+                "operation": requested_operation,
+                "evidence": "fake CodeGraph evidence",
+                "fake": True,
+            }
+            if requested_operation != normalized:
+                result["resolved_operation"] = normalized
+            return result
+        if normalized == "explore":
+            evidence = _run_codegraph_explore(
+                target_path=target_path,
+                query=query,
+                timeout_seconds=self.timeout_seconds,
+            )
+        else:
+            bounded_limit = min(400, max(1, int(limit)))
+            command = ["node"]
+            if file:
+                command.extend(["--file", file])
+                if file_symbol_map:
+                    command.append("--symbols-only")
+                command.extend(["--limit", str(bounded_limit)])
+            elif symbol:
+                command.extend([symbol])
+            else:
+                raise HarnessError("target_repo_codegraph_failed", "Node query requires symbol or file.")
+            evidence = _run_codegraph_command(
+                target_path=target_path,
+                arguments=command,
+                timeout_seconds=self.timeout_seconds,
+            )
+        result = {
+            "operation": requested_operation,
+            "evidence": _truncate(evidence, limit=MAX_EVIDENCE_CHARS),
+            "truncated": len(evidence) > MAX_EVIDENCE_CHARS,
+        }
+        if requested_operation != normalized:
+            result["resolved_operation"] = normalized
+        return result
+
+    def sync_if_stale(self, target_path: Path) -> dict[str, object]:
+        """Incrementally sync pending worktree changes and return a fresh snapshot."""
+
+        self.require_index(target_path)
+        if self.fake_mode:
+            return {"synced": False, "snapshot": self.snapshot_readonly(target_path)}
+        status = _run_codegraph_status(target_path=target_path, timeout_seconds=self.timeout_seconds)
+        synced = _pending_change_count(status) > 0
+        if synced:
+            _run_codegraph_sync(target_path=target_path, timeout_seconds=self.timeout_seconds)
+            status = _run_codegraph_status(target_path=target_path, timeout_seconds=self.timeout_seconds)
+        return {"synced": synced, "snapshot": _validated_snapshot(status)}
 
     def snapshot_readonly(self, target_path: Path) -> dict[str, object]:
         """Return a stable freshness snapshot without mutating the index."""
@@ -335,8 +437,7 @@ def _run_codegraph_command(
 
 def _validated_snapshot(status: dict[str, object]) -> dict[str, object]:
     index = status.get("index") if isinstance(status.get("index"), dict) else {}
-    pending = status.get("pendingChanges") if isinstance(status.get("pendingChanges"), dict) else {}
-    pending_total = sum(int(pending.get(key) or 0) for key in ("added", "modified", "removed"))
+    pending_total = _pending_change_count(status)
     stale_reasons: list[str] = []
     if not bool(status.get("initialized")):
         stale_reasons.append("not_initialized")
@@ -364,6 +465,11 @@ def _validated_snapshot(status: dict[str, object]) -> dict[str, object]:
         "languages": sorted(str(item) for item in status.get("languages", []) if str(item)),
         "extraction_version": int(index.get("currentExtractionVersion") or 0),
     })
+
+
+def _pending_change_count(status: dict[str, object]) -> int:
+    pending = status.get("pendingChanges") if isinstance(status.get("pendingChanges"), dict) else {}
+    return sum(int(pending.get(key) or 0) for key in ("added", "modified", "removed"))
 
 
 def _with_snapshot_digest(value: dict[str, object]) -> dict[str, object]:

@@ -29,6 +29,7 @@ class _FakeClient:
             content=self.complete(system=system, prompt=prompt),
             finish_reason="stop",
             usage={"completion_tokens": 7},
+            reasoning_content="private provider reasoning",
         )
 
 
@@ -36,6 +37,20 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
     def test_parsed_output_accepts_validator_json_not_only_tool_actions(self) -> None:
         self.assertEqual(
             _parsed_output('{"ok":true,"findings":[]}'),
+            {"ok": True, "findings": []},
+        )
+
+    def test_parsed_output_does_not_extract_nested_object_from_malformed_root(self) -> None:
+        raw = (
+            '{"action":"execution.complete_unit","arguments":{"summary":"bar\n\nrels",'
+            '"path_dispositions":[{"path":"src/client.ts","status":"verified_unchanged"}]}}'
+        )
+
+        self.assertIsNone(_parsed_output(raw))
+
+    def test_parsed_output_still_accepts_json_after_plain_text(self) -> None:
+        self.assertEqual(
+            _parsed_output('Result follows:\n{"ok":true,"findings":[]}'),
             {"ok": True, "findings": []},
         )
 
@@ -167,6 +182,7 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
             self.assertEqual(exchange["prompt"], "developer prompt")
             self.assertEqual(exchange["parsed_output"]["action"], "repo.read")
             self.assertEqual(exchange["parsed_output"]["arguments"], {"path": "package.json"})
+            self.assertEqual(exchange["reasoning_content"], "private provider reasoning")
             self.assertEqual(exchange["request_options"], {"json_mode": True, "max_tokens": 2048})
 
             resumed = ReviewableLlmClient(
@@ -186,6 +202,7 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
                 max_tokens=2048,
             )
             self.assertEqual(completion.content, exchange["raw_completion"])
+            self.assertEqual(completion.reasoning_content, "private provider reasoning")
             self.assertEqual(completion.finish_reason, "stop")
             self.assertEqual(len(base.prompts), 1)
 

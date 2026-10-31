@@ -357,6 +357,32 @@ class WorkPacketTypeScriptAstExtractor:
         )
 
 
+class DeveloperExecutionStateTest(unittest.TestCase):
+    def test_fresh_progress_clears_stale_pending_step_review(self) -> None:
+        state = {
+            "developer_execution": {
+                "executor": "tool_loop",
+                "mode": "developer_act",
+                "repair_iteration": 0,
+                "artifact_version": 1,
+                "pending_step_review": {"call_id": "stale-call"},
+            }
+        }
+
+        execution = PhaseFourWorkflow._developer_execution_state(
+            state,
+            executor="tool_loop",
+            mode="developer_act",
+            repair_iteration=0,
+            session_iteration=1,
+            artifact_version=1,
+            progress={"completed_items": 2, "remaining_items": 5},
+            status="blocked",
+        )
+
+        self.assertNotIn("pending_step_review", execution)
+
+
 class PhaseFourTest(unittest.TestCase):
     ISOLATED_REPOSITORY_TESTS = {
         "test_canonical_checkout_change_does_not_redirect_run_workspace",

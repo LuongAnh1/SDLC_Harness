@@ -55,6 +55,12 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     continue_run.add_argument("--implementation-repair-limit", default=None)
     continue_run.add_argument("--qa-repair-limit", default=None)
+    continue_run.add_argument("--step-review", action="store_true")
+    continue_run.add_argument("--step-review-input", action="store_true")
+    continue_run.add_argument("--step-review-output", action="store_true")
+    continue_run.add_argument("--step-review-call-id", default=None)
+    continue_run.add_argument("--step-review-decision", choices=["approve", "reject"], default=None)
+    continue_run.add_argument("--step-review-note", default=None)
     _add_sync_mode_argument(continue_run)
     continue_run.add_argument("--runtime-root", default=None)
 
@@ -158,7 +164,15 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "start-from-jira": ("issue_key", "requested_by"),
     "get-status": ("run_id",),
     "sync-run": ("run_id",),
-    "continue-run": ("run_id",),
+    "continue-run": (
+        "run_id",
+        "step_review",
+        "step_review_input",
+        "step_review_output",
+        "step_review_call_id",
+        "step_review_decision",
+        "step_review_note",
+    ),
     "revalidate-implementation": ("run_id",),
     "revalidate-implementation-plan": ("run_id",),
     "revalidate-design": ("run_id",),

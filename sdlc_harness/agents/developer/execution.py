@@ -5,11 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import time
 from typing import Any, Callable
 
+from ...core.config import phase4_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.json_utils import final_response_text
 from ...llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
@@ -27,6 +30,7 @@ from ...verification import VerificationRunner
 from ..validator.code_contract import deterministic_typescript_contract_findings
 from ..validator.typescript_ast import TypeScriptAstExtractor
 from .fake_generation import fake_developer_files
+from .package_dependency import ensure_workspace_dependency, workspace_dependency_status
 from .profile_context import (
     developer_generation_context,
     developer_path_is_test,
@@ -49,9 +53,12 @@ _UNIT_ACTION_NAMES = {
     "repo.read",
     "repo.search",
     "repo.read_diff",
+    "codegraph.query",
     "codegraph.query_readonly",
     "repo.write_file",
     "repo.apply_patch",
+    "repo.replace_text",
+    "package.ensure_workspace_dependency",
     "verification.run_stage",
     "execution.complete_unit",
 }
@@ -63,13 +70,21 @@ _ACTION_TO_LEGACY = {
     "repo.read_diff": "read_diff",
     "repo.write_file": "write_file",
     "repo.apply_patch": "apply_patch",
+    "repo.replace_text": "replace_text",
     "execution.complete_unit": "complete",
 }
 _OBSERVATION_ACTIONS = {
     "list_files", "read_file", "search_code", "read_diff",
-    "repo.list", "repo.read", "repo.search", "repo.read_diff", "codegraph.query_readonly",
+    "repo.list", "repo.read", "repo.search", "repo.read_diff",
+    "codegraph.query", "codegraph.query_readonly", "codegraph.seed_context",
 }
-_MUTATION_ACTIONS = {"write_file", "apply_patch", "repo.write_file", "repo.apply_patch"}
+_MUTATION_ACTIONS = {
+    "write_file",
+    "apply_patch",
+    "repo.write_file",
+    "repo.apply_patch",
+    "repo.replace_text",
+}
 _RECOVERABLE_ACTION_POLICY_ERRORS = {
     "developer_act_out_of_scope",
     "developer_patch_out_of_scope",
@@ -83,7 +98,11 @@ _WORKING_MEMORY_RECENT_RESULT_LIMIT = 4
 _WORKING_MEMORY_BREADCRUMB_LIMIT = 8
 _TIMEOUT_DIAGNOSTIC_SOURCE_MARKER = "SDLC_DIAGNOSTIC_INSTRUMENTATION"
 _TIMEOUT_DIAGNOSTIC_FAILURE_PREFIX = "SDLC_DIAGNOSTIC_TIMEOUT:"
-_READ_DENIED_NAMES = {".env", ".git", ".runtime"}
+_READ_DENIED_NAMES = {".env", ".git", ".runtime", ".codegraph"}
+_SEARCH_PRUNED_DIR_NAMES = {"node_modules", ".codegraph", "dist", "build", "coverage"}
+_SEARCH_MAX_SCANNED_FILES = 5000
+_SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
+_SEARCH_TIMEOUT_SECONDS = 5.0
 _TEXT_SUFFIXES = {
     ".java", ".kt", ".py", ".js", ".ts", ".tsx", ".jsx", ".xml", ".json",
     ".yaml", ".yml", ".toml", ".gradle", ".properties", ".md", ".txt", ".sh", ".ps1",
@@ -191,6 +210,8 @@ class DeveloperToolLoopExecutor:
         selection_policy_migrated = False
         context_contract_migrated = False
         entrypoint_scope_migrated = False
+        dependency_scope_migrated = False
+        scope_reopen_reason = ""
         scope_reopened_item_ids: list[str] = []
         persisted_required_paths_for_migration: set[str] = set()
         legacy_file_manifest_migrated = False
@@ -203,6 +224,7 @@ class DeveloperToolLoopExecutor:
             repair_iteration=repair_iteration,
             expected_dirty_paths=expected_dirty_paths,
         )
+        manifest["llm_call_profiles"] = _developer_llm_call_profiles(self.settings)
         if manifest_file.exists():
             existing = _read_json(manifest_file, run_id=run_id)
             if (
@@ -223,6 +245,10 @@ class DeveloperToolLoopExecutor:
                 persisted_paths: set[str] = set()
                 context_upgrade = _merge_context_only_manifest(existing, manifest)
                 entrypoint_scope_upgrade = _merge_database_entrypoint_scope_manifest(
+                    existing,
+                    manifest,
+                )
+                dependency_scope_upgrade = _merge_dependency_manifest_scope_manifest(
                     existing,
                     manifest,
                 )
@@ -258,6 +284,11 @@ class DeveloperToolLoopExecutor:
                 elif entrypoint_scope_upgrade is not None:
                     existing, scope_reopened_item_ids = entrypoint_scope_upgrade
                     entrypoint_scope_migrated = True
+                    scope_reopen_reason = "database_entrypoint_scope"
+                elif dependency_scope_upgrade is not None:
+                    existing, scope_reopened_item_ids = dependency_scope_upgrade
+                    dependency_scope_migrated = True
+                    scope_reopen_reason = "package_dependency_scope"
                 elif legacy_context_schema:
                     existing = compatible_manifest or manifest
                 elif not compatible_manifest or existing.get("input_hash") != compatible_manifest.get("input_hash"):
@@ -315,6 +346,8 @@ class DeveloperToolLoopExecutor:
             migration_code = (
                 "database_entrypoint_scope_migrated"
                 if entrypoint_scope_migrated
+                else "package_dependency_scope_migrated"
+                if dependency_scope_migrated
                 else "execution_context_contract_migrated"
                 if context_contract_migrated
                 else "repair_selection_policy_migrated"
@@ -354,21 +387,27 @@ class DeveloperToolLoopExecutor:
                 journal=journal,
             )
         if scope_reopened_item_ids:
-            _reopen_database_entrypoint_items(
+            _reopen_scope_expanded_items(
                 target_path=target_path,
                 session_dir=session_dir,
                 manifest=manifest,
                 journal=journal,
                 item_ids=scope_reopened_item_ids,
+                reason=scope_reopen_reason or "database_entrypoint_scope",
             )
             migrations = journal.setdefault("migrations", [])
+            scope_migration_code = (
+                "package_dependency_scope_migrated"
+                if (scope_reopen_reason or "") == "package_dependency_scope"
+                else "database_entrypoint_scope_migrated"
+            )
             if not any(
-                isinstance(row, dict) and row.get("code") == "database_entrypoint_scope_migrated"
+                isinstance(row, dict) and row.get("code") == scope_migration_code
                 for row in migrations
             ):
                 migrations.append(
                     {
-                        "code": "database_entrypoint_scope_migrated",
+                        "code": scope_migration_code,
                         "reopened_item_ids": scope_reopened_item_ids,
                         "migrated_at": utc_now_iso(),
                     }
@@ -586,9 +625,10 @@ class DeveloperToolLoopExecutor:
         max_action_index = 0
         max_write_chars = max(
             2000,
-            min(18000, (int(getattr(self.settings, "llm_structured_max_tokens", 8192)) - 1024) * 2),
+            min(30000, (int(getattr(self.settings, "llm_structured_max_tokens", 8192)) - 1024) * 2),
         )
         item_paths = _item_paths(item)
+        execution_hash_paths = _item_execution_hash_paths(item)
         for metadata in sorted(source_actions, key=lambda row: int(row.get("action_index") or 0)):
             action_index = int(metadata.get("action_index") or 0)
             action_name = str(metadata.get("tool_action") or "")
@@ -613,6 +653,19 @@ class DeveloperToolLoopExecutor:
                     },
                 }
             )
+            completion_gate = _dict_value(metadata.get("completion_gate"))
+            if completion_gate.get("status") == "rejected":
+                history.append(
+                    {
+                        "action": "rejected",
+                        "error": str(completion_gate.get("reason") or "completion_rejected"),
+                        "instruction": (
+                            "The previous completion was rejected by Harness. Address the structured "
+                            "completion_gate evidence before completing this unit again."
+                        ),
+                        "completion_gate": completion_gate,
+                    }
+                )
             if result.get("ok") is not True:
                 continue
             if action_name in _OBSERVATION_ACTIONS:
@@ -630,15 +683,18 @@ class DeveloperToolLoopExecutor:
                     f"Approved exchange for action {action_index} does not match journaled mutation scope.",
                     run_id=run_id,
                 )
-            payload_key = "patch" if action_name.endswith("apply_patch") else "content"
-            payload = parsed_arguments.get(payload_key)
-            expected_payload_hash = str(arguments.get(f"{payload_key}_sha256") or "")
-            if not isinstance(payload, str) or hashlib.sha256(payload.encode("utf-8")).hexdigest() != expected_payload_hash:
-                raise HarnessError(
-                    "developer_step_review_recovery_invalid",
-                    f"Approved exchange payload hash does not match journaled action {action_index}.",
-                    run_id=run_id,
-                )
+            for payload_key in _mutation_payload_keys(action_name):
+                payload = parsed_arguments.get(payload_key)
+                expected_payload_hash = str(arguments.get(f"{payload_key}_sha256") or "")
+                if (
+                    not isinstance(payload, str)
+                    or hashlib.sha256(payload.encode("utf-8")).hexdigest() != expected_payload_hash
+                ):
+                    raise HarnessError(
+                        "developer_step_review_recovery_invalid",
+                        f"Approved exchange payload hash does not match journaled action {action_index}.",
+                        run_id=run_id,
+                    )
             expected_after = str(result.get("sha256") or "")
             if _file_hash(target_path / path) != expected_after:
                 replayed = _execute_action(
@@ -689,7 +745,7 @@ class DeveloperToolLoopExecutor:
         entry["status"] = "review_required"
         entry["working_state_path"] = self.store.relative(working_state_file)
         entry["paused_sha256_by_path"] = {
-            path: _file_hash(target_path / path) for path in item_paths
+            path: _file_hash(target_path / path) for path in execution_hash_paths
         }
         entry["step_review_recovery"] = {
             "version": "developer_step_review_recovery_v1",
@@ -833,6 +889,7 @@ class DeveloperToolLoopExecutor:
         item_id = str(item.get("id") or "")
         entry = _journal_item(journal, item_id)
         item_paths = _item_paths(item)
+        execution_hash_paths = _item_execution_hash_paths(item)
         working_state_file = session_dir / "units" / item_id / "working_state.json"
         resuming_step_review = entry.get("status") == "review_required" and working_state_file.is_file()
         if resuming_step_review:
@@ -903,17 +960,59 @@ class DeveloperToolLoopExecutor:
         mutated_paths = set(_string_items(working_state.get("mutated_paths")))
         repair_mode = str(manifest.get("mode") or "").endswith("_repair")
         context_paths = _item_context_paths(item)
+        if resuming_step_review and self._revalidate_signature_rejected_completion(
+            run_id=run_id,
+            work_packet=work_packet,
+            target_path=target_path,
+            session_dir=session_dir,
+            item=item,
+            entry=entry,
+            history=history,
+            mutated_paths=mutated_paths,
+        ):
+            _supersede_pending_step_review(
+                session_dir=session_dir,
+                journal=journal,
+                reason="completion_signature_revalidated",
+            )
+            journal["updated_at"] = utc_now_iso()
+            _write_json_atomic(journal_file, journal)
+            if on_progress:
+                on_progress(_progress(journal), manifest_path, journal_path)
+            return
         length_failures = int(working_state.get("length_failures") or 0)
         invalid_action_failures = int(working_state.get("invalid_action_failures") or 0)
         next_action_index = max(1, int(working_state.get("next_action_index") or 1))
+        durable_next_action_index = next_action_index
         review_cursor = max(0, int(working_state.get("review_cursor") or 0))
         configured_max_actions = int(getattr(self.settings, "developer_max_actions_per_item", 24))
+        verification_repair_action_reserve = int(
+            getattr(self.settings, "developer_verification_repair_action_reserve", 6)
+        )
         timeout_action_reserve = 2 * max(1, len(_string_items(item.get("required_stage_ids")))) + 2
-        maximum_action_limit = configured_max_actions + timeout_action_reserve
+        maximum_action_limit = (
+            configured_max_actions
+            + timeout_action_reserve
+            + verification_repair_action_reserve
+        )
         max_retries = int(getattr(self.settings, "developer_max_action_retries", 2))
-        configured_max_tokens = int(getattr(self.settings, "llm_structured_max_tokens", 8192))
+        fallback_max_tokens = int(getattr(self.settings, "llm_structured_max_tokens", 8192))
+        pinned_profiles = _dict_value(manifest.get("llm_call_profiles"))
+        normal_options = _dict_value(pinned_profiles.get("developer_action")) or {
+            "max_tokens": fallback_max_tokens
+        }
+        repair_options = _dict_value(pinned_profiles.get("developer_repair")) or {
+            "max_tokens": fallback_max_tokens
+        }
         context_window_tokens = int(getattr(self.settings, "llm_context_window_tokens", 128000))
-        max_write_chars = max(2000, min(18000, (configured_max_tokens - 1024) * 2))
+        working_memory_evidence_chars = int(
+            getattr(self.settings, "developer_working_memory_evidence_chars", 96000)
+        )
+        profile_max_tokens = max(
+            int(normal_options.get("max_tokens") or fallback_max_tokens),
+            int(repair_options.get("max_tokens") or fallback_max_tokens),
+        )
+        max_write_chars = max(2000, min(30000, (profile_max_tokens - 1024) * 2))
         llm_client = self.llm_client
         if bool(self.step_review.get("enabled")):
             relative_session = session_dir.relative_to(self.store.run_dir(run_id))
@@ -936,6 +1035,8 @@ class DeveloperToolLoopExecutor:
             )
 
         def persist_working_state(next_index: int, *, cursor: int | None = None) -> None:
+            nonlocal durable_next_action_index
+            durable_next_action_index = next_index
             current_cursor = int(getattr(llm_client, "cursor", 0)) if cursor is None else cursor
             payload = {
                 "version": "developer_working_state_v1",
@@ -953,14 +1054,23 @@ class DeveloperToolLoopExecutor:
             _write_json_atomic(working_state_file, payload)
             entry["working_state_path"] = self.store.relative(working_state_file)
             entry["paused_sha256_by_path"] = {
-                path: _file_hash(target_path / path) for path in item_paths
+                path: _file_hash(target_path / path) for path in execution_hash_paths
             }
 
         try:
+            if not history and manifest.get("version") == "developer_execution_manifest_v8":
+                seed_context = _codegraph_seed_context(
+                    target_path=target_path,
+                    item=item,
+                    repo_context_provider=self.repo_context_provider,
+                )
+                if seed_context:
+                    history.append(seed_context)
             for action_index in range(next_action_index, maximum_action_limit + 1):
-                max_actions = _timeout_diagnostic_action_limit(
+                max_actions = _developer_action_limit(
                     configured_max_actions=configured_max_actions,
                     timeout_action_reserve=timeout_action_reserve,
+                    verification_repair_action_reserve=verification_repair_action_reserve,
                     history=history,
                 )
                 if action_index > max_actions:
@@ -976,6 +1086,15 @@ class DeveloperToolLoopExecutor:
                     max_actions=max_actions,
                     mutated=bool(mutated_paths),
                     context_window_tokens=context_window_tokens,
+                    working_memory_evidence_chars=working_memory_evidence_chars,
+                )
+                active_options = (
+                    repair_options
+                    if repair_mode or bool(_verification_repair_state(history))
+                    else normal_options
+                )
+                configured_max_tokens = int(
+                    active_options.get("max_tokens") or fallback_max_tokens
                 )
                 max_tokens = _completion_token_budget(
                     prompt,
@@ -992,7 +1111,10 @@ class DeveloperToolLoopExecutor:
                     ),
                     prompt=prompt,
                     json_mode=True,
+                    model=str(active_options.get("model") or "") or None,
+                    reasoning_effort=str(active_options.get("reasoning_effort") or "") or None,
                     max_tokens=max_tokens,
+                    timeout_seconds=int(active_options.get("timeout_seconds") or 0) or None,
                 )
                 journal.pop("pending_step_review", None)
                 raw = str(getattr(completion, "content", ""))
@@ -1004,6 +1126,12 @@ class DeveloperToolLoopExecutor:
                     "finish_reason": str(getattr(completion, "finish_reason", "") or ""),
                     "usage": getattr(completion, "usage", {}) if isinstance(getattr(completion, "usage", {}), dict) else {},
                     "max_tokens": max_tokens,
+                    "request_options": {
+                        "model": str(active_options.get("model") or ""),
+                        "reasoning_effort": str(active_options.get("reasoning_effort") or ""),
+                        "max_tokens": max_tokens,
+                        "timeout_seconds": int(active_options.get("timeout_seconds") or 0),
+                    },
                     "created_at": utc_now_iso(),
                     "replayed": getattr(llm_client, "last_replay_kind", "") == "approved",
                 }
@@ -1077,7 +1205,19 @@ class DeveloperToolLoopExecutor:
                     persist_working_state(action_index + 1)
                     _write_json_atomic(journal_file, journal)
                     continue
-                current_hashes = {path: _file_hash(target_path / path) for path in item_paths}
+                current_hashes = {
+                    path: _file_hash(target_path / path) for path in execution_hash_paths
+                }
+                dependency_statuses = _package_dependency_statuses(
+                    target_path=target_path,
+                    item=item,
+                    run_id=run_id,
+                )
+                pending_dependency_ids = [
+                    str(status.get("dependency_id") or "")
+                    for status in dependency_statuses
+                    if status.get("satisfied") is not True
+                ]
                 repair_state = _verification_repair_state(history)
                 failed_stage_ids = sorted(repair_state)
                 policy_error = _new_test_context_policy_error(
@@ -1119,6 +1259,7 @@ class DeveloperToolLoopExecutor:
                     closure_resolved=True,
                     handled_paths=set(),
                     unresolved_paths=set(),
+                    pending_package_dependency_ids=pending_dependency_ids,
                 )
                 if policy_error:
                     result = {"ok": False, **policy_error}
@@ -1136,6 +1277,9 @@ class DeveloperToolLoopExecutor:
                             repo_context_provider=self.repo_context_provider,
                             verification_runner=self.verification_runner,
                             verification_policy=verification_policy,
+                            package_tool_timeout_seconds=int(
+                                getattr(self.settings, "developer_package_tool_timeout_seconds", 120)
+                            ),
                         )
                     except HarnessError as exc:
                         if exc.error_code in _RECOVERABLE_ACTION_POLICY_ERRORS:
@@ -1390,6 +1534,29 @@ class DeveloperToolLoopExecutor:
                     and bool(declared_unchanged)
                     and not invalid_unchanged
                 )
+                required_test_mutations = (
+                    set(_string_items(item.get("test_target_paths"))) - set(mutated_paths)
+                    if _dict_items(item.get("test_intents"))
+                    else set()
+                )
+                if required_test_mutations:
+                    entry["actions"][-1]["completion_gate"] = {
+                        "status": "rejected",
+                        "reason": "test_intent_evidence_missing",
+                        "missing_test_mutations": sorted(required_test_mutations),
+                    }
+                    history.append(
+                        {
+                            "action": "rejected",
+                            "error": (
+                                "complete requires each test_target_path attached to a test_intent to be mutated "
+                                "in this unit. A passing pre-existing test file does not prove the new intent. "
+                                f"missing_test_mutations={sorted(required_test_mutations)}."
+                            ),
+                        }
+                    )
+                    _write_json_atomic(journal_file, journal)
+                    continue
                 completed_unit = (
                     bool(mutated_paths)
                     and mutated_paths <= existing_paths
@@ -1419,7 +1586,9 @@ class DeveloperToolLoopExecutor:
                     _write_json_atomic(journal_file, journal)
                     continue
                 required_stages = set(_string_items(item.get("required_stage_ids")))
-                current_hashes = {path: _file_hash(target_path / path) for path in item_paths}
+                current_hashes = {
+                    path: _file_hash(target_path / path) for path in execution_hash_paths
+                }
                 missing_stages = sorted(
                     required_stages - _current_passed_stages(history, current_hashes=current_hashes)
                 )
@@ -1461,7 +1630,13 @@ class DeveloperToolLoopExecutor:
                     )
                     _write_json_atomic(journal_file, journal)
                     continue
+                codegraph_evidence = _codegraph_affected_test_evidence(
+                    target_path=target_path,
+                    mutated_paths=mutated_paths,
+                    repo_context_provider=self.repo_context_provider,
+                )
                 entry["signature_evidence"] = signature_evidence
+                entry["codegraph_evidence"] = codegraph_evidence
                 entry["actions"][-1]["completion_gate"] = {"status": "passed"}
                 self._complete_item(
                     item=item,
@@ -1472,6 +1647,7 @@ class DeveloperToolLoopExecutor:
                     mutated_paths=mutated_paths,
                     no_change_required=no_change_allowed,
                     verification_evidence=_stage_evidence(history),
+                    codegraph_evidence=codegraph_evidence,
                 )
                 journal["updated_at"] = utc_now_iso()
                 _write_json_atomic(journal_file, journal)
@@ -1517,6 +1693,25 @@ class DeveloperToolLoopExecutor:
                 progress=_progress(journal),
             ) from exc
         except DeveloperExecutionError as exc:
+            if exc.error_code == "developer_action_limit_exceeded":
+                persist_working_state(durable_next_action_index)
+                journal.pop("pending_step_review", None)
+                journal["last_failed_unit_id"] = item_id
+                entry["status"] = "review_required"
+                entry["last_error_at"] = utc_now_iso()
+                entry["budget_resume"] = {
+                    "version": "developer_budget_resume_v1",
+                    "next_action_index": durable_next_action_index,
+                    "configured_max_actions": configured_max_actions,
+                    "paused_at": utc_now_iso(),
+                }
+                journal["status"] = "paused"
+                journal["updated_at"] = utc_now_iso()
+                _write_json_atomic(journal_file, journal)
+                exc.manifest_path = exc.manifest_path or manifest_path
+                exc.journal_path = exc.journal_path or journal_path
+                exc.progress = _progress(journal)
+                raise
             self._rollback_item(target_path=target_path, session_dir=session_dir, item=item, entry=entry)
             journal["last_failed_unit_id"] = item_id
             entry["status"] = "pending"
@@ -1582,10 +1777,14 @@ class DeveloperToolLoopExecutor:
                 exc.error_code,
                 exc.message,
                 run_id=run_id,
-                retriable=exc.error_code in {
-                    "typescript_ast_extractor_unavailable",
-                    "typescript_ast_extraction_failed",
-                },
+                retriable=(
+                    exc.error_code
+                    in {
+                        "typescript_ast_extractor_unavailable",
+                        "typescript_ast_extraction_failed",
+                    }
+                    or exc.error_code.startswith("target_repo_codegraph")
+                ),
                 manifest_path=manifest_path,
                 journal_path=journal_path,
                 progress=_progress(journal),
@@ -1669,6 +1868,7 @@ class DeveloperToolLoopExecutor:
         mutated_paths: set[str],
         no_change_required: bool = False,
         verification_evidence: list[dict[str, object]] | None = None,
+        codegraph_evidence: dict[str, object] | None = None,
     ) -> None:
         path_dispositions = _dict_value(entry.get("path_dispositions")) or {
             path: {
@@ -1692,6 +1892,7 @@ class DeveloperToolLoopExecutor:
                 "summary": summary,
                 "no_change_required": no_change_required,
                 "verification_evidence": verification_evidence or [],
+                "codegraph_evidence": codegraph_evidence or {},
                 "path_dispositions": path_dispositions,
             }
         )
@@ -1711,11 +1912,80 @@ class DeveloperToolLoopExecutor:
                     "path_dispositions": path_dispositions,
                     "after_sha256_by_path": entry.get("after_sha256_by_path", {}),
                     "verification_evidence": verification_evidence or [],
+                    "codegraph_evidence": codegraph_evidence or {},
                     "signature_evidence": entry.get("signature_evidence", {}),
                     "summary": summary,
                     "completed_at": entry.get("completed_at"),
                 },
             )
+
+    def _revalidate_signature_rejected_completion(
+        self,
+        *,
+        run_id: str,
+        work_packet: dict[str, object],
+        target_path: Path,
+        session_dir: Path,
+        item: dict[str, object],
+        entry: dict[str, object],
+        history: list[dict[str, object]],
+        mutated_paths: set[str],
+    ) -> bool:
+        """Replay only a stale signature gate before asking the LLM to repair code."""
+
+        actions = _dict_items(entry.get("actions"))
+        if not actions:
+            return False
+        completion = actions[-1]
+        gate = _dict_value(completion.get("completion_gate"))
+        if (
+            completion.get("tool_action") != "execution.complete_unit"
+            or gate.get("status") != "rejected"
+            or gate.get("reason") != "approved_signature_mismatch"
+        ):
+            return False
+        current_hashes = {
+            path: _file_hash(target_path / path) for path in _item_execution_hash_paths(item)
+        }
+        required_stages = set(_string_items(item.get("required_stage_ids")))
+        if required_stages - _current_passed_stages(history, current_hashes=current_hashes):
+            return False
+        signature_evidence = _unit_signature_evidence(
+            run_id=run_id,
+            target_path=target_path,
+            work_packet=work_packet,
+            item=item,
+        )
+        if signature_evidence.get("status") == "failed":
+            return False
+        completion_arguments = _dict_value(
+            _dict_value(completion.get("tool_call")).get("arguments")
+        )
+        codegraph_evidence = _codegraph_affected_test_evidence(
+            target_path=target_path,
+            mutated_paths=mutated_paths,
+            repo_context_provider=self.repo_context_provider,
+        )
+        entry["signature_evidence"] = signature_evidence
+        entry["codegraph_evidence"] = codegraph_evidence
+        completion["completion_gate"] = {
+            "status": "passed",
+            "revalidated": True,
+            "revalidated_from": "approved_signature_mismatch",
+            "revalidated_at": utc_now_iso(),
+        }
+        self._complete_item(
+            item=item,
+            entry=entry,
+            target_path=target_path,
+            session_dir=session_dir,
+            summary=str(completion_arguments.get("summary") or ""),
+            mutated_paths=mutated_paths,
+            no_change_required=not mutated_paths,
+            verification_evidence=_stage_evidence(history),
+            codegraph_evidence=codegraph_evidence,
+        )
+        return True
 
     def _rollback_item(self, *, target_path: Path, session_dir: Path, item: dict[str, object], entry: dict[str, object]) -> None:
         item_id = str(item.get("id") or "")
@@ -1751,7 +2021,9 @@ class DeveloperToolLoopExecutor:
                 continue
             working_state_file = session_dir / "units" / str(item.get("id") or "") / "working_state.json"
             paused_hashes = _dict_value(entry.get("paused_sha256_by_path"))
-            current_hashes = {path: _file_hash(target_path / path) for path in _item_paths(item)}
+            current_hashes = {
+                path: _file_hash(target_path / path) for path in _item_execution_hash_paths(item)
+            }
             if working_state_file.is_file() and paused_hashes and current_hashes == paused_hashes:
                 entry["status"] = "review_required"
                 entry["recovered_at"] = utc_now_iso()
@@ -2147,6 +2419,7 @@ def _build_manifest(
                     "surface_contracts": _dict_items(unit.get("surface_contracts")),
                     "required_stage_ids": _string_items(unit.get("required_stage_ids")),
                     "test_target_paths": _string_items(unit.get("test_target_paths")),
+                    "package_dependencies": _dict_items(unit.get("package_dependencies")),
                     "signature_entry_ids": unit_signature_ids,
                     "input_digest": str(unit.get("input_digest") or ""),
                     "requirements": [
@@ -2196,13 +2469,21 @@ def _build_manifest(
             "Developer execution has no unit inside the approved repair scope.",
             run_id=run_id,
         )
+    workspace_allowed_paths = list(
+        dict.fromkeys(
+            [
+                *allowed,
+                *(path for item in items for path in _item_dependency_paths(item)),
+            ]
+        )
+    )
     input_payload = {
         "approved_plan": work_packet.get("approved_plan"),
         "effective_design_contract": work_packet.get("effective_design_contract"),
         "requirement_contract": work_packet.get("requirement_contract"),
         "developer_generation_context": generation_context,
         "base_sha": _dict_value(work_packet.get("run_workspace")).get("base_sha"),
-        "workspace_allowed_paths": allowed,
+        "workspace_allowed_paths": workspace_allowed_paths,
         "items": [
             {
                 **item,
@@ -2224,7 +2505,7 @@ def _build_manifest(
         "created_at": utc_now_iso(),
         "base_sha": _dict_value(work_packet.get("run_workspace")).get("base_sha"),
         "input_hash": _json_hash(input_payload),
-        "workspace_allowed_paths": allowed,
+        "workspace_allowed_paths": workspace_allowed_paths,
         "expected_dirty_files": expected_dirty_files,
         "repair_feedback": repair_feedback or {},
         "developer_generation_context": generation_context,
@@ -2328,6 +2609,7 @@ def _action_prompt(
     max_actions: int,
     mutated: bool,
     context_window_tokens: int,
+    working_memory_evidence_chars: int | None = None,
 ) -> str:
     unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
@@ -2337,7 +2619,19 @@ def _action_prompt(
     anchor_paths = _item_contract_anchor_paths(item)
     handled_paths = _handled_paths(history, required_paths=paths)
     inspected_paths = _inspected_paths(history, required_paths=paths)
-    current_hashes = {path: _file_hash(target_path / path) for path in _item_paths(item)}
+    current_hashes = {
+        path: _file_hash(target_path / path) for path in _item_execution_hash_paths(item)
+    }
+    package_dependency_statuses = _package_dependency_statuses(
+        target_path=target_path,
+        item=item,
+        run_id=str(manifest.get("run_id") or ""),
+    )
+    pending_package_dependency_ids = [
+        str(status.get("dependency_id") or "")
+        for status in package_dependency_statuses
+        if status.get("satisfied") is not True
+    ]
     pending_stage_ids = sorted(
         set(_string_items(item.get("required_stage_ids")))
         - _current_passed_stages(history, current_hashes=current_hashes)
@@ -2367,22 +2661,58 @@ def _action_prompt(
         pending_stage_ids=pending_stage_ids,
         failed_stage_ids=failed_stage_ids,
     )
+    evidence_budget = max(
+        8000,
+        min(
+            int(working_memory_evidence_chars or 96000),
+            context_window_tokens * 2,
+        ),
+    )
     action_memory = _action_memory(
         history,
         target_item_paths=paths,
-        max_evidence_chars=max(8000, min(24000, context_window_tokens // 2)),
+        max_evidence_chars=evidence_budget,
     )
     current_sources = _current_mutated_sources(
         history,
         target_path=target_path,
         target_item_paths=paths,
-        max_evidence_chars=max(8000, min(24000, context_window_tokens // 4)),
+        max_evidence_chars=evidence_budget,
     )
-    action_memory["authoritative_sources"] = _authoritative_sources(
+    previously_omitted_sources = _dict_items(action_memory.pop("omitted_sources", []))
+    authoritative_sources, omitted_sources = _authoritative_sources(
         inspected_sources=_dict_items(action_memory.pop("inspected_sources", [])),
         current_sources=current_sources,
         target_path=target_path,
+        max_evidence_chars=evidence_budget,
     )
+    action_memory["authoritative_sources"] = authoritative_sources
+    fully_current_paths = {
+        str(source.get("path") or "")
+        for source in authoritative_sources
+        if source.get("origin") == "worktree_after_mutation"
+        and source.get("truncated") is not True
+    }
+    total_lines_by_path = {
+        str(source.get("path") or ""): int(source.get("total_lines") or 0)
+        for source in authoritative_sources
+        if source.get("total_lines")
+    }
+    combined_omitted_sources = [
+        {
+            **source,
+            **(
+                {"end_line": total_lines_by_path[str(source.get("path") or "")]}
+                if source.get("reason") == "repo_read_partial"
+                and total_lines_by_path.get(str(source.get("path") or ""))
+                else {}
+            ),
+        }
+        for source in [*previously_omitted_sources, *omitted_sources]
+        if str(source.get("path") or "") not in fully_current_paths
+    ]
+    if combined_omitted_sources:
+        action_memory["omitted_sources"] = combined_omitted_sources
     if failed_stage_ids:
         action_memory["recent_results"] = [
             row
@@ -2401,10 +2731,15 @@ def _action_prompt(
         history,
         target_test_path=new_test_targets[0],
     )
+    test_authoring_policy: dict[str, object] = {
+        "new_test_targets": new_test_targets,
+        "repository_evidence_required": bool(new_test_targets),
+        "repository_evidence_satisfied": test_context_ready,
+    }
     action_schema = {
         "action": (
-            "repo.list|repo.read|repo.search|repo.read_diff|codegraph.query_readonly|"
-            "repo.write_file|repo.apply_patch|verification.run_stage|execution.complete_unit"
+            "repo.list|repo.read|repo.search|repo.read_diff|codegraph.query|codegraph.query_readonly|"
+            "repo.write_file|repo.apply_patch|repo.replace_text|verification.run_stage|execution.complete_unit"
             if unit_aware
             else "list_files|read_file|search_code|read_diff|write_file|apply_patch|complete"
         ),
@@ -2413,33 +2748,34 @@ def _action_prompt(
     }
     if unit_aware and verification_forced_stage_ids:
         action_schema["action"] = "verification.run_stage"
+    if unit_aware and pending_package_dependency_ids:
+        action_schema["action"] = "package.ensure_workspace_dependency"
     active_failures = [
         _compact_repair_episode(repair_state[stage_id]) for stage_id in failed_stage_ids
     ]
-    test_authoring_policy: dict[str, object] = {
-        "new_test_targets": new_test_targets,
-        "repository_evidence_required": bool(new_test_targets),
-        "repository_evidence_satisfied": test_context_ready,
-    }
     if new_test_targets:
         test_authoring_policy["rules"] = [
             "Inspect an existing repository test or search/CodeGraph evidence for its test and mocking conventions before creating a new TypeScript test.",
             "Test doubles must satisfy the exact production runtime predicates, including instanceof checks.",
             "Hoisted module-mock factories may reference only values initialized through the test framework's supported hoisting mechanism.",
+            "Do not add production props, branches, or initial-state hooks solely to make a test renderer reach otherwise interactive state.",
         ]
     test_authoring_instruction = (
         "Before creating a new TypeScript test, satisfy test_authoring_policy with repository evidence. "
+        "Never add production props, branches, or initial-state hooks solely to make a test renderer reach otherwise interactive state. "
         "Test doubles must satisfy exact production predicates such as instanceof; never replace a nominal runtime "
         "check with a shape-only fake. Respect the test framework's module-mock hoisting rules. "
         if new_test_targets
         else ""
     )
+    mandatory_obligations = _unit_mandatory_obligations(item)
     context = {
         "active_focus": {
             "unit_id": item.get("id"),
             "goal": item.get("objective") or item.get("title"),
             "phase": phase,
             "failed_stage_ids": failed_stage_ids,
+            "mandatory_obligations": mandatory_obligations,
             "known_facts": (
                 [
                     "Every source in working_memory.authoritative_sources is verified against the current worktree.",
@@ -2448,12 +2784,6 @@ def _action_prompt(
                 if action_memory["authoritative_sources"]
                 else []
             ),
-            "next_decision": (
-                "Use the active diagnostic and authoritative sources to choose a different diagnostic observation "
-                "or the smallest coherent mutation."
-                if failed_stage_ids
-                else "Inspect only missing evidence, then implement or verify the current unit."
-            ),
         },
         "execution_task": _focused_execution_task(
             item,
@@ -2461,9 +2791,16 @@ def _action_prompt(
             active_repair=bool(failed_stage_ids),
         ),
         "execution": {"mode": manifest.get("mode"), "base_sha": manifest.get("base_sha")},
-        "dependency_receipts": [
-            {"unit_id": dependency, "status": "completed"}
-            for dependency in _string_items(item.get("depends_on"))
+        "dependency_receipts": _completed_dependency_receipts(item=item, manifest=manifest)
+        + [
+            status
+            for status in package_dependency_statuses
+            if status.get("satisfied") is True
+        ],
+        "pending_package_dependencies": [
+            status
+            for status in package_dependency_statuses
+            if status.get("satisfied") is not True
         ],
         "developer_generation_context": manifest.get("developer_generation_context"),
         "repair_feedback": _developer_repair_context(manifest.get("repair_feedback")),
@@ -2495,11 +2832,14 @@ def _action_prompt(
             "failed_stage_ids": failed_stage_ids,
             "verification_ready_stage_ids": verification_ready_stage_ids,
             "verification_forced_stage_ids": verification_forced_stage_ids,
+            "pending_package_dependency_ids": pending_package_dependency_ids,
         },
         "active_failures": active_failures,
         "test_authoring_policy": test_authoring_policy,
         "working_memory": action_memory,
     }
+    if not unit_aware:
+        context["approved_signatures"] = _item_approved_signatures(item)
     if timeout_diagnostic or timeout_cleanup_paths:
         context["timeout_diagnostic_protocol"] = {
             "version": "timeout_diagnostic_v1",
@@ -2517,8 +2857,8 @@ def _action_prompt(
             ],
         }
     extra = (
-        "The previous response exceeded the output budget. Use write_file for a small compilable skeleton, then "
-        "add bounded pieces with apply_patch. Do not return a large complete file in one action."
+        "The previous response exceeded the output budget. Use write_file for a small new file or replace_text for "
+        "one exact existing block. Do not return a large complete file or multi-hunk patch in one action."
         if force_incremental
         else ""
     )
@@ -2529,7 +2869,7 @@ def _action_prompt(
             "working_memory.action_ledger. Start editing as soon as the target change is clear."
         ),
         "edit_required": (
-            "The inspection budget is exhausted. Your next action MUST be write_file or apply_patch for an "
+            "The inspection budget is exhausted. Your next action MUST be write_file, replace_text, or apply_patch for an "
             "approved execution-unit path. Use working_memory.authoritative_sources; do not read, list, or search again."
         ),
         "edit_or_complete": (
@@ -2564,9 +2904,9 @@ def _action_prompt(
         )
     elif not repair_mode:
         work_instruction = (
-            "Choose the next coherent implementation slice yourself from the approved plan. Size it to fit the "
-            "remaining tool-action and JSON output budget. Keep the worktree internally consistent and buildable. "
-            "Finish that slice, then call complete; Verification and Validator will assess the accumulated worktree."
+            "Advance the approved unit one tool action at a time. When exact current bytes are already present, prefer "
+            "a bounded mutation over more planning or rereading. Do not predesign or serialize every remaining file; "
+            "Verification and Validator assess the unit only after the required edits are coordinated."
         )
     elif feedback_source == "verification":
         work_instruction = (
@@ -2613,7 +2953,10 @@ def _action_prompt(
         work_instruction = work_instruction.replace("call complete", "call execution.complete_unit")
         phase_instruction = (
             phase_instruction
-            .replace("write_file or apply_patch", "repo.write_file or repo.apply_patch")
+            .replace(
+                "write_file, replace_text, or apply_patch",
+                "repo.write_file, repo.replace_text, or repo.apply_patch",
+            )
             .replace("call complete", "run required verification stages, then call execution.complete_unit")
         )
         available_actions = (
@@ -2621,13 +2964,21 @@ def _action_prompt(
             "- repo.read: arguments {path, start_line?, end_line?}\n"
             "- repo.search: arguments {query, prefix?, limit?}\n"
             "- repo.read_diff: arguments {path}\n"
-            "- codegraph.query_readonly: arguments {query}; read-only symbol and call-path context\n"
+            "- codegraph.query: arguments {operation, query?, symbol?, file?, files?, kind?, limit?, depth?, "
+            "file_filter?, pattern?}; operation is symbols|node|callers|callees|impact|affected_tests|files|explore\n"
+            "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
+            "capability. node requires symbol or file; explore requires query.\n"
+            "- codegraph.query_readonly: legacy alias with arguments {query}; use codegraph.query for new work\n"
             "- repo.write_file: arguments {path, expected_sha256, content}; approved unit write path only\n"
+            "- repo.replace_text: arguments {path, expected_sha256, old_text, new_text}; replace one exact unique "
+            "block in an existing approved unit path\n"
             "- repo.apply_patch: arguments {path, expected_sha256, patch}; unified diff for an approved unit path\n"
             "- verification.run_stage: arguments {stage_id}; stage_id must be listed in required_stage_ids\n"
             "- execution.complete_unit: arguments {summary, path_dispositions: [{path, status, reason}]}; status is "
             "mutated|verified_unchanged|not_required. Every unit path needs a disposition, non-mutated paths need "
-            "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes\n"
+            "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes. "
+            "When test_intents are present, every listed test_target_path must be mutated in this unit; a passing "
+            "pre-existing test file is not coverage evidence for a new intent\n"
         )
         context["execution_unit_contract"] = {
             "unit_id": item.get("id"),
@@ -2640,19 +2991,22 @@ def _action_prompt(
             "design_node_ids": item.get("design_node_ids", []),
             "planned_code_targets": _dict_items(item.get("planned_code_targets")),
             "migration_impact": _dict_value(item.get("migration_impact")),
-            "runtime_bindings": _dict_items(item.get("runtime_bindings")),
-            "boundary_contracts": _dict_items(item.get("boundary_contracts")),
-            "surface_contracts": _dict_items(item.get("surface_contracts")),
+            "behavior_contract_source": "active_focus.mandatory_obligations",
             "required_stage_ids": item.get("required_stage_ids", []),
             "test_target_paths": item.get("test_target_paths", []),
+            "package_dependencies": _dict_items(item.get("package_dependencies")),
+            "package_dependency_statuses": package_dependency_statuses,
+            "package_tool_owned_paths": _item_dependency_paths(item),
             "approved_signatures": _item_approved_signatures(item),
             "hard_constraints": [
                 "Approved signatures are immutable and override conflicting prose objectives.",
-                "Preserve each qualified_name, parameter list, async flag, and return_type exactly.",
-                "Treat planned code targets, migration impact, runtime bindings, boundary mappings, and surface contracts as approved execution constraints.",
-                "Preserve each boundary input/output/error mapping and runtime attachment; inspect related approved paths instead of inventing a different contract.",
+                "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
+                "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+                "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
                 "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
+                "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
                 "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+                "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
                 "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
             ],
         }
@@ -2664,6 +3018,17 @@ def _action_prompt(
             phase_instruction = (
                 "Harness rejected an exact no-effect mutation. Your next and only allowed action MUST be "
                 f"verification.run_stage for one of {verification_forced_stage_ids}."
+            )
+        if pending_package_dependency_ids:
+            available_actions = (
+                "- package.ensure_workspace_dependency: arguments {dependency_id}; dependency_id MUST be one of "
+                f"{pending_package_dependency_ids}\n"
+            )
+            phase_instruction = (
+                "An approved local workspace dependency is not synchronized between its consumer manifest and "
+                "npm lockfile. Your next and only allowed action MUST be package.ensure_workspace_dependency for "
+                f"one of {pending_package_dependency_ids}. Do not inspect node_modules or edit package metadata "
+                "with repo.write_file."
             )
     else:
         available_actions = (
@@ -2677,23 +3042,59 @@ def _action_prompt(
             "- complete: arguments {summary, no_change_required?, unchanged_paths?: [{path, reason}]}; normally "
             "after at least one successful mutation. no_change_required=true requires fresh inspected evidence.\n"
         )
+    context["next_action"] = {
+        "response_scope": "Choose and emit exactly one tool action; completing the whole unit is not required in this response.",
+        "unit_strategy": work_instruction,
+        "instruction": phase_instruction,
+        "consistency_boundary": (
+            "Coordinate all approved files before verification or completion. An intermediate single-file mutation "
+            "may leave related approved edits for later actions."
+        ),
+        "editing_rule": (
+            "For an existing file, prefer repo.replace_text with an exact unique old_text block and its replacement. "
+            "Use repo.apply_patch only for one small localized hunk; do not reconstruct the whole file or manually "
+            "recalculate later hunk offsets. Use repo.write_file for a small new file or when the complete replacement "
+            "safely fits the write budget."
+        ),
+        "design_rule": (
+            "Implement the explicit mandatory obligations without inventing sibling controls, alternate flows, or a "
+            "new interaction model. Preserve existing behavior unless an obligation explicitly changes it. When the "
+            "contract permits multiple presentations, choose the smallest compatible extension once and proceed; do "
+            "not redesign it again without new tool or verification evidence."
+        ),
+    }
+    signature_contract_ref = (
+        "execution_unit_contract.approved_signatures"
+        if unit_aware
+        else "approved_signatures"
+    )
     return (
         f"Developer Tool Action {'v2' if unit_aware else 'v1'}\n\n"
         "Return exactly one JSON object matching this shape:\n"
         f"{json.dumps(action_schema, ensure_ascii=False)}\n\n"
         "Available actions:\n"
         f"{available_actions}\n"
-        f"A write_file content or apply_patch value must stay below {max_write_chars} characters. {extra}\n"
-        "Treat execution_unit_contract.approved_signatures as immutable hard constraints. They override conflicting "
-        "prose objectives; never change an approved qualified name, parameters, async flag, or return type. "
+        f"A mutation's text payload must stay below {max_write_chars} characters. {extra}\n"
+        f"Treat {signature_contract_ref} as immutable hard constraints. They override conflicting "
+        "prose objectives; never change an approved qualified name, parameter type/order/optional/rest shape, async "
+        "flag, or return type. Parameter names are evidence rather than contract, so destructuring is allowed when "
+        "the approved shape is preserved. Treat active_focus.mandatory_obligations as the single canonical behavior "
+        "checklist; execution_task and the short goal are navigation summaries, not competing contracts. "
         "Choose exactly one next action, emit its JSON object, and end the response immediately. Only Harness "
         "tool results in working_memory prove execution. Treat authoritative_sources as the single verified current "
         "worktree view; each entry includes its freshness and verification action. Do not read the same "
-        "path/range again unless a successful mutation changed that file. Do not output source code "
-        "outside the JSON action. In summary, state the conclusion established by the latest relevant evidence "
+        "path/range again unless a successful mutation changed that file. If working_memory.omitted_sources lists "
+        "a path/range, its bytes are not present in this prompt; do not claim they were inspected, and request only "
+        "the missing range when it is required. Do not output source code "
+        "outside the JSON action. Use working_memory.graph_evidence to locate symbols and call paths. Before "
+        "changing an existing shared or boundary symbol, obtain node or impact evidence unless fresh seed evidence "
+        "already covers it. CodeGraph never replaces repo.read/repo.read_diff for exact current bytes and hashes, "
+        "and never expands execution_unit_contract.write_paths. "
+        "In summary, state the conclusion established by the latest relevant evidence "
         "and why the chosen action follows. Keep it brief; do not include chain-of-thought. "
         f"{test_authoring_instruction}"
-        f"{work_instruction} {phase_instruction}\n\n"
+        "Follow next_action for the current response. Do not design, serialize, or validate the whole unit before "
+        "choosing that one action.\n\n"
         f"Execution context:\n{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}"
     )
 
@@ -2783,6 +3184,7 @@ def _action_policy_error(
     closure_resolved: bool = True,
     handled_paths: set[str] | None = None,
     unresolved_paths: set[str] | None = None,
+    pending_package_dependency_ids: list[str] | None = None,
 ) -> dict[str, object] | None:
     name = str(action.get("action") or "")
     phase = _execution_phase(
@@ -2798,7 +3200,20 @@ def _action_policy_error(
     repair_mutated_stage_ids = repair_mutated_stage_ids or []
     repair_verification_ready_stage_ids = repair_verification_ready_stage_ids or []
     repair_verification_forced_stage_ids = repair_verification_forced_stage_ids or []
+    pending_package_dependency_ids = pending_package_dependency_ids or []
     action_path = str(_dict_value(action.get("arguments")).get("path") or "").replace("\\", "/")
+    if pending_package_dependency_ids:
+        dependency_id = str(_dict_value(action.get("arguments")).get("dependency_id") or "")
+        if name == "package.ensure_workspace_dependency" and dependency_id in pending_package_dependency_ids:
+            return None
+        return {
+            "error": "package_dependency_required",
+            "instruction": (
+                "Materialize one approved pending dependency before reading or changing consumer code. "
+                "The only allowed action is package.ensure_workspace_dependency."
+            ),
+            "pending_dependency_ids": pending_package_dependency_ids,
+        }
     timeout_diagnostic = _timeout_diagnostic_state(history)
     timeout_instrumentation_action = _is_timeout_diagnostic_instrumentation_action(
         action,
@@ -3029,9 +3444,10 @@ def _has_test_authoring_context(
             query = str(arguments.get("query") or "").casefold()
             if _dict_items(result.get("hits")) and any(marker in query for marker in query_markers):
                 return True
-        if action_name == "codegraph.query_readonly":
+        if action_name in {"codegraph.query", "codegraph.query_readonly"}:
             query = str(arguments.get("query") or "").casefold()
-            if str(result.get("evidence") or "").strip() and any(
+            serialized = json.dumps(result, ensure_ascii=False).casefold()
+            if serialized.strip() and any(
                 marker in query for marker in query_markers
             ):
                 return True
@@ -3138,7 +3554,7 @@ def _action_history_arguments(action: dict[str, object]) -> dict[str, object]:
     arguments = _dict_value(action.get("arguments"))
     safe: dict[str, object] = {}
     for key, value in arguments.items():
-        if key in {"content", "patch"} and isinstance(value, str):
+        if key in {"content", "patch", "old_text", "new_text"} and isinstance(value, str):
             safe[f"{key}_chars"] = len(value)
             safe[f"{key}_sha256"] = hashlib.sha256(value.encode("utf-8")).hexdigest()
         elif key == "expected_sha256" and isinstance(value, str):
@@ -3146,6 +3562,14 @@ def _action_history_arguments(action: dict[str, object]) -> dict[str, object]:
         else:
             safe[key] = value
     return safe
+
+
+def _mutation_payload_keys(action_name: str) -> tuple[str, ...]:
+    if action_name.endswith("replace_text"):
+        return ("old_text", "new_text")
+    if action_name.endswith("apply_patch"):
+        return ("patch",)
+    return ("content",)
 
 
 def _repeats_no_effect_mutation(
@@ -3164,10 +3588,10 @@ def _no_effect_mutation_repeat_count(
     """Count identical mutation payloads already known to have no effect."""
 
     current = _action_history_arguments(action)
-    content_key = "patch_sha256" if str(action.get("action") or "").endswith("apply_patch") else "content_sha256"
-    fingerprint = str(current.get(content_key) or "")
+    payload_hash_keys = [f"{key}_sha256" for key in _mutation_payload_keys(str(action.get("action") or ""))]
+    fingerprint = tuple(str(current.get(key) or "") for key in payload_hash_keys)
     path = str(current.get("path") or "").replace("\\", "/")
-    if not fingerprint or not path:
+    if not all(fingerprint) or not path:
         return 0
     count = 0
     for row in history:
@@ -3183,10 +3607,79 @@ def _no_effect_mutation_repeat_count(
         previous = _dict_value(row.get("arguments"))
         if (
             str(previous.get("path") or "").replace("\\", "/") == path
-            and str(previous.get(content_key) or "") == fingerprint
+            and tuple(str(previous.get(key) or "") for key in payload_hash_keys) == fingerprint
         ):
             count += 1
     return count
+
+
+def _codegraph_seed_context(
+    *,
+    target_path: Path,
+    item: dict[str, object],
+    repo_context_provider: CodeGraphContextProvider,
+) -> dict[str, object] | None:
+    """Prefetch bounded file topology without spending one Developer action."""
+
+    if not (target_path / ".codegraph").exists():
+        return None
+    freshness = repo_context_provider.sync_if_stale(target_path)
+    snapshot = _dict_value(freshness.get("snapshot"))
+    seed_rows: list[dict[str, object]] = []
+    remaining = 12000
+    paths = [path for path in _item_context_paths(item) if (target_path / path).is_file()][:6]
+    for path in paths:
+        payload = repo_context_provider.query_capability(
+            target_path,
+            operation="node",
+            file=path,
+            limit=80,
+        )
+        evidence = str(payload.get("evidence") or "")
+        if remaining <= 0:
+            break
+        evidence = evidence[:remaining]
+        seed_rows.append({"path": path, "evidence": evidence})
+        remaining -= len(evidence)
+    return {
+        "action": "codegraph.seed_context",
+        "arguments": {"files": paths},
+        "result": {
+            "ok": True,
+            "operation": "node",
+            "snapshot_digest": snapshot.get("artifact_digest"),
+            "index_synced": freshness.get("synced") is True,
+            "entries": seed_rows,
+        },
+        "summary": f"Seeded current CodeGraph topology for {len(seed_rows)} unit context file(s).",
+    }
+
+
+def _codegraph_affected_test_evidence(
+    *,
+    target_path: Path,
+    mutated_paths: set[str],
+    repo_context_provider: CodeGraphContextProvider,
+) -> dict[str, object]:
+    """Refresh the graph after mutations and record bounded affected-test evidence."""
+
+    if not mutated_paths or not (target_path / ".codegraph").exists():
+        return {}
+    freshness = repo_context_provider.sync_if_stale(target_path)
+    payload = repo_context_provider.query_capability(
+        target_path,
+        operation="affected_tests",
+        files=sorted(mutated_paths),
+        depth=5,
+    )
+    snapshot = _dict_value(freshness.get("snapshot"))
+    return {
+        "operation": "affected_tests",
+        "files": sorted(mutated_paths),
+        "snapshot_digest": snapshot.get("artifact_digest"),
+        "index_synced": freshness.get("synced") is True,
+        "result": payload,
+    }
 
 
 def _action_memory(
@@ -3199,6 +3692,7 @@ def _action_memory(
     evidence_conclusions_by_key: dict[str, dict[str, object]] = {}
     mutation_state_by_path: dict[str, dict[str, object]] = {}
     verification_state_by_stage: dict[str, dict[str, object]] = {}
+    graph_evidence: list[dict[str, object]] = []
     for index, row in enumerate(history, start=1):
         arguments = _dict_value(row.get("arguments"))
         result = _dict_value(row.get("result"))
@@ -3227,6 +3721,10 @@ def _action_memory(
             "error": row.get("error") or result.get("error"),
         }
         if action in _MUTATION_ACTIONS and result.get("ok") is True and path:
+            for graph_row in graph_evidence:
+                if graph_row.get("fresh") is True:
+                    graph_row["fresh"] = False
+                    graph_row["stale_after_action"] = index
             for evidence_key, evidence in list(evidence_conclusions_by_key.items()):
                 if evidence.get("path") == path:
                     evidence_conclusions_by_key.pop(evidence_key, None)
@@ -3241,6 +3739,27 @@ def _action_memory(
                 }.items()
                 if value not in {None, ""}
             }
+        if action in {"codegraph.query", "codegraph.query_readonly", "codegraph.seed_context"} and result.get("ok") is True:
+            graph_evidence.append(
+                {
+                    key: value
+                    for key, value in {
+                        "action": action,
+                        "operation": arguments.get("operation") or result.get("operation"),
+                        "query": arguments.get("query"),
+                        "symbol": arguments.get("symbol"),
+                        "file": arguments.get("file"),
+                        "files": arguments.get("files"),
+                        "snapshot_digest": result.get("snapshot_digest"),
+                        "index_synced": result.get("index_synced"),
+                        "verified_at_action": index,
+                        "fresh": True,
+                        "summary": summary[:500],
+                        "evidence": _clip_json_value(result, 4000),
+                    }.items()
+                    if value is not None and value != "" and value != []
+                }
+            )
         if action in _OBSERVATION_ACTIONS and summary:
             evidence_key = json.dumps(
                 {
@@ -3339,35 +3858,109 @@ def _action_memory(
         result = _dict_value(row.get("result"))
         if not result.get("ok") or not isinstance(result.get("content"), str):
             continue
-        key = (str(result.get("path") or ""), result.get("start_line"), result.get("end_line"))
+        content = str(result.get("content") or "")
+        start_line = int(result.get("start_line") or 1)
+        end_line = int(result.get("end_line") or start_line)
+        total_lines = int(result.get("total_lines") or end_line)
+        truncated = result.get("truncated") is True
+        has_more = result.get("has_more") is True
+        next_start_line = int(result.get("next_start_line") or 0)
+        legacy_clipped = False
+        if "truncated" not in result and len(content) >= 12000:
+            final_line = content.splitlines()[-1] if content.splitlines() else ""
+            match = re.match(r"^(\d+):", final_line)
+            if match:
+                end_line = max(start_line - 1, int(match.group(1)) - 1)
+                total_lines = max(total_lines, int(result.get("end_line") or end_line))
+                truncated = True
+                has_more = True
+                next_start_line = end_line + 1
+                legacy_clipped = True
+        key = (str(result.get("path") or ""), start_line, end_line)
         if key in seen_ranges:
             continue
         seen_ranges.add(key)
-        latest_reads.append(
-            {
-                "path": key[0],
-                "start_line": key[1],
-                "end_line": key[2],
-                "content": result["content"],
-                "verified_at_action": history_index + 1,
-            }
-        )
+        candidate = {
+            "path": key[0],
+            "start_line": key[1],
+            "end_line": key[2],
+            "content": content,
+            "verified_at_action": history_index + 1,
+            **({"total_lines": total_lines} if "total_lines" in result or legacy_clipped else {}),
+            **({"truncated": True} if truncated else {}),
+            **({"has_more": True} if has_more else {}),
+            **({"next_start_line": next_start_line} if next_start_line else {}),
+        }
+        if any(_read_source_covers(newer, candidate) for newer in latest_reads):
+            continue
+        latest_reads.append(candidate)
     target_order = {path: index for index, path in enumerate(target_item_paths)}
-    latest_reads.sort(key=lambda row: target_order.get(str(row.get("path")), len(target_order)))
+    latest_reads.sort(
+        key=lambda row: (
+            -int(row.get("verified_at_action") or 0),
+            target_order.get(str(row.get("path")), len(target_order)),
+        )
+    )
 
     inspected_sources: list[dict[str, object]] = []
+    omitted_inspected_sources: list[dict[str, object]] = []
     evidence_chars = 0
     for row in latest_reads:
         content = str(row.get("content") or "")
         remaining = max_evidence_chars - evidence_chars
         if remaining <= 0:
-            break
+            omitted_inspected_sources.append(_omitted_source_descriptor(row, content))
+            continue
         if len(content) > remaining:
             if inspected_sources:
+                omitted_inspected_sources.append(_omitted_source_descriptor(row, content))
                 continue
             content = content[:remaining]
-        inspected_sources.append({**row, "content": content})
+        inspected_sources.append(
+            {
+                **row,
+                "content": content,
+                **(
+                    {
+                        "truncated": True,
+                        "original_content_chars": len(str(row.get("content") or "")),
+                    }
+                    if len(content) < len(str(row.get("content") or ""))
+                    else {}
+                ),
+            }
+        )
         evidence_chars += len(content)
+
+    partial_paths: set[str] = set()
+    for row in latest_reads:
+        path = str(row.get("path") or "")
+        if not path or path in partial_paths or row.get("has_more") is not True:
+            continue
+        cursor = int(row.get("next_start_line") or int(row.get("end_line") or 0) + 1)
+        total_lines = int(row.get("total_lines") or 0)
+        for candidate in sorted(
+            (source for source in latest_reads if str(source.get("path") or "") == path),
+            key=lambda source: int(source.get("start_line") or 1),
+        ):
+            candidate_start = int(candidate.get("start_line") or 1)
+            candidate_end = int(candidate.get("end_line") or candidate_start)
+            if candidate_end < cursor:
+                continue
+            if candidate_start > cursor:
+                break
+            cursor = max(cursor, candidate_end + 1)
+        if not total_lines or cursor <= total_lines:
+            omitted_inspected_sources.append(
+                {
+                    "path": path,
+                    "start_line": cursor,
+                    **({"end_line": total_lines} if total_lines else {}),
+                    "verified_at_action": row.get("verified_at_action"),
+                    "reason": "repo_read_partial",
+                }
+            )
+            partial_paths.add(path)
 
     recent_results: list[dict[str, object]] = []
     for row in history[-_WORKING_MEMORY_RECENT_RESULT_LIMIT:]:
@@ -3392,7 +3985,7 @@ def _action_memory(
         )
     memory = {
         "projection": {
-            "version": "developer_working_memory_projection_v2",
+            "version": "developer_working_memory_projection_v3",
             "history_count": len(history),
             "action_ledger_total": len(complete_ledger),
             "action_ledger_retained": len(ledger),
@@ -3408,8 +4001,19 @@ def _action_memory(
         memory["mutation_state"] = list(mutation_state_by_path.values())
     if verification_state_by_stage:
         memory["verification_state"] = list(verification_state_by_stage.values())
+    if graph_evidence:
+        prioritized = sorted(
+            graph_evidence,
+            key=lambda row: (
+                str(row.get("operation") or "") in {"impact", "affected_tests"},
+                int(row.get("verified_at_action") or 0),
+            ),
+        )
+        memory["graph_evidence"] = prioritized[-8:]
     if diagnostic_breadcrumbs:
         memory["diagnostic_breadcrumbs"] = diagnostic_breadcrumbs[-_WORKING_MEMORY_BREADCRUMB_LIMIT:]
+    if omitted_inspected_sources:
+        memory["omitted_sources"] = omitted_inspected_sources
     return memory
 
 
@@ -3497,7 +4101,8 @@ def _authoritative_sources(
     inspected_sources: list[dict[str, object]],
     current_sources: list[dict[str, object]],
     target_path: Path,
-) -> list[dict[str, object]]:
+    max_evidence_chars: int,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Expose one source view; successful mutations replace cached observations."""
 
     current_by_path = {str(row.get("path") or ""): row for row in current_sources}
@@ -3507,6 +4112,8 @@ def _authoritative_sources(
         path = str(inspected.get("path") or "")
         current = current_by_path.get(path)
         if current:
+            if path in emitted:
+                continue
             sources.append(
                 {
                     **current,
@@ -3518,10 +4125,17 @@ def _authoritative_sources(
         else:
             source = (target_path / path).resolve()
             sha256 = _file_hash(source) if source.is_file() else ""
+            current_total_lines = (
+                len(source.read_text(encoding="utf-8", errors="replace").splitlines())
+                if source.is_file()
+                and (inspected.get("has_more") is True or inspected.get("truncated") is True)
+                else 0
+            )
             sources.append(
                 {
                     **inspected,
                     "sha256": sha256,
+                    **({"total_lines": current_total_lines} if current_total_lines else {}),
                     "origin": "verified_current_read",
                     "freshness": "current_worktree_verified",
                     "changed": False,
@@ -3538,7 +4152,63 @@ def _authoritative_sources(
                     "changed": True,
                 }
             )
-    return sources
+    bounded: list[dict[str, object]] = []
+    omitted: list[dict[str, object]] = []
+    used = 0
+    for source in sources:
+        content = str(source.get("content") or "")
+        remaining = max_evidence_chars - used
+        if not content:
+            bounded.append(source)
+            continue
+        if remaining <= 0 or len(content) > remaining:
+            omitted.append(
+                {
+                    key: value
+                    for key, value in {
+                        "path": source.get("path"),
+                        "start_line": source.get("start_line"),
+                        "end_line": source.get("end_line"),
+                        "sha256": source.get("sha256"),
+                        "verified_at_action": source.get("verified_at_action"),
+                        "content_chars": len(content),
+                        "reason": "working_memory_evidence_budget",
+                    }.items()
+                    if value not in {None, ""}
+                }
+            )
+            continue
+        bounded.append(source)
+        used += len(content)
+    return bounded, omitted
+
+
+def _read_source_covers(container: dict[str, object], candidate: dict[str, object]) -> bool:
+    """A newer whole/ranged read supersedes an older range of the same file."""
+
+    if str(container.get("path") or "") != str(candidate.get("path") or ""):
+        return False
+    container_start = int(container.get("start_line") or 1)
+    candidate_start = int(candidate.get("start_line") or 1)
+    container_end = int(container.get("end_line") or container_start)
+    candidate_end = int(candidate.get("end_line") or candidate_start)
+    return container_start <= candidate_start and container_end >= candidate_end
+
+
+def _omitted_source_descriptor(source: dict[str, object], content: str) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in {
+            "path": source.get("path"),
+            "start_line": source.get("start_line"),
+            "end_line": source.get("end_line"),
+            "sha256": source.get("sha256"),
+            "verified_at_action": source.get("verified_at_action"),
+            "content_chars": len(content),
+            "reason": "working_memory_evidence_budget",
+        }.items()
+        if value not in {None, ""}
+    }
 
 
 def _current_mutated_sources(
@@ -3550,20 +4220,19 @@ def _current_mutated_sources(
 ) -> list[dict[str, object]]:
     """Read current worktree content for paths changed during this attempt."""
 
-    mutated: set[str] = set()
-    for row in history:
+    mutated: dict[str, int] = {}
+    for index, row in enumerate(history, start=1):
         if row.get("action") not in _MUTATION_ACTIONS:
             continue
         result = _dict_value(row.get("result"))
         path = str(result.get("path") or "").replace("\\", "/")
         if result.get("ok") is True and path in target_item_paths:
-            mutated.add(path)
+            mutated[path] = index
 
     sources: list[dict[str, object]] = []
     used = 0
-    for path in target_item_paths:
-        if path not in mutated:
-            continue
+    ordered_paths = sorted(mutated, key=lambda path: mutated[path], reverse=True)
+    for path in ordered_paths:
         source = (target_path / path).resolve()
         try:
             source.relative_to(target_path.resolve())
@@ -3586,6 +4255,7 @@ def _current_mutated_sources(
                 "sha256": _file_hash(source),
                 "content": content,
                 "truncated": truncated,
+                "verified_at_action": mutated[path],
             }
         )
         used += len(content)
@@ -3764,6 +4434,18 @@ def _completion_token_budget(
     return max(1024, min(configured_max_tokens, available))
 
 
+def _developer_llm_call_profiles(settings: object) -> dict[str, dict[str, object]]:
+    fallback = int(getattr(settings, "llm_structured_max_tokens", 8192))
+    return {
+        profile_name: phase4_llm_call_options(
+            settings,
+            profile_name,
+            fallback_max_tokens=fallback,
+        )
+        for profile_name in ("developer_action", "developer_repair")
+    }
+
+
 def _execute_action(
     *,
     action: dict[str, object],
@@ -3777,18 +4459,109 @@ def _execute_action(
     repo_context_provider: CodeGraphContextProvider,
     verification_runner: VerificationRunner,
     verification_policy: VerificationStagePolicy | None,
+    package_tool_timeout_seconds: int = 120,
 ) -> dict[str, object]:
     raw_name = str(action["action"])
     name = _ACTION_TO_LEGACY.get(raw_name, raw_name)
     args = _dict_value(action.get("arguments"))
+    if raw_name == "package.ensure_workspace_dependency":
+        dependency_id = str(args.get("dependency_id") or "").strip()
+        requirement = next(
+            (
+                row
+                for row in _dict_items(item.get("package_dependencies"))
+                if str(row.get("dependency_id") or "") == dependency_id
+            ),
+            None,
+        )
+        if requirement is None:
+            return {
+                "ok": False,
+                "error": "developer_package_dependency_not_approved",
+                "dependency_id": dependency_id,
+            }
+        return ensure_workspace_dependency(
+            repo_root=repo_root,
+            requirement=requirement,
+            run_id=run_id,
+            timeout_seconds=package_tool_timeout_seconds,
+        )
+    if raw_name == "codegraph.query":
+        operation = str(args.get("operation") or "").strip().lower()
+        query = str(args.get("query") or "").strip()
+        symbol = str(args.get("symbol") or "").strip()
+        file = _normalized_codegraph_path(repo_root, args.get("file"), run_id=run_id)
+        files = [
+            path
+            for raw_path in _string_items(args.get("files"))[:20]
+            if (path := _normalized_codegraph_path(repo_root, raw_path, run_id=run_id))
+        ]
+        file_filter = _normalized_codegraph_path(
+            repo_root,
+            args.get("file_filter"),
+            run_id=run_id,
+        )
+        pattern = str(args.get("pattern") or "").strip()
+        allowed_operations = {
+            "symbols",
+            "node",
+            "callers",
+            "callees",
+            "impact",
+            "affected_tests",
+            "files",
+            "explore",
+        }
+        missing_required_input = (
+            (operation == "symbols" and not (query or file))
+            or (operation == "explore" and not query)
+            or (operation in {"callers", "callees", "impact"} and not symbol)
+            or (operation == "node" and not (symbol or file))
+            or (operation == "affected_tests" and not files)
+        )
+        if (
+            operation not in allowed_operations
+            or missing_required_input
+            or len(query) > 500
+            or len(symbol) > 300
+            or len(pattern) > 200
+        ):
+            return {"ok": False, "error": "invalid_codegraph_query"}
+        freshness = repo_context_provider.sync_if_stale(repo_root)
+        payload = repo_context_provider.query_capability(
+            repo_root,
+            operation=operation,
+            query=query,
+            symbol=symbol,
+            file=file,
+            files=files,
+            kind=str(args.get("kind") or "").strip(),
+            limit=int(args.get("limit") or 10),
+            depth=int(args.get("depth") or 2),
+            file_filter=file_filter,
+            pattern=pattern,
+        )
+        snapshot = _dict_value(freshness.get("snapshot"))
+        return {
+            "ok": True,
+            "operation": operation,
+            "snapshot_digest": snapshot.get("artifact_digest"),
+            "index_synced": freshness.get("synced") is True,
+            **payload,
+        }
     if raw_name == "codegraph.query_readonly":
         query = str(args.get("query") or "").strip()
         if not query or len(query) > 500:
             return {"ok": False, "error": "invalid_codegraph_query"}
+        freshness = repo_context_provider.sync_if_stale(repo_root)
         evidence = repo_context_provider.query_readonly(repo_root, query)
+        snapshot = _dict_value(freshness.get("snapshot"))
         return {
             "ok": True,
+            "operation": "explore",
             "query_sha256": "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            "snapshot_digest": snapshot.get("artifact_digest"),
+            "index_synced": freshness.get("synced") is True,
             "evidence": evidence[:12000],
             "truncated": len(evidence) > 12000,
         }
@@ -3819,7 +4592,9 @@ def _execute_action(
             "status": result.status,
             "failure_kind": result.failure_kind,
             "reason": result.reason,
-            "input_hashes": {path: _file_hash(repo_root / path) for path in item_paths},
+            "input_hashes": {
+                path: _file_hash(repo_root / path) for path in _item_execution_hash_paths(item)
+            },
             "selected_test_files": list(result.selected_test_files),
             "verified_test_files": list(result.verified_test_files),
             "stage_results": [row.to_dict() for row in result.stage_results],
@@ -3861,26 +4636,37 @@ def _execute_action(
             return {"ok": False, "error": "file_not_readable"}
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, int(args.get("start_line") or 1))
-        end = min(len(lines), int(args.get("end_line") or min(len(lines), start + 300)))
-        content = "\n".join(f"{index + 1}: {lines[index]}" for index in range(start - 1, end))
-        return {"ok": True, "path": str(args.get("path")), "start_line": start, "end_line": end, "content": content[:12000]}
+        requested_end = min(len(lines), int(args.get("end_line") or min(len(lines), start + 300)))
+        rendered: list[str] = []
+        rendered_chars = 0
+        actual_end = start - 1
+        for index in range(start - 1, requested_end):
+            line = f"{index + 1}: {lines[index]}"
+            added_chars = len(line) + (1 if rendered else 0)
+            if rendered and rendered_chars + added_chars > 12000:
+                break
+            if not rendered and len(line) > 12000:
+                line = line[:12000]
+            rendered.append(line)
+            rendered_chars += len(line) + (1 if len(rendered) > 1 else 0)
+            actual_end = index + 1
+            if rendered_chars >= 12000:
+                break
+        has_more = actual_end < len(lines)
+        return {
+            "ok": True,
+            "path": str(args.get("path")),
+            "start_line": start,
+            "end_line": actual_end,
+            "requested_end_line": requested_end,
+            "total_lines": len(lines),
+            "content": "\n".join(rendered),
+            "truncated": actual_end < requested_end,
+            "has_more": has_more,
+            **({"next_start_line": actual_end + 1} if has_more else {}),
+        }
     if name == "search_code":
-        query = str(args.get("query") or "")
-        if not query or len(query) > 200:
-            return {"ok": False, "error": "invalid_query"}
-        prefix = _safe_read_path(repo_root, str(args.get("prefix") or ""), run_id=run_id, allow_root=True)
-        limit = max(1, min(int(args.get("limit") or 30), 60))
-        hits = []
-        candidates = [prefix] if prefix.is_file() else prefix.rglob("*") if prefix.exists() else []
-        for path in candidates:
-            if not path.is_file() or not _read_path_allowed(repo_root, path):
-                continue
-            for line_no, line in enumerate(path.read_text(encoding="utf-8", errors="replace").splitlines(), start=1):
-                if query.casefold() in line.casefold():
-                    hits.append({"path": str(path.relative_to(repo_root)).replace("\\", "/"), "line": line_no, "text": line[:300]})
-                    if len(hits) >= limit:
-                        return {"ok": True, "hits": hits, "truncated": True}
-        return {"ok": True, "hits": hits, "truncated": False}
+        return _search_code(repo_root, args, run_id=run_id)
     if name == "read_diff":
         path = str(args.get("path") or "")
         _safe_read_path(repo_root, path, run_id=run_id)
@@ -3915,6 +4701,66 @@ def _execute_action(
                 ),
             }
         return {"ok": True, "path": path, "sha256": after_sha256, "chars": len(content)}
+    if name == "replace_text":
+        path = str(args.get("path") or "")
+        target = _safe_write_target(repo_root, path, item_paths, run_id=run_id)
+        old_text = args.get("old_text")
+        new_text = args.get("new_text")
+        if not isinstance(old_text, str) or not old_text:
+            return {"ok": False, "error": "replace_text_old_text_required"}
+        if not isinstance(new_text, str) or len(old_text) + len(new_text) > max_write_chars:
+            return {"ok": False, "error": "replace_text_too_large", "max_chars": max_write_chars}
+        expected = str(args.get("expected_sha256") or "")
+        before_sha256 = _file_hash(target)
+        if expected != before_sha256:
+            return {"ok": False, "error": "stale_file_hash", "actual_sha256": before_sha256}
+        if not target.is_file():
+            return {"ok": False, "error": "replace_text_file_not_found", "path": path}
+        try:
+            content = target.read_bytes().decode("utf-8")
+        except UnicodeDecodeError:
+            return {"ok": False, "error": "replace_text_file_not_utf8", "path": path}
+        newline = "\r\n" if "\r\n" in content else "\n"
+        matched_old_text = old_text.replace("\r\n", "\n").replace("\r", "\n")
+        replacement_text = new_text.replace("\r\n", "\n").replace("\r", "\n")
+        if newline == "\r\n":
+            matched_old_text = matched_old_text.replace("\n", newline)
+            replacement_text = replacement_text.replace("\n", newline)
+        match_count = content.count(matched_old_text)
+        if match_count == 0:
+            return {
+                "ok": False,
+                "error": "replace_text_not_found",
+                "path": path,
+                "instruction": "Read the current exact block and retry with byte-for-byte old_text.",
+            }
+        if match_count > 1:
+            return {
+                "ok": False,
+                "error": "replace_text_ambiguous",
+                "path": path,
+                "match_count": match_count,
+                "instruction": "Include more unchanged surrounding text so old_text matches exactly once.",
+            }
+        updated = content.replace(matched_old_text, replacement_text, 1)
+        if updated == content:
+            return {
+                "ok": False,
+                "error": "no_effect_mutation",
+                "path": path,
+                "sha256": before_sha256,
+                "instruction": "old_text and new_text produce no file change; submit a materially different replacement.",
+            }
+        target.write_bytes(updated.encode("utf-8"))
+        after_sha256 = _file_hash(target)
+        return {
+            "ok": True,
+            "path": path,
+            "sha256": after_sha256,
+            "replacements": 1,
+            "old_chars": len(old_text),
+            "new_chars": len(new_text),
+        }
     if name == "apply_patch":
         path = str(args.get("path") or "")
         target = _safe_write_target(repo_root, path, item_paths, run_id=run_id)
@@ -4024,6 +4870,26 @@ def _walk_strings(value: object) -> list[str]:
     return [str(value)] if isinstance(value, (str, int, float)) else []
 
 
+def _normalized_codegraph_path(
+    repo_root: Path,
+    value: object,
+    *,
+    run_id: str,
+) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    target = _safe_read_path(repo_root, raw, run_id=run_id)
+    relative = target.relative_to(repo_root.resolve())
+    if any(part.casefold() in _READ_DENIED_NAMES for part in relative.parts):
+        raise HarnessError(
+            "developer_tool_unsafe_path",
+            f"CodeGraph path is protected: {raw}",
+            run_id=run_id or None,
+        )
+    return relative.as_posix()
+
+
 def _safe_read_path(repo_root: Path, raw: str, *, run_id: str, allow_root: bool = False) -> Path:
     normalized = raw.strip().replace("\\", "/").lstrip("/")
     if not normalized and allow_root:
@@ -4066,9 +4932,106 @@ def _read_path_allowed(repo_root: Path, path: Path) -> bool:
         rel = path.resolve().relative_to(repo_root.resolve())
     except ValueError:
         return False
-    if any(part in _READ_DENIED_NAMES for part in rel.parts):
+    if any(part.casefold() in _READ_DENIED_NAMES for part in rel.parts):
         return False
     return path.suffix.lower() in _TEXT_SUFFIXES or path.name in {"pom.xml", "build.gradle", "settings.gradle", "gradlew"}
+
+
+def _search_code(repo_root: Path, args: dict[str, object], *, run_id: str) -> dict[str, object]:
+    query = str(args.get("query") or "")
+    if not query or len(query) > 200:
+        return {"ok": False, "error": "invalid_query"}
+
+    raw_prefix = str(args.get("prefix") or "")
+    prefix = _safe_read_path(repo_root, raw_prefix, run_id=run_id, allow_root=True)
+    relative_parts = tuple(
+        part.casefold()
+        for part in prefix.relative_to(repo_root.resolve()).parts
+    )
+    if ".codegraph" in relative_parts:
+        return {
+            "ok": False,
+            "error": "codegraph_search_not_supported",
+            "instruction": "Use codegraph.query for graph/index evidence instead of searching .codegraph files.",
+        }
+    if "node_modules" in relative_parts and prefix.is_dir():
+        dependency_parts = relative_parts[relative_parts.index("node_modules") + 1 :]
+        package_selected = bool(dependency_parts) and (
+            not dependency_parts[0].startswith("@") or len(dependency_parts) >= 2
+        )
+        if not package_selected:
+            return {
+                "ok": False,
+                "error": "dependency_search_scope_required",
+                "instruction": "Set prefix to one concrete package such as node_modules/@scope/package.",
+            }
+
+    limit = max(1, min(int(args.get("limit") or 30), 60))
+    query_folded = query.casefold()
+    hits: list[dict[str, object]] = []
+    scanned_files = 0
+    skipped_large_files = 0
+    deadline = time.monotonic() + _SEARCH_TIMEOUT_SECONDS
+    candidates = [prefix] if prefix.is_file() else _walk_search_files(prefix)
+    for path in candidates:
+        if time.monotonic() >= deadline:
+            return {
+                "ok": True,
+                "hits": hits,
+                "truncated": True,
+                "truncation_reason": "timeout",
+            }
+        if not path.is_file() or not _read_path_allowed(repo_root, path):
+            continue
+        if scanned_files >= _SEARCH_MAX_SCANNED_FILES:
+            return {
+                "ok": True,
+                "hits": hits,
+                "truncated": True,
+                "truncation_reason": "file_limit",
+            }
+        scanned_files += 1
+        try:
+            if path.stat().st_size > _SEARCH_MAX_FILE_BYTES:
+                skipped_large_files += 1
+                continue
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for line_no, line in enumerate(lines, start=1):
+            if query_folded in line.casefold():
+                hits.append(
+                    {
+                        "path": str(path.relative_to(repo_root)).replace("\\", "/"),
+                        "line": line_no,
+                        "text": line[:300],
+                    }
+                )
+                if len(hits) >= limit:
+                    return {"ok": True, "hits": hits, "truncated": True}
+    result: dict[str, object] = {"ok": True, "hits": hits, "truncated": False}
+    if skipped_large_files:
+        result.update(
+            {
+                "truncated": True,
+                "truncation_reason": "large_files_skipped",
+                "skipped_large_files": skipped_large_files,
+            }
+        )
+    return result
+
+
+def _walk_search_files(prefix: Path):
+    if not prefix.exists():
+        return
+    for root, directories, filenames in os.walk(prefix, topdown=True, followlinks=False):
+        directories[:] = sorted(
+            name
+            for name in directories
+            if name.casefold() not in _SEARCH_PRUNED_DIR_NAMES
+        )
+        for filename in sorted(filenames):
+            yield Path(root) / filename
 
 
 def _prepare_patch_text(patch_text: str, *, item_path: str, run_id: str) -> str:
@@ -4229,6 +5192,44 @@ def _item_paths(item: dict[str, object]) -> list[str]:
     )
 
 
+def _item_dependency_paths(item: dict[str, object]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            path
+            for dependency in _dict_items(item.get("package_dependencies"))
+            for path in (
+                str(
+                    dependency.get("consumer_manifest_path")
+                    or dependency.get("manifest_path")
+                    or ""
+                ).replace("\\", "/"),
+                str(dependency.get("lockfile_path") or "").replace("\\", "/"),
+            )
+            if path
+        )
+    )
+
+
+def _item_execution_hash_paths(item: dict[str, object]) -> list[str]:
+    return list(dict.fromkeys([*_item_paths(item), *_item_dependency_paths(item)]))
+
+
+def _package_dependency_statuses(
+    *,
+    target_path: Path,
+    item: dict[str, object],
+    run_id: str,
+) -> list[dict[str, object]]:
+    return [
+        workspace_dependency_status(
+            repo_root=target_path,
+            requirement=requirement,
+            run_id=run_id,
+        )
+        for requirement in _dict_items(item.get("package_dependencies"))
+    ]
+
+
 def _item_context_paths(item: dict[str, object]) -> list[str]:
     declared = [path.replace("\\", "/") for path in _string_items(item.get("context_paths"))]
     if not declared:
@@ -4259,6 +5260,114 @@ def _item_required_paths(item: dict[str, object]) -> list[str]:
     return _item_context_paths(item)
 
 
+def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
+    """Promote approved behavior that a short work-unit objective can hide."""
+
+    requirements = _dedupe_prompt_rows(_dict_items(item.get("requirements")))
+    test_intents = _dedupe_prompt_rows(_dict_items(item.get("test_intents")))
+    ui: dict[str, object] = {}
+    for binding in _dict_items(item.get("surface_contracts")):
+        if str(binding.get("surface") or "").strip().lower() != "ui":
+            continue
+        contract = _dict_value(binding.get("surface_contract"))
+        experience = _dict_value(contract.get("experience_contract"))
+        for field in ("component_structure", "accessibility", "responsive", "focus_flow"):
+            values = _string_items(experience.get(field))
+            if values:
+                ui.setdefault(field, []).extend(values)
+        feedback = [
+            {
+                "trigger": str(row.get("trigger") or ""),
+                "response": str(row.get("response") or ""),
+            }
+            for row in _dict_items(experience.get("feedback"))
+            if str(row.get("trigger") or "") or str(row.get("response") or "")
+        ]
+        if feedback:
+            ui.setdefault("feedback", []).extend(feedback)
+        for field in ("entrypoint", "states", "transitions", "validations", "outcomes"):
+            value = contract.get(field)
+            if value:
+                ui.setdefault(field, value)
+
+    boundaries = []
+    for boundary in _dict_items(item.get("boundary_contracts")):
+        boundaries.append(
+            {
+                "design_edge_id": boundary.get("design_edge_id"),
+                "consumer_operation": boundary.get("consumer_operation"),
+                "provider_operation": boundary.get("provider_operation"),
+                "auth_mapping": boundary.get("auth_mapping", []),
+                "input_mapping": boundary.get("input_mapping", []),
+                "response_mapping": boundary.get("response_mapping", []),
+                "error_mapping": boundary.get("error_mapping", []),
+            }
+        )
+
+    wiring = []
+    for binding in _dict_items(item.get("runtime_bindings")):
+        wiring.append(
+            {
+                "runtime_kind": binding.get("runtime_kind"),
+                "target": binding.get("target", {}),
+                "attachment": binding.get("attachment", {}),
+            }
+        )
+
+    return {
+        **({"requirements": requirements} if requirements else {}),
+        **({"test_intents": test_intents} if test_intents else {}),
+        **({"ui": ui} if ui else {}),
+        **({"boundaries": boundaries} if boundaries else {}),
+        **({"runtime_wiring": wiring} if wiring else {}),
+    }
+
+
+def _dedupe_prompt_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+    unique: list[dict[str, object]] = []
+    seen: set[str] = set()
+    for row in rows:
+        identity = _json_hash(row)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        unique.append(row)
+    return unique
+
+
+def _completed_dependency_receipts(
+    *,
+    item: dict[str, object],
+    manifest: dict[str, object],
+) -> list[dict[str, object]]:
+    """Describe what a completed dependency owns instead of exposing only its ID."""
+
+    by_id = {
+        str(row.get("id") or ""): row
+        for row in _dict_items(manifest.get("items"))
+        if str(row.get("id") or "")
+    }
+    receipts: list[dict[str, object]] = []
+    for dependency_id in _string_items(item.get("depends_on")):
+        dependency = _dict_value(by_id.get(dependency_id))
+        receipt: dict[str, object] = {
+            "unit_id": dependency_id,
+            "status": "completed",
+        }
+        if dependency:
+            receipt.update(
+                {
+                    "title": dependency.get("title"),
+                    "component_id": dependency.get("component_id"),
+                    "surfaces": _string_items(dependency.get("surfaces")),
+                    "write_paths": _item_paths(dependency),
+                    "planned_code_targets": _dict_items(dependency.get("planned_code_targets")),
+                }
+            )
+        receipts.append(receipt)
+    return receipts
+
+
 def _focused_execution_task(
     item: dict[str, object],
     *,
@@ -4287,6 +5396,7 @@ def _focused_execution_task(
         "required_stage_ids",
         "test_target_paths",
         "implementation_steps",
+        "package_dependencies",
     }
     return {key: value for key, value in task.items() if key in keep}
 
@@ -4298,23 +5408,36 @@ def _prompt_execution_task(item: dict[str, object], *, context_paths: list[str])
         for row in _dict_items(item.get("implementation_steps"))
         if context.intersection(path.replace("\\", "/") for path in _string_items(row.get("files")))
     ]
-    contract_fields = {
-        "boundary_contracts",
-        "migration_impact",
-        "planned_code_targets",
-        "runtime_bindings",
-        "surface_contracts",
+    navigation_fields = {
+        "id",
+        "title",
+        "order",
+        "scenario_id",
+        "component_id",
+        "surfaces",
+        "depends_on",
     }
     visible_item = {
         key: value
         for key, value in item.items()
-        if key != "required_paths" and key not in contract_fields
+        if key in navigation_fields
     }
+    file_summaries = []
+    for row in _item_files(item):
+        if str(row.get("path") or "") not in context:
+            continue
+        file_summaries.append(
+            {
+                key: row.get(key)
+                for key in ("path", "operation")
+                if row.get(key) not in {None, ""}
+            }
+        )
     return {
         **visible_item,
         "paths": context_paths,
         "allowed_paths": _item_paths(item),
-        "files": [row for row in _item_files(item) if str(row.get("path") or "") in context],
+        "files": file_summaries,
         "implementation_steps": steps,
     }
 
@@ -4466,6 +5589,109 @@ def _merge_database_entrypoint_scope_manifest(
     return merged, reopened
 
 
+def _merge_dependency_manifest_scope_manifest(
+    existing: dict[str, object],
+    candidate: dict[str, object],
+) -> tuple[dict[str, object], list[str]] | None:
+    """Accept deterministic migration between legacy manifest scope and package-tool contracts."""
+
+    if existing.get("mode") != "act" or candidate.get("mode") != "act":
+        return None
+    stable_manifest_fields = (
+        "version",
+        "run_id",
+        "mode",
+        "repair_iteration",
+        "base_sha",
+        "expected_dirty_files",
+        "repair_feedback",
+        "developer_generation_context",
+    )
+    if any(existing.get(field) != candidate.get(field) for field in stable_manifest_fields):
+        return None
+    old_allowed = set(_string_items(existing.get("workspace_allowed_paths")))
+    new_allowed = set(_string_items(candidate.get("workspace_allowed_paths")))
+    existing_items = _dict_items(existing.get("items"))
+    candidate_items = _dict_items(candidate.get("items"))
+    if [item.get("id") for item in existing_items] != [item.get("id") for item in candidate_items]:
+        return None
+
+    changed_item_ids: list[str] = []
+    reopened_item_ids: list[str] = []
+    old_declared_manifests: set[str] = set()
+    new_declared_manifests: set[str] = set()
+    for old_item, new_item in zip(existing_items, candidate_items):
+        if _dependency_scope_stable_item(old_item) != _dependency_scope_stable_item(new_item):
+            return None
+        old_paths = set(_item_paths(old_item))
+        new_paths = set(_item_paths(new_item))
+        added_paths = new_paths - old_paths
+        removed_paths = old_paths - new_paths
+        old_item_manifests = set(_item_dependency_paths(old_item))
+        new_item_manifests = set(_item_dependency_paths(new_item))
+        if removed_paths - old_item_manifests or added_paths - new_item_manifests:
+            return None
+        old_declared_manifests.update(old_item_manifests)
+        new_declared_manifests.update(new_item_manifests)
+        old_files = {
+            str(file_item.get("path") or ""): _entrypoint_scope_stable_file(file_item)
+            for file_item in _item_files(old_item)
+        }
+        new_files = {
+            str(file_item.get("path") or ""): _entrypoint_scope_stable_file(file_item)
+            for file_item in _item_files(new_item)
+        }
+        if any(
+            new_files.get(path) != value
+            for path, value in old_files.items()
+            if path not in removed_paths
+        ):
+            return None
+        if set(new_files) - set(old_files) != added_paths or set(old_files) - set(new_files) != removed_paths:
+            return None
+        dependency_contract_changed = (
+            old_item.get("package_dependencies") != new_item.get("package_dependencies")
+        )
+        if added_paths or removed_paths or dependency_contract_changed:
+            item_id = str(new_item.get("id") or "")
+            changed_item_ids.append(item_id)
+            if dependency_contract_changed and _dict_items(new_item.get("package_dependencies")):
+                reopened_item_ids.append(item_id)
+    if (
+        (not changed_item_ids and old_allowed == new_allowed)
+        or new_allowed - old_allowed - new_declared_manifests
+        or old_allowed - new_allowed - old_declared_manifests
+    ):
+        return None
+
+    merged = json.loads(json.dumps(existing))
+    merged["input_hash"] = candidate.get("input_hash")
+    merged["workspace_allowed_paths"] = candidate.get("workspace_allowed_paths", [])
+    candidate_by_id = {str(item.get("id") or ""): item for item in candidate_items}
+    for index, old_item in enumerate(_dict_items(merged.get("items"))):
+        item_id = str(old_item.get("id") or "")
+        if item_id in changed_item_ids:
+            merged["items"][index] = json.loads(json.dumps(candidate_by_id[item_id]))
+    return merged, reopened_item_ids
+
+
+def _dependency_scope_stable_item(item: dict[str, object]) -> dict[str, object]:
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in {
+            "paths",
+            "context_paths",
+            "direct_repair_paths",
+            "diagnostic_paths",
+            "contract_anchor_paths",
+            "files",
+            "package_dependencies",
+            "input_digest",
+        }
+    }
+
+
 def _entrypoint_scope_stable_item(item: dict[str, object]) -> dict[str, object]:
     return {
         key: value
@@ -4510,20 +5736,21 @@ def _database_entrypoint_journal_reopen_ids(
     return result
 
 
-def _reopen_database_entrypoint_items(
+def _reopen_scope_expanded_items(
     *,
     target_path: Path,
     session_dir: Path,
     manifest: dict[str, object],
     journal: dict[str, object],
     item_ids: list[str],
+    reason: str,
 ) -> None:
-    """Reopen only completed DB providers and preserve their previous audit artifacts."""
+    """Refresh pending scope or reopen completed units while preserving audit artifacts."""
 
     _supersede_pending_step_review(
         session_dir=session_dir,
         journal=journal,
-        reason="database_entrypoint_scope_reopened",
+        reason=f"{reason}_reopened",
     )
 
     item_by_id = {
@@ -4535,7 +5762,7 @@ def _reopen_database_entrypoint_items(
         if item is None:
             raise HarnessError(
                 "developer_execution_manifest_invalid",
-                f"Database entrypoint migration is missing execution unit {item_id}.",
+                f"Scope migration is missing execution unit {item_id}.",
             )
         entry = _journal_item(journal, item_id)
         entry["paths"] = _item_paths(item)
@@ -4573,7 +5800,7 @@ def _reopen_database_entrypoint_items(
         )
         entry.setdefault("scope_reopen_history", []).append(
             {
-                "reason": "database_entrypoint_scope_added",
+                "reason": f"{reason}_added",
                 "reopened_at": reopened_at,
                 "completed_at": entry.get("completed_at"),
                 "summary": entry.get("summary"),
@@ -4604,6 +5831,26 @@ def _reopen_database_entrypoint_items(
     journal["updated_at"] = reopened_at
 
 
+def _reopen_database_entrypoint_items(
+    *,
+    target_path: Path,
+    session_dir: Path,
+    manifest: dict[str, object],
+    journal: dict[str, object],
+    item_ids: list[str],
+) -> None:
+    """Compatibility wrapper for the earlier DB-entrypoint scope migration."""
+
+    _reopen_scope_expanded_items(
+        target_path=target_path,
+        session_dir=session_dir,
+        manifest=manifest,
+        journal=journal,
+        item_ids=item_ids,
+        reason="database_entrypoint_scope",
+    )
+
+
 def _supersede_pending_step_review(
     *,
     session_dir: Path,
@@ -4614,19 +5861,20 @@ def _supersede_pending_step_review(
     pending_call_id = str(pending_review.get("call_id") or "")
     if not pending_call_id:
         return
+    pending_exchange_id = pending_call_id.removesuffix("-input")
     for review_session_file in (session_dir / "step_review").glob("*/step_review_session_v1.json"):
         review_session = _read_json(review_session_file, run_id="")
         calls = _dict_items(review_session.get("calls"))
         changed = False
         for call in calls:
             if (
-                str(call.get("call_id") or "") == pending_call_id
-                and str(call.get("status") or "") == "pending"
+                str(call.get("call_id") or "") == pending_exchange_id
+                and str(call.get("status") or "") in {"pending", "input_pending", "input_approved"}
             ):
                 call["status"] = "superseded"
                 call["superseded_at"] = utc_now_iso()
                 call["superseded_reason"] = reason
-                _write_json_atomic(review_session_file.parent / f"exchange_{pending_call_id}.json", call)
+                _write_json_atomic(review_session_file.parent / f"exchange_{pending_exchange_id}.json", call)
                 changed = True
         if changed:
             review_session["calls"] = calls
@@ -4810,6 +6058,29 @@ def _timeout_diagnostic_action_limit(
     return configured_max_actions + timeout_action_reserve if instrumented else configured_max_actions
 
 
+def _developer_action_limit(
+    *,
+    configured_max_actions: int,
+    timeout_action_reserve: int,
+    verification_repair_action_reserve: int,
+    history: list[dict[str, object]],
+) -> int:
+    """Keep one bounded repair reserve once implementation verification has failed."""
+
+    limit = _timeout_diagnostic_action_limit(
+        configured_max_actions=configured_max_actions,
+        timeout_action_reserve=timeout_action_reserve,
+        history=history,
+    )
+    repair_started = any(
+        row.get("action") == "verification.run_stage"
+        and _dict_value(row.get("result")).get("status") == "failed"
+        and _dict_value(row.get("result")).get("failure_kind") == "implementation"
+        for row in history
+    )
+    return limit + verification_repair_action_reserve if repair_started else limit
+
+
 def _step_review_start_ordinal(
     *,
     session_path: Path,
@@ -4822,7 +6093,8 @@ def _step_review_start_ordinal(
     if not session_path.is_file():
         return cursor
     calls = _dict_items(_read_json(session_path, run_id=run_id).get("calls"))
-    if any(str(row.get("status") or "") == "pending" for row in calls):
+    pending_statuses = {"input_pending", "input_approved", "pending"}
+    if any(str(row.get("status") or "") in pending_statuses for row in calls):
         return cursor
     return max(cursor, *(int(row.get("ordinal") or 0) for row in calls))
 
@@ -4838,7 +6110,12 @@ def _is_timeout_diagnostic_instrumentation_action(
         return False
     arguments = _dict_value(action.get("arguments"))
     path = str(arguments.get("path") or "").replace("\\", "/")
-    payload = str(arguments.get("content") or arguments.get("patch") or "")
+    payload = str(
+        arguments.get("content")
+        or arguments.get("patch")
+        or arguments.get("new_text")
+        or ""
+    )
     return (
         path in set(_string_items(timeout_diagnostic.get("test_paths")))
         and _TIMEOUT_DIAGNOSTIC_SOURCE_MARKER in payload

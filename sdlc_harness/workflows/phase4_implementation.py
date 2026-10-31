@@ -14,6 +14,7 @@ from ..agents.developer import (
     merge_work_unit_updates,
     refresh_developer_execution_context,
     refresh_developer_work_packet,
+    upgrade_developer_dependency_scope,
 )
 from ..artifacts.writers import (
     write_phase4_code_change_report,
@@ -456,7 +457,7 @@ class PhaseFourImplementationCycle:
             if session_iteration is None
             else max(0, session_iteration)
         )
-        return {
+        execution_state = {
             **(existing if same_session else {}),
             "schema_version": (
                 "developer_execution_state_v2" if unit_aware else "developer_execution_state_v1"
@@ -475,6 +476,9 @@ class PhaseFourImplementationCycle:
             **(progress or {}),
             "status": status,
         }
+        if progress is not None and "pending_step_review" not in progress:
+            execution_state.pop("pending_step_review", None)
+        return execution_state
 
     def _execute_developer_tool_loop(
         self,
@@ -791,6 +795,33 @@ class PhaseFourImplementationCycle:
     ) -> tuple[dict[str, object], str]:
         """Upgrade an approved Plan V4 packet before the first Developer mutation only."""
 
+        if work_packet.get("execution_units"):
+            target_info = self._workspace_target_info(
+                run_id=run_id,
+                work_packet=work_packet,
+                allow_dirty=True,
+            )
+            work_packet, dependency_scope_changed = upgrade_developer_dependency_scope(
+                packet=work_packet,
+                target_repo_path=target_info.path,
+                planning_policy=_planning_policy_for_state(state, run_id=run_id),
+                run_id=run_id,
+            )
+            if dependency_scope_changed:
+                version = _next_phase4_artifact_version(self.store, run_id)
+                work_packet = {
+                    **work_packet,
+                    "version": f"developer_work_packet_v{version}",
+                    "mode": "approved_dependency_scope_upgrade_v1",
+                    "refreshed_at": utc_now_iso(),
+                }
+                path = write_phase4_developer_work_packet(
+                    store=self.store,
+                    run_id=run_id,
+                    packet=work_packet,
+                    version=version,
+                )
+                return work_packet, path
         if work_packet.get("execution_units") and _has_complete_execution_unit_contract(work_packet):
             return work_packet, ""
         artifacts = _string_dict(state.get("latest_artifacts"))

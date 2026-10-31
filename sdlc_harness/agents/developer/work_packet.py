@@ -84,12 +84,20 @@ def build_developer_work_packet(
         design_mappings=design_mappings,
         planning_policy=planning_policy,
     )
+    package_dependencies = _derive_cross_package_dependencies(
+        units=_dict_items(structured_plan.get("work_units")),
+        target_repo_path=target_repo_path,
+        planning_policy=planning_policy,
+        run_id=run_id,
+    )
+    dependency_manifest_paths: set[str] = set()
     enriched_files = [
         _enrich_proposed_file(
             target_repo_path=target_repo_path,
             file_item=item,
             run_id=run_id,
             planning_policy=planning_policy,
+            dependency_manifest_paths=dependency_manifest_paths,
         )
         for item in proposed_files
     ]
@@ -157,12 +165,14 @@ def build_developer_work_packet(
                     planning_policy=planning_policy,
                     verification_policy=verification_policy,
                     run_id=run_id,
+                    package_dependencies=package_dependencies,
                 )
             }
             if component_aware_contract
             else {}
         ),
         "proposed_files": enriched_files,
+        "package_dependency_requirements": package_dependencies,
         "design_mappings_by_file": _group_design_mappings_by_file(
             design_mappings,
             planning_policy=planning_policy,
@@ -214,6 +224,7 @@ def _build_execution_units(
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
     run_id: str,
+    package_dependencies: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
     """Project approved Plan V4 work units without inventing new execution scope."""
 
@@ -240,6 +251,7 @@ def _build_execution_units(
     projected: list[dict[str, object]] = []
     paths_by_unit: dict[str, set[str]] = {}
     dependencies: dict[str, set[str]] = {}
+    dependency_rows = package_dependencies or []
     for item in sorted(work_units, key=lambda row: (int(row.get("order") or 0), str(row.get("unit_id") or ""))):
         unit_id = str(item.get("unit_id") or "").strip()
         depends_on = _string_items(item.get("depends_on"))
@@ -256,12 +268,19 @@ def _build_execution_units(
         test_intents = _dict_items(item.get("test_intents"))
         for intent in test_intents:
             raw_paths.extend(_string_items(intent.get("target_paths")))
+        unit_package_dependencies = [
+            dependency
+            for dependency in dependency_rows
+            if unit_id in _string_items(dependency.get("required_by_unit_ids"))
+            or str(dependency.get("unit_id") or "") == unit_id
+        ]
         write_paths: list[str] = []
         for raw_path in raw_paths:
             path = _clean_repo_path(
                 raw_path,
                 run_id=run_id,
                 planning_policy=planning_policy,
+                dependency_manifest_paths=set(),
             )
             if path not in allowed:
                 raise HarnessError(
@@ -317,6 +336,7 @@ def _build_execution_units(
             "signature_entry_ids": signature_ids,
             "test_intents": test_intents,
             "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
+            "package_dependencies": unit_package_dependencies,
         }
         projected.append(canonical)
         paths_by_unit[unit_id] = set(write_paths)
@@ -366,6 +386,86 @@ def refresh_developer_execution_context(
     allowed = set(_string_items(_dict_value(packet.get("output_contract")).get("allowed_paths")))
     _attach_execution_unit_context(units, allowed=allowed)
     return {**packet, "execution_units": units}
+
+
+def upgrade_developer_dependency_scope(
+    *,
+    packet: dict[str, object],
+    target_repo_path: Path,
+    planning_policy: PlanningPathPolicy,
+    run_id: str,
+) -> tuple[dict[str, object], bool]:
+    """Upgrade legacy manifest-write scope to deterministic dependency-tool contracts."""
+
+    units = json.loads(json.dumps(_dict_items(packet.get("execution_units"))))
+    derived = _derive_cross_package_dependencies(
+        units=units,
+        target_repo_path=target_repo_path,
+        planning_policy=planning_policy,
+        run_id=run_id,
+    )
+    existing = _dict_items(packet.get("package_dependency_requirements"))
+    legacy_manifest_paths = {
+        str(item.get("consumer_manifest_path") or item.get("manifest_path") or "")
+        for item in existing
+        if str(item.get("consumer_manifest_path") or item.get("manifest_path") or "")
+    }
+    if existing == derived and all(
+        str(item.get("dependency_id") or "") for item in existing
+    ):
+        return packet, False
+
+    requirements = derived
+    proposed_files = json.loads(json.dumps(_dict_items(packet.get("proposed_files"))))
+    dependency_only_paths = {
+        str(item.get("path") or "")
+        for item in proposed_files
+        if str(item.get("path") or "") in legacy_manifest_paths
+        and str(item.get("purpose") or "").startswith("Declare runtime dependency ")
+    }
+    proposed_files = [
+        item for item in proposed_files if str(item.get("path") or "") not in dependency_only_paths
+    ]
+
+    requirements_by_unit: dict[str, list[dict[str, object]]] = {}
+    for dependency in requirements:
+        for unit_id in _string_items(dependency.get("required_by_unit_ids")):
+            requirements_by_unit.setdefault(unit_id, []).append(dependency)
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "")
+        unit_dependencies = requirements_by_unit.get(unit_id, [])
+        write_paths = [
+            path for path in _string_items(unit.get("write_paths")) if path not in dependency_only_paths
+        ]
+        unit["write_paths"] = write_paths
+        context_paths = [
+            path for path in _string_items(unit.get("context_paths")) if path not in dependency_only_paths
+        ]
+        unit["context_paths"] = [*write_paths, *[path for path in context_paths if path not in write_paths]]
+        unit["package_dependencies"] = unit_dependencies
+        digest_payload = json.dumps(unit, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        unit["input_digest"] = "sha256:" + hashlib.sha256(digest_payload.encode("utf-8")).hexdigest()
+
+    output_contract = _dict_value(packet.get("output_contract"))
+    allowed_paths = [
+        path for path in _string_items(output_contract.get("allowed_paths")) if path not in dependency_only_paths
+    ]
+    return {
+        **packet,
+        "execution_units": units,
+        "proposed_files": proposed_files,
+        "current_files": [
+            {
+                "path": item["path"],
+                "exists": item["exists"],
+                "content": item["current_content"],
+                "content_truncated": item["current_content_truncated"],
+            }
+            for item in proposed_files
+        ],
+        "package_dependency_requirements": requirements,
+        "output_contract": {**output_contract, "allowed_paths": allowed_paths},
+    }, True
 
 
 def _attach_execution_unit_context(
@@ -439,6 +539,170 @@ def _signature_ids_for_targets(
     ]
 
 
+def _derive_cross_package_dependencies(
+    *,
+    units: list[dict[str, object]],
+    target_repo_path: Path,
+    planning_policy: PlanningPathPolicy,
+    run_id: str,
+) -> list[dict[str, object]]:
+    """Derive only direct workspace imports proved by approved boundary operations."""
+
+    by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
+    requirements_by_identity: dict[tuple[str, str, str, str], dict[str, object]] = {}
+    package_manager = ""
+    for consumer in units:
+        unit_id = str(consumer.get("unit_id") or "")
+        component_id = str(consumer.get("component_id") or "")
+        consumer_edges = set(_string_items(consumer.get("design_edge_ids")))
+        boundary_operations = {
+            str(contract.get("provider_operation") or "").strip()
+            for contract in _dict_items(consumer.get("boundary_contracts"))
+            if str(contract.get("provider_operation") or "").strip()
+        }
+        consumer_manifests = {
+            manifest
+            for target in _dict_items(consumer.get("planned_code_targets"))
+            if planning_policy.component_for_path(str(target.get("path") or "")) == component_id
+            for manifest in [
+                _nearest_package_manifest(
+                    target_repo_path=target_repo_path,
+                    repo_path=str(target.get("path") or ""),
+                )
+            ]
+            if manifest
+        }
+        for dependency_id in _string_items(consumer.get("depends_on")):
+            provider = by_id.get(dependency_id)
+            if not provider or not consumer_edges.intersection(_string_items(provider.get("design_edge_ids"))):
+                continue
+            for target in _dict_items(provider.get("planned_code_targets")):
+                symbol = str(target.get("symbol") or "").strip()
+                if not symbol or symbol not in boundary_operations:
+                    continue
+                provider_manifest_path = _nearest_package_manifest(
+                    target_repo_path=target_repo_path,
+                    repo_path=str(target.get("path") or ""),
+                )
+                if not provider_manifest_path:
+                    continue
+                provider_manifest = _read_package_manifest(
+                    target_repo_path=target_repo_path,
+                    manifest_path=provider_manifest_path,
+                    run_id=run_id,
+                )
+                dependency_name = str(provider_manifest.get("name") or "").strip()
+                dependency_spec = str(provider_manifest.get("version") or "").strip() or "*"
+                if not dependency_name:
+                    continue
+                for manifest_path in sorted(consumer_manifests):
+                    if manifest_path == provider_manifest_path:
+                        continue
+                    consumer_manifest = _read_package_manifest(
+                        target_repo_path=target_repo_path,
+                        manifest_path=manifest_path,
+                        run_id=run_id,
+                    )
+                    identity = (
+                        manifest_path,
+                        provider_manifest_path,
+                        dependency_name,
+                        dependency_spec,
+                    )
+                    dependency = requirements_by_identity.get(identity)
+                    if dependency is None:
+                        if not package_manager:
+                            root_manifest = _read_package_manifest(
+                                target_repo_path=target_repo_path,
+                                manifest_path="package.json",
+                                run_id=run_id,
+                            )
+                            package_manager = str(
+                                root_manifest.get("packageManager") or "npm"
+                            ).split("@", 1)[0].casefold()
+                        digest = hashlib.sha256(
+                            "\0".join(identity).encode("utf-8")
+                        ).hexdigest()[:12].upper()
+                        dependency = {
+                            "dependency_id": f"DEP-{digest}",
+                            "unit_id": unit_id,
+                            "required_by_unit_ids": [],
+                            "package_manager": package_manager,
+                            "workspace_root": ".",
+                            "lockfile_path": "package-lock.json",
+                            "manifest_path": manifest_path,
+                            "consumer_manifest_path": manifest_path,
+                            "consumer_workspace_path": Path(manifest_path).parent.as_posix(),
+                            "consumer_package_name": str(consumer_manifest.get("name") or "").strip(),
+                            "dependency_name": dependency_name,
+                            "dependency_spec": dependency_spec,
+                            "provider_manifest_path": provider_manifest_path,
+                            "provider_workspace_path": Path(provider_manifest_path).parent.as_posix(),
+                            "provider_package_name": dependency_name,
+                            "provider_symbols": [],
+                            "already_declared": _manifest_declares_dependency(
+                                consumer_manifest,
+                                dependency_name,
+                            ),
+                        }
+                        requirements_by_identity[identity] = dependency
+                    required_by = dependency["required_by_unit_ids"]
+                    if unit_id not in required_by:
+                        required_by.append(unit_id)
+                    provider_symbols = dependency["provider_symbols"]
+                    if symbol not in provider_symbols:
+                        provider_symbols.append(symbol)
+    return list(requirements_by_identity.values())
+
+
+def _nearest_package_manifest(*, target_repo_path: Path, repo_path: str) -> str:
+    normalized = repo_path.strip().replace("\\", "/")
+    if not normalized:
+        return ""
+    root = target_repo_path.resolve()
+    current = (root / normalized).parent.resolve()
+    while current != root:
+        try:
+            current.relative_to(root)
+        except ValueError:
+            return ""
+        manifest = current / "package.json"
+        if manifest.is_file():
+            return str(manifest.relative_to(root)).replace("\\", "/")
+        current = current.parent
+    return ""
+
+
+def _read_package_manifest(
+    *,
+    target_repo_path: Path,
+    manifest_path: str,
+    run_id: str,
+) -> dict[str, object]:
+    try:
+        value = json.loads((target_repo_path / manifest_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HarnessError(
+            "developer_package_manifest_invalid",
+            f"Cannot read workspace package manifest: {manifest_path}",
+            run_id=run_id or None,
+        ) from exc
+    if not isinstance(value, dict):
+        raise HarnessError(
+            "developer_package_manifest_invalid",
+            f"Workspace package manifest must contain a JSON object: {manifest_path}",
+            run_id=run_id or None,
+        )
+    return value
+
+
+def _manifest_declares_dependency(manifest: dict[str, object], dependency_name: str) -> bool:
+    return any(
+        dependency_name in _dict_value(manifest.get(field))
+        for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
+    )
+
+
 def refresh_developer_work_packet(
     *,
     packet: dict[str, object],
@@ -462,12 +726,14 @@ def refresh_developer_work_packet(
             run_id=run_id,
         )
 
+    dependency_manifest_paths = _dependency_manifest_paths(packet)
     refreshed_by_path = {
         path: _enrich_proposed_file(
             target_repo_path=target_repo_path,
             file_item={"path": path},
             run_id=run_id,
             planning_policy=planning_policy,
+            dependency_manifest_paths=dependency_manifest_paths,
         )
         for path in allowed_paths
     }
@@ -546,11 +812,13 @@ def _enrich_proposed_file(
     file_item: dict[str, object],
     run_id: str,
     planning_policy: PlanningPathPolicy,
+    dependency_manifest_paths: set[str] | None = None,
 ) -> dict[str, object]:
     rel_path = _clean_repo_path(
         str(file_item.get("path") or ""),
         run_id=run_id,
         planning_policy=planning_policy,
+        dependency_manifest_paths=dependency_manifest_paths,
     )
     absolute_path = (target_repo_path / rel_path).resolve()
     try:
@@ -702,6 +970,7 @@ def _clean_repo_path(
     *,
     run_id: str,
     planning_policy: PlanningPathPolicy,
+    dependency_manifest_paths: set[str] | None = None,
 ) -> str:
     normalized = raw_path.strip()
     invalid_shape = (
@@ -717,7 +986,10 @@ def _clean_repo_path(
         or any(part in {"", ".", ".."} for part in normalized.split("/"))
         or (len(normalized) >= 2 and normalized[1] == ":" and normalized[0].isalpha())
     )
-    supported = not invalid_shape and planning_policy.normalize_editable_path(normalized) == normalized
+    supported = not invalid_shape and (
+        planning_policy.normalize_editable_path(normalized) == normalized
+        or normalized in (dependency_manifest_paths or set())
+    )
     if invalid_shape or not supported:
         raise HarnessError(
             "developer_work_packet_unsafe_path",
@@ -768,14 +1040,24 @@ def validate_developer_work_packet_path_policy(
                 run_id=run_id or None,
             )
 
+    dependency_manifest_paths = _dependency_manifest_paths(packet)
     return [
         _clean_repo_path(
             str(value),
             run_id=run_id,
             planning_policy=planning_policy,
+            dependency_manifest_paths=dependency_manifest_paths,
         )
         for value in values
     ]
+
+
+def _dependency_manifest_paths(packet: dict[str, object]) -> set[str]:
+    return {
+        str(item.get("manifest_path") or "").strip().replace("\\", "/")
+        for item in _dict_items(packet.get("package_dependency_requirements"))
+        if str(item.get("manifest_path") or "").strip()
+    }
 
 
 def _profiled_path_policy_contract(policy: PlanningPathPolicy) -> dict[str, object]:

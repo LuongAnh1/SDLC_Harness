@@ -28,6 +28,7 @@ from .work_packet import (
     build_developer_work_packet,
     refresh_developer_execution_context,
     refresh_developer_work_packet,
+    upgrade_developer_dependency_scope,
     validate_developer_work_packet_path_policy,
 )
 
@@ -52,6 +53,7 @@ __all__ = [
     "build_developer_work_packet",
     "refresh_developer_execution_context",
     "refresh_developer_work_packet",
+    "upgrade_developer_dependency_scope",
     "validate_developer_work_packet_path_policy",
 ]
 

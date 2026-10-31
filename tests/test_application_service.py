@@ -43,6 +43,13 @@ class ApplicationCommandTests(unittest.TestCase):
                 "4",
                 "--qa-repair-limit",
                 "3",
+                "--step-review",
+                "--step-review-call-id",
+                "plan-1-input",
+                "--step-review-decision",
+                "approve",
+                "--step-review-note",
+                "looks good",
                 "--sync-mode",
                 "real",
                 "--runtime-root",
@@ -53,7 +60,18 @@ class ApplicationCommandTests(unittest.TestCase):
         command = command_from_args(args)
 
         self.assertEqual(command.name, "continue-run")
-        self.assertEqual(command.arguments, {"run_id": "run_1"})
+        self.assertEqual(
+            command.arguments,
+            {
+                "run_id": "run_1",
+                "step_review": True,
+                "step_review_input": False,
+                "step_review_output": False,
+                "step_review_call_id": "plan-1-input",
+                "step_review_decision": "approve",
+                "step_review_note": "looks good",
+            },
+        )
         self.assertEqual(command.runtime_root, Path(".runtime-test"))
         self.assertEqual(
             dict(command.settings_overrides),
@@ -452,6 +470,35 @@ class ApplicationServiceTests(unittest.TestCase):
         )
         phase_four.return_value.revalidate_implementation.assert_called_once_with(run_id="run_1")
 
+    def test_continue_run_passes_developer_input_output_review_to_phase_four(self) -> None:
+        self.write_state(status="implementation_ready", current_phase="implementation_preparing")
+        arguments = {
+            "run_id": "run_1",
+            "step_review": True,
+            "step_review_input": False,
+            "step_review_output": False,
+            "step_review_call_id": None,
+            "step_review_decision": None,
+            "step_review_note": None,
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {
+                "status": "implementation_ready"
+            }
+            phase_four_type.return_value.continue_until_implementation_checkpoint.return_value = {
+                "ok": True
+            }
+
+            self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(
+            phase_four_type.call_args.kwargs["developer_step_review"],
+            {"enabled": True, "review_input": True, "review_output": True},
+        )
+
     def test_continue_run_routes_requirement_pause_to_phase_one(self) -> None:
         self.write_state(
             status="requirement_paused",
@@ -491,6 +538,83 @@ class ApplicationServiceTests(unittest.TestCase):
         self.assertEqual(result, response)
         phase_two_continue.assert_called_once_with(run_id="run_1")
         phase_four.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
+    def test_continue_run_routes_design_step_review_decision_to_phase_two(self) -> None:
+        self.write_state(
+            status="design_paused",
+            current_phase="design_investigating",
+            allowed_next_actions=["continue_run", "get_status"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "design_paused"}
+        arguments = {
+            "run_id": "run_1",
+            "step_review_call_id": "designer-0001-input",
+            "step_review_decision": "approve",
+            "step_review_note": "looks good",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseTwoWorkflow") as phase_two_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {"status": "design_paused"}
+            phase_two_type.return_value.continue_design.return_value = response
+
+            result = self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(result, response)
+        self.assertEqual(
+            phase_two_type.call_args.kwargs["designer_step_review"],
+            {
+                "enabled": True,
+                "call_id": "designer-0001-input",
+                "decision": "approve",
+                "note": "looks good",
+            },
+        )
+        phase_two_type.return_value.continue_design.assert_called_once_with(run_id="run_1")
+        phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
+    def test_continue_run_routes_implementation_plan_step_review_to_phase_three(self) -> None:
+        self.write_state(
+            status="implementation_plan_step_review_required",
+            current_phase="implementation_planning",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "implementation_plan_step_review_required"}
+        arguments = {
+            "run_id": "run_1",
+            "step_review_call_id": "plan-1-input",
+            "step_review_decision": "approve",
+            "step_review_note": "looks good",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseThreeWorkflow") as phase_three_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {
+                "status": "implementation_plan_step_review_required"
+            }
+            phase_three_type.return_value.continue_implementation_plan_step_review.return_value = response
+
+            result = self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(result, response)
+        phase_three_type.assert_called_once()
+        self.assertEqual(
+            phase_three_type.call_args.kwargs["plan_step_review"],
+            {
+                "enabled": True,
+                "call_id": "plan-1-input",
+                "decision": "approve",
+                "note": "looks good",
+            },
+        )
+        phase_three_type.return_value.continue_implementation_plan_step_review.assert_called_once_with(
+            run_id="run_1"
+        )
+        phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
 
     def test_approval_and_workspace_commands_dispatch(self) -> None:
         self.write_state()

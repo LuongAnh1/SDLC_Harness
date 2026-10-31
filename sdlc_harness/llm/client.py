@@ -28,6 +28,7 @@ class LlmCompletion:
     content: str
     finish_reason: str = ""
     usage: dict[str, object] = field(default_factory=dict)
+    reasoning_content: str = ""
 
 
 class BudgetedLlmClient:
@@ -384,7 +385,9 @@ class LlmClient:
         try:
             data = json.loads(raw)
             choice = data["choices"][0]
-            content = choice["message"]["content"]
+            message = choice["message"]
+            content = message["content"]
+            reasoning_content = str(message.get("reasoning_content") or "")
             finish_reason = str(choice.get("finish_reason") or "")
             usage_value = data.get("usage")
             usage = usage_value if isinstance(usage_value, dict) else {}
@@ -397,6 +400,7 @@ class LlmClient:
             content=strip_code_fence(str(content)).strip(),
             finish_reason=finish_reason,
             usage=usage,
+            reasoning_content=reasoning_content,
         )
 
 

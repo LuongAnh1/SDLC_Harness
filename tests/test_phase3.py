@@ -491,9 +491,28 @@ class PhaseThreeTest(unittest.TestCase):
         )
 
         self.assertEqual(first["status"], "implementation_plan_step_review_required")
+        self.assertIn("continue_run", first["allowed_next_actions"])
+        self.assertIn("revalidate_design", first["allowed_next_actions"])
+        paused_state = PhaseOneWorkflow(self.settings).store.read_state(self.run_id)
+        self.assertEqual(
+            paused_state["implementation_plan_step_review"],
+            {"enabled": True, "review_input": True, "review_output": True},
+        )
         first_pending = first["pending_step_review"]
         exchange_path = self.repo_root / str(first_pending["exchange_path"])
         self.assertTrue(exchange_path.exists())
+        exchange = json.loads(exchange_path.read_text(encoding="utf-8"))
+        plan_profile = self.settings.phase3_llm_profiles["developer_plan"]
+        self.assertEqual(
+            exchange["request_options"],
+            {
+                "json_mode": True,
+                "max_tokens": plan_profile.max_tokens,
+                "model": plan_profile.model,
+                "reasoning_effort": plan_profile.thinking_effort,
+                "timeout_seconds": plan_profile.timeout_seconds,
+            },
+        )
 
         second = PhaseThreeWorkflow(
             self.settings,
@@ -506,6 +525,96 @@ class PhaseThreeTest(unittest.TestCase):
 
         self.assertEqual(second["status"], "implementation_plan_step_review_required")
         self.assertNotEqual(second["pending_step_review"]["call_id"], first_pending["call_id"])
+
+    def test_new_design_checkpoint_supersedes_approved_plan_exchange(self) -> None:
+        approved = self._create_phase2_run()
+        store = PhaseOneWorkflow(self.settings).store
+        execution_root = store.run_dir(self.run_id) / "implementation_plan_execution"
+        execution_root.mkdir(parents=True, exist_ok=True)
+        stale = {
+            "call_id": "implementation-plan-0001-a01",
+            "ordinal": 1,
+            "attempt": 1,
+            "status": "approved",
+            "prompt_hash": "sha256:stale",
+            "resume_prompt_hash": "sha256:stale",
+            "raw_completion": "{}",
+        }
+        (execution_root / "step_review_session_v1.json").write_text(
+            json.dumps({"calls": [stale]}), encoding="utf-8"
+        )
+        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
+            json.dumps(stale), encoding="utf-8"
+        )
+
+        response = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={"enabled": True},
+        ).approve_design_checkpoint(
+            run_id=self.run_id,
+            checkpoint_id=str(approved["pending_checkpoint"]["checkpoint_id"]),
+        )
+
+        self.assertEqual(response["status"], "implementation_plan_step_review_required")
+        self.assertNotEqual(
+            response["pending_step_review"]["call_id"],
+            "implementation-plan-0001-a01",
+        )
+        session = json.loads(
+            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual([item["status"] for item in session["calls"]], ["superseded", "input_pending"])
+        self.assertEqual(session["calls"][0]["superseded_from_status"], "approved")
+        self.assertEqual(
+            session["calls"][0]["superseded_reason"],
+            "upstream_design_checkpoint_changed",
+        )
+
+    def test_revalidate_recovers_failed_plan_step_review_drift(self) -> None:
+        self._create_phase2_run()
+        store = PhaseOneWorkflow(self.settings).store
+        execution_root = store.run_dir(self.run_id) / "implementation_plan_execution"
+        execution_root.mkdir(parents=True, exist_ok=True)
+        stale = {
+            "call_id": "implementation-plan-0001-a01",
+            "ordinal": 1,
+            "attempt": 1,
+            "status": "approved",
+            "prompt_hash": "sha256:stale",
+            "resume_prompt_hash": "sha256:stale",
+            "raw_completion": "{}",
+        }
+        (execution_root / "step_review_session_v1.json").write_text(
+            json.dumps({"calls": [stale]}), encoding="utf-8"
+        )
+        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
+            json.dumps(stale), encoding="utf-8"
+        )
+        state = store.read_state(self.run_id)
+        state.update(
+            {
+                "current_phase": "implementation_planning",
+                "status": "failed",
+                "pending_checkpoint": None,
+                "last_error": {
+                    "error_code": "implementation_plan_step_review_drift",
+                    "message": "stale approved plan exchange",
+                },
+            }
+        )
+        store.write_state(state)
+
+        response = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={"enabled": True},
+        ).revalidate_implementation_plan(run_id=self.run_id)
+
+        self.assertEqual(response["status"], "implementation_plan_step_review_required")
+        self.assertEqual(response["pending_step_review"]["review_stage"], "input")
+        session = json.loads(
+            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual([item["status"] for item in session["calls"]], ["superseded", "input_pending"])
 
     def _create_phase3_run_from_template(self) -> dict[str, object]:
         manager = RunWorkspaceManager(self.settings)

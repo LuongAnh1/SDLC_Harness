@@ -17,6 +17,8 @@ from .config_schema import (
     CONFIG_SECTIONS,
     PHASE1_LLM_PROFILE_DEFAULTS,
     PHASE2_LLM_PROFILE_DEFAULTS,
+    PHASE3_LLM_PROFILE_DEFAULTS,
+    PHASE4_LLM_PROFILE_DEFAULTS,
     config_field_index,
     serialize_config_value,
 )
@@ -50,10 +52,15 @@ class Settings:
     llm_context_window_tokens: int
     phase1_llm_profiles: dict[str, LlmCallProfile]
     phase2_llm_profiles: dict[str, LlmCallProfile]
+    phase3_llm_profiles: dict[str, LlmCallProfile]
+    phase4_llm_profiles: dict[str, LlmCallProfile]
     requirement_max_tool_actions: int
     requirement_max_action_retries: int
     developer_max_actions_per_item: int
+    developer_verification_repair_action_reserve: int
     developer_max_action_retries: int
+    developer_package_tool_timeout_seconds: int
+    developer_working_memory_evidence_chars: int
     requirement_contract_version: str
     design_repair_limit: int
     design_validation_trials: int
@@ -63,11 +70,17 @@ class Settings:
     designer_finalization_action_budget: int
     designer_global_action_hard_cap: int
     designer_contract_version: str
+    design_step_review_enabled: bool
+    design_step_review_input_enabled: bool
+    design_step_review_output_enabled: bool
     uiux_skill_mode: str
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
     vertical_trace_mode: str
     implementation_plan_repair_limit: int
+    implementation_plan_step_review_enabled: bool
+    implementation_plan_step_review_input_enabled: bool
+    implementation_plan_step_review_output_enabled: bool
     implementation_repair_limit: int
     implementation_validation_trials: int
     implementation_validation_call_budget: int
@@ -241,6 +254,105 @@ def phase2_llm_call_options(
     }
 
 
+def _phase3_llm_profiles(
+    merged: dict[str, str],
+    *,
+    default_model: str,
+) -> dict[str, LlmCallProfile]:
+    profiles: dict[str, LlmCallProfile] = {}
+    for profile_name, defaults in PHASE3_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE3_{profile_name.upper()}"
+        effort_default = str(defaults["effort"])
+        effort = merged.get(f"{prefix}_THINKING_EFFORT", effort_default).strip().lower()
+        if effort not in {"none", "low", "high", "max"}:
+            effort = effort_default
+        profiles[profile_name] = LlmCallProfile(
+            model=merged.get(f"{prefix}_MODEL", "").strip() or default_model,
+            thinking_effort=effort,
+            max_tokens=_int_value(
+                merged.get(f"{prefix}_MAX_TOKENS"),
+                default=int(defaults["max_tokens"]),
+                minimum=1024,
+                maximum=384000,
+            ),
+            timeout_seconds=_int_value(
+                merged.get(f"{prefix}_TIMEOUT_SECONDS"),
+                default=int(defaults["timeout"]),
+                minimum=1,
+                maximum=1800,
+            ),
+        )
+    return profiles
+
+
+def phase3_llm_call_options(
+    settings: object,
+    profile_name: str,
+    *,
+    fallback_max_tokens: int = 8192,
+) -> dict[str, object]:
+    profiles = getattr(settings, "phase3_llm_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, LlmCallProfile):
+        return {"max_tokens": fallback_max_tokens}
+    return {
+        "model": profile.model,
+        "reasoning_effort": profile.thinking_effort,
+        "max_tokens": profile.max_tokens,
+        "timeout_seconds": profile.timeout_seconds,
+    }
+
+
+def _phase4_llm_profiles(
+    merged: dict[str, str],
+    *,
+    default_model: str,
+) -> dict[str, LlmCallProfile]:
+    profiles: dict[str, LlmCallProfile] = {}
+    for profile_name, defaults in PHASE4_LLM_PROFILE_DEFAULTS.items():
+        prefix = f"SDLC_PHASE4_{profile_name.upper()}"
+        model_default = str(defaults.get("model") or default_model)
+        effort_default = str(defaults["effort"])
+        effort = merged.get(f"{prefix}_THINKING_EFFORT", effort_default).strip().lower()
+        if effort not in {"none", "low", "high", "max"}:
+            effort = effort_default
+        profiles[profile_name] = LlmCallProfile(
+            model=merged.get(f"{prefix}_MODEL", model_default).strip() or model_default,
+            thinking_effort=effort,
+            max_tokens=_int_value(
+                merged.get(f"{prefix}_MAX_TOKENS"),
+                default=int(defaults["max_tokens"]),
+                minimum=1024,
+                maximum=384000,
+            ),
+            timeout_seconds=_int_value(
+                merged.get(f"{prefix}_TIMEOUT_SECONDS"),
+                default=int(defaults["timeout"]),
+                minimum=1,
+                maximum=1800,
+            ),
+        )
+    return profiles
+
+
+def phase4_llm_call_options(
+    settings: object,
+    profile_name: str,
+    *,
+    fallback_max_tokens: int = 8192,
+) -> dict[str, object]:
+    profiles = getattr(settings, "phase4_llm_profiles", {})
+    profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
+    if not isinstance(profile, LlmCallProfile):
+        return {"max_tokens": fallback_max_tokens}
+    return {
+        "model": profile.model,
+        "reasoning_effort": profile.thinking_effort,
+        "max_tokens": profile.max_tokens,
+        "timeout_seconds": profile.timeout_seconds,
+    }
+
+
 def resolve_config(
     *,
     root: Path | None = None,
@@ -366,10 +478,27 @@ def load_settings(
         llm_context_window_tokens=_int_value(merged.get("SDLC_LLM_CONTEXT_WINDOW_TOKENS"), default=128000, minimum=8192),
         phase1_llm_profiles=_phase1_llm_profiles(merged, default_model=llm_model),
         phase2_llm_profiles=_phase2_llm_profiles(merged, default_model=llm_model),
+        phase3_llm_profiles=_phase3_llm_profiles(merged, default_model=llm_model),
+        phase4_llm_profiles=_phase4_llm_profiles(merged, default_model=llm_model),
         requirement_max_tool_actions=_int_value(merged.get("SDLC_REQUIREMENT_MAX_TOOL_ACTIONS"), default=12, minimum=3),
         requirement_max_action_retries=_int_value(merged.get("SDLC_REQUIREMENT_MAX_ACTION_RETRIES"), default=2, minimum=0),
         developer_max_actions_per_item=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM"), default=24, minimum=1),
+        developer_verification_repair_action_reserve=_int_value(
+            merged.get("SDLC_DEVELOPER_VERIFICATION_REPAIR_ACTION_RESERVE"),
+            default=6,
+            minimum=0,
+        ),
         developer_max_action_retries=_int_value(merged.get("SDLC_DEVELOPER_MAX_ACTION_RETRIES"), default=2, minimum=0),
+        developer_package_tool_timeout_seconds=_int_value(
+            merged.get("SDLC_DEVELOPER_PACKAGE_TOOL_TIMEOUT_SECONDS"),
+            default=120,
+            minimum=1,
+        ),
+        developer_working_memory_evidence_chars=_int_value(
+            merged.get("SDLC_DEVELOPER_WORKING_MEMORY_EVIDENCE_CHARS"),
+            default=96000,
+            minimum=8000,
+        ),
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
         design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
@@ -395,6 +524,17 @@ def load_settings(
             minimum=1,
         ),
         designer_contract_version=designer_contract_version,
+        design_step_review_enabled=_bool_value(
+            merged.get("SDLC_DESIGN_STEP_REVIEW_ENABLED")
+        ),
+        design_step_review_input_enabled=_bool_value(
+            merged.get("SDLC_DESIGN_STEP_REVIEW_INPUT_ENABLED"),
+            default=True,
+        ),
+        design_step_review_output_enabled=_bool_value(
+            merged.get("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED"),
+            default=True,
+        ),
         uiux_skill_mode=uiux_skill_mode,
         uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
         uiux_skill_timeout_seconds=_int_value(
@@ -405,6 +545,17 @@ def load_settings(
         ),
         vertical_trace_mode=vertical_trace_mode,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
+        implementation_plan_step_review_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED")
+        ),
+        implementation_plan_step_review_input_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED"),
+            default=True,
+        ),
+        implementation_plan_step_review_output_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED"),
+            default=True,
+        ),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),
         implementation_validation_trials=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"), default=3, minimum=2),
         implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=6, minimum=2),

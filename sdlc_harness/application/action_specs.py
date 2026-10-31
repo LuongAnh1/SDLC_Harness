@@ -46,7 +46,7 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
     "continue_run": {
         "command": "continue-run",
         "required": set(),
-        "optional": set(),
+        "optional": {"step_review_call_id", "step_review_decision", "step_review_note"},
         "overrides": {"implementation_repair_limit", "qa_repair_limit"},
         "confirmation": "standard",
     },

@@ -181,11 +181,13 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     assert unit_contract["approved_signatures"][0]["return_type"] == "Promise<boolean>"
     assert unit_contract["hard_constraints"] == [
         "Approved signatures are immutable and override conflicting prose objectives.",
-        "Preserve each qualified_name, parameter list, async flag, and return_type exactly.",
-        "Treat planned code targets, migration impact, runtime bindings, boundary mappings, and surface contracts as approved execution constraints.",
-        "Preserve each boundary input/output/error mapping and runtime attachment; inspect related approved paths instead of inventing a different contract.",
+        "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
+        "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+        "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
         "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
-            "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+        "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
+        "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+        "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
         "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
     ]
 

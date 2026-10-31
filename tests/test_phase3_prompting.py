@@ -139,6 +139,10 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     assert "A `typecheck` intent targets a non-test source" in prompt
     assert "legacy Class graph supplies signature trace identity" in prompt
     assert "shared-contract, client-adapter, or migration" in prompt
+    assert "every non-empty experience-contract category" in prompt
+    assert "CSS class names without owned or" in prompt
+    assert "static markup alone does not" in prompt
+    assert "required boundary auth/input mappings" in prompt
     assert "concrete migration artifact" in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
@@ -178,6 +182,10 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     assert "Never emit design_element_id" in prompt
     assert "`packages/contracts/src/...` target" in prompt
     assert "Harness assigns repo-profile" in prompt
+    assert "A UI objective is only executable" in prompt
+    assert "CSS class names without an owned or verified style" in prompt
+    assert "static markup alone" in prompt
+    assert "owner of required auth and input mappings" in prompt
     assert "apps/web/src/CulturalHeritageInsertionForm.tsx" in prompt
     assert "Legacy Class graph" not in prompt
     assert "Legacy Sequence graph" not in prompt

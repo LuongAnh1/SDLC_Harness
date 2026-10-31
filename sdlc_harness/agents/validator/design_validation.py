@@ -327,7 +327,7 @@ Return one JSON object only:
   "findings": [
     {{
       "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
+      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
       "severity": "blocking|warning",
       "message": "specific contradiction or ambiguity",
       "expected_change": "specific UML correction",
@@ -345,6 +345,9 @@ Assessment contract:
 - satisfied assessments require at least one exact Design node/edge ID in design_refs.
 - missing, contradicted, and uncertain assessments require a finding bound through claim_ids.
 - Finding requirement_ids and subject_ref must use exact IDs supplied below.
+- For finding evidence with source "requirement", ref must be an exact Requirement ID from requirement_ids
+  (for example "MF-1" or "AC-3"), never a composite claim_id such as "SC-1:MF-1".
+- For finding evidence with source "design" or "design_graph", ref must be an exact VDN-* or VDE-* ID supplied below.
 
 Blocking policy:
 - Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
@@ -352,6 +355,12 @@ Blocking policy:
 - Block success, cancellation, and failure paths that reach the wrong terminal state.
 - Block persistence before required human confirmation only when neither the UI contract nor the interaction path represents that confirmation before the write.
 - Do not require a preliminary backend verification round trip unless the approved requirement explicitly requires it.
+- Reusing one UI owner across main and alternative scenarios is valid when each projection keeps its own behavior contract.
+- Verify that every runtime edge is executable. A direct call may stay within one application or target an importable
+  shared package; a call into another application requires an explicit API/transport surface.
+- A business rule does not imply backend placement. When a scenario marks API as not applicable, do not invent an
+  endpoint to connect UI to a backend service; report the placement/boundary contradiction so the Designer can keep
+  local logic in the caller application or an importable shared package.
 - Block transaction/rollback ambiguity only when the approved requirement or the design itself explicitly promises atomicity, all-or-nothing behavior, or a single consistency boundary.
 - If transaction behavior is merely an architectural improvement not required by either input, emit a warning.
 - For each Vertical Design UI node, review its experience contract: component structure, observable feedback,

@@ -1,10 +1,13 @@
 import json
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from sdlc_harness.agents.developer.planner import (
     DeveloperPlanAgent,
+    _complete_phase3_json,
     _apply_design_adjustments,
     _apply_design_adjustments_to_steps,
     _canonical_proposed_files,
@@ -15,12 +18,20 @@ from sdlc_harness.agents.developer.planner import (
 )
 from sdlc_harness.agents.developer.work_packet import (
     _build_execution_units,
+    _derive_cross_package_dependencies,
     _signature_ids_for_targets,
     build_developer_work_packet,
     refresh_developer_work_packet,
+    upgrade_developer_dependency_scope,
 )
-from sdlc_harness.agents.validator.plan_review import ImplementationPlanValidator, _llm_review_prompt
+from sdlc_harness.agents.validator.plan_review import (
+    ImplementationPlanReview,
+    ImplementationPlanValidator,
+    _llm_review_prompt,
+)
+from sdlc_harness.core.config import LlmCallProfile
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.interfaces.cli import build_parser
 from sdlc_harness.profiles import (
     build_planning_path_policy,
@@ -29,6 +40,73 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.workflows.phase3 import _next_implementation_plan_version
+
+
+class _ProfileCaptureLlm:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.settings = SimpleNamespace(
+            llm_structured_max_tokens=8192,
+            phase3_llm_profiles={
+                "developer_plan": LlmCallProfile("plan-model", "high", 49152, 420),
+                "developer_repair": LlmCallProfile("repair-model", "max", 65536, 600),
+                "plan_validator": LlmCallProfile("validator-model", "high", 32768, 300),
+            },
+        )
+
+    def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.calls.append(dict(kwargs))
+        return LlmCompletion(
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "summary": "accepted",
+                    "coverage_issues": [],
+                    "requirement_coverage_issues": [],
+                    "traceability_issues": [],
+                    "implementation_quality_issues": [],
+                    "test_issues": [],
+                    "scope_issues": [],
+                    "developer_feedback": "",
+                }
+            )
+        )
+
+
+def test_phase3_developer_and_validator_calls_use_individual_profiles() -> None:
+    client = _ProfileCaptureLlm()
+
+    _complete_phase3_json(
+        client,
+        system="developer",
+        prompt="plan",
+        profile_name="developer_plan",
+    )
+    _complete_phase3_json(
+        client,
+        system="repair",
+        prompt="repair plan",
+        profile_name="developer_repair",
+    )
+    ImplementationPlanValidator(client).review_llm(
+        structured_plan={},
+        requirement_packet="requirement",
+        design_artifact="design",
+        requirement_design_trace={},
+        class_graph={},
+        sequence_graph={},
+        rule_review=ImplementationPlanReview(ok=True, mode="rules"),
+    )
+
+    assert [
+        (call["model"], call["reasoning_effort"], call["max_tokens"], call["timeout_seconds"])
+        for call in client.calls
+    ] == [
+        ("plan-model", "high", 49152, 420),
+        ("repair-model", "max", 65536, 600),
+        ("validator-model", "high", 32768, 300),
+    ]
+    assert all(call["json_mode"] is True for call in client.calls)
 
 
 def test_execution_unit_signatures_are_scoped_by_path_and_symbol() -> None:
@@ -106,6 +184,126 @@ def test_execution_unit_adds_shared_boundary_dependency_targets_as_read_context(
     assert consumer["write_paths"] == [consumer_path]
     assert consumer["context_paths"] == [consumer_path, provider_path, contract_path]
     assert consumer["contract_anchor_paths"] == [provider_path, contract_path]
+
+
+def test_cross_package_symbol_dependency_emits_tool_owned_contract(tmp_path: Path) -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    api_manifest = tmp_path / "apps/api/package.json"
+    db_manifest = tmp_path / "packages/db/package.json"
+    api_manifest.parent.mkdir(parents=True)
+    db_manifest.parent.mkdir(parents=True)
+    api_manifest.write_text(
+        json.dumps({"name": "@example/gateway", "version": "3.0.0", "dependencies": {}}),
+        encoding="utf-8",
+    )
+    db_manifest.write_text(
+        json.dumps({"name": "@example/storage", "version": "2.4.1"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text(
+        json.dumps({"private": True, "packageManager": "npm@10.9.0"}),
+        encoding="utf-8",
+    )
+    units = [
+        {
+            "unit_id": "WU-STORAGE",
+            "component_id": "database",
+            "depends_on": [],
+            "design_edge_ids": ["EDGE-DIRECT"],
+            "planned_code_targets": [
+                {"path": "packages/db/src/widget.ts", "symbol": "persistWidget"}
+            ],
+        },
+        {
+            "unit_id": "WU-GATEWAY",
+            "component_id": "api",
+            "depends_on": ["WU-STORAGE"],
+            "design_edge_ids": ["EDGE-DIRECT"],
+            "planned_code_targets": [
+                {"path": "apps/api/src/widget.ts", "symbol": "createWidgetRoute"}
+            ],
+            "boundary_contracts": [{"provider_operation": "persistWidget"}],
+        },
+    ]
+
+    requirements = _derive_cross_package_dependencies(
+        units=units,
+        target_repo_path=tmp_path,
+        planning_policy=planning_policy,
+        run_id="run_package_scope",
+    )
+
+    assert len(requirements) == 1
+    requirement = requirements[0]
+    assert str(requirement["dependency_id"]).startswith("DEP-")
+    assert requirement["required_by_unit_ids"] == ["WU-GATEWAY"]
+    assert requirement["package_manager"] == "npm"
+    assert requirement["lockfile_path"] == "package-lock.json"
+    assert requirement["consumer_manifest_path"] == "apps/api/package.json"
+    assert requirement["consumer_package_name"] == "@example/gateway"
+    assert requirement["dependency_name"] == "@example/storage"
+    assert requirement["dependency_spec"] == "2.4.1"
+    assert requirement["provider_manifest_path"] == "packages/db/package.json"
+    assert requirement["provider_symbols"] == ["persistWidget"]
+
+
+def test_dependency_scope_upgrade_does_not_open_manifest_for_http_boundary(tmp_path: Path) -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    for path, manifest in (
+        ("apps/web/package.json", {"name": "@example/web", "version": "1.0.0"}),
+        ("apps/api/package.json", {"name": "@example/api", "version": "1.0.0"}),
+    ):
+        target = tmp_path / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(json.dumps(manifest), encoding="utf-8")
+    packet = {
+        "execution_units": [
+            {
+                "unit_id": "WU-API",
+                "component_id": "api",
+                "depends_on": [],
+                "design_edge_ids": ["EDGE-HTTP"],
+                "planned_code_targets": [
+                    {"path": "apps/api/src/widget.ts", "symbol": "widgetRoute"}
+                ],
+                "write_paths": ["apps/api/src/widget.ts"],
+            },
+            {
+                "unit_id": "WU-WEB",
+                "component_id": "web",
+                "depends_on": ["WU-API"],
+                "design_edge_ids": ["EDGE-HTTP"],
+                "planned_code_targets": [
+                    {"path": "apps/web/src/Widget.tsx", "symbol": "Widget"}
+                ],
+                "boundary_contracts": [{"provider_operation": "GET /widgets/{id}"}],
+                "write_paths": ["apps/web/src/Widget.tsx"],
+            },
+        ],
+        "proposed_files": [],
+        "current_files": [],
+        "output_contract": {
+            "allowed_paths": ["apps/api/src/widget.ts", "apps/web/src/Widget.tsx"]
+        },
+    }
+
+    upgraded, changed = upgrade_developer_dependency_scope(
+        packet=packet,
+        target_repo_path=tmp_path,
+        planning_policy=planning_policy,
+        run_id="run_http_scope",
+    )
+
+    assert changed is False
+    assert upgraded is packet
 
 
 def test_execution_unit_preserves_approved_ui_experience_contract() -> None:
