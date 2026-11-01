@@ -8,7 +8,11 @@ import re
 from typing import Any
 
 from ...core.errors import HarnessError
-from .uiux import UIUX_EXPERIENCE_CONTRACT_VERSION
+from .uiux import (
+    RUNTIME_SURFACE_BINDING_VERSION,
+    UI_EXPERIENCE_CONTRACT_V2,
+    UIUX_EXPERIENCE_CONTRACT_VERSION,
+)
 
 
 GRAPH_VERSION_V1 = "vertical_design_graph_v1"
@@ -26,6 +30,21 @@ DESIGN_BUNDLE_STATE_KEY = "design_bundle_contract_version"
 SURFACE_CONTRACT_VERSION = "design_surface_contract_v1"
 RUNTIME_BINDING_VERSION = "runtime_binding_v1"
 BOUNDARY_CONTRACT_VERSION = "boundary_contract_v1"
+RUNTIME_INPUT_SOURCES = frozenset({"existing_runtime", "external_use_case", "new_boundary", "demo_fixture"})
+RUNNABLE_STATUSES = frozenset({"bound", "externally_blocked", "fixture_required"})
+# Requirement IDs that can state a dependency on another use case (precondition or flow step).
+EXTERNAL_DEPENDENCY_REF_PREFIXES = ("PRE-", "MF-", "AF-", "EF-")
+UI_RUNTIME_STATES = ("loading", "ready", "empty", "error", "success")
+UI_VISUAL_GROUPS = ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules")
+UI_STYLE_TARGET_POLICIES = frozenset({"reuse_existing", "new_stylesheet"})
+UI_SURFACE_ROLES = frozenset({"screen", "composition_wiring"})
+
+
+def is_composition_wiring(node: dict[str, object]) -> bool:
+    """A UI node that only forwards runtime inputs to a child; it carries no screen UX of its own."""
+
+    surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
+    return str(surface.get("role") or "") == "composition_wiring"
 RUNTIME_KINDS = frozenset(
     {
         "entrypoint",
@@ -85,6 +104,15 @@ def graph_digest(graph: dict[str, object]) -> str:
     return canonical_hash({key: value for key, value in graph.items() if key != "artifact_digest"})
 
 
+def ui_contract_v2(graph: dict[str, object]) -> bool:
+    binding = graph.get("snapshot_binding")
+    return (
+        str(graph.get("schema_version") or "") == GRAPH_VERSION_V2
+        and isinstance(binding, dict)
+        and binding.get("designer_ui_contract_version") == UI_EXPERIENCE_CONTRACT_V2
+    )
+
+
 def new_vertical_design_graph(
     *,
     run_id: str,
@@ -126,6 +154,7 @@ def validate_vertical_design_graph(
         raise HarnessError("vertical_design_graph_invalid", "Design graph snapshot binding is missing.", run_id=run_id)
     if expected_binding is not None and any(binding.get(key) != item for key, item in expected_binding.items()):
         raise HarnessError("designer_input_drift", "Design graph no longer matches its frozen inputs.", run_id=run_id)
+    ui_v2 = ui_contract_v2(value)
 
     partitions = _dict_items(value.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)
     partition_keys: set[str] = set()
@@ -179,6 +208,7 @@ def validate_vertical_design_graph(
                 surface=str(node.get("surface") or ""),
                 node_id=node_id,
                 run_id=run_id,
+                ui_v2=ui_v2,
             )
         if graph_version == GRAPH_VERSION_V2 and node.get("runtime_binding") is not None:
             _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
@@ -345,6 +375,7 @@ def _validate_surface_contract(
     surface: str,
     node_id: str,
     run_id: str,
+    ui_v2: bool = False,
 ) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != SURFACE_CONTRACT_VERSION:
         raise HarnessError(
@@ -409,7 +440,21 @@ def _validate_surface_contract(
         require_strings("outcomes")
         experience = value.get("experience_contract")
         if experience is not None:
-            _validate_ui_experience_contract(experience, node_id=node_id, run_id=run_id)
+            _validate_ui_experience_contract(
+                experience,
+                node_id=node_id,
+                run_id=run_id,
+                expected_version=UI_EXPERIENCE_CONTRACT_V2 if ui_v2 else UIUX_EXPERIENCE_CONTRACT_VERSION,
+            )
+        if ui_v2:
+            _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
+            screen_id = str(_dict_value(_dict_value(experience).get("screen")).get("screen_id") or "")
+            if experience is not None and screen_id != str(_dict_value(value.get("runtime_surface")).get("screen_id") or ""):
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} experience_contract.screen.screen_id must equal runtime_surface.screen_id.",
+                    run_id=run_id,
+                )
     elif surface == "api":
         require_text("operation_id")
         require_text("method")
@@ -443,11 +488,68 @@ def _validate_surface_contract(
         require_strings("outcomes")
 
 
-def _validate_ui_experience_contract(value: object, *, node_id: str, run_id: str) -> None:
-    if not isinstance(value, dict) or value.get("schema_version") != UIUX_EXPERIENCE_CONTRACT_VERSION:
+def _validate_runtime_surface(value: object, *, node_id: str, run_id: str) -> None:
+    def invalid(detail: str) -> HarnessError:
+        return HarnessError(
+            "vertical_design_graph_invalid",
+            f"Node {node_id} runtime_surface {detail}.",
+            run_id=run_id,
+        )
+
+    if not isinstance(value, dict) or value.get("schema_version") != RUNTIME_SURFACE_BINDING_VERSION:
+        raise invalid(f"must use {RUNTIME_SURFACE_BINDING_VERSION}")
+    if not _SAFE_KEY.fullmatch(str(value.get("screen_id") or "")):
+        raise invalid("screen_id is missing or unsafe")
+    entrypoint = str(value.get("entrypoint") or "")
+    if not _is_symbol_ref(entrypoint):
+        raise invalid("entrypoint must be <repo path>#<symbol>")
+    path = value.get("composition_path")
+    if not isinstance(path, list) or not path or any(not _is_symbol_ref(str(item)) for item in path):
+        raise invalid("composition_path must list entrypoint through target as <repo path>#<symbol>")
+    if str(path[0]) != entrypoint:
+        raise invalid("composition_path must start at entrypoint")
+    inputs = value.get("required_inputs")
+    if not isinstance(inputs, list):
+        raise invalid("required_inputs must be a list")
+    for item in inputs:
+        if (
+            not isinstance(item, dict)
+            or not str(item.get("name") or "").strip()
+            or str(item.get("source") or "") not in RUNTIME_INPUT_SOURCES
+            or not str(item.get("binding") or "").strip()
+            or not _is_symbol_ref(str(item.get("provided_by") or ""))
+            or not isinstance(item.get("requirement_refs", []), list)
+            or not isinstance(item.get("states", []), list)
+        ):
+            raise invalid(
+                "required_inputs items need name, source ("
+                + "|".join(sorted(RUNTIME_INPUT_SOURCES))
+                + "), binding and provided_by <repo path>#<symbol>"
+            )
+    if str(value.get("runnable_status") or "") not in RUNNABLE_STATUSES:
+        raise invalid("runnable_status must be " + "|".join(sorted(RUNNABLE_STATUSES)))
+    if str(value.get("role") or "screen") not in UI_SURFACE_ROLES:
+        raise invalid("role must be " + "|".join(sorted(UI_SURFACE_ROLES)))
+    if not isinstance(value.get("evidence_refs", []), list):
+        raise invalid("evidence_refs must be a list")
+
+
+def _is_symbol_ref(value: str) -> bool:
+    path, _, symbol = value.partition("#")
+    return _is_repo_path(path) and bool(_TYPESCRIPT_IDENTIFIER.fullmatch(symbol))
+
+
+def _validate_ui_experience_contract(
+    value: object,
+    *,
+    node_id: str,
+    run_id: str,
+    expected_version: str = UIUX_EXPERIENCE_CONTRACT_VERSION,
+) -> None:
+    if not isinstance(value, dict) or value.get("schema_version") != expected_version:
         raise HarnessError(
             "vertical_design_graph_invalid",
-            f"Node {node_id} has an unsupported UI experience contract.",
+            f"Node {node_id} has an unsupported UI experience contract; expected {expected_version}.",
             run_id=run_id,
         )
     for key in ("component_structure", "accessibility", "responsive", "focus_flow", "guidance_refs"):
@@ -470,6 +572,88 @@ def _validate_ui_experience_contract(value: object, *, node_id: str, run_id: str
             f"Node {node_id} UI experience contract has invalid feedback.",
             run_id=run_id,
         )
+    if expected_version == UI_EXPERIENCE_CONTRACT_V2:
+        _validate_holistic_experience(value, node_id=node_id, run_id=run_id)
+
+
+def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run_id: str) -> None:
+    """Structural checks only; whether the UX decisions are good stays with semantic review."""
+
+    def invalid(detail: str) -> HarnessError:
+        return HarnessError(
+            "vertical_design_graph_invalid",
+            f"Node {node_id} {UI_EXPERIENCE_CONTRACT_V2} {detail}.",
+            run_id=run_id,
+        )
+
+    def texts(raw: object) -> bool:
+        return isinstance(raw, list) and bool(raw) and all(isinstance(item, str) and item.strip() for item in raw)
+
+    screen = value.get("screen")
+    if (
+        not isinstance(screen, dict)
+        or not _SAFE_KEY.fullmatch(str(screen.get("screen_id") or ""))
+        or not str(screen.get("purpose") or "").strip()
+        or not str(screen.get("entry_condition") or "").strip()
+    ):
+        raise invalid("screen needs screen_id, purpose and entry_condition")
+    states = value.get("runtime_states")
+    if not isinstance(states, dict):
+        raise invalid("runtime_states must be an object")
+    for name in UI_RUNTIME_STATES:
+        state = states.get(name)
+        applicable = (
+            isinstance(state, dict)
+            and str(state.get("presentation") or "").strip()
+            and str(state.get("trigger") or "").strip()
+        )
+        skipped = (
+            isinstance(state, dict)
+            and state.get("not_applicable") is True
+            and str(state.get("reason") or "").strip()
+        )
+        if not applicable and not skipped:
+            raise invalid(
+                f"runtime_states.{name} needs presentation and trigger, or not_applicable=true with a reason"
+            )
+    visual = value.get("visual_contract")
+    if not isinstance(visual, dict):
+        raise invalid("visual_contract must be an object")
+    for key in UI_VISUAL_GROUPS:
+        if not texts(visual.get(key)):
+            raise invalid(f"visual_contract.{key} needs at least one decision")
+    if str(visual.get("style_target_policy") or "") not in UI_STYLE_TARGET_POLICIES:
+        raise invalid("visual_contract.style_target_policy must be " + "|".join(sorted(UI_STYLE_TARGET_POLICIES)))
+    if not str(visual.get("style_target_reason") or "").strip():
+        raise invalid("visual_contract.style_target_reason is required")
+    policies = value.get("focus_policies")
+    if not isinstance(policies, list):
+        raise invalid("focus_policies must be a list")
+    for policy in policies:
+        announcement = policy.get("announcement") if isinstance(policy, dict) else None
+        if (
+            not isinstance(policy, dict)
+            or not str(policy.get("event") or "").strip()
+            or not isinstance(policy.get("source_removed"), bool)
+            or not str(policy.get("primary_target") or "").strip()
+            or not str(policy.get("selection_strategy") or "").strip()
+            or not isinstance(announcement, dict)
+            or not str(announcement.get("target") or "").strip()
+            or not isinstance(announcement.get("moves_focus"), bool)
+        ):
+            raise invalid(
+                "focus_policies items need event, source_removed, primary_target, selection_strategy "
+                "and announcement{target, moves_focus}"
+            )
+        if policy["source_removed"]:
+            removed = str(policy.get("removed_element") or "").strip()
+            fallback = str(policy.get("fallback_target") or "").strip()
+            if not removed or not fallback:
+                raise invalid("focus policy with source_removed=true needs removed_element and fallback_target")
+            if removed in {str(policy["primary_target"]).strip(), fallback}:
+                raise invalid(f"focus policy for {policy['event']} must not move focus to the removed element")
+    if not texts(value.get("repo_evidence_refs")):
+        raise invalid("repo_evidence_refs needs the ui_repo_context evidence used for these decisions")
 
 
 def _validate_delta_guidance_refs(
@@ -718,12 +902,23 @@ def completion_findings(
             if str(node.get("surface") or "") != "ui":
                 continue
             surface_contract = _dict_value(node.get("surface_contract"))
-            if not _dict_value(surface_contract.get("experience_contract")):
+            expected_experience = (
+                UI_EXPERIENCE_CONTRACT_V2 if ui_contract_v2(graph) else UIUX_EXPERIENCE_CONTRACT_VERSION
+            )
+            if not _dict_value(surface_contract.get("experience_contract")) and not is_composition_wiring(node):
                 findings.append(
                     _finding(
                         "ui_experience_contract_missing",
                         str(node.get("id") or "ui"),
-                        "UI node has no ui_experience_contract_v1 backed by observed UI/UX guidance.",
+                        f"UI node has no {expected_experience} backed by observed UI/UX guidance.",
+                    )
+                )
+            if ui_contract_v2(graph) and not _dict_value(surface_contract.get("runtime_surface")):
+                findings.append(
+                    _finding(
+                        "ui_runtime_surface_missing",
+                        str(node.get("id") or "ui"),
+                        f"UI node has no {RUNTIME_SURFACE_BINDING_VERSION} proving entrypoint composition and required inputs.",
                     )
                 )
     if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
@@ -758,6 +953,10 @@ def _runtime_composition_findings(
         for item in _dict_items((landscape or {}).get("components", []), code="vertical_design_graph_invalid", run_id=run_id)
     }
     findings: list[dict[str, object]] = []
+    ui_v2_graph = ui_contract_v2(graph)
+    ui_components = _dict_value(
+        _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context")).get("components")
+    )
 
     for partition in partitions:
         scenario_id = str(partition.get("scenario_id") or "")
@@ -855,6 +1054,11 @@ def _runtime_composition_findings(
             owner_valid = owner_valid and (not owner_symbol or owner_symbol == str(owner.get("symbol") or ""))
         elif owner_ref.startswith("RLA-") and not anchors:
             owner_valid = True
+        elif ui_v2_graph and component_id == "web":
+            # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context.
+            owner_key = f"{attachment.get('owner_path') or ''}#{attachment.get('owner_symbol') or ''}"
+            ui_component = _dict_value(ui_components.get(owner_key))
+            owner_valid = bool(ui_component) and owner_ref in {owner_key, str(ui_component.get("evidence_ref") or "")}
         if not owner_valid:
             findings.append(
                 _composition_finding(
@@ -994,6 +1198,19 @@ def _runtime_composition_findings(
                     )
                 )
             diagnostics = _boundary_contract_diagnostics(contract, provider)
+            if str(edge.get("kind") or "") == "returns" and contract:
+                paired = _paired_request_edge(edge, edges)
+                paired_inputs = _dict_value(paired.get("boundary_contract")).get("input_mapping")
+                if isinstance(paired_inputs, list) and _mapping_pairs(paired_inputs) != _mapping_pairs(
+                    contract.get("input_mapping")
+                ):
+                    diagnostics["paired_edge_id"] = str(paired.get("id") or "")
+                    diagnostics["paired_input_mapping"] = paired_inputs
+                    diagnostics["mismatches"].append(
+                        f"copy input_mapping (consumer field -> provider field) from paired "
+                        f"{paired.get('kind')} edge {paired.get('id')}; only response_mapping and "
+                        "error_mapping flow provider -> consumer"
+                    )
             if diagnostics["mismatches"]:
                 expected_change = "; ".join(str(item) for item in diagnostics["mismatches"])
                 finding = _composition_finding(
@@ -1034,6 +1251,12 @@ def _runtime_composition_findings(
                     finding["contract_diagnostics"] = operation_diagnostics
                     findings.append(finding)
 
+    ui_v2 = ui_contract_v2(graph)
+    ui_reachable_from_entry: set[str] = set()
+    if ui_v2:
+        ui_findings, ui_reachable_from_entry = _ui_runtime_surface_findings(graph, nodes)
+        findings.extend(ui_findings)
+
     inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
     for scenario_id, surfaces in sorted(inferred.items()):
         scenario_nodes = [item for item in nodes if str(item.get("scenario_id") or "") == scenario_id]
@@ -1049,6 +1272,12 @@ def _runtime_composition_findings(
                 else {"entrypoint", "api_route"}
                 if "api" in surfaces
                 else {"entrypoint", "service", "persistence_adapter", "data_model"}
+            )
+            # Under UI contract v2 a UI component only starts a path once its composition proves app reachability.
+            and not (
+                ui_v2
+                and str(item.get("surface") or "") == "ui"
+                and str(item.get("id") or "") not in ui_reachable_from_entry
             )
         ]
         if not starts:
@@ -1081,6 +1310,279 @@ def _runtime_composition_findings(
                 )
             )
     return findings
+
+
+def _ui_runtime_surface_findings(
+    graph: dict[str, object],
+    nodes: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], set[str]]:
+    """Prove each v2 UI surface is reachable from the app entrypoint with every required input owned."""
+
+    binding = _dict_value(graph.get("snapshot_binding"))
+    context = _dict_value(binding.get("ui_repo_context"))
+    requirement_ids = set(_strings(binding.get("requirement_reference_ids")))
+    entry = str(_dict_value(context.get("entrypoint")).get("ref") or "")
+    chain = {
+        str(hop.get("ref") or ""): hop
+        for hop in context.get("composition_chain", [])
+        if isinstance(hop, dict)
+    }
+    components = _dict_value(context.get("components"))
+    providers = {
+        str(item.get("ref") or "")
+        for item in context.get("data_clients", [])
+        if isinstance(item, dict)
+    } | set(chain) | set(components)
+    node_ids = {str(node.get("id") or "") for node in nodes}
+    planned_targets: dict[str, dict[str, object]] = {}
+    for node in nodes:
+        target = _dict_value(_dict_value(node.get("runtime_binding")).get("target"))
+        ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+        if ref != "#":
+            planned_targets.setdefault(ref, node)
+    findings: list[dict[str, object]] = []
+    reachable: set[str] = set()
+    if not entry:
+        if not any(str(node.get("surface") or "") == "ui" for node in nodes):
+            return findings, reachable
+        findings.append(
+            _composition_finding(
+                "ui_entrypoint_unresolved",
+                "ui_repo_context",
+                "Frozen web app has no resolvable entrypoint root component.",
+                "Escalate to the project owner; the fixed profile requires a web entrypoint that renders a root component.",
+            )
+        )
+        return findings, reachable
+
+    for node in nodes:
+        if str(node.get("surface") or "") != "ui":
+            continue
+        node_id = str(node.get("id") or "")
+        surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
+        if not surface:
+            continue
+        runtime = _dict_value(node.get("runtime_binding"))
+        target = _dict_value(runtime.get("target"))
+        attachment = _dict_value(runtime.get("attachment"))
+        target_ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+        path = _strings(surface.get("composition_path"))
+        entry_ok = bool(path) and path[0] == entry and path[-1] == target_ref
+        if not entry_ok:
+            findings.append(
+                _composition_finding(
+                    "ui_entrypoint_unreachable",
+                    node_id,
+                    f"UI surface {node_id} composition_path must run from {entry} to its runtime target {target_ref}.",
+                    f"Set composition_path to start at {entry} and end at {target_ref}, listing every mounting component between them.",
+                    node=node,
+                )
+            )
+        invalid_hops = [hop for hop in path[1:-1] if hop not in chain and hop not in planned_targets]
+        for parent, child in zip(path, path[1:]):
+            parent_node = planned_targets.get(parent)
+            parent_modified = parent_node is not None and str(parent_node.get("disposition") or "") in {"modify", "add"}
+            # Two AS-IS hops must already be a real render edge unless the Design modifies the parent to mount it.
+            if parent in chain and child in chain and child not in _strings(chain[parent].get("renders")) and not parent_modified:
+                invalid_hops.append(f"{parent}->{child}")
+        for hop in invalid_hops:
+            findings.append(
+                _composition_finding(
+                    "ui_composition_hop_invalid",
+                    f"{node_id}:{hop}",
+                    f"Composition hop {hop} is neither in the frozen web composition chain nor a runtime target in this Design.",
+                    "Use an AS-IS component from ui_repo_context.composition_chain or add a runtime-bound UI node for the new mounting component.",
+                    node=node,
+                )
+            )
+        owner_ref = f"{attachment.get('owner_path') or ''}#{attachment.get('owner_symbol') or ''}"
+        if len(path) >= 2 and owner_ref != "#" and owner_ref != path[-2]:
+            findings.append(
+                _composition_finding(
+                    "ui_attachment_off_path",
+                    node_id,
+                    f"runtime_binding owner {owner_ref} is not the component that renders {target_ref} on composition_path ({path[-2]}).",
+                    f"Attach the UI target to {path[-2]} or correct composition_path.",
+                    node=node,
+                )
+            )
+        if entry_ok and not invalid_hops:
+            reachable.add(node_id)
+
+        inputs = [item for item in surface.get("required_inputs", []) if isinstance(item, dict)]
+        declared = {str(item.get("name") or "") for item in inputs}
+        if str(node.get("disposition") or "") in {"modify", "reuse", "no_change"}:
+            component = _dict_value(components.get(target_ref))
+            missing = [
+                str(prop.get("name") or "")
+                for prop in component.get("props", [])
+                if isinstance(prop, dict)
+                and not prop.get("optional")
+                and not prop.get("has_default")
+                and str(prop.get("name") or "") not in declared
+            ]
+            if missing:
+                findings.append(
+                    _composition_finding(
+                        "ui_required_input_undeclared",
+                        node_id,
+                        f"AS-IS component {target_ref} requires props {missing} that runtime_surface.required_inputs does not declare.",
+                        "Declare each required prop with its source, binding and provided_by hop.",
+                        node=node,
+                    )
+                )
+        has_external = False
+        has_fixture = False
+        for item in inputs:
+            name = str(item.get("name") or "")
+            source = str(item.get("source") or "")
+            bound_to = str(item.get("binding") or "")
+            refs = {*_strings(item.get("requirement_refs")), bound_to}
+            provided_by = str(item.get("provided_by") or "")
+            problem = ""
+            if source == "existing_runtime" and bound_to not in providers:
+                problem = f"existing_runtime binding {bound_to} is not a provider in the frozen web app"
+            elif source == "new_boundary" and bound_to not in node_ids:
+                problem = f"new_boundary binding {bound_to} is not a node in this Design graph"
+            elif source == "external_use_case" and not any(
+                ref.startswith(EXTERNAL_DEPENDENCY_REF_PREFIXES) and ref in requirement_ids for ref in refs
+            ):
+                problem = (
+                    "external_use_case must cite the approved Requirement precondition (PRE-*) or flow step "
+                    "(MF-*/AF-*/EF-*) that states the dependency on the other use case"
+                )
+            elif source == "demo_fixture" and not any(
+                ref.startswith("DEC-") and ref in requirement_ids for ref in refs
+            ):
+                problem = "demo_fixture must cite an approved Requirement decision (DEC-*)"
+            elif path and provided_by == path[-1]:
+                problem = (
+                    "it is state owned by the target component itself, not a runtime input; remove it from "
+                    "required_inputs and model it in runtime_states/transitions instead"
+                )
+            elif provided_by not in path[:-1]:
+                problem = f"provided_by {provided_by} is not a hop before the target on composition_path"
+            if problem:
+                findings.append(
+                    _composition_finding(
+                        "ui_required_input_unbound",
+                        f"{node_id}:{name}",
+                        f"Required input {name}: {problem}.",
+                        "Bind the input to an existing provider, a Design node, an approved Requirement PRE-*/DEC-* reference, and a provided_by hop on composition_path.",
+                        node=node,
+                    )
+                )
+                continue
+            has_external = has_external or source == "external_use_case"
+            has_fixture = has_fixture or source == "demo_fixture"
+            # shortcut: matches the prop name per hop; renamed props across hops need an explicit modify node.
+            start = path.index(provided_by)
+            for index in range(start, len(path) - 1):
+                hop, child = path[index], path[index + 1]
+                passed = _strings(_dict_value(_dict_value(chain.get(hop)).get("passes_props")).get(child))
+                hop_node = planned_targets.get(hop)
+                modeled = hop_node is not None and str(hop_node.get("disposition") or "") in {"modify", "add"}
+                if hop in chain and name not in passed and not modeled:
+                    findings.append(
+                        _composition_finding(
+                            "composition_hop_unmodeled",
+                            f"{node_id}:{name}:{hop}",
+                            f"AS-IS {hop} does not pass {name} to {child}, and no Design node modifies it.",
+                            f"Add a modify node with runtime_binding target {hop} that supplies {name} to {child}.",
+                            node=node,
+                        )
+                    )
+        status = str(surface.get("runnable_status") or "")
+        expected = "externally_blocked" if has_external else "fixture_required" if has_fixture else "bound"
+        if status != expected:
+            findings.append(
+                _composition_finding(
+                    "ui_runnable_status_inconsistent",
+                    node_id,
+                    f"runnable_status {status} does not match its required inputs; expected {expected}.",
+                    f"Set runnable_status to {expected}.",
+                    node=node,
+                )
+            )
+        experience = _dict_value(_dict_value(node.get("surface_contract")).get("experience_contract"))
+        visual = _dict_value(experience.get("visual_contract"))
+        styles = _dict_value(context.get("styles"))
+        if visual.get("style_target_policy") == "reuse_existing" and not _strings(styles.get("stylesheet_files")):
+            findings.append(
+                _composition_finding(
+                    "ui_style_policy_unsupported",
+                    node_id,
+                    "visual_contract.style_target_policy=reuse_existing but the frozen web app has no stylesheet to reuse.",
+                    "Choose new_stylesheet and explain the visual convention it introduces.",
+                    node=node,
+                )
+            )
+        context_refs = set(_strings(context.get("evidence_refs")))
+        if experience and not context_refs.intersection(_strings(experience.get("repo_evidence_refs"))):
+            findings.append(
+                _composition_finding(
+                    "ui_visual_evidence_missing",
+                    node_id,
+                    "UI experience decisions cite no evidence from the frozen ui_repo_context.",
+                    "Add the ui_repo_context evidence refs (entrypoint, shell, style or data conventions) the decisions rely on.",
+                    node=node,
+                )
+            )
+
+    screens: dict[str, list[tuple[dict[str, object], list[str]]]] = {}
+    for node in nodes:
+        surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
+        if str(node.get("surface") or "") == "ui" and surface and not is_composition_wiring(node):
+            screens.setdefault(str(surface.get("screen_id") or ""), []).append(
+                (node, _strings(surface.get("composition_path")))
+            )
+    for screen_id, members in sorted(screens.items()):
+        root_path = min((path for _, path in members), key=len)
+        for node, path in members:
+            if path[: len(root_path)] != root_path:
+                findings.append(
+                    _composition_finding(
+                        "ui_screen_inconsistent",
+                        f"{screen_id}:{node.get('id')}",
+                        f"UI node {node.get('id')} shares screen {screen_id} but does not mount under {' -> '.join(root_path)}.",
+                        "Give nodes on one screen a shared composition root, or use a different screen_id for a separate screen.",
+                        node=node,
+                    )
+                )
+    return findings, reachable
+
+
+def _mapping_pairs(value: object) -> set[tuple[str, str]]:
+    items = value if isinstance(value, list) else []
+    return {
+        (str(item.get("from") or "").strip(), str(item.get("to") or "").strip())
+        for item in items
+        if isinstance(item, dict)
+    }
+
+
+def _paired_request_edge(edge: dict[str, object], edges: list[dict[str, object]]) -> dict[str, object]:
+    """Latest calls/reads/writes edge before this returns edge, from its consumer to its provider."""
+    contract = _dict_value(edge.get("boundary_contract"))
+    order = edge.get("order") if isinstance(edge.get("order"), int) else 0
+    candidates = [
+        item
+        for item in edges
+        if str(item.get("kind") or "") in {"calls", "reads", "writes"}
+        and str(item.get("from") or "") == str(edge.get("to") or "")
+        and str(item.get("to") or "") == str(edge.get("from") or "")
+        and str(item.get("scenario_id") or "") == str(edge.get("scenario_id") or "")
+        and _dict_value(item.get("boundary_contract"))
+        and (not order or not isinstance(item.get("order"), int) or item["order"] < order)
+    ]
+    same_operation = [
+        item
+        for item in candidates
+        if str(_dict_value(item.get("boundary_contract")).get("provider_operation") or "")
+        == str(contract.get("provider_operation") or "")
+    ]
+    pool = same_operation or candidates
+    return max(pool, key=lambda item: item.get("order") if isinstance(item.get("order"), int) else 0, default={})
 
 
 def _boundary_contract_diagnostics(

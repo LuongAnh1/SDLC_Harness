@@ -79,10 +79,13 @@ from ..agents.requirements.session_v1 import (
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
     GRAPH_VERSION_V1,
+    GRAPH_VERSION_V2,
     SUPPORTED_GRAPH_VERSIONS,
+    UI_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
+    resolve_ui_contract_pin,
 )
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -221,6 +224,14 @@ class PhaseOneWorkflow:
         state[UIUX_MODE_STATE_KEY] = self.settings.uiux_skill_mode
         state[UIUX_CONTRACT_STATE_KEY] = (
             UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
+        )
+        state[UI_CONTRACT_STATE_KEY] = resolve_ui_contract_pin(
+            ui_contract_version=str(
+                getattr(self.settings, "designer_ui_contract_version", "ui_experience_contract_v1")
+            ),
+            graph_v2=designer_contract_version == GRAPH_VERSION_V2,
+            uiux_mode=self.settings.uiux_skill_mode,
+            run_id=run_id,
         )
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (

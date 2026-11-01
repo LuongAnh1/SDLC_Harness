@@ -24,7 +24,15 @@ if str(ROOT) not in sys.path:
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
 
-from sdlc_harness.agents.designer import DESIGNER_CONTRACT_STATE_KEY, GRAPH_VERSION
+from sdlc_harness.agents.designer import (
+    DESIGNER_CONTRACT_STATE_KEY,
+    GRAPH_VERSION,
+    UI_CONTRACT_STATE_KEY,
+    UIUX_CONTRACT_STATE_KEY,
+    UIUX_CONTRACT_VERSION,
+    UIUX_MODE_STATE_KEY,
+    resolve_ui_contract_pin,
+)
 from sdlc_harness.agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
@@ -57,6 +65,7 @@ def main() -> int:
     parser.add_argument("--source-file")
     parser.add_argument("--revalidate-run-id")
     parser.add_argument("--review-run-id")
+    parser.add_argument("--continue-run-id", help="Resume a paused Designer session without step review.")
     parser.add_argument("--step-review", action="store_true")
     parser.add_argument("--review-input", action="store_true")
     parser.add_argument("--review-output", action="store_true")
@@ -66,6 +75,11 @@ def main() -> int:
     parser.add_argument("--design-call-budget", type=int, default=128)
     parser.add_argument("--design-repair-limit", type=int, default=3)
     parser.add_argument("--vertical-trace-mode", choices=("shadow", "enforce"), default="shadow")
+    parser.add_argument(
+        "--ui-contract-version",
+        choices=("ui_experience_contract_v1", "ui_experience_contract_v2"),
+        default="ui_experience_contract_v1",
+    )
     args = parser.parse_args()
 
     if args.revalidate_run_id and args.review_run_id:
@@ -118,6 +132,12 @@ def main() -> int:
             "SDLC_TARGET_BASE_BRANCH": "main",
             "SDLC_TARGET_WORKTREE_ROOT": str(worktree_root),
             "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+            "SDLC_DESIGNER_UI_CONTRACT_VERSION": args.ui_contract_version,
+            **(
+                {"SDLC_UIUX_SKILL_MODE": "enforce"}
+                if args.ui_contract_version == "ui_experience_contract_v2"
+                else {}
+            ),
         },
     )
 
@@ -125,9 +145,10 @@ def main() -> int:
     run_id = str(
         args.review_run_id
         or args.revalidate_run_id
+        or args.continue_run_id
         or f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:8]}"
     )
-    if not args.revalidate_run_id and not args.review_run_id:
+    if not args.revalidate_run_id and not args.review_run_id and not args.continue_run_id:
         _seed_approved_requirement(
             store=store,
             settings=settings,
@@ -150,7 +171,7 @@ def main() -> int:
     })
     result = (
         workflow.continue_design(run_id=run_id)
-        if args.review_run_id
+        if args.review_run_id or args.continue_run_id
         else (
             workflow.revalidate_design(run_id=run_id)
             if args.revalidate_run_id
@@ -169,6 +190,8 @@ def main() -> int:
     report_name = (
         f"l3_shadow_step_{str(args.review_call_id or 'pending')}.json"
         if args.review_run_id
+        else "l3_shadow_continue_report.json"
+        if args.continue_run_id
         else ("l3_shadow_revalidate_report.json" if args.revalidate_run_id else "l3_shadow_report.json")
     )
     report_path = store.run_dir(run_id) / report_name
@@ -375,6 +398,16 @@ def _seed_approved_requirement(
         IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
         VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
         VERTICAL_TRACE_MODE_STATE_KEY: vertical_trace_mode,
+        UIUX_MODE_STATE_KEY: str(getattr(settings, "uiux_skill_mode")),
+        UIUX_CONTRACT_STATE_KEY: (
+            UIUX_CONTRACT_VERSION if str(getattr(settings, "uiux_skill_mode")) == "enforce" else ""
+        ),
+        UI_CONTRACT_STATE_KEY: resolve_ui_contract_pin(
+            ui_contract_version=str(getattr(settings, "designer_ui_contract_version")),
+            graph_v2=True,
+            uiux_mode=str(getattr(settings, "uiux_skill_mode")),
+            run_id=run_id,
+        ),
         "profile_snapshot": build_profile_snapshot(
             project_profile_id=str(getattr(settings, "project_profile_id")),
             target_remote=str(getattr(settings, "target_repo_remote")),

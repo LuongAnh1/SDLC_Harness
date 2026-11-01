@@ -327,7 +327,7 @@ Return one JSON object only:
   "findings": [
     {{
       "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
+      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
       "severity": "blocking|warning",
       "message": "specific contradiction or ambiguity",
       "expected_change": "specific UML correction",
@@ -369,7 +369,7 @@ Blocking policy:
   outcome unobservable, or makes the approved interaction impossible. Visual polish and aesthetic preferences
   are warnings unless the approved requirement explicitly makes them mandatory.
 - UI/UX guidance references are design evidence, not new Requirements; never promote a recommendation into a blocker by itself.
-- Review authorization against the approved Requirement. Use authorization_required as the typed Design decision; do not infer it from prose labels.
+{_holistic_ui_review_instruction(vertical_design_graph)}- Review authorization against the approved Requirement. Use authorization_required as the typed Design decision; do not infer it from prose labels.
 - Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
 - Give every finding an exact Vertical Design node or edge ID as subject_ref.
 - An uncertainty without evidence is a warning, not a blocker.
@@ -662,7 +662,42 @@ def _vertical_design_review_view(value: dict[str, object] | None) -> dict[str, o
             for edge in _dict_items(graph.get("edges"))
         ],
         "unresolved_items": graph.get("unresolved_items") or [],
+        **({"ui_repo_context": _ui_repo_context_review_view(graph)} if _ui_contract_v2(graph) else {}),
     }
+
+
+def _ui_contract_v2(graph: dict[str, object]) -> bool:
+    binding = _dict_value(graph.get("snapshot_binding"))
+    return binding.get("designer_ui_contract_version") == "ui_experience_contract_v2"
+
+
+def _ui_repo_context_review_view(graph: dict[str, object]) -> dict[str, object]:
+    context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
+    return {
+        "entrypoint": _dict_value(context.get("entrypoint")).get("ref"),
+        "composition_chain": [
+            {"ref": hop.get("ref"), "renders": hop.get("renders"), "passes_props": hop.get("passes_props")}
+            for hop in _dict_items(context.get("composition_chain"))
+        ],
+        "data_clients": [item.get("ref") for item in _dict_items(context.get("data_clients"))],
+        "auth": context.get("auth"),
+        "styles": context.get("styles"),
+        "verification": context.get("verification"),
+    }
+
+
+def _holistic_ui_review_instruction(vertical_design_graph: dict[str, object] | None) -> str:
+    if not _ui_contract_v2(_dict_value(vertical_design_graph)):
+        return ""
+    return (
+        "- UI contract v2: review each screen as one journey. Nodes sharing a screen_id must tell one consistent story "
+        "across scenarios (ui_journey_coherence). runtime_states must make loading, empty, error and success observable "
+        "when the approved behavior can reach them; not_applicable needs a reason that matches the Requirement. "
+        "focus_policies must give one deterministic target per event. Using ui_repo_context, check that every "
+        "required_input classification is plausible: external_use_case must match an approved precondition, and a "
+        "list-driven or authenticated screen marked bound must have a real provider (ui_runtime_input_binding). "
+        "Block only when a required behavior or state becomes unreachable or unobservable; visual taste stays a warning.\n"
+    )
 
 
 def _vertical_trace_review_view(value: dict[str, object] | None) -> dict[str, object]:

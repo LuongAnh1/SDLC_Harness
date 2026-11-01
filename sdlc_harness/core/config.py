@@ -73,6 +73,7 @@ class Settings:
     design_step_review_enabled: bool
     design_step_review_input_enabled: bool
     design_step_review_output_enabled: bool
+    designer_ui_contract_version: str
     uiux_skill_mode: str
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
@@ -445,6 +446,12 @@ def load_settings(
     ).strip()
     if designer_contract_version not in {"vertical_design_graph_v1", "vertical_design_graph_v2"}:
         designer_contract_version = "vertical_design_graph_v1"
+    designer_ui_contract_version = merged.get(
+        "SDLC_DESIGNER_UI_CONTRACT_VERSION",
+        "ui_experience_contract_v1",
+    ).strip()
+    if designer_ui_contract_version not in {"ui_experience_contract_v1", "ui_experience_contract_v2"}:
+        designer_ui_contract_version = "ui_experience_contract_v1"
     uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
     if uiux_skill_mode not in {"off", "enforce"}:
         uiux_skill_mode = "off"
@@ -535,6 +542,7 @@ def load_settings(
             merged.get("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED"),
             default=True,
         ),
+        designer_ui_contract_version=designer_ui_contract_version,
         uiux_skill_mode=uiux_skill_mode,
         uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
         uiux_skill_timeout_seconds=_int_value(

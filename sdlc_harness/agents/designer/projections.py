@@ -6,7 +6,204 @@ import hashlib
 import re
 from typing import Any
 
-from .graph import design_bundle_version_for
+from .graph import UI_RUNTIME_STATES, design_bundle_version_for, is_composition_wiring, ui_contract_v2
+
+UI_FEATURE_EXPERIENCE_VERSION = "ui_feature_experience_v1"
+_RUNNABLE_RANK = {"bound": 0, "fixture_required": 1, "externally_blocked": 2}
+
+
+def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] | None:
+    """Screen spec + Markdown wireframe projected from canonical UI contract v2 nodes; None when not applicable."""
+
+    if not ui_contract_v2(graph):
+        return None
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for node in _dicts(graph.get("nodes")):
+        surface = _dict(_dict(node.get("surface_contract")).get("runtime_surface"))
+        if str(node.get("surface") or "") == "ui" and surface and not is_composition_wiring(node):
+            grouped.setdefault(str(surface.get("screen_id") or ""), []).append(node)
+    if not grouped:
+        return None
+    screens: list[dict[str, object]] = []
+    for screen_id, members in sorted(grouped.items()):
+        members.sort(
+            key=lambda item: (
+                len(_strings(_dict(_dict(item.get("surface_contract")).get("runtime_surface")).get("composition_path"))),
+                str(item.get("id") or ""),
+            )
+        )
+        contracts = [_dict(item.get("surface_contract")) for item in members]
+        experiences = [_dict(contract.get("experience_contract")) for contract in contracts]
+        surfaces = [_dict(contract.get("runtime_surface")) for contract in contracts]
+        root = next((item for item in experiences if item.get("screen")), experiences[0])
+        inputs: dict[tuple[str, str], dict[str, Any]] = {}
+        for surface in surfaces:
+            for entry in _dicts(surface.get("required_inputs")):
+                inputs.setdefault((str(entry.get("name") or ""), str(entry.get("source") or "")), entry)
+        focus: dict[str, dict[str, Any]] = {}
+        for experience in experiences:
+            for policy in _dicts(experience.get("focus_policies")):
+                focus.setdefault(str(policy.get("event") or ""), policy)
+        journeys: dict[str, list[str]] = {}
+        for node, contract in zip(members, contracts):
+            for transition in _dicts(contract.get("transitions")):
+                journeys.setdefault(str(node.get("scenario_id") or ""), []).append(
+                    f"{transition.get('from', '')} --{transition.get('action', '')}--> "
+                    f"{transition.get('to', '')}: {transition.get('outcome', '')}"
+                )
+        screens.append(
+            {
+                "screen_id": screen_id,
+                "screen": _dict(root.get("screen")),
+                "composition_paths": [_strings(surface.get("composition_path")) for surface in surfaces],
+                "nodes": [
+                    {
+                        "id": node.get("id"),
+                        "name": node.get("name"),
+                        "scenario_id": node.get("scenario_id"),
+                        "disposition": node.get("disposition"),
+                        "component_structure": _strings(experience.get("component_structure")),
+                    }
+                    for node, experience in zip(members, experiences)
+                ],
+                "journeys": journeys,
+                "runtime_states": _merged_runtime_states(experiences),
+                "visual_contract": _dict(root.get("visual_contract")),
+                "focus_policies": [focus[key] for key in sorted(focus)],
+                "accessibility": sorted({item for exp in experiences for item in _strings(exp.get("accessibility"))}),
+                "feedback": [
+                    item
+                    for index, exp in enumerate(experiences)
+                    for item in _dicts(exp.get("feedback"))
+                    if item not in [f for prior in experiences[:index] for f in _dicts(prior.get("feedback"))]
+                ],
+                "required_inputs": [inputs[key] for key in sorted(inputs)],
+                "runnable_status": max(
+                    (str(surface.get("runnable_status") or "bound") for surface in surfaces),
+                    key=lambda status: _RUNNABLE_RANK.get(status, 0),
+                ),
+                "evidence_refs": sorted({ref for exp in experiences for ref in _strings(exp.get("repo_evidence_refs"))}),
+            }
+        )
+    payload: dict[str, object] = {
+        "schema_version": UI_FEATURE_EXPERIENCE_VERSION,
+        "graph_digest": graph.get("artifact_digest"),
+        "screens": screens,
+    }
+    return {"json": payload, "markdown": _ui_feature_markdown(payload)}
+
+
+def _merged_runtime_states(experiences: list[dict[str, Any]]) -> dict[str, object]:
+    """Each scenario owns its own states; the screen shows the applicable one from whichever node owns it."""
+
+    merged: dict[str, object] = {}
+    for name in UI_RUNTIME_STATES:
+        states = [_dict(_dict(exp.get("runtime_states")).get(name)) for exp in experiences]
+        merged[name] = next(
+            (state for state in states if state and not state.get("not_applicable")),
+            next((state for state in states if state), {}),
+        )
+    return merged
+
+
+def _ui_feature_markdown(payload: dict[str, object]) -> str:
+    lines = ["# UI Feature Experience", "", f"Graph digest: `{payload.get('graph_digest')}`", ""]
+    for screen in _dicts(payload.get("screens")):
+        meta = _dict(screen.get("screen"))
+        visual = _dict(screen.get("visual_contract"))
+        lines.extend(
+            [
+                f"## Screen `{screen.get('screen_id')}`",
+                "",
+                f"- **Mục tiêu người dùng:** {meta.get('purpose', 'n/a')}",
+                f"- **Đường vào:** {meta.get('entry_condition', 'n/a')}",
+                f"- **Trạng thái chạy được:** `{screen.get('runnable_status')}`",
+                "",
+                "### Composition",
+                "",
+                *[f"- {' → '.join(path)}" for path in screen.get("composition_paths", [])],
+                "",
+                "### Component tree",
+                "",
+            ]
+        )
+        for node in _dicts(screen.get("nodes")):
+            lines.append(f"- `{node.get('id')}` {node.get('name')} ({node.get('scenario_id')}, {node.get('disposition')})")
+            lines.extend(f"  - {item}" for item in _strings(node.get("component_structure")))
+        lines.extend(["", "### Journeys", ""])
+        for scenario_id, steps in sorted(_dict(screen.get("journeys")).items()):
+            lines.append(f"- **{scenario_id}**")
+            lines.extend(f"  - {step}" for step in _strings(steps))
+        lines.extend(["", "### Runtime states", "", "| State | Presentation | Trigger |", "| --- | --- | --- |"])
+        states = _dict(screen.get("runtime_states"))
+        for name in UI_RUNTIME_STATES:
+            state = _dict(states.get(name))
+            if state.get("not_applicable"):
+                lines.append(f"| {name} | không áp dụng | {_cell(state.get('reason'))} |")
+            else:
+                lines.append(f"| {name} | {_cell(state.get('presentation'))} | {_cell(state.get('trigger'))} |")
+        lines.extend(["", "### Visual decisions", ""])
+        for key in ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules"):
+            lines.append(f"- **{key}:** {'; '.join(_strings(visual.get(key))) or 'n/a'}")
+        lines.append(
+            f"- **style_target_policy:** `{visual.get('style_target_policy', 'n/a')}` — {visual.get('style_target_reason', '')}"
+        )
+        lines.extend(["", "### Wireframe (desktop)", "", "```text", *_wireframe(_strings(visual.get("layout")), 64), "```"])
+        lines.extend(["", "### Wireframe (mobile)", "", "```text", *_wireframe(_strings(visual.get("layout")), 34), "```"])
+        lines.extend(f"- {rule}" for rule in _strings(visual.get("responsive_rules")))
+        lines.extend(
+            [
+                "",
+                "### Focus và accessibility",
+                "",
+                "| Event | Removed element | Primary target | Fallback | Strategy | Announcement |",
+                "| --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for policy in _dicts(screen.get("focus_policies")):
+            announcement = _dict(policy.get("announcement"))
+            lines.append(
+                "| "
+                + " | ".join(
+                    _cell(value)
+                    for value in (
+                        policy.get("event"),
+                        policy.get("removed_element") if policy.get("source_removed") else "—",
+                        policy.get("primary_target"),
+                        policy.get("fallback_target"),
+                        policy.get("selection_strategy"),
+                        f"{announcement.get('target', '')} ({'moves focus' if announcement.get('moves_focus') else 'announce only'})",
+                    )
+                )
+                + " |"
+            )
+        lines.extend(f"- {item}" for item in _strings(screen.get("accessibility")))
+        lines.extend(["", "### Runtime inputs", "", "| Input | Source | Binding | Provided by |", "| --- | --- | --- | --- |"])
+        for entry in _dicts(screen.get("required_inputs")):
+            lines.append(
+                f"| {_cell(entry.get('name'))} | {_cell(entry.get('source'))} | {_cell(entry.get('binding'))} | "
+                f"{_cell(str(entry.get('provided_by') or '').rpartition('#')[2])} |"
+            )
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _wireframe(layout: list[str], width: int) -> list[str]:
+    inner = width - 4
+    border = "+" + "-" * (width - 2) + "+"
+    lines = [border]
+    for item in layout or ["main: n/a"]:
+        region, _, content = item.partition(":")
+        text = f"{region.strip().upper()}: {content.strip()}" if content else region.strip()
+        while text:
+            lines.append(f"| {text[:inner].ljust(inner)} |")
+            text = text[inner:]
+        lines.append(border)
+    return lines
+
+
+def _cell(value: object) -> str:
+    return str(value or "").replace("|", "/").replace("\n", " ")
 
 
 def render_design_projections(
@@ -264,6 +461,41 @@ def _render_markdown(
                 )
                 + " |"
             )
+        surfaces = [
+            (item, _dict(_dict(item.get("surface_contract")).get("runtime_surface")))
+            for item in _dicts(graph.get("nodes"))
+        ]
+        surfaces = [(item, surface) for item, surface in surfaces if surface]
+        if surfaces:
+            lines.extend(
+                [
+                    "",
+                    "## UI Runtime Surfaces",
+                    "",
+                    "| Screen | UI element | Composition path | Required inputs | Runnable |",
+                    "| --- | --- | --- | --- | --- |",
+                ]
+            )
+            for item, surface in surfaces:
+                inputs = "; ".join(
+                    f"{entry.get('name', '')} ← {entry.get('source', '')}: {entry.get('binding', '')}"
+                    f" (via {str(entry.get('provided_by') or '').rpartition('#')[2]})"
+                    for entry in _dicts(surface.get("required_inputs"))
+                )
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        value.replace("|", "/")
+                        for value in (
+                            str(surface.get("screen_id") or ""),
+                            str(item.get("name") or item.get("id") or ""),
+                            " → ".join(str(hop).rpartition("#")[2] for hop in _strings(surface.get("composition_path"))),
+                            inputs or "none",
+                            str(surface.get("runnable_status") or ""),
+                        )
+                    )
+                    + " |"
+                )
     lines.extend(["", "## Surface Contracts", ""])
     for title, key in (
         ("UI", "ui"),

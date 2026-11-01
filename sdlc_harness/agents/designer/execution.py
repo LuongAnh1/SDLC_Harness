@@ -26,11 +26,18 @@ from .graph import (
     completion_findings,
     delta_version_for,
     graph_digest,
+    is_composition_wiring,
     new_vertical_design_graph,
+    ui_contract_v2,
     validate_vertical_design_graph,
 )
+from .projections import _merged_runtime_states
 from .tools import DesignerToolRegistry
+from .ui_context import chain_path_to, required_props
 from .uiux import (
+    RUNTIME_SURFACE_BINDING_VERSION,
+    UI_EXPERIENCE_CONTRACT_V2,
+    UI_EXPERIENCE_CONTRACT_VERSIONS,
     UIUX_CONTRACT_VERSION,
     UIUX_EXPERIENCE_CONTRACT_VERSION,
     UiUxGuidanceProvider,
@@ -282,6 +289,9 @@ class DesignerToolLoopExecutor:
             uiux_mode=uiux_mode,
             expected_codegraph_digest=str(snapshot_binding.get("repo_codegraph_snapshot_digest") or ""),
         )
+        registry.register_evidence_refs(
+            _strings(_dict(snapshot_binding.get("ui_repo_context")).get("evidence_refs"))
+        )
         for refs in _dict(session.get("source_observations")).values():
             registry.register_evidence_refs(_strings(refs))
         for values in _dict(session.get("guidance_observations")).values():
@@ -513,6 +523,37 @@ class DesignerToolLoopExecutor:
                     ) or [scenario_id]
                     temp_ref = f"tmp:{scenario_id}:{surface}"
                     temp_refs.append(temp_ref)
+                    fake_contract = _fake_surface_contract(
+                        surface=surface,
+                        scenario_id=scenario_id,
+                        name=str((anchor or {}).get("symbol") or f"{scenario_id} {surface}"),
+                        uiux_mode=registry.uiux_mode,
+                        guidance_refs=guidance_refs,
+                    )
+                    fake_binding = _fake_runtime_binding(
+                        landscape=landscape,
+                        component_id=component_id,
+                        surface=surface,
+                        anchor=anchor,
+                        source_refs=source_refs,
+                        fallback_symbol=f"{scenario_id} {surface}",
+                    )
+                    if surface == "ui" and ui_contract_v2(registry.graph):
+                        fake_contract["runtime_surface"], fake_binding = _fake_runtime_surface(
+                            graph=registry.graph,
+                            landscape=landscape,
+                            binding=fake_binding,
+                            scenario_id=scenario_id,
+                        )
+                        if isinstance(fake_contract.get("experience_contract"), dict):
+                            fake_contract["experience_contract"]["schema_version"] = UI_EXPERIENCE_CONTRACT_V2
+                            fake_contract["experience_contract"].update(
+                                _experience_v2_fields(
+                                    registry.graph,
+                                    screen_id=str(fake_contract["runtime_surface"]["screen_id"]),
+                                    fake_label=f"{scenario_id} ui",
+                                )
+                            )
                     operations.append(
                         {
                             "op": "add_node",
@@ -527,21 +568,8 @@ class DesignerToolLoopExecutor:
                                 "evidence_refs": [str(anchor["anchor_id"])] if anchor else [],
                                 "evidence_reason": "Required surface has no existing anchor; add within the frozen component root." if not anchor else "",
                                 "contract": f"Realize required {surface} behavior for scenario {scenario_id}.",
-                                "surface_contract": _fake_surface_contract(
-                                    surface=surface,
-                                    scenario_id=scenario_id,
-                                    name=str((anchor or {}).get("symbol") or f"{scenario_id} {surface}"),
-                                    uiux_mode=registry.uiux_mode,
-                                    guidance_refs=guidance_refs,
-                                ),
-                                "runtime_binding": _fake_runtime_binding(
-                                    landscape=landscape,
-                                    component_id=component_id,
-                                    surface=surface,
-                                    anchor=anchor,
-                                    source_refs=source_refs,
-                                    fallback_symbol=f"{scenario_id} {surface}",
-                                ),
+                                "surface_contract": fake_contract,
+                                "runtime_binding": fake_binding,
                             },
                         }
                     )
@@ -644,6 +672,7 @@ class DesignerToolLoopExecutor:
             return []
         partition_key = f"{scenario_id}|{component_id}"
         session["active_partition_key"] = partition_key
+        session["active_guidance_key"] = partition_key
         session["active_component_id"] = component_id
         calls = (
             {"query": "confirmation focus feedback", "mode": "domain", "domain": "ux"},
@@ -970,6 +999,12 @@ class DesignerToolLoopExecutor:
                 graph=registry.graph,
             )
             session["active_partition_key"] = active_partition_key
+            guidance_key = _guidance_key(
+                graph=registry.graph,
+                requirement_model=requirement_model,
+                partition_key=active_partition_key,
+            )
+            session["active_guidance_key"] = guidance_key
             session["ui_guidance_required"] = ui_guidance_required
             if repair_feedback and repair_task is None and active_partition is None:
                 return
@@ -1017,6 +1052,8 @@ class DesignerToolLoopExecutor:
                             require_runtime_binding=(
                                 str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
                             ),
+                            repair_closers=ui_contract_v2(registry.graph)
+                            and str(exchange.get("finish_reason") or "") == "stop",
                         )
                     except json.JSONDecodeError:
                         pass
@@ -1051,6 +1088,7 @@ class DesignerToolLoopExecutor:
                     note = str(self.step_review.get("note") or "").strip() or "Operator rejected this Designer action."
                     session["pending_step_review"] = None
                     session["last_review_feedback"] = note
+                    session["last_review_target"] = str(pending_review.get("review_target") or "")
                     if parse_error:
                         session["last_invalid_action"] = ""
                     session["status"] = "running"
@@ -1076,6 +1114,7 @@ class DesignerToolLoopExecutor:
                     continue
                 session["pending_step_review"] = None
                 session["last_review_feedback"] = ""
+                session["last_review_target"] = ""
                 session["status"] = "running"
                 _update_designer_exchange(
                     exchange_path,
@@ -1103,9 +1142,11 @@ class DesignerToolLoopExecutor:
                     observations_since_delta=observations_since_delta,
                     last_invalid_action=str(session.get("last_invalid_action") or ""),
                     observation_limit=observation_limit,
-                    last_review_feedback=str(session.get("last_review_feedback") or ""),
+                    last_review_feedback=_scoped_review_feedback(
+                        session, current_target=_review_target_key(repair_task, active_partition)
+                    ),
                     uiux_mode=registry.uiux_mode,
-                    active_guidance=_guidance_observations(session, active_partition_key),
+                    active_guidance=_guidance_observations(session, guidance_key),
                     source_inspected=bool(_source_observation_refs(session, active_component_id)),
                 )
                 system_prompt = "You are SDLC Harness Designer L3. Return exactly one JSON tool action."
@@ -1190,6 +1231,9 @@ class DesignerToolLoopExecutor:
                         require_runtime_binding=(
                             str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
                         ),
+                        # A length-truncated output must never be completed into a partial delta.
+                        repair_closers=ui_contract_v2(registry.graph)
+                        and str(getattr(completion, "finish_reason", "") or "") == "stop",
                     )
                 except json.JSONDecodeError:
                     if bool(self.step_review.get("enabled")):
@@ -1200,6 +1244,7 @@ class DesignerToolLoopExecutor:
                             "call_id": call_id,
                             "exchange_file": exchange_path.name,
                             "exchange_path": self.store.relative(exchange_path),
+                            "review_target": _review_target_key(repair_task, active_partition),
                             "action": {},
                             "parse_error": {
                                 "code": "invalid_json",
@@ -1224,12 +1269,18 @@ class DesignerToolLoopExecutor:
                             session_dir=session_dir,
                             journal_file=journal_file,
                         )
-                    self._invalid_action(session, session_file, message="Designer returned invalid JSON.")
+                    invalid_json_message = "Designer returned invalid JSON." + _json_structure_hint(
+                        str(completion.content or "")
+                    )
+                    self._invalid_action(session, session_file, message=invalid_json_message)
                     self._record_observation(
                         session,
-                        {"tool_id": "llm", "status": "rejected", "message": "Designer returned invalid JSON."},
+                        {"tool_id": "llm", "status": "rejected", "message": invalid_json_message},
                     )
-                    _update_designer_exchange(exchange_path, {"rejection": {"code": "invalid_json"}})
+                    _update_designer_exchange(
+                        exchange_path,
+                        {"rejection": {"code": "invalid_json", "message": invalid_json_message}},
+                    )
                     _write_json_atomic(session_file, session)
                     continue
                 exchange_update: dict[str, object] = {"parsed_action": action}
@@ -1244,6 +1295,7 @@ class DesignerToolLoopExecutor:
                         "call_id": call_id,
                         "exchange_file": exchange_path.name,
                         "exchange_path": self.store.relative(exchange_path),
+                        "review_target": _review_target_key(repair_task, active_partition),
                         "action": action,
                         "created_at": utc_now_iso(),
                     }
@@ -1304,7 +1356,7 @@ class DesignerToolLoopExecutor:
                 selector = str(args.get("domain") or args.get("stack") or "").strip().lower()
                 mode = str(args.get("mode") or "").strip().lower()
                 guidance_status = _uiux_guidance_status(
-                    _guidance_observations(session, active_partition_key),
+                    _guidance_observations(session, guidance_key),
                     source_inspected=bool(source_refs),
                 )
                 required_next = _dict(guidance_status.get("required_next_action"))
@@ -1333,7 +1385,7 @@ class DesignerToolLoopExecutor:
                     )
                     _write_json_atomic(session_file, session)
                     continue
-                if _guidance_attempt_count(session, active_partition_key, mode=mode, selector=selector) >= 2:
+                if _guidance_attempt_count(session, guidance_key, mode=mode, selector=selector) >= 2:
                     self._invalid_action(
                         session,
                         session_file,
@@ -1386,7 +1438,8 @@ class DesignerToolLoopExecutor:
                 tool_id == "design.propose_delta"
                 and registry.uiux_mode == "enforce"
                 and ui_guidance_required
-                and not _has_required_ui_guidance(session, active_partition_key)
+                and not _has_required_ui_guidance(session, guidance_key)
+                and not _feature_guidance_satisfied(registry.graph)
             ):
                 self._invalid_action(
                     session,
@@ -1645,7 +1698,7 @@ class DesignerToolLoopExecutor:
         elif tool_id == "uiux.search_guidance":
             _record_guidance_observation(
                 session,
-                partition_key=str(session.get("active_partition_key") or ""),
+                partition_key=str(session.get("active_guidance_key") or session.get("active_partition_key") or ""),
                 arguments=_dict(arguments),
                 output=_dict(output),
                 refs=evidence_refs,
@@ -1653,7 +1706,7 @@ class DesignerToolLoopExecutor:
         elif tool_id == "design.propose_delta" and _delta_contains_ui_experience(arguments):
             _compact_guidance_partition(
                 session,
-                partition_key=str(session.get("active_partition_key") or ""),
+                partition_key=str(session.get("active_guidance_key") or session.get("active_partition_key") or ""),
             )
         result = RoleToolResultV1.build(
             call_id=effective_call_id,
@@ -1880,6 +1933,148 @@ def _parse_designer_tool_action(
     raw: str,
     *,
     require_runtime_binding: bool,
+    repair_closers: bool = False,
+) -> tuple[dict[str, object], dict[str, object]]:
+    payload, normalization = _parse_designer_tool_action_text(
+        raw,
+        require_runtime_binding=require_runtime_binding,
+        repair_closers=repair_closers,
+    )
+    relocated = _relocate_misplaced_runtime_surface(payload)
+    if relocated:
+        normalization = {
+            "schema_version": "designer_output_normalization_v1",
+            "kind": normalization.get("kind") or "relocated_runtime_surface",
+            **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
+            "relocated_runtime_surface": relocated,
+        }
+    return payload, normalization
+
+
+def _relocate_misplaced_runtime_surface(payload: dict[str, object]) -> list[str]:
+    """Move runtime_surface written under experience_contract or the node back to surface_contract."""
+
+    moved: list[str] = []
+    arguments = payload.get("arguments")
+    delta = arguments.get("delta") if isinstance(arguments, dict) else None
+    operations = delta.get("operations") if isinstance(delta, dict) else None
+    for operation in operations if isinstance(operations, list) else []:
+        if not isinstance(operation, dict):
+            continue
+        holder = operation.get("node") if operation.get("op") == "add_node" else operation.get("changes")
+        contract = holder.get("surface_contract") if isinstance(holder, dict) else None
+        if not isinstance(contract, dict) or "runtime_surface" in contract:
+            continue
+        experience = contract.get("experience_contract")
+        if isinstance(experience, dict) and isinstance(experience.get("runtime_surface"), dict):
+            contract["runtime_surface"] = experience.pop("runtime_surface")
+        elif isinstance(holder.get("runtime_surface"), dict):
+            contract["runtime_surface"] = holder.pop("runtime_surface")
+        else:
+            continue
+        moved.append(str(holder.get("temp_ref") or operation.get("node_id") or "node"))
+    return moved
+
+
+def _repair_unbalanced_closers(text: str) -> str | None:
+    """Close an array the model ended with '}' and append missing closers; content is never rewritten."""
+
+    out: list[str] = []
+    stack: list[str] = []
+    in_string = escaped = changed = False
+    for char in text:
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]":
+            if not stack:
+                return None
+            expected = "}" if stack[-1] == "{" else "]"
+            if char != expected:
+                opener = "{" if char == "}" else "["
+                # Close the inner container(s) the model forgot, until this closer matches its opener.
+                while stack and stack[-1] != opener:
+                    out.append("]" if stack[-1] == "[" else "}")
+                    stack.pop()
+                    changed = True
+                if not stack:
+                    return None
+            stack.pop()
+        out.append(char)
+    if in_string:
+        return None
+    if stack:
+        changed = True
+        out.extend("}" if item == "{" else "]" for item in reversed(stack))
+    return "".join(out) if changed else None
+
+
+def _json_structure_hint(raw: str) -> str:
+    """Name the array that was closed with '}' so the next Designer call can fix its own nesting."""
+
+    stack: list[tuple[str, int]] = []
+    in_string = escaped = False
+    for index, char in enumerate(raw):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append((char, index))
+        elif char in "}]" and stack:
+            opener, opened_at = stack.pop()
+            if opener == "[" and char == "}":
+                key = re.findall(r'"([A-Za-z_]+)"\s*:\s*$', raw[max(0, opened_at - 80):opened_at])
+                name = key[-1] if key else "an array"
+                return (
+                    f" The '{name}' array was closed with '}}' instead of ']'. Close every array with ']' and "
+                    "every object with '}', and keep completion_claims and unresolved_items inside delta after operations."
+                )
+    if stack:
+        return f" The JSON ended with {len(stack)} unclosed bracket(s); output the complete action object."
+    return ""
+
+
+def _remove_redundant_closers(text: str, *, require_runtime_binding: bool, limit: int = 3) -> dict[str, object] | None:
+    """Drop stray closing brackets exactly where the JSON parser stops on them (at most `limit`)."""
+
+    candidate = text
+    for _ in range(limit + 1):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            # The parser expected a delimiter or end of input but met a closer: that closer is the stray one.
+            if error.pos >= len(candidate) or candidate[error.pos] not in "}]":
+                return None
+            candidate = candidate[: error.pos] + candidate[error.pos + 1:]
+            continue
+        if candidate is text or not isinstance(payload, dict):
+            return None
+        return payload if _designer_action_shape(payload, require_runtime_binding=require_runtime_binding) else None
+    return None
+
+
+def _parse_designer_tool_action_text(
+    raw: str,
+    *,
+    require_runtime_binding: bool,
+    repair_closers: bool = False,
 ) -> tuple[dict[str, object], dict[str, object]]:
     try:
         return parse_first_json_object(raw, expected_keys={"action", "arguments"}), {}
@@ -1904,6 +2099,27 @@ def _parse_designer_tool_action(
             candidates[canonical] = payload
             positions.setdefault(canonical, []).append(index)
         if len(candidates) != 1:
+            if repair_closers:
+                stripped = _remove_redundant_closers(text, require_runtime_binding=require_runtime_binding)
+                if stripped is not None:
+                    return stripped, {
+                        "schema_version": "designer_output_normalization_v1",
+                        "kind": "removed_redundant_closers",
+                    }
+            closed = _repair_unbalanced_closers(text) if repair_closers else None
+            if closed is not None:
+                try:
+                    payload = json.loads(closed)
+                except json.JSONDecodeError:
+                    payload = None
+                if isinstance(payload, dict) and _designer_action_shape(
+                    payload,
+                    require_runtime_binding=require_runtime_binding,
+                ):
+                    return payload, {
+                        "schema_version": "designer_output_normalization_v1",
+                        "kind": "closed_unbalanced_brackets",
+                    }
             raise original_error
         canonical, payload = next(iter(candidates.items()))
         return payload, {
@@ -2022,6 +2238,29 @@ def _guidance_partition_key(
     scenario_id = str(partition.get("scenario_id") or "")
     component_id = str(partition.get("component_id") or "")
     return f"{scenario_id}|{component_id}" if scenario_id and component_id else ""
+
+
+def _guidance_key(
+    *,
+    graph: dict[str, object],
+    requirement_model: dict[str, object],
+    partition_key: str,
+) -> str:
+    """UI contract v2 shares one guidance lane per feature so every partition designs the same screen."""
+
+    if partition_key and ui_contract_v2(graph):
+        return f"ui-feature|{_requirement_use_case_id(requirement_model)}"
+    return partition_key
+
+
+def _feature_guidance_satisfied(graph: dict[str, object]) -> bool:
+    """Under UI contract v2 one feature-level guidance pass is enough; later sessions (repairs) reuse its refs."""
+
+    return ui_contract_v2(graph) and any(
+        _strings(_dict(_dict(node.get("surface_contract")).get("experience_contract")).get("guidance_refs"))
+        for node in _dicts(graph.get("nodes"))
+        if str(node.get("surface") or "") == "ui"
+    )
 
 
 def _ui_guidance_required(
@@ -2201,17 +2440,24 @@ def _has_required_ui_guidance(session: dict[str, object], partition_key: str) ->
 
 def _delta_contains_ui_experience(arguments: object) -> bool:
     delta = _dict(_dict(arguments).get("delta"))
+    ui_nodes = [
+        _dict(operation.get("node"))
+        for operation in _dicts(delta.get("operations"))
+        if str(operation.get("op") or "") == "add_node" and str(_dict(operation.get("node")).get("surface") or "") == "ui"
+    ]
+    if ui_nodes and all(is_composition_wiring(node) for node in ui_nodes):
+        return True
     for operation in _dicts(delta.get("operations")):
         if str(operation.get("op") or "") == "add_node":
             node = _dict(operation.get("node"))
             if str(node.get("surface") or "") != "ui":
                 continue
             experience = _dict(_dict(node.get("surface_contract")).get("experience_contract"))
-            if experience.get("schema_version") == UIUX_EXPERIENCE_CONTRACT_VERSION:
+            if experience.get("schema_version") in UI_EXPERIENCE_CONTRACT_VERSIONS:
                 return True
         if str(operation.get("op") or "") == "update_node":
             experience = _dict(_dict(_dict(operation.get("changes")).get("surface_contract")).get("experience_contract"))
-            if experience.get("schema_version") == UIUX_EXPERIENCE_CONTRACT_VERSION:
+            if experience.get("schema_version") in UI_EXPERIENCE_CONTRACT_VERSIONS:
                 return True
     return False
 
@@ -2220,6 +2466,7 @@ def _active_requirement_slice(
     *,
     requirement_model: dict[str, object],
     active_partition: dict[str, object] | None,
+    include_outcome_context: bool = False,
 ) -> dict[str, object]:
     if active_partition is None:
         return {}
@@ -2254,6 +2501,34 @@ def _active_requirement_slice(
         if str(item.get("id") or "") in allowed_refs:
             requirement_items.append(item)
 
+    # A UI partition presents the scenario's final outcome even when the Requirement allocated that outcome only to
+    # backend surfaces (or to no surface): expose those ids as presentation-only context, never as behavior scope.
+    outcome_context: list[dict[str, object]] = []
+    if include_outcome_context and any(str(work.get("surface") or "") == "ui" for work in surface_work):
+        allocated = {
+            ref
+            for item in _scenarios(requirement_model)
+            for contract in _dict(item.get("surfaces")).values()
+            for ref in _strings(_dict(contract).get("requirement_refs"))
+        }
+        outcome_ids = [
+            *(ref for ref in _strings(scenario.get("acceptance_refs")) if ref not in allowed_refs),
+            # Postconditions describe the main success end state; branch scenarios end in their own flow outcome.
+            *(
+                str(item.get("id"))
+                for item in _dicts(requirement_model.get("postconditions"))
+                if str(scenario.get("kind") or "") == "main"
+                and str(item.get("id") or "")
+                and str(item.get("id")) not in allocated
+            ),
+        ]
+        by_id = {str(item.get("id") or ""): item for collection in collections for item in _dicts(collection)}
+        outcome_context = [
+            {"id": ref, "text": str(by_id[ref].get("text") or by_id[ref].get("action") or "")}
+            for ref in dict.fromkeys(outcome_ids)
+            if ref in by_id
+        ]
+
     return {
         "use_case": requirement_model.get("use_case"),
         "scenario": {
@@ -2271,6 +2546,7 @@ def _active_requirement_slice(
         ],
         "allowed_requirement_refs": allowed_refs,
         "requirements": requirement_items,
+        **({"outcome_context": outcome_context} if outcome_context else {}),
     }
 
 
@@ -2290,6 +2566,23 @@ def _requirement_context_index(requirement_model: dict[str, object]) -> dict[str
             for scenario in _scenarios(requirement_model)
         ],
     }
+
+
+def _review_target_key(
+    repair_task: dict[str, object] | None, active_partition: dict[str, object] | None
+) -> str:
+    if repair_task is not None:
+        return f"repair:{repair_task.get('target_id') or ''}"
+    partition = _dict(_dict(active_partition).get("partition"))
+    return f"partition:{partition.get('scenario_id') or ''}@{partition.get('component_id') or ''}"
+
+
+def _scoped_review_feedback(session: dict[str, object], *, current_target: str) -> str:
+    """An operator note only applies to the target it reviewed; older notes have no target and still apply."""
+    target = str(session.get("last_review_target") or "")
+    if target and target != current_target:
+        return ""
+    return str(session.get("last_review_feedback") or "")
 
 
 def _prompt_review_feedback(
@@ -2347,7 +2640,7 @@ def _designer_prompt(
             },
         }
         if repair_task is not None
-        else graph
+        else _graph_without_ui_context(graph)
     )
     scenario_matches = _dicts(landscape.get("scenario_matches"))
     if repair_scenario_id:
@@ -2357,6 +2650,7 @@ def _designer_prompt(
     active_requirement_slice = _active_requirement_slice(
         requirement_model=requirement_model,
         active_partition=active_partition,
+        include_outcome_context=ui_contract_v2(graph),
     )
     prompt_review_feedback = _prompt_review_feedback(
         last_review_feedback,
@@ -2406,12 +2700,50 @@ def _designer_prompt(
         repair_task=repair_task,
         graph=graph,
     )
+    guidance_reused = _feature_guidance_satisfied(graph)
     uiux_status = (
         _uiux_guidance_status(active_guidance or [], source_inspected=source_inspected)
-        if uiux_mode == "enforce" and ui_guidance_required
+        if uiux_mode == "enforce" and ui_guidance_required and not guidance_reused
         else {}
     )
     payload["uiux_guidance_status"] = uiux_status
+    ui_v2_work = ui_guidance_required and ui_contract_v2(graph)
+    if ui_v2_work:
+        payload["ui_runtime_context"] = _ui_runtime_prompt_context(
+            graph,
+            requirement_model=requirement_model,
+            allowed_refs=_strings(_dict(active_requirement_slice).get("allowed_requirement_refs")),
+        )
+        payload["feature_ux_decisions"] = _feature_ux_decisions(graph)
+    experience_version = UI_EXPERIENCE_CONTRACT_V2 if ui_contract_v2(graph) else UIUX_EXPERIENCE_CONTRACT_VERSION
+    runtime_surface_instruction = (
+        f"UI contract v2: every UI node's surface_contract.runtime_surface ({RUNTIME_SURFACE_BINDING_VERSION}) must "
+        "prove how a user reaches the screen. composition_path starts at ui_runtime_context.entrypoint and ends at the "
+        "node's runtime_binding.target, each item written as <repo path>#<symbol>; middle hops are AS-IS components "
+        "from ui_runtime_context.composition_chain or runtime targets of other UI nodes, and runtime_binding.attachment "
+        "owner_path#owner_symbol must equal the hop just before the target. Nodes on the same screen share one screen_id. "
+        "required_inputs lists every runtime input the screen needs to become usable (records to show or select, "
+        "session/auth, data loaded from another use case), including every required prop of an AS-IS component you "
+        "modify or reuse. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
+        "new_boundary when this Design adds the provider (binding is that node's VDN-* id); external_use_case when the "
+        "approved Requirement says the data comes from another use case, citing the precondition or flow-step id from "
+        "ui_runtime_context.dependency_refs whose text states that dependency, and then runnable_status=externally_blocked; "
+        "never declare such data as provided by this screen. An input guaranteed by a precondition (for example an "
+        "authenticated session) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
+        "has its provider; demo_fixture only with an approved DEC-* decision and "
+        "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
+        "that supplies the input. delta_scaffold only lists the missing surface nodes. "
+        "active_partition.optional_wiring_operations holds ready-made composition_wiring modify nodes for each AS-IS hop on "
+        "the screen mount path: when a new input must flow down to the screen, declare it only on the screen node with "
+        "provided_by set to the topmost hop that receives it, and add the wiring operation of every hop it passes through, "
+        "changing only its <input names> placeholders. Otherwise, when an AS-IS hop on "
+        "composition_path does not already pass an input (see composition_chain.passes_props), add in the same delta a "
+        "modify node whose runtime_binding.target is that hop (the app root uses runtime_kind=entrypoint with relation owned_by). An "
+        "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
+        "Requirement does not state. "
+        if ui_v2_work
+        else ""
+    )
     uiux_status_instruction = (
         "CURRENT UI/UX TOOL STATE (authoritative; apply before all general instructions):\n"
         f"{json.dumps(uiux_status, ensure_ascii=True, separators=(',', ':'))}\n"
@@ -2422,17 +2754,43 @@ def _designer_prompt(
         else ""
     )
     uiux_instruction = (
-        "For this active UI work item, first inspect source, then call uiux.search_guidance twice: "
-        "one mode=domain, domain=ux query and one mode=stack, stack=react query. Each query must express one dominant "
-        "intent in 2-5 meaningful generic ASCII terms without repository paths, symbols, or project-private text. "
-        "Retry the same selector at most once, and only when its previous result is empty or off-topic; otherwise advance "
-        f"to the next mode shown in CURRENT UI/UX TOOL STATE. Every UI node must include {UIUX_EXPERIENCE_CONTRACT_VERSION} under "
+        (
+            "Feature-level UI/UX guidance already exists in this graph: do not call uiux.search_guidance again; "
+            "reuse the guidance_refs already cited by UI nodes. "
+            if guidance_reused
+            else "For this active UI work item, first inspect source, then call uiux.search_guidance twice: "
+            "one mode=domain, domain=ux query and one mode=stack, stack=react query. Each query must express one dominant "
+            "intent in 2-5 meaningful generic ASCII terms without repository paths, symbols, or project-private text. "
+            "Retry the same selector at most once, and only when its previous result is empty or off-topic; otherwise advance "
+            "to the next mode shown in CURRENT UI/UX TOOL STATE. "
+        )
+        + f"Every UI node must include {experience_version} under "
         "surface_contract.experience_contract with component_structure, feedback[{trigger,response}], accessibility, "
         "responsive, focus_flow, and the successful uiux guidance_refs. Guidance informs UX only; Requirement and "
-        "repository source remain authoritative. When success removes the initiating control or selected row, focus_flow "
-        "must not restore focus to that removed element; move focus to the status region or the next surviving control. "
-        "If the active scenario itself owns a cancel/close path and the trigger still exists, return focus to that trigger. "
-        "Never add cancel/close behavior from another scenario; keep each alternative or exception in its own projection. "
+        "repository source remain authoritative. "
+        + (
+            "Design the whole screen, not only this partition: reuse feature_ux_decisions for the same screen_id and "
+            "keep them consistent. Screen-wide fields (screen, visual_contract, component layout) may describe the full "
+            "screen, but transitions, outcomes, feedback, focus_policies and runtime_states must implement only "
+            "active_requirement_slice. active_requirement_slice.outcome_context (if present) is this scenario's final "
+            "user-observable result: show it in the final transition outcome, outcomes, feedback and "
+            "runtime_states.success/error, but do not design how it is produced (that work belongs to other surfaces) and "
+            "never add outcome_context ids to requirement_refs. Mark a runtime state owned by another scenario as {not_applicable:true,reason:"
+            "'owned by <scenario id>'} and never add another scenario's behavior (for example its cancel or success "
+            "outcome) to this node. Also fill screen{screen_id,purpose,entry_condition}; runtime_states for loading, "
+            "ready, empty, error and success, each as {presentation,trigger} or {not_applicable:true,reason}; "
+            "visual_contract with hierarchy, layout as '<region>: <content>' items, typography, color_and_tokens, "
+            "focus_appearance, responsive_rules, style_target_policy (reuse_existing only when ui_runtime_context "
+            "styles has a stylesheet, otherwise new_stylesheet) and style_target_reason; focus_policies as structured "
+            "decisions {event,source_removed,removed_element,primary_target,fallback_target,selection_strategy,"
+            "announcement{target,moves_focus}} with one deterministic priority and never targeting the removed "
+            "element; and repo_evidence_refs from ui_runtime_context evidence. "
+            if ui_contract_v2(graph)
+            else "When success removes the initiating control or selected row, focus_flow "
+            "must not restore focus to that removed element; move focus to the status region or the next surviving control. "
+            "If the active scenario itself owns a cancel/close path and the trigger still exists, return focus to that trigger. "
+        )
+        + "Never add cancel/close behavior from another scenario; keep each alternative or exception in its own projection. "
         if uiux_mode == "enforce" and ui_guidance_required
         else ""
     )
@@ -2441,8 +2799,12 @@ def _designer_prompt(
         "source for this construction step: contracts, responses, outcomes, and edges may only implement IDs listed "
         "in allowed_requirement_refs. requirement_context.scenario_index is navigation-only; never copy behavior from "
         "a sibling scenario into the active projection. A runtime target may be shared by later projections, but this "
-        "projection must declare only the active scenario's behavior. delta_scaffold is the minimum complete operation "
-        "plan, not a node-only example. When active_partition.path_insertion.required is true, preserve every supplied "
+        "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton, "
+        "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
+        "connect this projection to nodes of the same scenario already in the graph or in this delta, keeping exactly "
+        "one terminal edge last. Edges may only reference existing nodes; when the counterpart surface (for example the "
+        "API a UI calls) is not designed yet, leave that edge to its later partition instead of inventing an endpoint. "
+        "When active_partition.path_insertion.required is true, preserve every supplied "
         "remove_edge and copied re-add operation, fill the two inserted edge contracts, and keep the terminal edge last; "
         "never submit the new surface as a disconnected node. For an alternative or exception scenario, inspect "
         "surface_work.planned_reuse_candidates before inventing a new runtime target. Graph projection identity and "
@@ -2491,7 +2853,7 @@ def _designer_prompt(
     uiux_tool_instruction = (
         "uiux.search_guidance(query,mode=domain,domain=ux|icons|react) or "
         "uiux.search_guidance(query,mode=stack,stack=react); "
-        if uiux_mode == "enforce" and ui_guidance_required
+        if uiux_mode == "enforce" and ui_guidance_required and not guidance_reused
         else ""
     )
     delta_scaffold_instruction = (
@@ -2504,6 +2866,7 @@ def _designer_prompt(
         + correction
         + review_correction
         + uiux_instruction
+        + runtime_surface_instruction
         + "Investigate frozen AS-IS evidence, identify GAP, and propose TO-BE one tool action at a time. "
         "Use only the listed tools. Existing behavior must use reuse/modify/no_change with RLA evidence; "
         "new behavior uses add with an evidence_reason. Every node needs requirement_refs, a concise contract, and a "
@@ -2588,6 +2951,307 @@ def _designer_prompt(
         + "Action JSON: {\"action\":\"tool.id\",\"arguments\":{...}}\n\n"
         + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     )
+
+
+def _graph_without_ui_context(graph: dict[str, object]) -> dict[str, object]:
+    binding = _dict(graph.get("snapshot_binding"))
+    if "ui_repo_context" not in binding:
+        return graph
+    return {**graph, "snapshot_binding": {key: value for key, value in binding.items() if key != "ui_repo_context"}}
+
+
+def _ui_runtime_prompt_context(
+    graph: dict[str, object],
+    *,
+    requirement_model: dict[str, object] | None = None,
+    allowed_refs: list[str] | None = None,
+) -> dict[str, object]:
+    binding = _dict(graph.get("snapshot_binding"))
+    context = _dict(binding.get("ui_repo_context"))
+    known = set(_strings(binding.get("requirement_reference_ids")))
+    allowed = set(allowed_refs or [])
+    cited = {
+        ref
+        for node in _dicts(graph.get("nodes"))
+        for item in _dicts(_dict(_dict(node.get("surface_contract")).get("runtime_surface")).get("required_inputs"))
+        for ref in [str(item.get("binding") or ""), *_strings(item.get("requirement_refs"))]
+    }
+    model = _dict(requirement_model)
+    texts = {
+        str(item.get("id")): str(item.get("text") or item.get("action") or "")
+        for items in [
+            *(_dicts(model.get(key)) for key in ("preconditions", "decisions")),
+            *(_dicts(value) for value in _dict(model.get("flows")).values()),
+        ]
+        for item in items
+    }
+    return {
+        "entrypoint": _dict(context.get("entrypoint")).get("ref"),
+        "composition_chain": [
+            {
+                "ref": hop.get("ref"),
+                "renders": hop.get("renders"),
+                "passes_props": hop.get("passes_props"),
+                "required_props": required_props(context, str(hop.get("ref") or "")),
+                "evidence_ref": hop.get("evidence_ref"),
+            }
+            for hop in _dicts(context.get("composition_chain"))
+        ],
+        "data_clients": [item.get("ref") for item in _dicts(context.get("data_clients"))],
+        "auth": context.get("auth"),
+        "styles": context.get("styles"),
+        # Preconditions/decisions, the active slice's flow steps, and ids already cited by existing UI runtime inputs
+        # (screens reused across scenarios keep their dependency) may justify a runtime input source.
+        "dependency_refs": [
+            {"id": ref, **({"text": texts[ref]} if texts.get(ref) else {})}
+            for ref in sorted(known)
+            if ref.startswith(("PRE-", "DEC-"))
+            or (ref.startswith(("MF-", "AF-", "EF-")) and (ref in allowed or ref in cited))
+        ],
+    }
+
+
+def _feature_ux_decisions(graph: dict[str, object]) -> dict[str, object]:
+    """Screen-level UX already committed to the graph, derived on demand so resume needs no extra state."""
+
+    screens: dict[str, dict[str, object]] = {}
+    for node in _dicts(graph.get("nodes")):
+        contract = _dict(node.get("surface_contract"))
+        surface = _dict(contract.get("runtime_surface"))
+        experience = _dict(contract.get("experience_contract"))
+        if str(node.get("surface") or "") != "ui" or not surface:
+            continue
+        screen = screens.setdefault(
+            str(surface.get("screen_id") or ""),
+            {"nodes": [], "composition_paths": [], "required_inputs": []},
+        )
+        screen["nodes"].append(f"{node.get('id')} ({node.get('scenario_id')}): {node.get('name')}")
+        screen["composition_paths"].append(_strings(surface.get("composition_path")))
+        screen["required_inputs"].extend(
+            f"{item.get('name')} <- {item.get('source')}" for item in _dicts(surface.get("required_inputs"))
+        )
+        for key in ("screen", "visual_contract", "focus_policies"):
+            if experience.get(key) and key not in screen:
+                screen[key] = experience[key]
+        screen.setdefault("_experiences", []).append(experience)
+    for screen in screens.values():
+        screen["runtime_states"] = _merged_runtime_states(screen.pop("_experiences"))
+    return screens
+
+
+def _wiring_operation_templates(
+    graph: dict[str, object],
+    *,
+    landscape: dict[str, object],
+    scenario_id: str,
+    component_id: str,
+    owner_anchors: list[dict[str, object]],
+    requirement_refs: list[str],
+) -> list[dict[str, object]]:
+    """Pre-filled composition_wiring modify nodes for each AS-IS hop on the screen's mount path."""
+
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    components = _dict(context.get("components"))
+    entry = str(_dict(context.get("entrypoint")).get("ref") or "")
+    owner = owner_anchors[0] if owner_anchors else {}
+    owner_key = str(owner.get("path") or "") + "#" + str(owner.get("symbol") or "")
+    mounted = chain_path_to(context, owner_key) or ([entry] if entry else [])
+    existing_targets = set()
+    for node in _dicts(graph.get("nodes")):
+        target = _dict(_dict(node.get("runtime_binding")).get("target"))
+        existing_targets.add(str(target.get("path") or "") + "#" + str(target.get("symbol") or ""))
+    anchors = _dicts(landscape.get("anchors"))
+    templates: list[dict[str, object]] = []
+    for index, hop in enumerate(mounted):
+        if hop in existing_targets or hop not in components:
+            continue
+        path, _, symbol = hop.partition("#")
+        evidence_ref = str(_dict(components.get(hop)).get("evidence_ref") or "")
+        if index == 0:
+            anchor = next(
+                (item for item in anchors if item.get("kind") == "ui_entrypoint" and item.get("path") == path),
+                {},
+            )
+            runtime_kind, relation = "entrypoint", "owned_by"
+            owner_ref = str(anchor.get("anchor_id") or "")
+            owner_path, owner_symbol = str(anchor.get("path") or path), str(anchor.get("symbol") or "")
+        else:
+            parent = mounted[index - 1]
+            parent_path, _, parent_symbol = parent.partition("#")
+            anchor = next(
+                (item for item in anchors if item.get("path") == parent_path and item.get("symbol") == parent_symbol),
+                {},
+            )
+            runtime_kind, relation = "ui_component", "rendered_by"
+            owner_ref, owner_path, owner_symbol = str(anchor.get("anchor_id") or parent), parent_path, parent_symbol
+        inherited = [
+            {
+                "name": name,
+                "source": "existing_runtime",
+                "binding": mounted[index - 1],
+                "provided_by": mounted[index - 1],
+                "requirement_refs": [],
+                "states": [],
+            }
+            for name in (required_props(context, hop) if index > 0 else [])
+        ]
+        refs = [evidence_ref] if evidence_ref else []
+        templates.append(
+            {
+                "op": "add_node",
+                "node": {
+                    "temp_ref": f"tmp:{scenario_id}:wire:{symbol}",
+                    "semantic_key": f"{scenario_id}:{component_id}:wire:{symbol}",
+                    "name": f"{symbol} forwards runtime inputs",
+                    "kind": _kind_for_surface("ui"),
+                    "surface": "ui",
+                    "disposition": "modify",
+                    "requirement_refs": requirement_refs,
+                    "evidence_refs": refs,
+                    "evidence_reason": "",
+                    "contract": f"{symbol} forwards <input names> to the next component on composition_path.",
+                    "surface_contract": {
+                        "schema_version": SURFACE_CONTRACT_VERSION,
+                        "surface": "ui",
+                        "entrypoint": hop,
+                        "states": ["forwarding"],
+                        "transitions": [
+                            {
+                                "from": "mounted",
+                                "action": "receive <input names>",
+                                "to": "forwarding",
+                                "outcome": "next component receives <input names>",
+                            }
+                        ],
+                        "validations": [],
+                        "outcomes": ["next component receives <input names>"],
+                        "runtime_surface": {
+                            "schema_version": RUNTIME_SURFACE_BINDING_VERSION,
+                            "role": "composition_wiring",
+                            "screen_id": f"{scenario_id.casefold()}-wiring",
+                            "entrypoint": entry,
+                            "composition_path": mounted[: index + 1],
+                            "required_inputs": inherited,
+                            "runnable_status": "bound",
+                            "evidence_refs": refs,
+                        },
+                    },
+                    "runtime_binding": {
+                        "schema_version": RUNTIME_BINDING_VERSION,
+                        "runtime_kind": runtime_kind,
+                        "target": {"component_id": component_id, "path": path, "symbol": symbol},
+                        "attachment": {
+                            "relation": relation,
+                            "owner_ref": owner_ref,
+                            "owner_path": owner_path,
+                            "owner_symbol": owner_symbol,
+                        },
+                        "evidence_refs": [ref for ref in (evidence_ref, owner_ref) if ref.startswith(("repo:", "RLA-"))],
+                    },
+                },
+            }
+        )
+    return templates
+
+
+def _runtime_surface_scaffold(
+    graph: dict[str, object],
+    *,
+    owner_anchors: list[dict[str, object]],
+) -> dict[str, object]:
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    entry = str(_dict(context.get("entrypoint")).get("ref") or "<entrypoint path>#<symbol>")
+    owner = owner_anchors[0] if owner_anchors else {}
+    mounted = chain_path_to(context, f"{owner.get('path') or ''}#{owner.get('symbol') or ''}") or [entry]
+    return {
+        "schema_version": RUNTIME_SURFACE_BINDING_VERSION,
+        "screen_id": "<stable screen id shared by every node on this screen>",
+        "entrypoint": entry,
+        "composition_path": [*mounted, "<runtime_binding.target path>#<symbol>"],
+        "required_inputs": [
+            {
+                "name": "<input the screen needs at runtime; remove this item when none>",
+                "source": "<existing_runtime|external_use_case|new_boundary|demo_fixture>",
+                "binding": "<provider path#symbol | VDN-* | PRE-*/MF-*/AF-*/EF-* from dependency_refs | DEC-*>",
+                "provided_by": "<hop on composition_path that supplies it>",
+                "requirement_refs": ["<ids from ui_runtime_context.dependency_refs when applicable>"],
+                "states": ["loading", "ready", "empty", "error"],
+            }
+        ],
+        "runnable_status": "<bound|externally_blocked|fixture_required>",
+        "evidence_refs": [
+            str(hop.get("evidence_ref"))
+            for hop in _dicts(context.get("composition_chain"))
+            if hop.get("ref") in mounted and hop.get("evidence_ref")
+        ],
+    }
+
+
+def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_label: str = "") -> dict[str, object]:
+    """Holistic UX groups of ui_experience_contract_v2; placeholders for the model, concrete values for fake mode."""
+
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    has_stylesheet = bool(_strings(_dict(context.get("styles")).get("stylesheet_files")))
+    if not fake_label:
+        return {
+            "screen": {
+                "screen_id": screen_id,
+                "purpose": "<user goal on this screen>",
+                "entry_condition": "<how the user reaches this screen>",
+            },
+            "runtime_states": {
+                state: {"presentation": f"<what the user sees while {state}>", "trigger": "<what causes it>"}
+                for state in ("loading", "ready", "empty", "error", "success")
+            },
+            "visual_contract": {
+                "hierarchy": ["<primary to secondary content order>"],
+                "layout": ["<region>: <content>"],
+                "typography": ["<heading/body/label decisions>"],
+                "color_and_tokens": ["<semantic color/token decisions>"],
+                "focus_appearance": ["<visible focus indicator>"],
+                "responsive_rules": ["<small viewport behavior>"],
+                "style_target_policy": "<reuse_existing|new_stylesheet>",
+                "style_target_reason": "<why, based on ui_runtime_context styles>",
+            },
+            "focus_policies": [
+                {
+                    "event": "<event that moves focus, or remove this item when none>",
+                    "source_removed": False,
+                    "removed_element": "<required when source_removed is true>",
+                    "primary_target": "<element that receives focus>",
+                    "fallback_target": "<element when primary is unavailable>",
+                    "selection_strategy": "<deterministic rule choosing the target>",
+                    "announcement": {"target": "<status/alert region>", "moves_focus": False},
+                }
+            ],
+            "repo_evidence_refs": _strings(context.get("evidence_refs")),
+        }
+    return {
+        "screen": {
+            "screen_id": screen_id,
+            "purpose": f"Complete {fake_label} from the application shell.",
+            "entry_condition": "User opens the application.",
+        },
+        "runtime_states": {
+            "loading": {"presentation": "Show a busy indicator in the content region.", "trigger": "Data request pending."},
+            "ready": {"presentation": "Show the interactive content.", "trigger": "Data available."},
+            "empty": {"not_applicable": True, "reason": "The fake scenario has no list data."},
+            "error": {"presentation": "Show an actionable alert.", "trigger": "Request failed."},
+            "success": {"presentation": "Announce the outcome in the status region.", "trigger": "Action completed."},
+        },
+        "visual_contract": {
+            "hierarchy": ["Heading, then primary content, then status."],
+            "layout": ["header: screen title", "main: primary content", "footer: status region"],
+            "typography": ["One h1 heading; body text for content."],
+            "color_and_tokens": ["Semantic error and success colors."],
+            "focus_appearance": ["Visible outline on focused controls."],
+            "responsive_rules": ["Stack regions vertically below 600px."],
+            "style_target_policy": "reuse_existing" if has_stylesheet else "new_stylesheet",
+            "style_target_reason": "Follow the frozen web style convention.",
+        },
+        "focus_policies": [],
+        "repo_evidence_refs": _strings(context.get("evidence_refs")),
+    }
 
 
 def _surface_contract_scaffold(surface: str, *, uiux_mode: str = "off") -> dict[str, object]:
@@ -2810,6 +3474,67 @@ def _fake_runtime_binding(
         },
         "evidence_refs": list(dict.fromkeys([*source_refs, *([str(anchor.get("anchor_id"))] if anchor else [])])),
     }
+
+
+def _fake_runtime_surface(
+    *,
+    graph: dict[str, object],
+    landscape: dict[str, object],
+    binding: dict[str, object],
+    scenario_id: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    """Mount the fake UI target on the AS-IS composition chain and re-point its owner to the parent hop."""
+
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    entry = str(_dict(context.get("entrypoint")).get("ref") or "")
+    target = _dict(binding.get("target"))
+    target_ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+    path = chain_path_to(context, target_ref)
+    if len(path) < 2:
+        root_children = next(
+            (_strings(hop.get("renders")) for hop in _dicts(context.get("composition_chain")) if hop.get("ref") == entry),
+            [],
+        )
+        path = [*([entry, root_children[0]] if root_children else [entry]), target_ref]
+    owner_path, _, owner_symbol = path[-2].partition("#")
+    owner_anchor = next(
+        (
+            item
+            for item in _dicts(landscape.get("anchors"))
+            if item.get("path") == owner_path and item.get("symbol") == owner_symbol
+        ),
+        {},
+    )
+    updated = {
+        **binding,
+        "attachment": {
+            **_dict(binding.get("attachment")),
+            "owner_ref": str(owner_anchor.get("anchor_id") or _dict(binding.get("attachment")).get("owner_ref") or ""),
+            "owner_path": owner_path,
+            "owner_symbol": owner_symbol,
+        },
+    }
+    inputs = [
+        {
+            "name": name,
+            "source": "existing_runtime",
+            "binding": path[-2],
+            "provided_by": path[-2],
+            "requirement_refs": [],
+            "states": ["ready"],
+        }
+        for name in required_props(context, target_ref)
+    ]
+    surface = {
+        "schema_version": RUNTIME_SURFACE_BINDING_VERSION,
+        "screen_id": f"screen-{scenario_id.casefold()}",
+        "entrypoint": entry,
+        "composition_path": path,
+        "required_inputs": inputs,
+        "runnable_status": "bound",
+        "evidence_refs": _strings(context.get("evidence_refs")),
+    }
+    return surface, updated
 
 
 def _fake_boundary_contract(
@@ -3200,6 +3925,31 @@ def _active_partition(
             }
             for item in surface_work
         ]
+        wiring_templates: list[dict[str, object]] = []
+        if ui_contract_v2(graph):
+            for scaffold, item in zip(node_scaffolds, surface_work):
+                if item["surface"] != "ui":
+                    continue
+                wiring_templates.extend(
+                    _wiring_operation_templates(
+                        graph,
+                        landscape=landscape,
+                        scenario_id=scenario_id,
+                        component_id=component_id,
+                        owner_anchors=_dicts(item.get("composition_owner_candidates")),
+                        requirement_refs=_strings(item.get("requirement_refs")),
+                    )
+                )
+                contract = scaffold["node"]["surface_contract"]
+                contract["runtime_surface"] = _runtime_surface_scaffold(
+                    graph,
+                    owner_anchors=_dicts(item.get("composition_owner_candidates")),
+                )
+                if isinstance(contract.get("experience_contract"), dict):
+                    contract["experience_contract"]["schema_version"] = UI_EXPERIENCE_CONTRACT_V2
+                    contract["experience_contract"].update(
+                        _experience_v2_fields(graph, screen_id=str(contract["runtime_surface"]["screen_id"]))
+                    )
         branch_parent = _branch_parent_scaffold(
             scenario=scenario,
             requirement_model=requirement_model,
@@ -3236,6 +3986,7 @@ def _active_partition(
                 "completion_claims": [{"scenario_id": scenario_id, "surfaces": grouped_surfaces}],
                 "unresolved_items": [],
             },
+            **({"optional_wiring_operations": wiring_templates} if wiring_templates else {}),
         }
     return None
 
@@ -3549,7 +4300,9 @@ def _active_repair_task(
         "instruction": (
             "Repair every listed finding for this exact target. Read related components when needed, but mutate only write_scope. "
             "Do not update read_only_nodes. Preserve unrelated partitions. "
-            "Use remove_edge plus ordered add_edge operations when interaction order must change."
+            "Use remove_edge plus ordered add_edge operations when interaction order must change. "
+            "A returns edge's boundary_contract.input_mapping repeats its paired calls/reads/writes edge exactly "
+            "(consumer field -> provider field); only response_mapping and error_mapping flow provider -> consumer."
         ),
     }
 
@@ -3586,6 +4339,9 @@ def _repair_delta_scaffold(
             replacement["boundary_contract"] = _boundary_contract_repair_scaffold(
                 edge=edge,
                 provider=nodes_by_id.get(provider_id, {}),
+                paired_input_mapping=_dicts(
+                    _dict(finding.get("contract_diagnostics")).get("paired_input_mapping")
+                ),
             )
             removals.append({"op": "remove_edge", "edge_id": edge_id})
             additions.append({"op": "add_edge", "edge": replacement})
@@ -3703,7 +4459,10 @@ def _is_exact_deterministic_repair_delta(
 
 
 def _boundary_contract_repair_scaffold(
-    *, edge: dict[str, object], provider: dict[str, object]
+    *,
+    edge: dict[str, object],
+    provider: dict[str, object],
+    paired_input_mapping: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     current = _dict(edge.get("boundary_contract"))
     surface = _dict(provider.get("surface_contract"))
@@ -3712,7 +4471,9 @@ def _boundary_contract_repair_scaffold(
             "schema_version": BOUNDARY_CONTRACT_VERSION,
             "consumer_operation": str(current.get("consumer_operation") or edge.get("label") or "<specific caller operation>"),
             "provider_operation": str(current.get("provider_operation") or "<specific provider operation>"),
-            "input_mapping": _dicts(current.get("input_mapping")) or [{"from": "<consumer field>", "to": "<provider field>", "required": True}],
+            "input_mapping": paired_input_mapping
+            or _dicts(current.get("input_mapping"))
+            or [{"from": "<consumer field>", "to": "<provider field>", "required": True}],
             "auth_mapping": _dicts(current.get("auth_mapping")),
             "response_mapping": _dicts(current.get("response_mapping")) or [{"from": "<provider success>", "to": "<consumer outcome>", "required": True}],
             "error_mapping": _dicts(current.get("error_mapping")),
@@ -3733,9 +4494,8 @@ def _boundary_contract_repair_scaffold(
         "schema_version": BOUNDARY_CONTRACT_VERSION,
         "consumer_operation": str(current.get("consumer_operation") or edge.get("label") or "consume API outcome"),
         "provider_operation": f"{str(surface.get('method') or '').upper()} {str(surface.get('path') or '')}".strip(),
-        "input_mapping": [
-            current_inputs.get(name, {"from": name, "to": name, "required": True}) for name in fields
-        ],
+        "input_mapping": paired_input_mapping
+        or [current_inputs.get(name, {"from": name, "to": name, "required": True}) for name in fields],
         "auth_mapping": _dicts(current.get("auth_mapping"))
         or ([{"from": authorization, "to": authorization, "required": True}] if auth_required else []),
         "response_mapping": _dicts(current.get("response_mapping"))

@@ -10,10 +10,14 @@ from ..agents.designer import (
     DESIGN_BUNDLE_STATE_KEY,
     DESIGNER_CONTRACT_STATE_KEY,
     GRAPH_VERSION_V1,
+    GRAPH_VERSION_V2,
     SUPPORTED_GRAPH_VERSIONS,
+    UI_CONTRACT_STATE_KEY,
+    UI_EXPERIENCE_CONTRACT_V2,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
+    resolve_ui_contract_pin,
     DesignerExecutionError,
     DesignerExecutionResult,
     DesignerToolLoopExecutor,
@@ -22,8 +26,10 @@ from ..agents.designer import (
     design_bundle_version_for,
     projection_manifest,
     render_design_projections,
+    render_ui_feature_experience,
     validate_vertical_design_graph,
 )
+from ..agents.designer.ui_context import build_ui_repo_context
 from ..agents.validator import (
     DesignFinding,
     DesignValidationResult,
@@ -88,6 +94,8 @@ _PHASE2_ARTIFACT_KEYS = frozenset(
         "vertical_trace_validation",
         "design_projection_manifest",
         "design_finding_ledger",
+        "ui_feature_experience",
+        "ui_feature_experience_markdown",
     }
 )
 
@@ -497,6 +505,14 @@ class PhaseTwoWorkflow:
                 f"Unsupported configured vertical trace mode: {self.settings.vertical_trace_mode}",
                 run_id=run_id,
             )
+        ui_contract_version = resolve_ui_contract_pin(
+            ui_contract_version=str(
+                getattr(self.settings, "designer_ui_contract_version", "ui_experience_contract_v1")
+            ),
+            graph_v2=contract_version == GRAPH_VERSION_V2,
+            uiux_mode=self.settings.uiux_skill_mode,
+            run_id=run_id,
+        )
 
         previous_execution = _dict_value(state.get("designer_execution"))
         versions = _design_versions(state)
@@ -526,6 +542,7 @@ class PhaseTwoWorkflow:
                 UIUX_CONTRACT_STATE_KEY: (
                     UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
                 ),
+                UI_CONTRACT_STATE_KEY: ui_contract_version,
                 VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
                 VERTICAL_TRACE_MODE_STATE_KEY: self.settings.vertical_trace_mode,
             }
@@ -574,6 +591,12 @@ class PhaseTwoWorkflow:
                 "Run requires UI/UX guidance but has no supported pinned UI/UX contract.",
                 run_id=run_id,
             )
+        resolve_ui_contract_pin(
+            ui_contract_version=str(state.get(UI_CONTRACT_STATE_KEY) or "ui_experience_contract_v1"),
+            graph_v2=design_contract_version == GRAPH_VERSION_V2,
+            uiux_mode=uiux_mode,
+            run_id=run_id,
+        )
         design_bundle_version = design_bundle_version_for(design_contract_version)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         landscape = self.repo_discovery.run(
@@ -957,6 +980,21 @@ class PhaseTwoWorkflow:
                 "design_component_view": self.store.relative(component_path),
                 "design_surface_view": self.store.relative(surface_path),
             }
+            ui_feature = render_ui_feature_experience(graph)
+            if ui_feature is not None:
+                ui_feature_json = self.store.write_json_artifact(
+                    run_id,
+                    f"ui_feature_experience_v{version}.json",
+                    ui_feature["json"],
+                )
+                ui_feature_markdown = self.store.artifact_path(run_id, f"ui_feature_experience_v{version}.md")
+                ui_feature_markdown.write_text(str(ui_feature["markdown"]), encoding="utf-8", newline="\n")
+                vertical_paths.update(
+                    {
+                        "ui_feature_experience": self.store.relative(ui_feature_json),
+                        "ui_feature_experience_markdown": self.store.relative(ui_feature_markdown),
+                    }
+                )
             if trace_graph is not None and trace_validation is not None:
                 trace_graph_path = self.store.write_json_artifact(
                     run_id,
@@ -1129,6 +1167,11 @@ class PhaseTwoWorkflow:
                     "vertical_design_graph": design_paths["vertical_design_graph"],
                     "projection_manifest": design_paths["design_projection_manifest"],
                     "design_bundle_contract_version": design_bundle_version,
+                    **(
+                        {"ui_feature_experience": design_paths["ui_feature_experience_markdown"]}
+                        if "ui_feature_experience_markdown" in design_paths
+                        else {}
+                    ),
                     **(
                         {
                             "vertical_trace_graph": design_paths["vertical_trace_graph"],
@@ -1432,7 +1475,29 @@ def _vertical_snapshot_binding(
     ).hexdigest()
     profile = _dict_value(state.get("profile_snapshot"))
     artifacts = _string_dict(state.get("latest_artifacts"))
+    # Only v2 runs carry these keys so historical graphs keep matching their frozen binding.
+    ui_contract: dict[str, object] = {}
+    if str(state.get(UI_CONTRACT_STATE_KEY) or "") == UI_EXPERIENCE_CONTRACT_V2:
+        ui_contract = {
+            "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
+            "ui_repo_context": build_ui_repo_context(
+                target_path=Path(str(getattr(workspace, "worktree_path", ""))),
+                landscape=landscape,
+                project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
+            ),
+            "requirement_reference_ids": sorted(
+                str(item.get("id"))
+                for value in [
+                    *requirement_payload.values(),
+                    *_dict_value(requirement_payload.get("flows")).values(),
+                ]
+                if isinstance(value, list)
+                for item in value
+                if isinstance(item, dict) and str(item.get("id") or "")
+            ),
+        }
     return {
+        **ui_contract,
         "requirement_contract_version": approved.contract_version,
         "requirement_revision": approved.canonical_model.revision,
         "requirement_artifact_ref": approved.approved_artifacts.get("requirement_model"),

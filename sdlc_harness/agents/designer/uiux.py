@@ -15,6 +15,10 @@ from ...core.errors import HarnessError
 
 UIUX_CONTRACT_VERSION = "uiux_pro_max_search_v1"
 UIUX_EXPERIENCE_CONTRACT_VERSION = "ui_experience_contract_v1"
+UI_EXPERIENCE_CONTRACT_V2 = "ui_experience_contract_v2"
+UI_EXPERIENCE_CONTRACT_VERSIONS = frozenset({UIUX_EXPERIENCE_CONTRACT_VERSION, UI_EXPERIENCE_CONTRACT_V2})
+UI_CONTRACT_STATE_KEY = "designer_ui_contract_version"
+RUNTIME_SURFACE_BINDING_VERSION = "runtime_surface_binding_v1"
 UIUX_MODE_STATE_KEY = "designer_uiux_mode"
 UIUX_CONTRACT_STATE_KEY = "designer_uiux_contract_version"
 UIUX_MODES = frozenset({"off", "enforce"})
@@ -200,6 +204,30 @@ def _tree_fingerprint(paths: list[Path]) -> str:
         digest.update(path.name.encode("utf-8"))
         digest.update(path.read_bytes())
     return "sha256:" + digest.hexdigest()
+
+
+def resolve_ui_contract_pin(
+    *,
+    ui_contract_version: str,
+    graph_v2: bool,
+    uiux_mode: str,
+    run_id: str,
+) -> str:
+    """Fail closed when a run asks for UI contract v2 without the graph/guidance it depends on."""
+
+    if ui_contract_version not in UI_EXPERIENCE_CONTRACT_VERSIONS:
+        raise HarnessError(
+            "designer_ui_contract_invalid",
+            f"Unsupported configured UI contract: {ui_contract_version}",
+            run_id=run_id,
+        )
+    if ui_contract_version == UI_EXPERIENCE_CONTRACT_V2 and (not graph_v2 or uiux_mode != "enforce"):
+        raise HarnessError(
+            "designer_ui_contract_invalid",
+            "ui_experience_contract_v2 requires vertical_design_graph_v2 and UI/UX enforce mode.",
+            run_id=run_id,
+        )
+    return ui_contract_version
 
 
 def guidance_evidence_ref(output: dict[str, object]) -> str:

@@ -421,6 +421,14 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 options=("off", "enforce"),
             ),
             _field(
+                "SDLC_DESIGNER_UI_CONTRACT_VERSION",
+                "UI contract version",
+                "enum",
+                "ui_experience_contract_v1",
+                "v2 bắt buộc runtime surface binding (entrypoint, composition path, required inputs); cần Graph V2 và UI/UX enforce.",
+                options=("ui_experience_contract_v1", "ui_experience_contract_v2"),
+            ),
+            _field(
                 "SDLC_UIUX_SKILL_ROOT",
                 "UI/UX skill root",
                 "path",

@@ -37,14 +37,22 @@ from .plantuml import (
     extract_class_sequence_diagrams,
     parse_design_model,
 )
-from .projections import build_deterministic_trace, projection_manifest, render_design_projections
+from .projections import (
+    build_deterministic_trace,
+    projection_manifest,
+    render_design_projections,
+    render_ui_feature_experience,
+)
 from .uiux import (
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_EXPERIENCE_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
     UIUX_MODES,
+    UI_CONTRACT_STATE_KEY,
+    UI_EXPERIENCE_CONTRACT_V2,
     UiUxGuidanceProvider,
+    resolve_ui_contract_pin,
 )
 
 __all__ = [
@@ -74,7 +82,10 @@ __all__ = [
     "UIUX_EXPERIENCE_CONTRACT_VERSION",
     "UIUX_MODE_STATE_KEY",
     "UIUX_MODES",
+    "UI_CONTRACT_STATE_KEY",
+    "UI_EXPERIENCE_CONTRACT_V2",
     "UiUxGuidanceProvider",
+    "resolve_ui_contract_pin",
     "ParsedDesign",
     "SequenceDiagramParser",
     "apply_designer_delta",
@@ -88,5 +99,6 @@ __all__ = [
     "parse_design_model",
     "projection_manifest",
     "render_design_projections",
+    "render_ui_feature_experience",
     "validate_vertical_design_graph",
 ]

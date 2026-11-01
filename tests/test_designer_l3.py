@@ -52,6 +52,7 @@ from sdlc_harness.agents.designer.execution import (
     _reconcile_stale_placeholder_partitions,
     _repair_target_present,
     _repair_targets,
+    _scoped_review_feedback,
     _validate_repair_delta_scope,
 )
 from sdlc_harness.agents.designer.graph import _sequence_behavior_findings, graph_digest
@@ -1019,6 +1020,124 @@ class VerticalDesignGraphTest(unittest.TestCase):
             for item in design_bundle_findings(repaired, landscape=landscape)
         }
         self.assertNotIn("runtime_operation_binding_mismatch", repaired_categories)
+
+    def test_returns_edge_must_repeat_paired_write_input_mapping(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-paired-returns", snapshot_binding=self.binding)
+        graph["partitions"] = [
+            {
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": component_id,
+                "coverage": {surface: "covered"},
+                "source_observation_refs": [f"repo:{component_id}:source"],
+            }
+            for component_id, surface in (("api", "business_rule"), ("database", "data"))
+        ]
+
+        def node(node_id: str, component_id: str, surface: str, kind: str, path: str, symbol: str) -> dict[str, object]:
+            return {
+                "id": node_id,
+                "use_case_id": "UC1",
+                "scenario_id": "SC-1",
+                "component_id": component_id,
+                "semantic_key": f"SC-1:{node_id}",
+                "name": symbol,
+                "kind": kind,
+                "surface": surface,
+                "disposition": "add",
+                "requirement_refs": ["REQ-1"],
+                "evidence_refs": [],
+                "evidence_reason": "Required behavior is new.",
+                "contract": f"{symbol} behavior.",
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION,
+                    "runtime_kind": "service" if surface == "business_rule" else "persistence_adapter",
+                    "target": {"component_id": component_id, "path": path, "symbol": symbol},
+                    "attachment": {
+                        "relation": "called_by",
+                        "owner_ref": f"RLA-{component_id}-owner",
+                        "owner_path": path,
+                        "owner_symbol": symbol,
+                    },
+                    "evidence_refs": [f"RLA-{component_id}-owner"],
+                },
+            }
+
+        graph["nodes"] = [
+            node("VDN-service", "api", "business_rule", "business_rule", "apps/api/src/heritage.ts", "deleteHeritage"),
+            node("VDN-database", "database", "data", "data_operation", "packages/db/src/heritage.ts", "deleteHeritageRecord"),
+        ]
+
+        def contract(input_mapping: list[dict[str, object]]) -> dict[str, object]:
+            return {
+                "schema_version": BOUNDARY_CONTRACT_VERSION,
+                "consumer_operation": "deleteHeritage",
+                "provider_operation": "deleteHeritageRecord",
+                "input_mapping": input_mapping,
+                "auth_mapping": [],
+                "response_mapping": [{"from": "deleted record", "to": "deletion succeeded", "required": True}],
+                "error_mapping": [],
+            }
+
+        forward = [{"from": "selectedHeritageId", "to": "id", "required": True}]
+        graph["edges"] = [
+            {
+                "id": "VDE-write",
+                "from": "VDN-service",
+                "to": "VDN-database",
+                "kind": "writes",
+                "label": "delete the selected record",
+                "scenario_id": "SC-1",
+                "order": 1,
+                "boundary_contract": contract(forward),
+            },
+            {
+                "id": "VDE-return",
+                "from": "VDN-database",
+                "to": "VDN-service",
+                "kind": "returns",
+                "label": "return the deleted record",
+                "scenario_id": "SC-1",
+                "order": 2,
+                "terminal": True,
+                "boundary_contract": contract([{"from": "deleted id", "to": "selectedHeritageId", "required": True}]),
+            },
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        landscape = {
+            "components": [
+                {"component_id": "api", "roots": ["apps/api/src"]},
+                {"component_id": "database", "roots": ["packages/db/src"]},
+            ],
+            "anchors": [],
+        }
+
+        mismatches = [
+            item
+            for item in design_bundle_findings(graph, landscape=landscape)
+            if item["category"] == "boundary_contract_mismatch"
+        ]
+        self.assertEqual([item["subject_ref"] for item in mismatches], ["VDE-return"])
+        self.assertEqual(mismatches[0]["contract_diagnostics"]["paired_edge_id"], "VDE-write")
+        repair_task = _active_repair_task(
+            repair_feedback=mismatches,
+            graph=graph,
+            completed_targets=[],
+            landscape=landscape,
+            source="inline_composition",
+        )
+        replacement = next(
+            item["edge"] for item in repair_task["delta_scaffold"]["operations"] if item["op"] == "add_edge"
+        )
+        self.assertEqual(replacement["boundary_contract"]["input_mapping"], forward)
+        self.assertEqual(replacement["kind"], "returns")
+
+        graph["edges"][1]["boundary_contract"] = contract(forward)
+        graph["artifact_digest"] = graph_digest(graph)
+        self.assertNotIn(
+            "boundary_contract_mismatch",
+            {str(item["category"]) for item in design_bundle_findings(graph, landscape=landscape)},
+        )
 
     @staticmethod
     def _api_contract() -> dict[str, object]:
@@ -2381,6 +2500,36 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(
             replacement["label"],
             "return duplicate rejection outcome to the operator notice",
+        )
+
+        paired = [{"from": "formName", "to": "name", "required": True}]
+        paired_task = _active_repair_task(
+            repair_feedback=[
+                {
+                    "code": "boundary_contract_mismatch",
+                    "subject_ref": "VDE-return",
+                    "partition": {"scenario_id": "SC-5", "component_id": "api"},
+                    "contract_diagnostics": {"paired_input_mapping": paired},
+                }
+            ],
+            graph=graph,
+            completed_targets=[],
+            source="inline_composition",
+        )
+        paired_replacement = next(
+            operation["edge"]
+            for operation in paired_task["delta_scaffold"]["operations"]
+            if operation["op"] == "add_edge"
+        )
+        self.assertEqual(paired_replacement["boundary_contract"]["input_mapping"], paired)
+
+    def test_review_feedback_only_applies_to_the_reviewed_target(self) -> None:
+        session = {"last_review_feedback": "fix SC-1 mapping", "last_review_target": "repair:SC-1@api"}
+        self.assertEqual(_scoped_review_feedback(session, current_target="repair:SC-1@api"), "fix SC-1 mapping")
+        self.assertEqual(_scoped_review_feedback(session, current_target="repair:SC-3@api"), "")
+        self.assertEqual(
+            _scoped_review_feedback({"last_review_feedback": "legacy note"}, current_target="repair:SC-3@api"),
+            "legacy note",
         )
 
     def test_duplicate_edge_feedback_lists_all_edges_in_one_rejection(self) -> None:

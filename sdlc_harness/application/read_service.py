@@ -63,6 +63,8 @@ PUBLIC_ARTIFACT_KEYS = frozenset(
         "vertical_design_graph",
         "design_component_view",
         "design_surface_view",
+        "ui_feature_experience",
+        "ui_feature_experience_markdown",
         "design_projection_manifest",
         "design_finding_ledger",
         "vertical_trace_graph",
