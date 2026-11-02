@@ -39,6 +39,16 @@ class MetadataLlmClient:
         return LlmCompletion(content=semantic_response())
 
 
+class TruncatedMetadataLlmClient(MetadataLlmClient):
+    def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+        self.calls.append(dict(kwargs))
+        return LlmCompletion(
+            content="",
+            finish_reason="length",
+            reasoning_content="reasoning consumed the response budget",
+        )
+
+
 def semantic_response(*findings: dict[str, object]) -> str:
     return json.dumps(
         {
@@ -183,10 +193,35 @@ def test_semantic_validator_uses_its_phase2_llm_profile() -> None:
     assert "Do not require a preliminary backend verification round trip" in prompt
     assert "A business rule does not imply backend placement" in prompt
     assert "a call into another application requires an explicit API/transport surface" in prompt
+    assert "has enough information to" in prompt
+    assert "Do not require a dedicated boolean when the control flow already identifies the condition" in prompt
+    assert "Do not prescribe one fixed UI -> API -> business-rule -> data chain" in prompt
+    assert "Treat approved negative constraints as behavior" in prompt
+    assert "authentication_required, authentication_source" in prompt
+    assert "Review focus and announcement behavior semantically" in prompt
     assert 'ref must be an exact Requirement ID from requirement_ids' in prompt
     assert 'never a composite claim_id such as "SC-1:MF-1"' in prompt
     assert 'ref must be an exact VDN-* or VDE-* ID' in prompt
     assert "return-to-human and separate confirmation interaction" not in prompt
+
+
+def test_semantic_validator_rejects_token_truncated_output() -> None:
+    client = TruncatedMetadataLlmClient()
+
+    try:
+        DesignValidator(client).review(
+            requirement_packet="approved requirement",
+            design_artifact="approved design",
+            class_graph={"nodes": []},
+            sequence_graph={"sequenceDiagrams": []},
+            traceability=empty_traceability(),
+            validation_trials=1,
+        )
+    except HarnessError as exc:
+        assert exc.error_code == "design_semantic_review_truncated"
+        assert "token budget" in exc.message
+    else:
+        raise AssertionError("Token-truncated semantic output was accepted.")
 
 
 def test_semantic_validator_uses_compact_canonical_source_order_and_claims() -> None:

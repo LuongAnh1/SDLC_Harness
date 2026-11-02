@@ -56,7 +56,12 @@ from sdlc_harness.agents.designer.execution import (
     _scoped_review_feedback,
     _validate_repair_delta_scope,
 )
-from sdlc_harness.agents.designer.graph import _boundary_contract_diagnostics, _sequence_behavior_findings, graph_digest
+from sdlc_harness.agents.designer.graph import (
+    _boundary_contract_diagnostics,
+    _sequence_behavior_findings,
+    _validate_surface_contract,
+    graph_digest,
+)
 from sdlc_harness.agents.designer.projections import render_design_projections
 from sdlc_harness.agents.validator import (
     VERTICAL_TRACE_GRAPH_VERSION,
@@ -82,6 +87,33 @@ class VerticalDesignGraphTest(unittest.TestCase):
             "workspace_ref": "run_workspace_v1",
             "base_sha": "abc123",
         }
+
+    def test_typed_api_access_contract_requires_authorization_decision(self) -> None:
+        contract = {
+            "schema_version": SURFACE_CONTRACT_VERSION,
+            "surface": "api",
+            "operation_id": "deleteItem",
+            "method": "DELETE",
+            "path": "/items/{id}",
+            "request_fields": [],
+            "responses": [{"status": "204", "outcome": "deleted"}],
+            "authentication": "authenticated caller",
+            "authentication_required": True,
+            "authentication_source": "external_dependency",
+            "authentication_requirement_refs": ["PRE-1"],
+            "authentication_evidence_refs": [],
+            "authorization": "no role restriction",
+        }
+
+        with self.assertRaisesRegex(HarnessError, "authorization_required must be boolean"):
+            _validate_surface_contract(contract, surface="api", node_id="VDN-api", run_id="run-test")
+
+        _validate_surface_contract(
+            {**contract, "authorization_required": False},
+            surface="api",
+            node_id="VDN-api",
+            run_id="run-test",
+        )
 
     def test_delta_is_deterministic_and_allocates_stable_ids(self) -> None:
         graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
@@ -340,6 +372,40 @@ class VerticalDesignGraphTest(unittest.TestCase):
             apply_designer_delta(graph, delta, valid_evidence_refs=set())
         self.assertEqual(caught.exception.error_code, "designer_delta_precondition_failed")
         self.assertEqual(graph["revision"], 0)
+
+    def test_existing_authentication_claim_rejects_unknown_repository_evidence(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-auth-evidence", snapshot_binding=self.binding)
+        contract = self._api_contract()
+        contract["authentication_source"] = "existing_runtime"
+        contract["authentication_evidence_refs"] = ["repo:unknown-auth#L1@sha256:missing"]
+        delta = {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": graph["artifact_digest"],
+            "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
+            "operations": [
+                {
+                    "op": "add_node",
+                    "node": {
+                        "temp_ref": "tmp:api",
+                        "semantic_key": "SC-1:api",
+                        "name": "Delete route",
+                        "kind": "api_contract",
+                        "surface": "api",
+                        "disposition": "add",
+                        "requirement_refs": ["REQ-1"],
+                        "evidence_refs": [],
+                        "evidence_reason": "The endpoint is new.",
+                        "contract": "Delete the selected record.",
+                        "surface_contract": contract,
+                    },
+                }
+            ],
+            "completion_claims": [],
+            "unresolved_items": [],
+        }
+
+        with self.assertRaisesRegex(HarnessError, "authentication references evidence outside"):
+            apply_designer_delta(graph, delta, valid_evidence_refs=set())
 
     def test_semantic_no_effect_delta_is_rejected(self) -> None:
         graph = new_vertical_design_graph(run_id="run-no-effect", snapshot_binding=self.binding)
@@ -832,7 +898,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
         self.assertTrue(diagnostics["auth_mapping_missing"])
         self.assertEqual(
             diagnostics["mismatches"],
-            ["add auth_mapping for authenticated operator"],
+            ["add auth_mapping for The upstream gateway authenticates the operator."],
         )
 
         repair_task = _active_repair_task(
@@ -856,7 +922,13 @@ class VerticalDesignGraphTest(unittest.TestCase):
         self.assertEqual(repaired_contract["input_mapping"], [{"from": "selectedId", "to": "id", "required": True}])
         self.assertEqual(
             repaired_contract["auth_mapping"],
-            [{"from": "authenticated operator", "to": "authenticated operator", "required": True}],
+            [
+                {
+                    "from": "The upstream gateway authenticates the operator.",
+                    "to": "The upstream gateway authenticates the operator.",
+                    "required": True,
+                }
+            ],
         )
         self.assertTrue(repaired_contract["response_mapping"])
         self.assertTrue(repaired_contract["error_mapping"])
@@ -1153,6 +1225,11 @@ class VerticalDesignGraphTest(unittest.TestCase):
                 {"status": "204", "outcome": "record deleted"},
                 {"status": "404", "outcome": "record not found"},
             ],
+            "authentication": "The upstream gateway authenticates the operator.",
+            "authentication_required": True,
+            "authentication_source": "external_dependency",
+            "authentication_requirement_refs": [],
+            "authentication_evidence_refs": [],
             "authorization": "authenticated operator",
             "authorization_required": True,
         }
@@ -2871,25 +2948,11 @@ class DesignerResumeTest(unittest.TestCase):
 
         self.assertEqual(third["partition"]["component_id"], "database")
         self.assertEqual(third["missing_surfaces"], ["data"])
+        self.assertNotIn("path_insertion", third)
+        self.assertNotIn("topology_obligation", third)
         self.assertEqual(
-            third["path_insertion"]["downstream_edge_ids_in_order"],
-            ["VDE-3", "VDE-4"],
-        )
-        insertion_ops = third["delta_scaffold"]["operations"][2:]
-        self.assertEqual(
-            [(item["op"], item.get("edge_id")) for item in insertion_ops[:2]],
-            [("remove_edge", "VDE-3"), ("remove_edge", "VDE-4")],
-        )
-        self.assertEqual(
-            [(item["edge"]["from"], item["edge"]["to"], item["edge"]["kind"]) for item in insertion_ops[2:4]],
-            [
-                ("VDN-rule", "tmp:SC-1:data", "writes"),
-                ("tmp:SC-1:data", "VDN-rule", "returns"),
-            ],
-        )
-        self.assertEqual(
-            [(item["edge"]["from"], item["edge"]["to"], item["edge"]["terminal"]) for item in insertion_ops[4:]],
-            [("VDN-rule", "VDN-api", False), ("VDN-api", "VDN-ui", True)],
+            [item["op"] for item in third["delta_scaffold"]["operations"]],
+            ["set_partition_coverage", "add_node"],
         )
 
     def test_reconcile_removes_only_stale_empty_routing_placeholder(self) -> None:

@@ -42,8 +42,8 @@ PHASE2_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     "design_validator": {
         "label": "Design semantic validator",
         "effort": "high",
-        "max_tokens": 32768,
-        "timeout": 300,
+        "max_tokens": 65536,
+        "timeout": 600,
     },
 }
 PHASE3_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {

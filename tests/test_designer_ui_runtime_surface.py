@@ -26,6 +26,7 @@ from sdlc_harness.agents.designer.execution import (
     _wiring_operation_templates,
     _active_partition,
     _active_requirement_slice,
+    _construction_graph_view,
     _designer_prompt,
     _guidance_key,
     _json_structure_hint,
@@ -800,6 +801,15 @@ class HolisticExperienceTest(_UiGraphFixture):
 class OutcomeContextSliceTest(unittest.TestCase):
     REQUIREMENT = {
         "use_case": {"id": "UC1"},
+        "preconditions": [
+            {
+                "id": "PRE-1",
+                "text": "The agency has logged in.",
+                "status": "approved",
+                "evidence_refs": ["SRC-1"],
+                "open_question_refs": [],
+            }
+        ],
         "postconditions": [{"id": "POST-1", "text": "The system notifies the successful deletion."}],
         "acceptance_criteria": [
             {"id": "AC-1", "text": "Confirming deletes the record and notifies success."},
@@ -849,6 +859,50 @@ class OutcomeContextSliceTest(unittest.TestCase):
     def test_branch_scenario_does_not_inherit_main_success_postcondition(self) -> None:
         # An exception that must not notify success would otherwise be told POST-1 is its final result.
         self.assertNotIn("outcome_context", self._slice("ui", v2=True, scenario_id="SC-3"))
+
+    def test_approved_preconditions_are_cross_cutting_facts_not_behavior_scope(self) -> None:
+        active_slice = self._slice("api", v2=True)
+
+        self.assertEqual(active_slice["allowed_requirement_refs"], ["MF-1", "AC-4"])
+        self.assertNotIn("prohibited_effects", active_slice)
+        self.assertEqual(
+            active_slice["cross_cutting_conditions"],
+            [
+                {
+                    "id": "PRE-1",
+                    "text": "The agency has logged in.",
+                    "status": "approved",
+                    "evidence_refs": ["SRC-1"],
+                    "open_question_refs": [],
+                }
+            ],
+        )
+
+class BackendConstructionContextTest(unittest.TestCase):
+    def test_backend_view_keeps_topology_but_strips_unrelated_ui_experience(self) -> None:
+        graph = {
+            "nodes": [
+                {
+                    "id": "VDN-ui",
+                    "surface": "ui",
+                    "surface_contract": {
+                        "surface": "ui",
+                        "entrypoint": "DeleteView",
+                        "experience_contract": {"wireframe": "large UI payload"},
+                    },
+                }
+            ],
+            "edges": [{"id": "VDE-ui", "from": "VDN-root", "to": "VDN-ui", "kind": "calls"}],
+        }
+
+        view = _construction_graph_view(
+            graph,
+            active_partition={"surface_work": [{"surface": "api"}]},
+        )
+
+        self.assertNotIn("experience_contract", view["nodes"][0]["surface_contract"])
+        self.assertEqual(view["edges"], graph["edges"])
+        self.assertIn("experience_contract", graph["nodes"][0]["surface_contract"])
 
 
 class WiringTemplateTest(_UiGraphFixture):
@@ -924,7 +978,10 @@ class WiringTemplateTest(_UiGraphFixture):
             owner_anchors=[{"path": "apps/web/src/AppShell.tsx", "symbol": "AppShell"}],
             requirement_refs=["AC-1"],
         )
-        partition = {"harness_wiring_operations": templates}
+        partition = {
+            "partition": {"scenario_id": "SC-1", "component_id": "web"},
+            "harness_wiring_operations": templates,
+        }
 
         def delta(*ops: dict[str, object]) -> dict[str, object]:
             return {"delta": {"operations": [{"op": "set_partition_coverage", "coverage": []}, *ops]}}
@@ -936,11 +993,28 @@ class WiringTemplateTest(_UiGraphFixture):
                 if op.get("op") == "add_node" and op["node"]["surface_contract"]["runtime_surface"].get("role") == "composition_wiring"
             }
 
-        view_op = {"op": "add_node", "node": self._view()}
+        delta_view = self._view()
+        delta_view.pop("id")
+        delta_view["temp_ref"] = "tmp:SC-1:ui"
+        view_op = {"op": "add_node", "node": delta_view}
         edge_op = {"op": "add_edge", "edge": {"kind": "contains", "from": "tmp:SC-1:wire:AppShell", "to": "tmp:SC-1:ui"}}
         result = _materialize_delta_wiring(arguments=delta(view_op, edge_op), active_partition=partition, graph=graph, run_id="r")
         ops = result["delta"]["operations"]
-        self.assertEqual([op["op"] for op in ops], ["set_partition_coverage", "add_node", "add_node", "add_node", "add_edge"])
+        self.assertEqual(
+            [op["op"] for op in ops],
+            ["set_partition_coverage", "add_node", "add_node", "add_node", "add_edge", "add_edge"],
+        )
+        self.assertEqual(
+            ops[-2]["edge"],
+            {
+                "from": "tmp:SC-1:wire:Root",
+                "to": "tmp:SC-1:wire:AppShell",
+                "kind": "calls",
+                "label": "Root forwards runtime inputs to AppShell",
+                "scenario_id": "SC-1",
+                "terminal": False,
+            },
+        )
         wired = wiring(result)
         self.assertEqual(sorted(wired), ["AppShell", "Root"])
         self.assertNotIn("<input names>", json.dumps(result))
@@ -995,6 +1069,61 @@ class WiringTemplateTest(_UiGraphFixture):
             _materialize_delta_wiring(arguments=delta(view_op), active_partition={}, graph=graph, run_id="r")
         self.assertEqual(raised.exception.error_code, "designer_delta_invalid")
         self.assertIn(f"{ENTRY} does not pass items", raised.exception.message)
+
+    def test_harness_reconciles_missing_edge_between_existing_wiring_hops(self) -> None:
+        wiring_nodes = self._wiring_nodes()
+        for node in wiring_nodes:
+            node["surface_contract"]["runtime_surface"]["role"] = "composition_wiring"
+        graph = self._graph([*wiring_nodes, self._view()])
+        graph["edges"] = [
+            {
+                "id": "VDE-shell-screen",
+                "from": "VDN-2",
+                "to": "VDN-3",
+                "kind": "calls",
+                "label": "AppShell mounts screen",
+                "scenario_id": "SC-1",
+                "terminal": True,
+            }
+        ]
+        arguments = {"delta": {"operations": [{"op": "set_partition_coverage", "coverage": {"api": "covered"}}]}}
+
+        result = _materialize_delta_wiring(
+            arguments=arguments,
+            active_partition={"partition": {"scenario_id": "SC-1"}},
+            graph=graph,
+            run_id="r",
+        )
+
+        self.assertEqual(
+            result["delta"]["operations"][-1]["edge"],
+            {
+                "from": "VDN-1",
+                "to": "VDN-2",
+                "kind": "calls",
+                "label": "Root forwards runtime inputs to AppShell",
+                "scenario_id": "SC-1",
+                "terminal": False,
+            },
+        )
+
+    def test_parser_canonicalizes_external_inputs_before_step_review(self) -> None:
+        view = self._view(inputs=[self._items_input(provided_by=VIEW_REF, requirement_refs=[])])
+        raw = json.dumps(
+            {
+                "action": "design.propose_delta",
+                "arguments": {"delta": {"operations": [{"op": "add_node", "node": view}]}},
+            }
+        )
+
+        action, normalization = _parse_designer_tool_action(raw, require_runtime_binding=True)
+
+        runtime_input = action["arguments"]["delta"]["operations"][0]["node"]["surface_contract"][
+            "runtime_surface"
+        ]["required_inputs"][0]
+        self.assertEqual(runtime_input["provided_by"], ENTRY)
+        self.assertEqual(runtime_input["requirement_refs"], ["PRE-1"])
+        self.assertEqual(normalization["canonicalized_external_inputs"], ["items"])
 
 
 class FeatureUxDecisionsTest(unittest.TestCase):

@@ -41,7 +41,10 @@ ROOT_CAUSES = frozenset({"none", "harness_context", "harness_contract", "model",
 REVIEW_PROMPT = """You are the root-cause analyst for one paused LLM step of the SDLC_Harness Phase 2 Designer
 (repo-aware design of a React/Fastify/Prisma use case). Do NOT modify any file. Read the exchange JSON at:
   {exchange}
-It holds the exact prompt the Harness sent, the model's raw completion, the parsed action (if any) and any rejection.
+It holds the exact prompt the Harness sent, the model's raw completion, the parsed action/output (if any), Harness
+normalization metadata and any rejection. When normalization is present, judge the canonical parsed action that the
+Harness will execute; do not reject solely because the raw completion omitted or misplaced a field the Harness owns
+and already normalized. You may still flag the normalization itself when the canonical result is wrong.
 Work fast: first compare the output with the prompt only. If the output is acceptable, reply verdict "ok" right away
 and do NOT open any other file. Read Harness source under sdlc_harness/ only after you have found a defect and need
 to locate its root cause.
@@ -158,7 +161,7 @@ def main() -> int:
         call_id = str(review["call_id"])
         exchange_path = ROOT / str(review["exchange_path"])
         exchange = json.loads(exchange_path.read_text(encoding="utf-8"))
-        action = str((exchange.get("parsed_action") or {}).get("action") or "") or "unparsed"
+        action = _exchange_action(exchange)
 
         if lead_decision:
             decision, note = lead_decision, args.note
@@ -288,6 +291,16 @@ def _previous_action(path: Path) -> str:
         return ""
     lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     return str(json.loads(lines[-1]).get("action") or "") if lines else ""
+
+
+def _exchange_action(exchange: dict[str, object]) -> str:
+    """Label parsed tool actions and structured validator outputs without conflating them with invalid JSON."""
+
+    for key in ("parsed_action", "parsed_output"):
+        parsed = exchange.get(key)
+        if isinstance(parsed, dict) and str(parsed.get("action") or ""):
+            return str(parsed["action"])
+    return "structured_output" if isinstance(exchange.get("parsed_output"), dict) else "unparsed"
 
 
 def _append(path: Path, entry: dict[str, object]) -> None:

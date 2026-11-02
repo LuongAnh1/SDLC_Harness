@@ -221,7 +221,8 @@ class RuntimeConfigTests(unittest.TestCase):
             ("delta-model", "max", 49152, 420),
         )
         self.assertEqual(settings.phase2_llm_profiles["designer_repair"].timeout_seconds, 600)
-        self.assertEqual(settings.phase2_llm_profiles["design_validator"].max_tokens, 32768)
+        self.assertEqual(settings.phase2_llm_profiles["design_validator"].max_tokens, 65536)
+        self.assertEqual(settings.phase2_llm_profiles["design_validator"].timeout_seconds, 600)
 
     def test_phase3_llm_profiles_have_long_running_defaults_and_individual_overrides(self) -> None:
         settings = load_settings(

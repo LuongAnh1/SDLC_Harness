@@ -505,6 +505,54 @@ def _validate_surface_contract(
                 f"Node {node_id} API authorization_required must be boolean.",
                 run_id=run_id,
             )
+        access_fields = {
+            "authentication",
+            "authentication_required",
+            "authentication_source",
+            "authentication_requirement_refs",
+            "authentication_evidence_refs",
+        }
+        if access_fields.intersection(value):
+            require_text("authentication")
+            if not isinstance(value.get("authentication_required"), bool):
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} API authentication_required must be boolean.",
+                    run_id=run_id,
+                )
+            if not isinstance(value.get("authorization_required"), bool):
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} API authorization_required must be boolean when using the typed access contract.",
+                    run_id=run_id,
+                )
+            source = str(value.get("authentication_source") or "")
+            if source not in {"existing_runtime", "external_dependency", "new_boundary", "none"}:
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} API authentication_source is invalid.",
+                    run_id=run_id,
+                )
+            require_strings("authentication_requirement_refs", allow_empty=True)
+            require_strings("authentication_evidence_refs", allow_empty=True)
+            if value.get("authentication_required") is True and source == "none":
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} requires authentication but declares no authentication source.",
+                    run_id=run_id,
+                )
+            if value.get("authentication_required") is False and source != "none":
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} does not require authentication but declares an authentication source.",
+                    run_id=run_id,
+                )
+            if source == "existing_runtime" and not value.get("authentication_evidence_refs"):
+                raise HarnessError(
+                    "vertical_design_graph_invalid",
+                    f"Node {node_id} existing authentication has no repository evidence.",
+                    run_id=run_id,
+                )
     elif surface == "business_rule":
         require_strings("inputs")
         require_text("decision")
@@ -1720,12 +1768,16 @@ def _boundary_contract_diagnostics(
     missing_targets = [name for name in required_targets if name not in mapped_targets]
     if missing_targets:
         mismatches.append(f"map required input targets {missing_targets}")
-    auth_required = surface.get("authorization_required") is True
+    auth_required = (
+        surface.get("authentication_required") is True
+        or surface.get("authorization_required") is True
+    )
     auth_missing = auth_required and not _dict_items(
         contract.get("auth_mapping", []), code="vertical_design_graph_invalid", run_id=""
     )
     if auth_missing:
-        mismatches.append(f"add auth_mapping for {str(surface.get('authorization') or '').strip()}")
+        access = str(surface.get("authentication") or surface.get("authorization") or "").strip()
+        mismatches.append(f"add auth_mapping for {access}")
     responses = _dict_items(surface.get("responses", []), code="vertical_design_graph_invalid", run_id="")
     error_statuses = [
         str(item.get("status") or "")
@@ -1892,6 +1944,11 @@ def _apply_operation(
             valid_evidence_refs=valid_evidence_refs,
             run_id=run_id,
         )
+        _validate_delta_access_evidence(
+            raw.get("surface_contract"),
+            valid_evidence_refs=valid_evidence_refs,
+            run_id=run_id,
+        )
         _validate_delta_guidance_refs(
             raw.get("surface_contract"),
             valid_guidance_refs=valid_guidance_refs,
@@ -1923,6 +1980,11 @@ def _apply_operation(
                 run_id=run_id,
             )
         if "surface_contract" in changes:
+            _validate_delta_access_evidence(
+                changes.get("surface_contract"),
+                valid_evidence_refs=valid_evidence_refs,
+                run_id=run_id,
+            )
             _validate_delta_guidance_refs(
                 changes.get("surface_contract"),
                 valid_guidance_refs=valid_guidance_refs,
@@ -2049,6 +2111,22 @@ def _validate_delta_runtime_evidence(
         raise HarnessError(
             "designer_delta_invalid",
             "Runtime binding references evidence outside the frozen or observed repository evidence.",
+            run_id=run_id,
+        )
+
+
+def _validate_delta_access_evidence(
+    value: object,
+    *,
+    valid_evidence_refs: set[str],
+    run_id: str,
+) -> None:
+    contract = _dict_value(value)
+    refs = _strings(contract.get("authentication_evidence_refs"))
+    if any(ref not in valid_evidence_refs for ref in refs):
+        raise HarnessError(
+            "designer_delta_invalid",
+            "API authentication references evidence outside the frozen or observed repository evidence.",
             run_id=run_id,
         )
 

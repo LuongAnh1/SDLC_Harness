@@ -327,7 +327,7 @@ Return one JSON object only:
   "findings": [
     {{
       "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|data_consistency|transaction_boundary|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authorization_contract",
+      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract",
       "severity": "blocking|warning",
       "message": "specific contradiction or ambiguity",
       "expected_change": "specific UML correction",
@@ -358,6 +358,12 @@ Blocking policy:
 - Reusing one UI owner across main and alternative scenarios is valid when each projection keeps its own behavior contract.
 - Verify that every runtime edge is executable. A direct call may stay within one application or target an importable
   shared package; a call into another application requires an explicit API/transport surface.
+- For every decision, guard, branch, and exception outcome, verify that the receiving node has enough information to
+  decide it through an input/boundary mapping, a response or error event, an already-selected control-flow path, or
+  local runtime state. Do not require a dedicated boolean when the control flow already identifies the condition.
+  Block when the Design names a decision but models no source from which the receiver can make it.
+- Do not prescribe one fixed UI -> API -> business-rule -> data chain. Fan-out, caller-local rules, dedicated error
+  handlers, and other topologies are valid when every required surface is reachable and the declared path is executable.
 - A business rule does not imply backend placement. When a scenario marks API as not applicable, do not invent an
   endpoint to connect UI to a backend service; report the placement/boundary contradiction so the Designer can keep
   local logic in the caller application or an importable shared package.
@@ -369,8 +375,15 @@ Blocking policy:
   outcome unobservable, or makes the approved interaction impossible. Visual polish and aesthetic preferences
   are warnings unless the approved requirement explicitly makes them mandatory.
 - UI/UX guidance references are design evidence, not new Requirements; never promote a recommendation into a blocker by itself.
-{_holistic_ui_review_instruction(vertical_design_graph)}- Review authorization against the approved Requirement. Use authorization_required as the typed Design decision; do not infer it from prose labels.
-- Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
+- Treat approved negative constraints as behavior: inspect transitions, states, feedback, outcomes, and edges for a
+  contradiction instead of relying on keyword-specific deterministic rules.
+- Review authentication_required, authentication_source, and authentication Requirement refs against the full approved
+  preconditions and flows. Keep actor authentication separate from role/permission authorization; do not decide either
+  from field labels alone. Review authorization_required against the approved Requirement as the typed Design decision.
+- Review focus and announcement behavior semantically. A live/status announcement may announce without receiving
+  keyboard focus; block focus movement only when the modeled target makes an approved interaction inaccessible or
+  targets an element that no longer exists.
+{_holistic_ui_review_instruction(vertical_design_graph)}- Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
 - Give every finding an exact Vertical Design node or edge ID as subject_ref.
 - An uncertainty without evidence is a warning, not a blocker.
 
@@ -1138,5 +1151,16 @@ def _complete_json(llm_client: Any, *, system: str, prompt: str) -> str:
                 fallback_max_tokens=max_tokens,
             ),
         )
-        return str(completion.content)
+        raw = str(completion.content or "").strip()
+        if str(completion.finish_reason or "").strip().lower() == "length":
+            raise HarnessError(
+                "design_semantic_review_truncated",
+                "Design semantic validator exhausted its token budget before returning complete JSON.",
+            )
+        if not raw:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                "Design semantic validator returned an empty response.",
+            )
+        return raw
     return str(llm_client.complete(system=system, prompt=prompt))

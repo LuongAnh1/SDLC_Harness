@@ -19,6 +19,7 @@ from ...storage.runtime import RuntimeStore, utc_now_iso
 from .graph import (
     BOUNDARY_CONTRACT_VERSION,
     DELTA_VERSION,
+    EXTERNAL_DEPENDENCY_REF_PREFIXES,
     GRAPH_VERSION,
     GRAPH_VERSION_V2,
     RUNTIME_BINDING_VERSION,
@@ -2047,6 +2048,15 @@ def _parse_designer_tool_action(
             **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
             "relocated_runtime_surface": relocated,
         }
+    arguments, external_inputs = _normalize_external_inputs(payload.get("arguments"))
+    if external_inputs:
+        payload["arguments"] = arguments
+        normalization = {
+            "schema_version": "designer_output_normalization_v1",
+            "kind": normalization.get("kind") or "canonicalized_external_inputs",
+            **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
+            "canonicalized_external_inputs": external_inputs,
+        }
     return payload, normalization
 
 
@@ -2600,6 +2610,8 @@ def _active_requirement_slice(
         if str(item.get("id") or "") in allowed_refs:
             requirement_items.append(item)
 
+    cross_cutting_conditions = _cross_cutting_conditions(requirement_model)
+
     # A UI partition presents the scenario's final outcome even when the Requirement allocated that outcome only to
     # backend surfaces (or to no surface): expose those ids as presentation-only context, never as behavior scope.
     outcome_context: list[dict[str, object]] = []
@@ -2645,8 +2657,21 @@ def _active_requirement_slice(
         ],
         "allowed_requirement_refs": allowed_refs,
         "requirements": requirement_items,
+        **({"cross_cutting_conditions": cross_cutting_conditions} if cross_cutting_conditions else {}),
         **({"outcome_context": outcome_context} if outcome_context else {}),
     }
+
+
+def _cross_cutting_conditions(requirement_model: dict[str, object]) -> list[dict[str, object]]:
+    return [
+        {
+            key: item.get(key)
+            for key in ("id", "text", "status", "evidence_refs", "open_question_refs")
+            if item.get(key) is not None
+        }
+        for item in _dicts(requirement_model.get("preconditions"))
+        if str(item.get("id") or "")
+    ]
 
 
 def _requirement_context_index(requirement_model: dict[str, object]) -> dict[str, object]:
@@ -2740,7 +2765,7 @@ def _designer_prompt(
             },
         }
         if repair_task is not None
-        else _graph_without_ui_context(graph)
+        else _construction_graph_view(graph, active_partition=active_partition)
     )
     scenario_matches = _dicts(landscape.get("scenario_matches"))
     if repair_scenario_id:
@@ -2839,10 +2864,12 @@ def _designer_prompt(
         "has its provider; demo_fixture only with an approved DEC-* decision and "
         "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
         "that supplies the input. When a new input must flow down to the screen, declare it only on the screen node "
-        "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta the "
-        "composition_wiring modify node of every AS-IS hop from provided_by down to the screen "
+        "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta every "
+        "composition_wiring modify node and every nonterminal calls edge between consecutive AS-IS wiring hops "
+        "from provided_by down to the screen "
         "(active_partition.harness_wiring_operations shows them, with <input names> filled from your required_inputs); "
-        "do not write those wiring nodes yourself, and you may reference their temp_ref in edges. An "
+        "do not write those wiring nodes or their internal edges yourself. Add only the semantic edge from the final "
+        "wiring hop to the screen, referencing that hop's temp_ref. An "
         "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
         "Requirement does not state. "
         if ui_v2_work
@@ -2898,7 +2925,9 @@ def _designer_prompt(
             "styles has a stylesheet, otherwise new_stylesheet) and style_target_reason; focus_policies as structured "
             "decisions {event,source_removed,removed_element,primary_target,fallback_target,selection_strategy,"
             "announcement{target,moves_focus}} with one deterministic priority and never targeting the removed "
-            "element; and repo_evidence_refs from ui_runtime_context evidence. "
+            "element. primary_target/fallback_target own keyboard focus; announcement.target owns the announced "
+            "region. A status/live-region announcement never receives keyboard focus: set announcement.moves_focus=false "
+            "and restore focus to a stable surviving primary_target; and repo_evidence_refs from ui_runtime_context evidence. "
             if ui_contract_v2(graph)
             else "When success removes the initiating control or selected row, focus_flow "
             "must not restore focus to that removed element; move focus to the status region or the next surviving control. "
@@ -2911,7 +2940,10 @@ def _designer_prompt(
     construction_instruction = (
         "Use active_partition only to build missing surfaces. active_requirement_slice is the authoritative behavior "
         "source for this construction step: contracts, responses, outcomes, and edges may only implement IDs listed "
-        "in allowed_requirement_refs. requirement_context.scenario_index is navigation-only; never copy behavior from "
+        "in allowed_requirement_refs. active_requirement_slice.cross_cutting_conditions are approved use-case facts, "
+        "not behavior: account for each applicable condition in the Design and cite its id without inventing how the "
+        "Requirement is implemented. "
+        "requirement_context.scenario_index is navigation-only; never copy behavior from "
         "a sibling scenario into the active projection. A runtime target may be shared by later projections, but this "
         "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton, "
         "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
@@ -2919,9 +2951,7 @@ def _designer_prompt(
         "one terminal edge last. Every edge endpoint must be an existing VDN-* id or a temp_ref added in this same delta; "
         "when the counterpart surface (for example the API a UI calls) is not designed yet, leave that edge to its later "
         "partition instead of inventing an endpoint. "
-        "When active_partition.path_insertion.required is true, preserve every supplied "
-        "remove_edge and copied re-add operation, fill the two inserted edge contracts, and keep the terminal edge last; "
-        "never submit the new surface as a disconnected node. For an alternative or exception scenario, inspect "
+        "For an alternative or exception scenario, inspect "
         "surface_work.planned_reuse_candidates before inventing a new runtime target. Graph projection identity and "
         "runtime target identity are separate: when the branch starts from or returns to the same interaction owner or "
         "entrypoint as a candidate (for example confirm and cancel in one dialog), add the required branch projection "
@@ -3028,7 +3058,11 @@ def _designer_prompt(
         "transitions[{from,action,to,outcome}], validations "
         "(an array of non-empty strings, never objects; it may be empty) and "
         "outcomes. API requires operation_id, method, path, request_fields[{name,type,location}], responses[{status,outcome}], "
-        "authorization and boolean authorization_required. business_rule requires inputs (an array of non-empty strings, never objects), decision and "
+        "authentication, boolean authentication_required, authentication_source "
+        "(existing_runtime|external_dependency|new_boundary|none), authentication_requirement_refs, "
+        "authentication_evidence_refs, authorization, and boolean authorization_required. Authentication proves identity/session; "
+        "authorization is only role/permission policy. Use existing_runtime only with observed repository authentication evidence. "
+        "business_rule requires inputs (an array of non-empty strings, never objects), decision and "
         "outcomes (an array of non-empty strings). data requires entity, operation, "
         "fields[{name,type}], constraints, relations and migration_intent. interaction requires steps and outcomes. "
         "Use update_node with changes.surface_contract to enrich an existing node during bundle repair. add_edge must be exactly "
@@ -3045,10 +3079,11 @@ def _designer_prompt(
         "otherwise the specific provider operation\",\"input_mapping\":[{\"from\":\"consumer field\","
         "\"to\":\"provider field\",\"required\":true}],\"auth_mapping\":[],"
         "\"response_mapping\":[{\"from\":\"provider success\",\"to\":\"consumer outcome\","
-        "\"required\":true}],\"error_mapping\":[]}}. Map every required API request field, non-public "
-        "authorization, success response, and 4xx/5xx response; 4xx/5xx statuses go only in error_mapping, and "
+        "\"required\":true}],\"error_mapping\":[]}}. Map every required API request field, required authentication "
+        "or authorization, success response, and 4xx/5xx response; 4xx/5xx statuses go only in error_mapping, and "
         "response_mapping stays empty when the API declares no success response. This full provider mapping is required on both calls "
-        "and returns edges when the provider is an API; a returns edge must not map only the response. "
+        "and returns edges when the provider is an API; a returns edge must not map only the response. On a returns edge, "
+        "from is the provider and to is the consumer, so provider_operation always names the from-node operation. "
         "When the provider is a business_rule, input_mapping must map every name in its surface_contract.inputs as a "
         "required target; declare only inputs the caller can actually supply. "
         "For service and persistence_adapter providers, when boundary_contract.provider_operation is a concrete "
@@ -3076,6 +3111,31 @@ def _graph_without_ui_context(graph: dict[str, object]) -> dict[str, object]:
     if "ui_repo_context" not in binding:
         return graph
     return {**graph, "snapshot_binding": {key: value for key, value in binding.items() if key != "ui_repo_context"}}
+
+
+def _construction_graph_view(
+    graph: dict[str, object],
+    *,
+    active_partition: dict[str, object] | None,
+) -> dict[str, object]:
+    """Keep active topology visible without sending an unrelated full UX contract to backend partitions."""
+
+    view = _graph_without_ui_context(graph)
+    surfaces = {
+        str(item.get("surface") or "")
+        for item in _dicts(_dict(active_partition).get("surface_work"))
+    }
+    if "ui" in surfaces:
+        return view
+    nodes = []
+    for node in _dicts(view.get("nodes")):
+        if str(node.get("surface") or "") != "ui":
+            nodes.append(node)
+            continue
+        surface = _dict(node.get("surface_contract"))
+        surface.pop("experience_contract", None)
+        nodes.append({**node, "surface_contract": surface})
+    return {**view, "nodes": nodes}
 
 
 def _ui_runtime_prompt_context(
@@ -3394,7 +3454,11 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
     }
 
 
-def _surface_contract_scaffold(surface: str, *, uiux_mode: str = "off") -> dict[str, object]:
+def _surface_contract_scaffold(
+    surface: str,
+    *,
+    uiux_mode: str = "off",
+) -> dict[str, object]:
     common: dict[str, object] = {
         "schema_version": SURFACE_CONTRACT_VERSION,
         "surface": surface,
@@ -3429,8 +3493,13 @@ def _surface_contract_scaffold(surface: str, *, uiux_mode: str = "off") -> dict[
             "path": "/<resource path>",
             "request_fields": [{"name": "<field>", "type": "<type>", "location": "<body|path|query>"}],
             "responses": [{"status": "<HTTP status>", "outcome": "<observable outcome>"}],
-            "authorization": "<none, authenticated, role-based, or not specified with rationale>",
-            "authorization_required": False,
+            "authentication": "<identity/session mechanism and rationale>",
+            "authentication_required": "<true|false from cross_cutting_conditions and repository evidence>",
+            "authentication_source": "<existing_runtime|external_dependency|new_boundary|none>",
+            "authentication_requirement_refs": [],
+            "authentication_evidence_refs": [],
+            "authorization": "<role/permission policy, separate from authentication>",
+            "authorization_required": "<true|false from the approved Requirement>",
         }
     if surface == "business_rule":
         return {
@@ -3545,6 +3614,11 @@ def _fake_surface_contract(
             "path": f"/{scenario_id.casefold()}",
             "request_fields": [],
             "responses": [{"status": "200", "outcome": f"{scenario_id} outcome"}],
+            "authentication": "not required by the fake requirement",
+            "authentication_required": False,
+            "authentication_source": "none",
+            "authentication_requirement_refs": [],
+            "authentication_evidence_refs": [],
             "authorization": "not specified by the approved requirement",
             "authorization_required": False,
         }
@@ -3688,7 +3762,10 @@ def _fake_boundary_contract(
     provider_operation = str(target.get("name") or target.get("contract") or "provide")
     if str(target.get("surface") or "") == "api":
         provider_operation = f"{str(provider.get('method') or '').upper()} {str(provider.get('path') or '')}".strip()
-    authorization_required = provider.get("authorization_required") is True
+    access_required = (
+        provider.get("authentication_required") is True
+        or provider.get("authorization_required") is True
+    )
     return {
         "schema_version": BOUNDARY_CONTRACT_VERSION,
         "consumer_operation": str(source.get("name") or source.get("contract") or "consume"),
@@ -3699,7 +3776,7 @@ def _fake_boundary_contract(
         ],
         "auth_mapping": (
             []
-            if not authorization_required
+            if not access_required
             else [{"from": "session.authorization", "to": "authorization", "required": True}]
         ),
         "response_mapping": [
@@ -3717,127 +3794,6 @@ def _fake_boundary_contract(
 
 def _surface_rank(surface: str) -> int:
     return {"ui": 0, "api": 1, "business_rule": 2, "data": 3, "interaction": 4}.get(surface, 9)
-
-
-def _data_path_insertion_scaffold(
-    *,
-    scenario_id: str,
-    grouped_surfaces: list[str],
-    graph: dict[str, object],
-    node_scaffolds: list[dict[str, object]],
-) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
-    if "data" not in grouped_surfaces:
-        return None, []
-    scenario_nodes = [
-        item
-        for item in _dicts(graph.get("nodes"))
-        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("id") or "")
-    ]
-    predecessor = next(
-        (item for item in scenario_nodes if str(item.get("surface") or "") == "business_rule"),
-        None,
-    )
-    if predecessor is None:
-        return None, []
-    scenario_edges = sorted(
-        [
-            item
-            for item in _dicts(graph.get("edges"))
-            if str(item.get("scenario_id") or "") == scenario_id
-            and str(item.get("kind") or "") in {"calls", "reads", "writes", "returns"}
-        ],
-        key=lambda item: int(item.get("order") or 0),
-    )
-    incoming = [item for item in scenario_edges if str(item.get("to") or "") == str(predecessor.get("id") or "")]
-    if not incoming:
-        return None, []
-    insertion_order = max(int(item.get("order") or 0) for item in incoming)
-    downstream = [item for item in scenario_edges if int(item.get("order") or 0) > insertion_order]
-    if not downstream:
-        return None, []
-    data_node = next(
-        (
-            _dict(item.get("node"))
-            for item in node_scaffolds
-            if str(_dict(item.get("node")).get("surface") or "") == "data"
-        ),
-        {},
-    )
-    data_ref = str(data_node.get("temp_ref") or f"tmp:{scenario_id}:data")
-    data_operation = str(
-        _dict(_dict(data_node.get("runtime_binding")).get("target")).get("symbol")
-        or "<exact data operation target symbol>"
-    )
-    predecessor_operation = str(
-        _dict(_dict(predecessor.get("runtime_binding")).get("target")).get("symbol")
-        or "<specific business-rule operation>"
-    )
-    boundary = {
-        "schema_version": BOUNDARY_CONTRACT_VERSION,
-        "consumer_operation": predecessor_operation,
-        "provider_operation": data_operation,
-        "input_mapping": [
-            {"from": "<consumer identifier field>", "to": "<data identifier field>", "required": True}
-        ],
-        "auth_mapping": [],
-        "response_mapping": [
-            {"from": "<data deletion result>", "to": "<business-rule outcome>", "required": True}
-        ],
-        "error_mapping": [],
-    }
-    operations: list[dict[str, object]] = [
-        {"op": "remove_edge", "edge_id": str(edge.get("id") or "")}
-        for edge in downstream
-    ]
-    operations.extend(
-        [
-            {
-                "op": "add_edge",
-                "edge": {
-                    "from": str(predecessor.get("id") or ""),
-                    "to": data_ref,
-                    "kind": "writes",
-                    "label": "<specific confirmed data mutation>",
-                    "scenario_id": scenario_id,
-                    "terminal": False,
-                    "boundary_contract": boundary,
-                },
-            },
-            {
-                "op": "add_edge",
-                "edge": {
-                    "from": data_ref,
-                    "to": str(predecessor.get("id") or ""),
-                    "kind": "returns",
-                    "label": "<specific persistence result>",
-                    "scenario_id": scenario_id,
-                    "terminal": False,
-                    "boundary_contract": boundary,
-                },
-            },
-        ]
-    )
-    operations.extend(
-        {
-            "op": "add_edge",
-            "edge": {key: value for key, value in edge.items() if key not in {"id", "order"}},
-        }
-        for edge in downstream
-    )
-    return (
-        {
-            "required": True,
-            "insert_after_node_id": predecessor.get("id"),
-            "insert_after_surface": predecessor.get("surface"),
-            "new_surface_ref": data_ref,
-            "downstream_edge_ids_in_order": [str(edge.get("id") or "") for edge in downstream],
-            "rule": (
-                "Remove the listed downstream edges, insert the data write and return, then re-add every downstream "
-                "edge in the supplied order so the observable terminal remains last."
-            ),
-        },
-        operations,
-    )
 
 
 def _reconcile_stale_placeholder_partitions(
@@ -4100,13 +4056,6 @@ def _active_partition(
             {"op": "set_partition_coverage", "coverage": required_coverage},
             *node_scaffolds,
         ]
-        path_insertion, path_operations = _data_path_insertion_scaffold(
-            scenario_id=scenario_id,
-            grouped_surfaces=grouped_surfaces,
-            graph=graph,
-            node_scaffolds=node_scaffolds,
-        )
-        operations.extend(path_operations)
         if branch_parent is not None:
             operations.append({"op": "add_edge", "edge": branch_parent["edge"]})
         return {
@@ -4116,7 +4065,6 @@ def _active_partition(
             "required_coverage": required_coverage,
             "surface_work": surface_work,
             "branch_parent_requirement": branch_parent,
-            "path_insertion": path_insertion,
             "base_graph_digest": graph.get("artifact_digest"),
             "delta_scaffold": {
                 "schema_version": delta_version_for(str(graph.get("schema_version") or "")),
@@ -4665,8 +4613,11 @@ def _boundary_contract_repair_scaffold(
         for item in _dicts(current.get("input_mapping"))
         if bool(item.get("required"))
     }
-    authorization = str(surface.get("authorization") or "").strip()
-    auth_required = surface.get("authorization_required") is True
+    authorization = str(surface.get("authentication") or surface.get("authorization") or "").strip()
+    auth_required = (
+        surface.get("authentication_required") is True
+        or surface.get("authorization_required") is True
+    )
     responses = _dicts(surface.get("responses"))
     success = [item for item in responses if not str(item.get("status") or "").startswith(("4", "5"))]
     errors = [item for item in responses if str(item.get("status") or "").startswith(("4", "5"))]
@@ -4930,13 +4881,14 @@ def _wiring_hop_inputs(arguments: object, graph: dict[str, object]) -> dict[str,
     return needed
 
 
-def _normalize_external_providers(arguments: object) -> object:
-    """Data from another use case enters at the app entrypoint; no AS-IS hop can own it, so the Harness fixes it.
+def _normalize_external_inputs(arguments: object) -> tuple[object, list[str]]:
+    """Canonicalize mechanical external-input fields before review and persistence.
 
-    composition_path starts at the entrypoint by contract, so path[0] is the only valid external provider.
+    Data from another use case enters at composition_path[0]. Its approved dependency binding is also a trace ref.
     """
 
     changed = False
+    normalized: list[str] = []
     result = json.loads(json.dumps(arguments, ensure_ascii=False))
     # Walk the copied JSON directly: _dict/_dicts return copies, and this function edits in place.
     operations = (result.get("delta") or {}).get("operations") if isinstance(result, dict) else None
@@ -4950,14 +4902,31 @@ def _normalize_external_providers(arguments: object) -> object:
         if str(surface.get("role") or "") == "composition_wiring" or len(path) < 2 or not isinstance(inputs, list):
             continue
         for item in inputs:
-            if (
-                isinstance(item, dict)
-                and str(item.get("source") or "") == "external_use_case"
-                and str(item.get("provided_by") or "") != path[0]
-            ):
+            if not isinstance(item, dict) or str(item.get("source") or "") != "external_use_case":
+                continue
+            name = str(item.get("name") or "external_input")
+            item_changed = False
+            if str(item.get("provided_by") or "") != path[0]:
                 item["provided_by"] = path[0]
+                item_changed = True
                 changed = True
-    return result if changed else arguments
+            binding = str(item.get("binding") or "")
+            raw_refs = item.get("requirement_refs", [])
+            refs = [str(ref) for ref in raw_refs if str(ref)] if isinstance(raw_refs, list) else []
+            if binding.startswith(EXTERNAL_DEPENDENCY_REF_PREFIXES) and binding not in refs:
+                item["requirement_refs"] = [*refs, binding]
+                item_changed = True
+                changed = True
+            if item_changed:
+                normalized.append(name)
+    return (result if changed else arguments), normalized
+
+
+def _normalize_external_providers(arguments: object) -> object:
+    """Compatibility wrapper for callers that only need the normalized arguments."""
+
+    normalized, _ = _normalize_external_inputs(arguments)
+    return normalized
 
 
 def _materialize_delta_wiring(
@@ -4967,53 +4936,133 @@ def _materialize_delta_wiring(
     graph: dict[str, object],
     run_id: str,
 ) -> object:
-    """Write the composition_wiring node of every hop the delta's screen inputs pass through.
+    """Materialize every mechanical composition-wiring node and edge idempotently."""
 
-    Wiring is mechanical (a template plus input names), so the Harness owns it instead of the Designer: a node the
-    Designer wrote for the same hop is replaced by the filled template, keeping its temp_ref for edges.
-    """
-
-    arguments = _normalize_external_providers(arguments)
-    needed = _wiring_hop_inputs(arguments, graph)
-    if not needed:
-        return arguments
-    templates = {
-        str(_dict(_dict(op.get("node")).get("surface_contract")).get("entrypoint") or ""): op
-        for op in _dicts(active_partition.get("harness_wiring_operations"))
-    }
-    unwired = [hop for hop in needed if hop not in templates]
-    if unwired:
-        raise HarnessError(
-            "designer_delta_invalid",
-            "Required inputs pass through hops the Harness cannot wire: "
-            + "; ".join(f"{hop} does not pass {', '.join(needed[hop])}" for hop in unwired)
-            + ". Bind each input to a provided_by hop on composition_path whose path down to the screen is AS-IS.",
-            run_id=run_id,
-        )
-    delta = dict(_dict(_dict(arguments).get("delta")))
+    normalized = _normalize_external_providers(arguments)
+    needed = _wiring_hop_inputs(normalized, graph)
+    delta = dict(_dict(_dict(normalized).get("delta")))
     operations = list(_dicts(delta.get("operations")))
-    authored: dict[str, int] = {}
-    for index, op in enumerate(operations):
-        node = _dict(op.get("node"))
+    changed = normalized is not arguments
+    if needed:
+        templates = {
+            str(_dict(_dict(op.get("node")).get("surface_contract")).get("entrypoint") or ""): op
+            for op in _dicts(active_partition.get("harness_wiring_operations"))
+        }
+        unwired = [hop for hop in needed if hop not in templates]
+        if unwired:
+            raise HarnessError(
+                "designer_delta_invalid",
+                "Required inputs pass through hops the Harness cannot wire: "
+                + "; ".join(f"{hop} does not pass {', '.join(needed[hop])}" for hop in unwired)
+                + ". Bind each input to a provided_by hop on composition_path whose path down to the screen is AS-IS.",
+                run_id=run_id,
+            )
+        authored: dict[str, int] = {}
+        for index, op in enumerate(operations):
+            node = _dict(op.get("node"))
+            target = _dict(_dict(node.get("runtime_binding")).get("target"))
+            ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+            if op.get("op") == "add_node" and ref in needed:
+                authored[ref] = index
+        inserted = []
+        for hop, names in needed.items():
+            filled = json.loads(
+                json.dumps(templates[hop], ensure_ascii=False).replace(
+                    "<input names>", json.dumps(", ".join(names))[1:-1]
+                )
+            )
+            if hop in authored:
+                original = _dict(operations[authored[hop]].get("node"))
+                filled["node"]["temp_ref"] = str(original.get("temp_ref") or filled["node"]["temp_ref"])
+                operations[authored[hop]] = filled
+            else:
+                inserted.append(filled)
+        # Wiring nodes go before every Designer-authored node/edge that may reference their temp_ref.
+        head = 1 if operations and operations[0].get("op") == "set_partition_coverage" else 0
+        operations = [*operations[:head], *inserted, *operations[head:]]
+        changed = True
+
+    scenario_id = str(
+        _dict(active_partition.get("partition")).get("scenario_id")
+        or _dict(delta.get("partition")).get("scenario_id")
+        or ""
+    )
+    operations, edge_count = _materialize_composition_wiring_edges(
+        operations=operations,
+        graph=graph,
+        scenario_id=scenario_id,
+    )
+    if not changed and edge_count == 0:
+        return arguments
+    delta["operations"] = operations
+    return {**_dict(normalized), "delta": delta}
+
+
+def _materialize_composition_wiring_edges(
+    *,
+    operations: list[dict[str, object]],
+    graph: dict[str, object],
+    scenario_id: str,
+) -> tuple[list[dict[str, object]], int]:
+    """Connect consecutive Harness-owned wiring hops from each declared composition path."""
+
+    refs: dict[str, str] = {}
+    wiring_refs: set[str] = set()
+    screens: list[dict[str, object]] = []
+
+    def remember(node: dict[str, object], endpoint: str) -> None:
         target = _dict(_dict(node.get("runtime_binding")).get("target"))
         ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
-        if op.get("op") == "add_node" and ref in needed:
-            authored[ref] = index
-    inserted = []
-    for hop, names in needed.items():
-        filled = json.loads(
-            json.dumps(templates[hop], ensure_ascii=False).replace("<input names>", json.dumps(", ".join(names))[1:-1])
-        )
-        if hop in authored:
-            original = _dict(operations[authored[hop]].get("node"))
-            filled["node"]["temp_ref"] = str(original.get("temp_ref") or filled["node"]["temp_ref"])
-            operations[authored[hop]] = filled
-        else:
-            inserted.append(filled)
-    # Wiring nodes go before the Designer's edges so edges may reference their temp_ref.
-    head = 1 if operations and operations[0].get("op") == "set_partition_coverage" else 0
-    delta["operations"] = [*operations[:head], *inserted, *operations[head:]]
-    return {**_dict(arguments), "delta": delta}
+        if ref == "#" or not endpoint:
+            return
+        refs[ref] = endpoint
+        if is_composition_wiring(node):
+            wiring_refs.add(ref)
+        elif str(node.get("surface") or "") == "ui":
+            screens.append(node)
+
+    for node in _dicts(graph.get("nodes")):
+        if scenario_id and str(node.get("scenario_id") or "") != scenario_id:
+            continue
+        remember(node, str(node.get("id") or ""))
+    for operation in operations:
+        if str(operation.get("op") or "") != "add_node":
+            continue
+        node = _dict(operation.get("node"))
+        remember(node, str(node.get("temp_ref") or ""))
+
+    connected = {
+        (str(edge.get("from") or ""), str(edge.get("to") or ""))
+        for edge in [*_dicts(graph.get("edges")), *(_dict(op.get("edge")) for op in operations if op.get("op") == "add_edge")]
+        if str(edge.get("kind") or "") == "calls"
+    }
+    additions: list[dict[str, object]] = []
+    for screen in screens:
+        path = _strings(_dict(_dict(screen.get("surface_contract")).get("runtime_surface")).get("composition_path"))
+        for parent, child in zip(path, path[1:]):
+            if parent not in wiring_refs or child not in wiring_refs:
+                continue
+            source, target = refs.get(parent, ""), refs.get(child, "")
+            if not source or not target or (source, target) in connected:
+                continue
+            additions.append(
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "from": source,
+                        "to": target,
+                        "kind": "calls",
+                        "label": f"{parent.rsplit('#', 1)[-1]} forwards runtime inputs to {child.rsplit('#', 1)[-1]}",
+                        "scenario_id": scenario_id,
+                        "terminal": False,
+                    },
+                }
+            )
+            connected.add((source, target))
+    if not additions:
+        return operations, 0
+    first_edge = next((index for index, op in enumerate(operations) if op.get("op") == "add_edge"), len(operations))
+    return [*operations[:first_edge], *additions, *operations[first_edge:]], len(additions)
 
 
 def _materialize_branch_parent(
