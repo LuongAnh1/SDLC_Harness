@@ -82,10 +82,12 @@ from ..agents.designer import (
     GRAPH_VERSION_V2,
     SUPPORTED_GRAPH_VERSIONS,
     UI_CONTRACT_STATE_KEY,
+    UI_LAYOUT_CONTRACT_KEY,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
     resolve_ui_contract_pin,
+    ui_layout_pin,
 )
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -233,6 +235,7 @@ class PhaseOneWorkflow:
             uiux_mode=self.settings.uiux_skill_mode,
             run_id=run_id,
         )
+        state[UI_LAYOUT_CONTRACT_KEY] = ui_layout_pin(str(state[UI_CONTRACT_STATE_KEY]))
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
             COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION

@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import Any
 
-from .graph import UI_RUNTIME_STATES, design_bundle_version_for, is_composition_wiring, ui_contract_v2
+from .graph import UI_RUNTIME_STATES, design_bundle_version_for, is_composition_wiring, layout_regions, ui_contract_v2
 
 UI_FEATURE_EXPERIENCE_VERSION = "ui_feature_experience_v1"
 _RUNNABLE_RANK = {"bound": 0, "fixture_required": 1, "externally_blocked": 2}
@@ -29,12 +29,14 @@ def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] 
         members.sort(
             key=lambda item: (
                 len(_strings(_dict(_dict(item.get("surface_contract")).get("runtime_surface")).get("composition_path"))),
+                str(item.get("scenario_id") or ""),
                 str(item.get("id") or ""),
             )
         )
         contracts = [_dict(item.get("surface_contract")) for item in members]
         experiences = [_dict(contract.get("experience_contract")) for contract in contracts]
         surfaces = [_dict(contract.get("runtime_surface")) for contract in contracts]
+        scenario_ids = [str(item.get("scenario_id") or "") for item in members]
         root = next((item for item in experiences if item.get("screen")), experiences[0])
         inputs: dict[tuple[str, str], dict[str, Any]] = {}
         for surface in surfaces:
@@ -55,7 +57,8 @@ def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] 
             {
                 "screen_id": screen_id,
                 "screen": _dict(root.get("screen")),
-                "composition_paths": [_strings(surface.get("composition_path")) for surface in surfaces],
+                "composition_paths": _distinct_paths([_strings(surface.get("composition_path")) for surface in surfaces]),
+                "components": _merged_components(experiences, scenario_ids),
                 "nodes": [
                     {
                         "id": node.get("id"),
@@ -67,8 +70,8 @@ def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] 
                     for node, experience in zip(members, experiences)
                 ],
                 "journeys": journeys,
-                "runtime_states": _merged_runtime_states(experiences),
-                "visual_contract": _dict(root.get("visual_contract")),
+                "runtime_states": _merged_runtime_states(experiences, scenario_ids),
+                "visual_contract": _merged_visual_contract(experiences),
                 "focus_policies": [focus[key] for key in sorted(focus)],
                 "accessibility": sorted({item for exp in experiences for item in _strings(exp.get("accessibility"))}),
                 "feedback": [
@@ -93,17 +96,85 @@ def render_ui_feature_experience(graph: dict[str, object]) -> dict[str, object] 
     return {"json": payload, "markdown": _ui_feature_markdown(payload)}
 
 
-def _merged_runtime_states(experiences: list[dict[str, Any]]) -> dict[str, object]:
-    """Each scenario owns its own states; the screen shows the applicable one from whichever node owns it."""
+def _merged_runtime_states(experiences: list[dict[str, Any]], scenario_ids: list[str]) -> dict[str, object]:
+    """Every scenario's applicable variant of each state (identical ones share scenario_ids); not-applicable only if none applies."""
 
     merged: dict[str, object] = {}
     for name in UI_RUNTIME_STATES:
-        states = [_dict(_dict(exp.get("runtime_states")).get(name)) for exp in experiences]
-        merged[name] = next(
-            (state for state in states if state and not state.get("not_applicable")),
-            next((state for state in states if state), {}),
-        )
+        applicable: dict[object, dict[str, Any]] = {}
+        skipped: dict[object, dict[str, Any]] = {}
+        for scenario_id, experience in zip(scenario_ids, experiences):
+            state = _dict(_dict(experience.get("runtime_states")).get(name))
+            if not state:
+                continue
+            if state.get("not_applicable"):
+                bucket, key = skipped, str(state.get("reason") or "")
+            else:
+                bucket, key = applicable, (str(state.get("presentation") or ""), str(state.get("trigger") or ""))
+            entry = bucket.setdefault(key, {**state, "scenario_ids": []})
+            if scenario_id not in entry["scenario_ids"]:
+                entry["scenario_ids"].append(scenario_id)
+        merged[name] = list((applicable or skipped).values())
     return merged
+
+
+def _distinct_paths(paths: list[list[str]]) -> list[list[str]]:
+    """Unique mount paths, dropping any that is only a prefix of a longer one."""
+
+    unique = [list(path) for path in dict.fromkeys(tuple(path) for path in paths)]
+    return [p for p in unique if not any(len(q) > len(p) and q[: len(p)] == p for q in unique)]
+
+
+_VISUAL_LIST_KEYS = ("hierarchy", "typography", "color_and_tokens", "focus_appearance", "responsive_rules")
+
+
+def _merged_visual_contract(experiences: list[dict[str, Any]]) -> dict[str, object]:
+    """Union of every scenario node's visual decisions; layout regions merge by name, their clauses deduped."""
+
+    visuals = [_dict(exp.get("visual_contract")) for exp in experiences]
+    merged: dict[str, object] = {
+        key: list(dict.fromkeys(item for visual in visuals for item in _strings(visual.get(key))))
+        for key in _VISUAL_LIST_KEYS
+    }
+    regions: dict[str, dict[str, Any]] = {}
+    for visual in visuals:
+        for region, layer, content in layout_regions(visual):
+            entry = regions.setdefault(region.lower(), {"region": region, "layer": layer, "clauses": {}})
+            entry["layer"] = entry["layer"] or layer
+            entry["clauses"].update((clause.strip(), None) for clause in content.split(";") if clause.strip())
+    merged["layout"] = [
+        {
+            "region": entry["region"],
+            "layer": entry["layer"] or _legacy_layer(entry["region"]),
+            "content": "; ".join(entry["clauses"]),
+        }
+        for entry in regions.values()
+    ]
+    policies = {
+        str(visual.get("style_target_policy")): str(visual.get("style_target_reason") or "")
+        for visual in reversed(visuals)
+        if visual.get("style_target_policy")
+    }
+    first = next((visual for visual in visuals if visual.get("style_target_policy")), {})
+    merged["style_target_policy"] = first.get("style_target_policy")
+    merged["style_target_reason"] = first.get("style_target_reason")
+    if len(policies) > 1:
+        # Nodes of one screen disagree; surface every choice instead of silently picking one.
+        merged["style_target_conflicts"] = [{"policy": key, "reason": policies[key]} for key in sorted(policies)]
+    return merged
+
+
+def _merged_components(experiences: list[dict[str, Any]], scenario_ids: list[str]) -> list[dict[str, object]]:
+    """One entry per component name across the screen, with each scenario's responsibility for it."""
+
+    components: dict[str, dict[str, Any]] = {}
+    for scenario_id, experience in zip(scenario_ids, experiences):
+        for item in _strings(experience.get("component_structure")):
+            label, _, duty = item.partition(":")
+            name = re.sub(r"\s*\(.*?\)\s*", " ", label).strip() or label.strip()
+            entry = components.setdefault(name, {"name": name, "responsibilities": []})
+            entry["responsibilities"].append({"scenario_id": scenario_id, "text": (duty or label).strip()})
+    return list(components.values())
 
 
 def _ui_feature_markdown(payload: dict[str, object]) -> str:
@@ -127,29 +198,49 @@ def _ui_feature_markdown(payload: dict[str, object]) -> str:
                 "",
             ]
         )
-        for node in _dicts(screen.get("nodes")):
-            lines.append(f"- `{node.get('id')}` {node.get('name')} ({node.get('scenario_id')}, {node.get('disposition')})")
-            lines.extend(f"  - {item}" for item in _strings(node.get("component_structure")))
+        for component in _dicts(screen.get("components")):
+            lines.append(f"- **{component.get('name')}**")
+            lines.extend(
+                f"  - {item.get('scenario_id')}: {item.get('text')}" for item in _dicts(component.get("responsibilities"))
+            )
+        lines.extend(["", "Design nodes:", ""])
+        lines.extend(
+            f"- `{node.get('id')}` {node.get('name')} ({node.get('scenario_id')}, {node.get('disposition')})"
+            for node in _dicts(screen.get("nodes"))
+        )
         lines.extend(["", "### Journeys", ""])
         for scenario_id, steps in sorted(_dict(screen.get("journeys")).items()):
             lines.append(f"- **{scenario_id}**")
             lines.extend(f"  - {step}" for step in _strings(steps))
-        lines.extend(["", "### Runtime states", "", "| State | Presentation | Trigger |", "| --- | --- | --- |"])
+        lines.extend(
+            ["", "### Runtime states", "", "| State | Scenario | Presentation | Trigger |", "| --- | --- | --- | --- |"]
+        )
         states = _dict(screen.get("runtime_states"))
         for name in UI_RUNTIME_STATES:
-            state = _dict(states.get(name))
-            if state.get("not_applicable"):
-                lines.append(f"| {name} | không áp dụng | {_cell(state.get('reason'))} |")
-            else:
-                lines.append(f"| {name} | {_cell(state.get('presentation'))} | {_cell(state.get('trigger'))} |")
+            for state in _dicts(states.get(name)) or [{}]:
+                scenarios = ", ".join(_strings(state.get("scenario_ids")))
+                if state.get("not_applicable"):
+                    lines.append(f"| {name} | {scenarios} | không áp dụng | {_cell(state.get('reason'))} |")
+                else:
+                    lines.append(
+                        f"| {name} | {scenarios} | {_cell(state.get('presentation'))} | {_cell(state.get('trigger'))} |"
+                    )
         lines.extend(["", "### Visual decisions", ""])
-        for key in ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules"):
+        for key in ("hierarchy", "typography", "color_and_tokens", "focus_appearance", "responsive_rules"):
             lines.append(f"- **{key}:** {'; '.join(_strings(visual.get(key))) or 'n/a'}")
+        lines.append("- **layout:**")
+        lines.extend(
+            f"  - `{item.get('layer')}` {item.get('region')}: {item.get('content')}" for item in _dicts(visual.get("layout"))
+        )
         lines.append(
             f"- **style_target_policy:** `{visual.get('style_target_policy', 'n/a')}` — {visual.get('style_target_reason', '')}"
         )
-        lines.extend(["", "### Wireframe (desktop)", "", "```text", *_wireframe(_strings(visual.get("layout")), 64), "```"])
-        lines.extend(["", "### Wireframe (mobile)", "", "```text", *_wireframe(_strings(visual.get("layout")), 34), "```"])
+        lines.extend(
+            f"  - **conflict:** `{item.get('policy')}` — {item.get('reason')}"
+            for item in _dicts(visual.get("style_target_conflicts"))
+        )
+        lines.extend(["", "### Wireframe (desktop)", "", "```text", *_wireframe(_dicts(visual.get("layout")), 64), "```"])
+        lines.extend(["", "### Wireframe (mobile)", "", "```text", *_wireframe(_dicts(visual.get("layout")), 34), "```"])
         lines.extend(f"- {rule}" for rule in _strings(visual.get("responsive_rules")))
         lines.extend(
             [
@@ -188,13 +279,44 @@ def _ui_feature_markdown(payload: dict[str, object]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _wireframe(layout: list[str], width: int) -> list[str]:
+# Only for graphs pinned before layered_layout_v1, whose layout strings carry no layer.
+_OVERLAY_WORDS = ("dialog", "modal", "overlay", "popover", "drawer", "sheet")
+
+
+def _legacy_layer(region: str) -> str:
+    return "overlay" if any(word in region.lower() for word in _OVERLAY_WORDS) else "page"
+
+
+def _wireframe(layout: list[dict[str, Any]], width: int) -> list[str]:
+    base: list[tuple[str, str]] = []
+    overlay: list[str] = []
+    for item in layout:
+        name = str(item.get("region") or "").upper()
+        content = str(item.get("content") or "")
+        text = f"{name}: {content}" if content else name
+        if item.get("layer") == "overlay":
+            overlay.append(text)
+        else:
+            base.append((name, text))
+    base = base or [("MAIN", "MAIN: n/a")]
+    lines = _boxes([text for _, text in base], width)
+    if overlay:
+        # A modal sits on top of the screen: redraw the screen dimmed with the overlay box floating over its middle.
+        inner = width - 4
+        dimmed = [f"| {(name[:inner - 1] + ' ').ljust(inner, ':')} |" for name, _ in base]
+        floating = [f"| {line.center(inner)} |" for line in _boxes(overlay, inner - 4)]
+        middle = (len(dimmed) + 1) // 2
+        border = "+" + "-" * (width - 2) + "+"
+        lines += ["", "With overlay open (screen behind is dimmed and inert):", border]
+        lines += [*dimmed[:middle], *floating, *dimmed[middle:], border]
+    return lines
+
+
+def _boxes(texts: list[str], width: int) -> list[str]:
     inner = width - 4
     border = "+" + "-" * (width - 2) + "+"
     lines = [border]
-    for item in layout or ["main: n/a"]:
-        region, _, content = item.partition(":")
-        text = f"{region.strip().upper()}: {content.strip()}" if content else region.strip()
+    for text in texts:
         while text:
             lines.append(f"| {text[:inner].ljust(inner)} |")
             text = text[inner:]

@@ -28,10 +28,12 @@ from sdlc_harness.agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
     GRAPH_VERSION,
     UI_CONTRACT_STATE_KEY,
+    UI_LAYOUT_CONTRACT_KEY,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
     resolve_ui_contract_pin,
+    ui_layout_pin,
 )
 from sdlc_harness.agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
@@ -428,6 +430,8 @@ def _seed_approved_requirement(
         "llm": {"mode": "deepseek", "model": str(getattr(settings, "llm_model"))},
         "summary_for_user": f"Controlled L3 shadow seeded with approved {source.use_case} Requirement V2.",
     }
+    # Same run pin as PhaseOneWorkflow, so seeded runs get the layered layout contract too.
+    state[UI_LAYOUT_CONTRACT_KEY] = ui_layout_pin(str(state[UI_CONTRACT_STATE_KEY]))
     store.write_state(state)
 
 

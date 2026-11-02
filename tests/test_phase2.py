@@ -348,7 +348,7 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertEqual(self.settings.design_repair_limit, 2)
         self.assertEqual(self.settings.design_validation_trials, 3)
         self.assertEqual(self.settings.design_llm_call_budget, 16)
-        self.assertEqual(self.settings.designer_partition_action_budget, 8)
+        self.assertEqual(self.settings.designer_partition_action_budget, 12)
         self.assertEqual(self.settings.designer_scenario_repair_action_budget, 4)
         self.assertEqual(self.settings.designer_finalization_action_budget, 4)
         self.assertEqual(self.settings.designer_global_action_hard_cap, 128)

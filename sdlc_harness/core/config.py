@@ -512,7 +512,7 @@ def load_settings(
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=128, minimum=1),
         designer_partition_action_budget=_int_value(
             merged.get("SDLC_DESIGNER_PARTITION_ACTION_BUDGET"),
-            default=8,
+            default=12,
             minimum=1,
         ),
         designer_scenario_repair_action_budget=_int_value(

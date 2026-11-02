@@ -213,7 +213,7 @@ class RuntimeConfigTests(unittest.TestCase):
                 investigation.max_tokens,
                 investigation.timeout_seconds,
             ),
-            ("global-model", "low", 8192, 180),
+            ("global-model", "low", 8192, 300),
         )
         delta = settings.phase2_llm_profiles["designer_delta"]
         self.assertEqual(

@@ -22,12 +22,14 @@ from .graph import (
     RUNTIME_BINDING_VERSION,
     SUPPORTED_GRAPH_VERSIONS,
     SURFACE_CONTRACT_VERSION,
+    UI_LAYOUT_CONTRACT_KEY,
     apply_designer_delta,
     completion_findings,
     design_bundle_findings,
     design_bundle_version_for,
     delta_version_for,
     new_vertical_design_graph,
+    ui_layout_pin,
     validate_vertical_design_graph,
 )
 from .plantuml import (
@@ -84,6 +86,7 @@ __all__ = [
     "UIUX_MODES",
     "UI_CONTRACT_STATE_KEY",
     "UI_EXPERIENCE_CONTRACT_V2",
+    "UI_LAYOUT_CONTRACT_KEY",
     "UiUxGuidanceProvider",
     "resolve_ui_contract_pin",
     "ParsedDesign",
@@ -100,5 +103,6 @@ __all__ = [
     "projection_manifest",
     "render_design_projections",
     "render_ui_feature_experience",
+    "ui_layout_pin",
     "validate_vertical_design_graph",
 ]

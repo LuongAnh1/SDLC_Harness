@@ -43,6 +43,7 @@ from sdlc_harness.agents.designer.execution import (
     _designer_llm_profile_name,
     _designer_prompt,
     _is_exact_deterministic_repair_delta,
+    _materialize_branch_parent,
     _repair_task_has_mutation_path,
     _uiux_guidance_status,
     _mark_repair_targets_completed,
@@ -55,7 +56,7 @@ from sdlc_harness.agents.designer.execution import (
     _scoped_review_feedback,
     _validate_repair_delta_scope,
 )
-from sdlc_harness.agents.designer.graph import _sequence_behavior_findings, graph_digest
+from sdlc_harness.agents.designer.graph import _boundary_contract_diagnostics, _sequence_behavior_findings, graph_digest
 from sdlc_harness.agents.designer.projections import render_design_projections
 from sdlc_harness.agents.validator import (
     VERTICAL_TRACE_GRAPH_VERSION,
@@ -1541,6 +1542,117 @@ class DesignerResumeTest(unittest.TestCase):
             "designer_repair",
         )
 
+    def test_complete_is_rejected_while_a_partition_is_active(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            settings = SimpleNamespace(
+                llm_mode="deepseek",
+                design_llm_call_budget=8,
+                llm_structured_max_tokens=1000,
+            )
+            requirement = {
+                "use_case_id": "UC-general",
+                "scenario_contract": {
+                    "scenarios": [
+                        {"id": "SC-pending", "kind": "main", "surfaces": {"api": {"status": "required"}}}
+                    ]
+                },
+            }
+            landscape = {
+                "artifact_digest": "sha256:repo",
+                "components": [{"component_id": "api", "roots": ["."]}],
+                "anchors": [],
+                "scenario_matches": [],
+            }
+            binding = {
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            }
+            client = _ScriptedDesignerClient(
+                [{"action": "complete", "arguments": {}} for _ in range(4)]
+            )
+
+            with patch(
+                "sdlc_harness.agents.designer.execution.completion_findings",
+                return_value=[],
+            ), self.assertRaises(DesignerExecutionError) as caught:
+                DesignerToolLoopExecutor(settings=settings, store=store, llm_client=client).execute(
+                    run_id="run-pending-complete",
+                    requirement_model=requirement,
+                    landscape=landscape,
+                    target_path=target,
+                    snapshot_binding=binding,
+                    contract_version=GRAPH_VERSION_V1,
+                )
+
+            self.assertEqual(caught.exception.error_code, "designer_invalid_action_exhausted")
+            self.assertEqual(caught.exception.progress["invalid_action_budget"]["used"], 4)
+            session = json.loads((root / caught.exception.session_path).read_text(encoding="utf-8"))
+            self.assertEqual(
+                [item.get("code") for item in session["observations"]],
+                ["active_work_pending"] * 4,
+            )
+            self.assertIn("active_partition SC-pending|api", session["last_invalid_action"])
+
+    def test_setup_harness_error_uses_designer_execution_contract_and_pauses_session(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            target = root / "target"
+            target.mkdir()
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            settings = SimpleNamespace(llm_mode="deepseek")
+            requirement = {
+                "use_case_id": "UC-general",
+                "scenario_contract": {
+                    "scenarios": [
+                        {"id": "SC-1", "kind": "main", "surfaces": {"api": {"status": "required"}}}
+                    ]
+                },
+            }
+            landscape = {
+                "artifact_digest": "sha256:repo",
+                "components": [{"component_id": "api", "roots": ["."]}],
+                "anchors": [],
+                "scenario_matches": [],
+            }
+            binding = {
+                "requirement_digest": "sha256:req",
+                "repo_landscape_digest": "sha256:repo",
+                "workspace_ref": "run_workspace_v1",
+                "base_sha": "abc123",
+            }
+
+            with patch(
+                "sdlc_harness.agents.designer.execution.DesignerToolRegistry",
+                side_effect=HarnessError(
+                    "target_repo_codegraph_failed",
+                    "CodeGraph setup failed.",
+                ),
+            ), self.assertRaises(DesignerExecutionError) as caught:
+                DesignerToolLoopExecutor(
+                    settings=settings,
+                    store=store,
+                    llm_client=_ScriptedDesignerClient([]),
+                ).execute(
+                    run_id="run-setup-error",
+                    requirement_model=requirement,
+                    landscape=landscape,
+                    target_path=target,
+                    snapshot_binding=binding,
+                    contract_version=GRAPH_VERSION_V1,
+                )
+
+            self.assertEqual(caught.exception.error_code, "target_repo_codegraph_failed")
+            self.assertTrue(caught.exception.retriable)
+            session = json.loads((root / caught.exception.session_path).read_text(encoding="utf-8"))
+            self.assertEqual(session["status"], "paused")
+            self.assertEqual(session["last_error"]["error_code"], "target_repo_codegraph_failed")
+
     def test_designer_action_normalizes_only_schema_valid_extra_closing_brace(self) -> None:
         payload = {
             "action": "design.propose_delta",
@@ -1743,6 +1855,26 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("navigation-only", prompt)
         self.assertIn("may only implement IDs listed in allowed_requirement_refs", prompt)
         self.assertIn("mixed sibling-scenario behavior into SC-1", payload["last_review_feedback"])
+
+    def test_designer_prompt_shows_the_operator_rejected_delta(self) -> None:
+        # run_20261102_061023 designer-0007: a "keep the rest" note was unanswerable without the rejected delta.
+        rejected = {"operations": [{"op": "add_edge", "edge": {"from": "VDN-ui", "to": "tmp:SC-1:api", "kind": "calls"}}]}
+        common = dict(
+            requirement_model={"scenarios": []},
+            landscape={},
+            graph={"schema_version": GRAPH_VERSION, "nodes": [], "edges": [], "partitions": []},
+            observations=[],
+            repair_feedback=[],
+            active_partition=None,
+            repair_task=None,
+            observations_since_delta=0,
+            last_invalid_action="",
+        )
+        prompt = _designer_prompt(**common, last_review_feedback="Drop the confirmation input.", last_rejected_delta=rejected)
+        self.assertIn("Drop the confirmation input. Your rejected delta follows", prompt)
+        self.assertIn('"to": "tmp:SC-1:api"', prompt)
+        # Without a review note (for example after approval), the old delta is not repeated.
+        self.assertNotIn("Your rejected delta", _designer_prompt(**common, last_rejected_delta=rejected))
 
     def test_designer_prompt_scopes_uiux_instructions_to_active_ui_work(self) -> None:
         graph = {
@@ -2208,7 +2340,7 @@ class DesignerResumeTest(unittest.TestCase):
                     "max_tokens": 8192,
                     "model": "deepseek-flash",
                     "reasoning_effort": "low",
-                    "timeout_seconds": 180,
+                    "timeout_seconds": 300,
                 },
             )
 
@@ -3255,6 +3387,129 @@ class DesignerResumeTest(unittest.TestCase):
             run_id="run-scenario-repair",
         )
 
+    def test_branch_parent_is_the_main_flow_entry_not_composition_wiring(self) -> None:
+        # run_20261102_061023 designer-0012: the hash-ordered pick landed on the SC-1 Root wiring node.
+        from sdlc_harness.agents.designer import GRAPH_VERSION_V2
+        from sdlc_harness.agents.designer.execution import _branch_parent_scaffold
+
+        requirement = {
+            "use_case_id": "UC1",
+            "scenario_contract": {
+                "scenarios": [{"id": "SC-1", "kind": "main", "surfaces": {}}, {"id": "SC-2", "kind": "alternative", "surfaces": {}}]
+            },
+        }
+        wiring = {
+            "id": "VDN-0-wire",
+            "scenario_id": "SC-1",
+            "surface": "ui",
+            "surface_contract": {"surface": "ui", "runtime_surface": {"role": "composition_wiring"}},
+        }
+        api = {"id": "VDN-1-api", "scenario_id": "SC-1", "surface": "api", "surface_contract": {"surface": "api"}}
+        screen = {"id": "VDN-9-screen", "scenario_id": "SC-1", "surface": "ui", "surface_contract": {"surface": "ui"}}
+        graph = {"schema_version": GRAPH_VERSION_V2, "nodes": [wiring, api, screen], "edges": []}
+        scenario = requirement["scenario_contract"]["scenarios"][1]
+
+        def parent() -> str:
+            result = _branch_parent_scaffold(scenario=scenario, requirement_model=requirement, graph=graph, branch_entry_ref="tmp:SC-2:ui")
+            assert result is not None
+            return str(result["edge"]["to"])
+
+        self.assertEqual(parent(), "VDN-9-screen")  # wiring excluded even with the smallest id
+        graph["edges"] = [
+            {"id": "VDE-c", "kind": "contains", "from": "VDN-0-wire", "to": "VDN-1-api", "scenario_id": "SC-1", "order": 0},
+            {"id": "VDE-1", "kind": "calls", "from": "VDN-1-api", "to": "VDN-9-screen", "scenario_id": "SC-1", "order": 2},
+            {"id": "VDE-2", "kind": "calls", "from": "VDN-9-screen", "to": "VDN-1-api", "scenario_id": "SC-1", "order": 1},
+        ]
+        self.assertEqual(parent(), "VDN-9-screen")  # source of the first ordered behavior edge
+        graph["edges"][2]["order"] = 3
+        self.assertEqual(parent(), "VDN-1-api")
+
+    def test_branch_parent_is_materialized_and_repair_can_target_only_main_entry(self) -> None:
+        requirement = {
+            "use_case_id": "UC-general",
+            "scenario_contract": {
+                "scenarios": [
+                    {"id": "SC-1", "kind": "main", "surfaces": {}},
+                    {
+                        "id": "SC-2",
+                        "kind": "exception",
+                        "surfaces": {"ui": {"status": "required", "requirement_refs": ["REQ-branch"]}},
+                    },
+                ]
+            },
+        }
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "nodes": [
+                {
+                    "id": "VDN-wire",
+                    "scenario_id": "SC-1",
+                    "surface": "ui",
+                    "surface_contract": {"runtime_surface": {"role": "composition_wiring"}},
+                },
+                {"id": "VDN-later", "scenario_id": "SC-1", "surface": "api"},
+                {"id": "VDN-entry", "scenario_id": "SC-1", "surface": "ui"},
+            ],
+            "edges": [
+                {
+                    "id": "VDE-main",
+                    "kind": "calls",
+                    "from": "VDN-entry",
+                    "to": "VDN-later",
+                    "scenario_id": "SC-1",
+                    "order": 1,
+                }
+            ],
+            "partitions": [],
+        }
+        landscape = {
+            "components": [{"component_id": "web", "roots": ["apps/web"]}],
+            "anchors": [],
+            "scenario_matches": [],
+        }
+        active = _active_partition(requirement_model=requirement, landscape=landscape, graph=graph)
+        assert active is not None
+        arguments = {
+            "delta": {
+                "operations": [
+                    {
+                        "op": "add_node",
+                        "node": {"temp_ref": "tmp:SC-2:ui", "surface": "ui"},
+                    }
+                ]
+            }
+        }
+
+        materialized = _materialize_branch_parent(
+            arguments=arguments,
+            active_partition=active,
+            requirement_model=requirement,
+            graph=graph,
+        )
+
+        self.assertEqual(len(arguments["delta"]["operations"]), 1)
+        self.assertEqual(
+            materialized["delta"]["operations"][-1],
+            {"op": "add_edge", "edge": active["branch_parent_requirement"]["edge"]},
+        )
+        graph["nodes"].append(
+            {"id": "VDN-branch", "scenario_id": "SC-2", "component_id": "web", "surface": "ui"}
+        )
+        graph["partitions"] = [
+            {"use_case_id": "UC-general", "scenario_id": "SC-2", "component_id": "web"}
+        ]
+        task = _active_repair_task(
+            repair_feedback=[{"category": "branch_parent_missing", "subject_ref": "SC-2"}],
+            graph=graph,
+            completed_targets=[],
+            requirement_model=requirement,
+        )
+        assert task is not None
+        self.assertEqual(
+            task["write_scope"]["allowed_edge_endpoint_ids"],
+            ["VDN-branch", "VDN-entry"],
+        )
+
     def test_ambiguous_branch_parent_repair_preserves_first_and_removes_only_excess(self) -> None:
         graph = {
             "schema_version": GRAPH_VERSION,
@@ -4131,6 +4386,100 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             )
 
             self.assertEqual(created["designer_contract_version"], GRAPH_VERSION_V1)
+
+
+class ErrorOnlyApiBoundaryTest(unittest.TestCase):
+    def test_error_only_api_needs_no_response_mapping(self) -> None:
+        # run_20261102_061023 designer-0021: the gate forced a fake success mapping on a 503-only API.
+        provider = {
+            "surface": "api",
+            "surface_contract": {
+                "method": "DELETE",
+                "path": "/items/{id}",
+                "request_fields": [],
+                "responses": [{"status": "503", "outcome": "rolled back"}],
+                "authorization_required": False,
+            },
+        }
+        contract = {
+            "provider_operation": "DELETE /items/{id}",
+            "input_mapping": [],
+            "response_mapping": [],
+            "error_mapping": [{"from": "503", "to": "failed", "required": True}],
+        }
+        self.assertEqual(_boundary_contract_diagnostics(contract, provider)["mismatches"], [])
+        provider["surface_contract"]["responses"].append({"status": "204", "outcome": "deleted"})
+        self.assertEqual(_boundary_contract_diagnostics(contract, provider)["mismatches"], ["add response_mapping"])
+
+
+class SameComponentBoundaryTest(unittest.TestCase):
+    def test_same_component_edges_with_a_contract_are_checked(self) -> None:
+        # run_20261102_061023 designer-0008: an api -> business_rule return inside one component reversed its
+        # input_mapping, and the gate skipped it because both nodes shared a component.
+        from sdlc_harness.agents.designer.graph import _runtime_composition_findings
+
+        def node(node_id: str, surface: str, symbol: str, kind: str, contract: dict[str, object]) -> dict[str, object]:
+            return {
+                "id": node_id,
+                "scenario_id": "SC-1",
+                "component_id": "api",
+                "surface": surface,
+                "disposition": "add",
+                "surface_contract": {"surface": surface, **contract},
+                "runtime_binding": {
+                    "runtime_kind": kind,
+                    "target": {"component_id": "api", "path": f"apps/api/src/{symbol}.ts", "symbol": symbol},
+                },
+            }
+
+        api = node(
+            "VDN-api", "api", "deleteRoute", "api_route",
+            {"method": "DELETE", "path": "/x/{id}", "request_fields": [{"name": "id", "type": "string", "location": "path"}],
+             "responses": [{"status": "204", "outcome": "ok"}], "authorization_required": False},
+        )
+        rule = node("VDN-rule", "business_rule", "deleteRule", "service", {"inputs": ["itemId"], "decision": "d", "outcomes": ["ok"]})
+        calls = {
+            "provider_operation": "deleteRule",
+            "input_mapping": [{"from": "id", "to": "itemId", "required": True}],
+            "response_mapping": [{"from": "ok", "to": "ok", "required": True}],
+            "error_mapping": [],
+        }
+        reversed_return = {**calls, "input_mapping": [{"from": "itemId", "to": "id", "required": True}]}
+
+        def boundary_subjects(returns_contract: dict[str, object] | None) -> list[str]:
+            edges = [
+                {"id": "VDE-c", "kind": "calls", "from": "VDN-api", "to": "VDN-rule", "scenario_id": "SC-1", "order": 1, "boundary_contract": calls},
+                {"id": "VDE-r", "kind": "returns", "from": "VDN-rule", "to": "VDN-api", "scenario_id": "SC-1", "order": 2,
+                 **({"boundary_contract": returns_contract} if returns_contract is not None else {})},
+            ]
+            graph = {"run_id": "r", "schema_version": GRAPH_VERSION, "nodes": [api, rule], "edges": edges, "partitions": []}
+            findings = _runtime_composition_findings(
+                graph,
+                required_surfaces={"SC-1": {"api", "business_rule"}},
+                landscape={"components": [{"component_id": "api", "roots": ["apps/api/src"]}], "anchors": []},
+            )
+            return [str(item.get("subject_ref")) for item in findings if item.get("code") == "boundary_contract_mismatch"]
+
+        self.assertEqual(boundary_subjects(reversed_return), ["VDE-r"])
+        self.assertEqual(boundary_subjects(calls), [])
+        # A same-component edge without a contract keeps the old behavior (not checked).
+        self.assertEqual(boundary_subjects(None), [])
+
+
+class BusinessRuleBoundaryInputsTest(unittest.TestCase):
+    def test_every_declared_business_rule_input_must_be_mapped(self) -> None:
+        # Mirrors run_20261102_061023: the rule declared a confirmation input that no caller supplies.
+        provider = {
+            "surface": "business_rule",
+            "surface_contract": {"inputs": ["culturalHeritageId", "confirmation"], "decision": "d", "outcomes": ["deleted"]},
+        }
+        contract = {"input_mapping": [{"from": "id", "to": "culturalHeritageId", "required": True}]}
+        diagnostics = _boundary_contract_diagnostics(contract, provider)
+        self.assertEqual(diagnostics["missing_input_targets"], ["confirmation"])
+        self.assertEqual(diagnostics["mismatches"], ["map required input targets ['confirmation']"])
+        contract["input_mapping"].append({"from": "confirmed", "to": "confirmation", "required": True})
+        self.assertEqual(_boundary_contract_diagnostics(contract, provider)["mismatches"], [])
+        self.assertEqual(_boundary_contract_diagnostics({}, provider)["mismatches"], ["add boundary_contract"])
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ PHASE2_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "label": "Designer investigation",
         "effort": "low",
         "max_tokens": 8192,
-        "timeout": 180,
+        "timeout": 300,
     },
     "designer_delta": {
         "label": "Designer graph delta",
@@ -350,7 +350,7 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 3, "Số vòng Designer sửa design.", minimum=0),
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
             _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call hard cap", "integer", 128, "Cầu dao tổng cho call LLM của Phase 2; action Designer còn được giới hạn theo policy bên dưới.", minimum=1),
-            _field("SDLC_DESIGNER_PARTITION_ACTION_BUDGET", "Designer actions per partition", "integer", 8, "Số action tối đa cho mỗi scenario/component partition; partition mới bắt đầu bộ đếm riêng.", minimum=1),
+            _field("SDLC_DESIGNER_PARTITION_ACTION_BUDGET", "Designer actions per partition", "integer", 12, "Số action tối đa cho mỗi scenario/component partition; partition mới bắt đầu bộ đếm riêng.", minimum=1),
             _field("SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET", "Designer repair actions per scenario", "integer", 4, "Số action dành riêng cho nối graph và repair của mỗi scenario.", minimum=0),
             _field("SDLC_DESIGNER_FINALIZATION_ACTION_BUDGET", "Designer finalization actions", "integer", 4, "Số action dự phòng để hoàn tất toàn bộ Design sau các partition.", minimum=0),
             _field("SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP", "Designer global action hard cap", "integer", 128, "Chặn trước khi chạy nếu ngân sách tính từ số partition/scenario vượt ngưỡng vận hành này.", minimum=1),

@@ -21,6 +21,8 @@ from sdlc_harness.agents.designer import (
     validate_vertical_design_graph,
 )
 from sdlc_harness.agents.designer.execution import (
+    _feature_ux_decisions,
+    _materialize_delta_wiring,
     _wiring_operation_templates,
     _active_partition,
     _active_requirement_slice,
@@ -29,7 +31,7 @@ from sdlc_harness.agents.designer.execution import (
     _json_structure_hint,
     _parse_designer_tool_action,
 )
-from sdlc_harness.agents.designer.graph import graph_digest
+from sdlc_harness.agents.designer.graph import UI_LAYERED_LAYOUT_V1, UI_LAYOUT_CONTRACT_KEY, graph_digest
 from sdlc_harness.agents.designer.projections import render_design_projections, render_ui_feature_experience
 from sdlc_harness.agents.validator.design_validation import (
     _holistic_ui_review_instruction,
@@ -284,7 +286,7 @@ class _UiGraphFixture(unittest.TestCase):
             },
         }
 
-    def _graph(self, nodes: list[dict[str, object]]) -> dict[str, object]:
+    def _graph(self, nodes: list[dict[str, object]], *, layered: bool = False) -> dict[str, object]:
         graph: dict[str, object] = {
             "schema_version": GRAPH_VERSION_V2,
             "revision": 1,
@@ -294,15 +296,17 @@ class _UiGraphFixture(unittest.TestCase):
                 "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
                 "ui_repo_context": self.context,
                 "requirement_reference_ids": ["AC-1", "DEC-1", "MF-1", "PRE-1"],
+                **({UI_LAYOUT_CONTRACT_KEY: UI_LAYERED_LAYOUT_V1} if layered else {}),
             },
             "partitions": [
                 {
                     "use_case_id": "UC1",
-                    "scenario_id": "SC-1",
+                    "scenario_id": scenario_id,
                     "component_id": "web",
                     "coverage": {"ui": "covered"},
                     "source_observation_refs": ["repo:apps/web/src/AppShell.tsx#L1@sha256:x"],
                 }
+                for scenario_id in sorted({"SC-1", *(str(node.get("scenario_id") or "SC-1") for node in nodes)})
             ],
             "nodes": nodes,
             "edges": [],
@@ -483,6 +487,7 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
                 target_path=target, landscape=landscape, project_profile_id="typescript_fullstack_v1"
             ),
             "requirement_reference_ids": ["MAIN-1", "PRE-1"],
+            UI_LAYOUT_CONTRACT_KEY: UI_LAYERED_LAYOUT_V1,
         }
         return target, landscape, binding
 
@@ -520,6 +525,7 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
         experience = ui_node["surface_contract"]["experience_contract"]
         self.assertEqual(experience["screen"]["screen_id"], surface["screen_id"])
         self.assertEqual(experience["visual_contract"]["style_target_policy"], "new_stylesheet")
+        self.assertTrue(all(item["layer"] in {"page", "overlay"} for item in experience["visual_contract"]["layout"]))
         markdown = render_design_projections(result.graph)["design_markdown"]
         self.assertIn("## UI Runtime Surfaces", markdown)
         self.assertIn("Root → AppShell", markdown)
@@ -558,6 +564,9 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
             [{"id": "PRE-1", "text": "Records come from search."}],
         )
         self.assertIn("styles", payload["ui_runtime_context"])
+        self.assertIn("layout as {region,layer,content}", prompt)
+        layout = node["surface_contract"]["experience_contract"]["visual_contract"]["layout"]
+        self.assertEqual(layout[0]["layer"], "<page|overlay>")
         self.assertIn("owned by <scenario id>", prompt)
         self.assertNotIn("ui_repo_context", payload["graph"]["snapshot_binding"])
         self.assertIn("UI contract v2", prompt)
@@ -680,7 +689,94 @@ class HolisticExperienceTest(_UiGraphFixture):
         feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), owner, other]))
         assert feature is not None
         screen = next(item for item in feature["json"]["screens"] if item["screen_id"] == "delete-screen")
-        self.assertEqual(screen["runtime_states"]["success"]["presentation"], "Announce deletion.")
+        self.assertEqual([state["presentation"] for state in screen["runtime_states"]["success"]], ["Announce deletion."])
+
+    def test_screen_projection_merges_every_scenario_node(self) -> None:
+        main, cancel = self._view_with_experience(), self._view_with_experience()
+        main["scenario_id"] = "SC-1"
+        cancel.update({"id": "VDN-4", "scenario_id": "SC-2"})
+        main_exp = main["surface_contract"]["experience_contract"]
+        cancel_exp = cancel["surface_contract"]["experience_contract"]
+        main_exp["component_structure"] = ["Dialog: confirms the deletion"]
+        cancel_exp["component_structure"] = ["Dialog (shared): offers cancel", "RetryAction: re-submits"]
+        cancel_exp["runtime_states"]["loading"] = {"presentation": "Dialog busy.", "trigger": "Cancel pressed."}
+        cancel_exp["visual_contract"]["layout"] = [
+            "main: record list; selection unchanged",
+            "dialog layer: confirm and cancel actions",
+            "alert region: interruption notice with retry",
+        ]
+        feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), cancel, main]))
+        assert feature is not None
+        screen = next(item for item in feature["json"]["screens"] if item["screen_id"] == "delete-screen")
+
+        loading = screen["runtime_states"]["loading"]
+        self.assertEqual([(s["scenario_ids"], s["presentation"]) for s in loading], [(["SC-1"], "Busy indicator."), (["SC-2"], "Dialog busy.")])
+        self.assertEqual(screen["runtime_states"]["ready"][0]["scenario_ids"], ["SC-1", "SC-2"])
+        self.assertEqual(
+            [(item["region"], item["layer"], item["content"]) for item in screen["visual_contract"]["layout"]],
+            [
+                ("header", "page", "title"),
+                ("main", "page", "record list; selection unchanged"),
+                ("footer", "page", "status region"),
+                ("dialog layer", "overlay", "confirm and cancel actions"),
+                ("alert region", "page", "interruption notice with retry"),
+            ],
+        )
+        self.assertEqual(len(screen["composition_paths"]), 1)
+        dialog = next(item for item in screen["components"] if item["name"] == "Dialog")
+        self.assertEqual([r["scenario_id"] for r in dialog["responsibilities"]], ["SC-1", "SC-2"])
+
+        markdown = str(feature["markdown"])
+        self.assertEqual(markdown.count("- **Dialog**"), 1)
+        self.assertIn("With overlay open", markdown)
+        self.assertIn("ALERT REGION: interruption notice with retry", markdown)
+        desktop = markdown.split("### Wireframe (desktop)")[1].split("### Wireframe (mobile)")[0]
+        stacked, overlaid = desktop.split("With overlay open")
+        self.assertNotIn("DIALOG LAYER", stacked)
+        self.assertIn("| MAIN :::", overlaid)
+        self.assertTrue(all(len(line) == 64 for line in desktop.splitlines() if line.startswith(("|", "+"))))
+
+    @staticmethod
+    def _layered(view: dict[str, object], *layout: tuple[str, str]) -> dict[str, object]:
+        view["surface_contract"]["experience_contract"]["visual_contract"]["layout"] = [
+            {"region": region, "layer": layer, "content": f"{region} content"} for region, layer in layout
+        ]
+        return view
+
+    def test_layered_layout_is_required_only_for_pinned_graphs(self) -> None:
+        legacy = self._view_with_experience()
+        self._graph([*self._wiring_nodes(), legacy])
+        with self.assertRaises(HarnessError) as raised:
+            self._graph([*self._wiring_nodes(), self._view_with_experience()], layered=True)
+        self.assertIn("{region,layer,content}", raised.exception.message)
+        with self.assertRaises(HarnessError):
+            self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "floating"))], layered=True)
+        self._graph([*self._wiring_nodes(), self._layered(self._view_with_experience(), ("main", "page"))], layered=True)
+
+    def test_screen_nodes_must_agree_on_region_layer_and_style(self) -> None:
+        main = self._layered(self._view_with_experience(), ("main", "page"), ("notice", "overlay"))
+        main["scenario_id"] = "SC-1"
+        other = self._layered(
+            self._view_with_experience(style_target_policy="reuse_existing"), ("main", "page"), ("Notice", "page")
+        )
+        other.update({"id": "VDN-4", "scenario_id": "SC-3"})
+        nodes = [*self._wiring_nodes(), main, other]
+        findings = design_bundle_findings(self._graph(nodes, layered=True), landscape=LANDSCAPE)
+        layout = [item for item in findings if item["category"] == "ui_screen_layout_inconsistent"]
+        self.assertEqual([item["subject_ref"] for item in layout], ["delete-screen:VDN-4:notice"])
+        self.assertIn("layer overlay", layout[0]["expected_change"])
+        self.assertIn("ui_screen_style_inconsistent", {item["category"] for item in findings})
+        legacy = {str(item["category"]) for item in design_bundle_findings(self._graph(nodes), landscape=LANDSCAPE)}
+        self.assertFalse(legacy & {"ui_screen_layout_inconsistent", "ui_screen_style_inconsistent"})
+
+    def test_declared_overlay_layer_drives_the_wireframe(self) -> None:
+        view = self._layered(self._view_with_experience(), ("main", "page"), ("retry notice", "overlay"))
+        feature = render_ui_feature_experience(self._graph([*self._wiring_nodes(), view], layered=True))
+        assert feature is not None
+        stacked, overlaid = str(feature["markdown"]).split("### Wireframe (desktop)")[1].split("With overlay open")[:2]
+        self.assertNotIn("RETRY NOTICE", stacked)
+        self.assertIn("RETRY NOTICE: retry notice content", overlaid)
+        self.assertIn("- `overlay` retry notice: retry notice content", str(feature["markdown"]))
 
     def test_semantic_view_and_guidance_key_are_v2_only(self) -> None:
         graph = self._graph([self._view()])
@@ -818,6 +914,123 @@ class WiringTemplateTest(_UiGraphFixture):
         )
         self.assertEqual(templates, [])
 
+    def test_harness_materializes_wiring_for_screen_inputs(self) -> None:
+        graph = self._graph([])
+        templates = _wiring_operation_templates(
+            graph,
+            landscape=self.REAL_LANDSCAPE,
+            scenario_id="SC-1",
+            component_id="web",
+            owner_anchors=[{"path": "apps/web/src/AppShell.tsx", "symbol": "AppShell"}],
+            requirement_refs=["AC-1"],
+        )
+        partition = {"harness_wiring_operations": templates}
+
+        def delta(*ops: dict[str, object]) -> dict[str, object]:
+            return {"delta": {"operations": [{"op": "set_partition_coverage", "coverage": []}, *ops]}}
+
+        def wiring(arguments: object) -> dict[str, dict[str, object]]:
+            return {
+                op["node"]["runtime_binding"]["target"]["symbol"]: op["node"]
+                for op in arguments["delta"]["operations"]  # type: ignore[index]
+                if op.get("op") == "add_node" and op["node"]["surface_contract"]["runtime_surface"].get("role") == "composition_wiring"
+            }
+
+        view_op = {"op": "add_node", "node": self._view()}
+        edge_op = {"op": "add_edge", "edge": {"kind": "contains", "from": "tmp:SC-1:wire:AppShell", "to": "tmp:SC-1:ui"}}
+        result = _materialize_delta_wiring(arguments=delta(view_op, edge_op), active_partition=partition, graph=graph, run_id="r")
+        ops = result["delta"]["operations"]
+        self.assertEqual([op["op"] for op in ops], ["set_partition_coverage", "add_node", "add_node", "add_node", "add_edge"])
+        wired = wiring(result)
+        self.assertEqual(sorted(wired), ["AppShell", "Root"])
+        self.assertNotIn("<input names>", json.dumps(result))
+        self.assertIn("next component receives items", json.dumps(wired["Root"]))
+        shell_surface = wired["AppShell"]["surface_contract"]["runtime_surface"]
+        self.assertEqual([item["name"] for item in shell_surface["required_inputs"]], ["title", "health"])
+        self.assertEqual(shell_surface["runnable_status"], "bound")
+
+        # A drifted Designer-written wiring node (run r6) is replaced by the template, keeping its temp_ref.
+        drifted = json.loads(json.dumps(templates[1]["node"]))
+        drifted["temp_ref"] = "tmp:custom-shell"
+        drifted["surface_contract"]["runtime_surface"]["required_inputs"].append(self._items_input())
+        drifted["surface_contract"]["runtime_surface"]["runnable_status"] = "externally_blocked"
+        result = _materialize_delta_wiring(
+            arguments=delta({"op": "add_node", "node": drifted}, view_op), active_partition=partition, graph=graph, run_id="r"
+        )
+        shell = wiring(result)["AppShell"]
+        self.assertEqual(shell["temp_ref"], "tmp:custom-shell")
+        self.assertEqual([item["name"] for item in shell["surface_contract"]["runtime_surface"]["required_inputs"]], ["title", "health"])
+        self.assertEqual(shell["surface_contract"]["runtime_surface"]["runnable_status"], "bound")
+        self.assertEqual(len(wiring(result)), 2)
+
+        # An external input the Designer bound to the screen itself (run r7) enters at the entrypoint instead.
+        self_bound = self._view(inputs=[self._items_input(provided_by=VIEW_REF)])
+        result = _materialize_delta_wiring(
+            arguments=delta({"op": "add_node", "node": self_bound}), active_partition=partition, graph=graph, run_id="r"
+        )
+        screen = result["delta"]["operations"][-1]["node"]["surface_contract"]["runtime_surface"]
+        self.assertEqual(screen["required_inputs"][0]["provided_by"], ENTRY)
+        self.assertEqual(sorted(wiring(result)), ["AppShell", "Root"])
+        self.assertEqual(self_bound["surface_contract"]["runtime_surface"]["required_inputs"][0]["provided_by"], VIEW_REF)
+        # An intermediate hop is not a valid external provider either: Root must also forward the input.
+        mid_bound = self._view(inputs=[self._items_input(provided_by=SHELL)])
+        result = _materialize_delta_wiring(
+            arguments=delta({"op": "add_node", "node": mid_bound}), active_partition=partition, graph=graph, run_id="r"
+        )
+        screen = result["delta"]["operations"][-1]["node"]["surface_contract"]["runtime_surface"]
+        self.assertEqual(screen["required_inputs"][0]["provided_by"], ENTRY)
+        self.assertEqual(sorted(wiring(result)), ["AppShell", "Root"])
+        # Other sources are not guessed; graph validation keeps reporting them.
+        local_view = self._view(inputs=[self._items_input(source="existing_runtime", provided_by=VIEW_REF)])
+        local = delta({"op": "add_node", "node": local_view})
+        self.assertIs(_materialize_delta_wiring(arguments=local, active_partition=partition, graph=graph, run_id="r"), local)
+
+        # Hops modeled by an earlier partition need no wiring; a hop without a template is rejected.
+        unchanged = delta(view_op)
+        self.assertIs(
+            _materialize_delta_wiring(arguments=unchanged, active_partition={}, graph=self._graph(self._wiring_nodes()), run_id="r"),
+            unchanged,
+        )
+        with self.assertRaises(HarnessError) as raised:
+            _materialize_delta_wiring(arguments=delta(view_op), active_partition={}, graph=graph, run_id="r")
+        self.assertEqual(raised.exception.error_code, "designer_delta_invalid")
+        self.assertIn(f"{ENTRY} does not pass items", raised.exception.message)
+
+
+class FeatureUxDecisionsTest(unittest.TestCase):
+    def test_focus_policies_keep_their_scenario_and_wiring_is_not_a_screen(self) -> None:
+        # run_20261102_061023 designer-0015: SC-3 copied SC-1's screen-level focus policy.
+        def node(node_id: str, scenario_id: str, *, role: str = "screen", event: str = "") -> dict[str, object]:
+            return {
+                "id": node_id,
+                "scenario_id": scenario_id,
+                "surface": "ui",
+                "name": node_id,
+                "surface_contract": {
+                    "runtime_surface": {"role": role, "screen_id": "manage" if role == "screen" else "sc-1-wiring"},
+                    "experience_contract": {
+                        "screen": {"screen_id": "manage"},
+                        "focus_policies": [{"event": event, "primary_target": "Confirm"}] if event else [],
+                    },
+                },
+            }
+
+        graph = {
+            "nodes": [
+                node("VDN-wire", "SC-1", role="composition_wiring"),
+                node("VDN-1", "SC-1", event="dialog opens"),
+                node("VDN-2", "SC-2", event="dialog closes"),
+            ]
+        }
+        decisions = _feature_ux_decisions(graph)
+        self.assertEqual(list(decisions), ["manage"])
+        screen = decisions["manage"]
+        self.assertNotIn("focus_policies", screen)
+        self.assertEqual(
+            [(item["scenario_id"], item["event"]) for item in screen["scenario_focus_policies"]],
+            [("SC-1", "dialog opens"), ("SC-2", "dialog closes")],
+        )
+
 
 class DesignerOutputNormalizationTest(unittest.TestCase):
     @staticmethod
@@ -950,7 +1163,28 @@ class UiContractWorkflowPinTest(unittest.TestCase):
             self.assertEqual(binding["designer_ui_contract_version"], UI_EXPERIENCE_CONTRACT_V2)
             self.assertEqual(binding["ui_repo_context"]["entrypoint"]["ref"], ENTRY)
             self.assertTrue(binding["requirement_reference_ids"])
+            self.assertEqual(binding[UI_LAYOUT_CONTRACT_KEY], UI_LAYERED_LAYOUT_V1)
 
+            revalidated = PhaseTwoWorkflow(settings).revalidate_design(run_id=run_id)
+            self.assertEqual(revalidated["status"], "waiting_design_approval", revalidated)
+
+    def test_run_pinned_before_layered_layout_keeps_legacy_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            settings = self._settings(Path(temp))
+            run_id = str(
+                PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")["run_id"]
+            )
+            store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
+            state = store.read_state(run_id)
+            state.pop(UI_LAYOUT_CONTRACT_KEY)
+            store.write_state(state)
+
+            designed = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=run_id)
+            self.assertEqual(designed["status"], "waiting_design_approval", designed)
+            graph = json.loads(
+                (settings.repo_root / str(designed["latest_artifacts"]["vertical_design_graph"])).read_text(encoding="utf-8")
+            )
+            self.assertNotIn(UI_LAYOUT_CONTRACT_KEY, graph["snapshot_binding"])
             revalidated = PhaseTwoWorkflow(settings).revalidate_design(run_id=run_id)
             self.assertEqual(revalidated["status"], "waiting_design_approval", revalidated)
 

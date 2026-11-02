@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -29,6 +30,7 @@ from .graph import (
     is_composition_wiring,
     new_vertical_design_graph,
     ui_contract_v2,
+    ui_layered_layout,
     validate_vertical_design_graph,
 )
 from .projections import _merged_runtime_states
@@ -150,161 +152,170 @@ class DesignerToolLoopExecutor:
         session_path = self.store.relative(session_file)
         manifest_path = self.store.relative(manifest_file)
         journal_path = self.store.relative(journal_file)
-        uiux_provider: UiUxGuidanceProvider | None = None
-        uiux_profile: dict[str, object] = {}
-        if uiux_mode == "enforce":
-            if uiux_contract_version != UIUX_CONTRACT_VERSION:
-                raise DesignerExecutionError(
-                    "designer_uiux_contract_missing",
-                    "Run has no supported pinned UI/UX guidance contract.",
-                    run_id=run_id,
-                    retriable=False,
-                    session_path=session_path,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
+        session: dict[str, object] | None = None
+        registry: DesignerToolRegistry | None = None
+        try:
+            uiux_provider: UiUxGuidanceProvider | None = None
+            uiux_profile: dict[str, object] = {}
+            if uiux_mode == "enforce":
+                if uiux_contract_version != UIUX_CONTRACT_VERSION:
+                    raise DesignerExecutionError(
+                        "designer_uiux_contract_missing",
+                        "Run has no supported pinned UI/UX guidance contract.",
+                        run_id=run_id,
+                        retriable=False,
+                        session_path=session_path,
+                        manifest_path=manifest_path,
+                        journal_path=journal_path,
+                    )
+                uiux_provider = UiUxGuidanceProvider(
+                    skill_root=self.settings.uiux_skill_root,
+                    timeout_seconds=self.settings.uiux_skill_timeout_seconds,
+                    fake_mode=self.settings.llm_mode == "fake",
                 )
-            uiux_provider = UiUxGuidanceProvider(
-                skill_root=self.settings.uiux_skill_root,
-                timeout_seconds=self.settings.uiux_skill_timeout_seconds,
-                fake_mode=self.settings.llm_mode == "fake",
-            )
-            try:
                 uiux_profile = uiux_provider.preflight()
-            except HarnessError as exc:
-                raise DesignerExecutionError(
-                    exc.error_code,
-                    exc.message,
-                    run_id=run_id,
-                    retriable=exc.error_code in {"designer_uiux_unavailable", "designer_uiux_failed"},
-                    session_path=session_path,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                ) from exc
-        action_budget_policy = _designer_action_budget_policy(
-            settings=self.settings,
-            requirement_model=requirement_model,
-            landscape=landscape,
-        )
-        manifest = self._manifest(
-            run_id=run_id,
-            requirement_model=requirement_model,
-            landscape=landscape,
-            snapshot_binding=snapshot_binding,
-            target_path=target_path,
-            repair_feedback=repair_feedback or [],
-            session_ordinal=session_ordinal,
-            contract_version=contract_version,
-            uiux_mode=uiux_mode,
-            uiux_profile=uiux_profile,
-            action_budget_policy=action_budget_policy,
-        )
-        if manifest_file.exists():
-            persisted_manifest = _read_json(manifest_file, run_id=run_id)
-            if persisted_manifest.get("input_hash") != manifest.get("input_hash"):
-                raise DesignerExecutionError(
-                    "designer_input_drift",
-                    "Frozen Designer inputs changed after the session was created.",
-                    run_id=run_id,
-                    retriable=False,
-                    session_path=session_path,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                )
-            persisted_manifest["action_budget"] = manifest["action_budget"]
-            persisted_manifest["action_budget_policy"] = manifest["action_budget_policy"]
-            _write_json_atomic(manifest_file, persisted_manifest)
-            manifest = persisted_manifest
-        else:
-            _write_json_atomic(manifest_file, manifest)
-
-        if session_file.exists():
-            session = _read_json(session_file, run_id=run_id)
-            if session.get("schema_version") != SESSION_VERSION:
-                raise DesignerExecutionError(
-                    "designer_session_invalid",
-                    "Persisted Designer session version is invalid.",
-                    run_id=run_id,
-                    retriable=False,
-                    session_path=session_path,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                )
-            graph = validate_vertical_design_graph(
-                session.get("graph"),
-                expected_run_id=run_id,
-                expected_binding=snapshot_binding,
-            )
-            _configure_action_budgets(session, action_budget_policy)
-            _write_json_atomic(session_file, session)
-        else:
-            graph = existing_graph or new_vertical_design_graph(
-                run_id=run_id,
-                snapshot_binding=snapshot_binding,
-                contract_version=contract_version,
-            )
-            graph = validate_vertical_design_graph(graph, expected_run_id=run_id, expected_binding=snapshot_binding)
-            graph, reconciled_stale_partitions = _reconcile_stale_placeholder_partitions(
+            action_budget_policy = _designer_action_budget_policy(
+                settings=self.settings,
                 requirement_model=requirement_model,
                 landscape=landscape,
-                graph=graph,
             )
-            session = {
-                "schema_version": SESSION_VERSION,
-                "run_id": run_id,
-                "session_name": session_name,
-                "status": "running",
-                "manifest_input_hash": manifest["input_hash"],
-                "cursor": {"next_action_index": 1, "pending_call": None},
-                "budgets": {
-                    **_new_action_budgets(action_budget_policy),
-                    "invalid_action": {"limit": INVALID_ACTION_LIMIT, "used": 0},
-                    "repair_iteration": max(0, session_ordinal - 1),
-                },
-                "graph": graph,
-                "delta_paths": [],
-                "observations": [],
-                "observation_actions_since_delta": 0,
-                "source_observations": {},
-                "guidance_observations": {},
-                "repair_observations": {},
-                "invalid_actions_by_target": {},
-                "active_repair_target_id": "",
-                "repair_targets_completed": [],
-                "reconciled_stale_partitions": reconciled_stale_partitions,
-                "exchange_paths": [],
-                "pending_step_review": None,
-                "last_review_feedback": "",
-                "created_at": utc_now_iso(),
-                "updated_at": utc_now_iso(),
-            }
-            _write_json_atomic(session_file, session)
+            manifest = self._manifest(
+                run_id=run_id,
+                requirement_model=requirement_model,
+                landscape=landscape,
+                snapshot_binding=snapshot_binding,
+                target_path=target_path,
+                repair_feedback=repair_feedback or [],
+                session_ordinal=session_ordinal,
+                contract_version=contract_version,
+                uiux_mode=uiux_mode,
+                uiux_profile=uiux_profile,
+                action_budget_policy=action_budget_policy,
+            )
+            if manifest_file.exists():
+                persisted_manifest = _read_json(manifest_file, run_id=run_id)
+                if persisted_manifest.get("input_hash") != manifest.get("input_hash"):
+                    raise DesignerExecutionError(
+                        "designer_input_drift",
+                        "Frozen Designer inputs changed after the session was created.",
+                        run_id=run_id,
+                        retriable=False,
+                        session_path=session_path,
+                        manifest_path=manifest_path,
+                        journal_path=journal_path,
+                    )
+                persisted_manifest["action_budget"] = manifest["action_budget"]
+                persisted_manifest["action_budget_policy"] = manifest["action_budget_policy"]
+                _write_json_atomic(manifest_file, persisted_manifest)
+                manifest = persisted_manifest
+            else:
+                _write_json_atomic(manifest_file, manifest)
 
-        registry = DesignerToolRegistry(
-            run_id=run_id,
-            target_path=target_path,
-            landscape=landscape,
-            graph=graph,
-            fake_mode=self.settings.llm_mode == "fake",
-            uiux_provider=uiux_provider,
-            uiux_mode=uiux_mode,
-            expected_codegraph_digest=str(snapshot_binding.get("repo_codegraph_snapshot_digest") or ""),
-        )
-        registry.register_evidence_refs(
-            _strings(_dict(snapshot_binding.get("ui_repo_context")).get("evidence_refs"))
-        )
-        for refs in _dict(session.get("source_observations")).values():
-            registry.register_evidence_refs(_strings(refs))
-        for values in _dict(session.get("guidance_observations")).values():
-            for item in _dicts(values):
-                registry.register_guidance_refs(_strings(item.get("evidence_refs")))
-        self._reconcile_pending(
-            run_id=run_id,
-            session=session,
-            session_file=session_file,
-            session_dir=session_dir,
-            registry=registry,
-            journal_file=journal_file,
-        )
+            if session_file.exists():
+                session = _read_json(session_file, run_id=run_id)
+                if session.get("schema_version") != SESSION_VERSION:
+                    raise DesignerExecutionError(
+                        "designer_session_invalid",
+                        "Persisted Designer session version is invalid.",
+                        run_id=run_id,
+                        retriable=False,
+                        session_path=session_path,
+                        manifest_path=manifest_path,
+                        journal_path=journal_path,
+                    )
+                graph = validate_vertical_design_graph(
+                    session.get("graph"),
+                    expected_run_id=run_id,
+                    expected_binding=snapshot_binding,
+                )
+                _configure_action_budgets(session, action_budget_policy)
+                _write_json_atomic(session_file, session)
+            else:
+                graph = existing_graph or new_vertical_design_graph(
+                    run_id=run_id,
+                    snapshot_binding=snapshot_binding,
+                    contract_version=contract_version,
+                )
+                graph = validate_vertical_design_graph(
+                    graph,
+                    expected_run_id=run_id,
+                    expected_binding=snapshot_binding,
+                )
+                graph, reconciled_stale_partitions = _reconcile_stale_placeholder_partitions(
+                    requirement_model=requirement_model,
+                    landscape=landscape,
+                    graph=graph,
+                )
+                session = {
+                    "schema_version": SESSION_VERSION,
+                    "run_id": run_id,
+                    "session_name": session_name,
+                    "status": "running",
+                    "manifest_input_hash": manifest["input_hash"],
+                    "cursor": {"next_action_index": 1, "pending_call": None},
+                    "budgets": {
+                        **_new_action_budgets(action_budget_policy),
+                        "invalid_action": {"limit": INVALID_ACTION_LIMIT, "used": 0},
+                        "repair_iteration": max(0, session_ordinal - 1),
+                    },
+                    "graph": graph,
+                    "delta_paths": [],
+                    "observations": [],
+                    "observation_actions_since_delta": 0,
+                    "source_observations": {},
+                    "guidance_observations": {},
+                    "repair_observations": {},
+                    "invalid_actions_by_target": {},
+                    "active_repair_target_id": "",
+                    "repair_targets_completed": [],
+                    "reconciled_stale_partitions": reconciled_stale_partitions,
+                    "exchange_paths": [],
+                    "pending_step_review": None,
+                    "last_review_feedback": "",
+                    "created_at": utc_now_iso(),
+                    "updated_at": utc_now_iso(),
+                }
+                _write_json_atomic(session_file, session)
+
+            registry = DesignerToolRegistry(
+                run_id=run_id,
+                target_path=target_path,
+                landscape=landscape,
+                graph=graph,
+                fake_mode=self.settings.llm_mode == "fake",
+                uiux_provider=uiux_provider,
+                uiux_mode=uiux_mode,
+                expected_codegraph_digest=str(snapshot_binding.get("repo_codegraph_snapshot_digest") or ""),
+            )
+            registry.register_evidence_refs(
+                _strings(_dict(snapshot_binding.get("ui_repo_context")).get("evidence_refs"))
+            )
+            for refs in _dict(session.get("source_observations")).values():
+                registry.register_evidence_refs(_strings(refs))
+            for values in _dict(session.get("guidance_observations")).values():
+                for item in _dicts(values):
+                    registry.register_guidance_refs(_strings(item.get("evidence_refs")))
+            self._reconcile_pending(
+                run_id=run_id,
+                session=session,
+                session_file=session_file,
+                session_dir=session_dir,
+                registry=registry,
+                journal_file=journal_file,
+            )
+        except DesignerExecutionError:
+            raise
+        except HarnessError as exc:
+            raise self._execution_error(
+                exc=exc,
+                run_id=run_id,
+                session=session,
+                registry=registry,
+                session_file=session_file,
+                session_path=session_path,
+                manifest_path=manifest_path,
+                journal_path=journal_path,
+            ) from exc
         if str(session.get("status") or "") == "completed":
             return DesignerExecutionResult(
                 graph=registry.graph,
@@ -344,27 +355,15 @@ class DesignerToolLoopExecutor:
         except DesignerExecutionError:
             raise
         except HarnessError as exc:
-            retriable = exc.error_code in {
-                "llm_transport_failed",
-                "target_repo_codegraph_failed",
-                "target_repo_codegraph_stale",
-                "designer_uiux_unavailable",
-                "designer_uiux_failed",
-            }
-            session["status"] = "paused" if retriable else "blocked"
-            session["updated_at"] = utc_now_iso()
-            session["last_error"] = exc.to_response()
-            session["graph"] = registry.graph
-            _write_json_atomic(session_file, session)
-            raise DesignerExecutionError(
-                exc.error_code,
-                exc.message,
+            raise self._execution_error(
+                exc=exc,
                 run_id=run_id,
-                retriable=retriable,
+                session=session,
+                registry=registry,
+                session_file=session_file,
                 session_path=session_path,
                 manifest_path=manifest_path,
                 journal_path=journal_path,
-                progress=_progress(session),
             ) from exc
 
         session["status"] = "completed"
@@ -976,6 +975,7 @@ class DesignerToolLoopExecutor:
                 completed_targets=(
                     _strings(session.get("repair_targets_completed")) if repair_feedback else []
                 ),
+                requirement_model=requirement_model,
                 landscape=landscape,
                 source="validator_feedback" if repair_feedback else "inline_composition",
                 active_partition=active_partition,
@@ -1089,6 +1089,12 @@ class DesignerToolLoopExecutor:
                     session["pending_step_review"] = None
                     session["last_review_feedback"] = note
                     session["last_review_target"] = str(pending_review.get("review_target") or "")
+                    # The next prompt must show what was rejected, or "keep the rest" cannot be honored.
+                    session["last_review_rejected_delta"] = (
+                        _dict(action.get("arguments")).get("delta")
+                        if str(action.get("action") or "") == "design.propose_delta"
+                        else None
+                    )
                     if parse_error:
                         session["last_invalid_action"] = ""
                     session["status"] = "running"
@@ -1115,6 +1121,7 @@ class DesignerToolLoopExecutor:
                 session["pending_step_review"] = None
                 session["last_review_feedback"] = ""
                 session["last_review_target"] = ""
+                session["last_review_rejected_delta"] = None
                 session["status"] = "running"
                 _update_designer_exchange(
                     exchange_path,
@@ -1145,6 +1152,7 @@ class DesignerToolLoopExecutor:
                     last_review_feedback=_scoped_review_feedback(
                         session, current_target=_review_target_key(repair_task, active_partition)
                     ),
+                    last_rejected_delta=_dict(session.get("last_review_rejected_delta")),
                     uiux_mode=registry.uiux_mode,
                     active_guidance=_guidance_observations(session, guidance_key),
                     source_inspected=bool(_source_observation_refs(session, active_component_id)),
@@ -1482,6 +1490,39 @@ class DesignerToolLoopExecutor:
                 continue
             if graph_is_v2 and tool_id == "design.propose_delta" and active_component_id and source_refs:
                 arguments = _attach_source_observations(arguments, component_id=active_component_id, refs=source_refs)
+            if tool_id == "complete" and (active_partition is not None or repair_task is not None):
+                if active_partition is not None:
+                    partition = _dict(active_partition.get("partition"))
+                    work_item = (
+                        "active_partition "
+                        f"{partition.get('scenario_id') or '?'}|{partition.get('component_id') or '?'}"
+                    )
+                else:
+                    work_item = f"active_repair_task {(repair_task or {}).get('target_id') or '?'}"
+                message = (
+                    f"Cannot call complete while {work_item} is active. "
+                    "Propose a design.propose_delta for that work item first."
+                )
+                self._invalid_action(session, session_file, message=message)
+                self._record_observation(
+                    session,
+                    {
+                        "tool_id": tool_id,
+                        "arguments": arguments,
+                        "status": "rejected",
+                        "code": "active_work_pending",
+                        "message": message,
+                    },
+                )
+                _update_designer_exchange(
+                    exchange_path,
+                    {
+                        "status": "rejected",
+                        "rejection": {"code": "active_work_pending", "message": message},
+                    },
+                )
+                _write_json_atomic(session_file, session)
+                continue
             if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id != "design.propose_delta":
                 self._invalid_action(
                     session,
@@ -1539,6 +1580,7 @@ class DesignerToolLoopExecutor:
             session["cursor"] = cursor
             _write_json_atomic(session_file, session)
             action_fingerprint = canonical_json_hash({"tool_id": tool_id, "arguments": arguments})
+            designer_arguments = arguments
             if action_fingerprint == str(session.get("last_action_fingerprint") or ""):
                 self._invalid_action(
                     session,
@@ -1561,6 +1603,19 @@ class DesignerToolLoopExecutor:
                 _write_json_atomic(session_file, session)
                 continue
             try:
+                if tool_id == "design.propose_delta" and active_partition is not None:
+                    arguments = _materialize_delta_wiring(
+                        arguments=arguments,
+                        active_partition=active_partition,
+                        graph=registry.graph,
+                        run_id=run_id,
+                    )
+                    arguments = _materialize_branch_parent(
+                        arguments=arguments,
+                        active_partition=active_partition,
+                        requirement_model=requirement_model,
+                        graph=registry.graph,
+                    )
                 if tool_id == "design.propose_delta" and repair_task is not None:
                     _validate_repair_delta_scope(
                         arguments=arguments,
@@ -1579,6 +1634,7 @@ class DesignerToolLoopExecutor:
                     journal_file=journal_file,
                     on_progress=on_progress,
                     call_id=call_id,
+                    fingerprint_arguments=designer_arguments,
                 )
                 _update_designer_exchange(exchange_path, {"status": "succeeded"})
                 if tool_id == "design.propose_delta" and repair_task is not None:
@@ -1608,6 +1664,7 @@ class DesignerToolLoopExecutor:
                 if exc.error_code in {
                     "designer_tool_unknown",
                     "designer_tool_input_invalid",
+                    "designer_repo_path_unsafe",
                     "designer_evidence_not_found",
                     "designer_delta_invalid",
                     "designer_delta_no_effect",
@@ -1636,6 +1693,45 @@ class DesignerToolLoopExecutor:
                     _write_json_atomic(session_file, session)
                     continue
                 raise
+
+    def _execution_error(
+        self,
+        *,
+        exc: HarnessError,
+        run_id: str,
+        session: dict[str, object] | None,
+        registry: DesignerToolRegistry | None,
+        session_file: Path,
+        session_path: str,
+        manifest_path: str,
+        journal_path: str,
+    ) -> DesignerExecutionError:
+        retriable = exc.error_code in {
+            "llm_transport_failed",
+            "target_repo_codegraph_failed",
+            "target_repo_codegraph_stale",
+            "designer_uiux_unavailable",
+            "designer_uiux_failed",
+        }
+        progress: dict[str, object] = {}
+        if session is not None:
+            session["status"] = "paused" if retriable else "blocked"
+            session["updated_at"] = utc_now_iso()
+            session["last_error"] = exc.to_response()
+            if registry is not None:
+                session["graph"] = registry.graph
+            _write_json_atomic(session_file, session)
+            progress = _progress(session)
+        return DesignerExecutionError(
+            exc.error_code,
+            exc.message,
+            run_id=run_id,
+            retriable=retriable,
+            session_path=session_path,
+            manifest_path=manifest_path,
+            journal_path=journal_path,
+            progress=progress,
+        )
 
     def _step_review_required(
         self,
@@ -1673,6 +1769,7 @@ class DesignerToolLoopExecutor:
         journal_file: Path,
         on_progress: Any | None,
         call_id: str | None = None,
+        fingerprint_arguments: object | None = None,
     ) -> None:
         cursor = _dict(session.get("cursor"))
         effective_call_id = call_id or f"designer-{int(cursor.get('next_action_index') or 1):04d}"
@@ -1754,7 +1851,9 @@ class DesignerToolLoopExecutor:
                 "evidence_refs": evidence_refs,
             },
         )
-        session["last_action_fingerprint"] = canonical_json_hash({"tool_id": tool_id, "arguments": arguments})
+        session["last_action_fingerprint"] = canonical_json_hash(
+            {"tool_id": tool_id, "arguments": arguments if fingerprint_arguments is None else fingerprint_arguments}
+        )
         if tool_id == "design.propose_delta":
             session["observation_actions_since_delta"] = 0
         elif tool_id in OBSERVATION_TOOL_IDS:
@@ -2620,6 +2719,7 @@ def _designer_prompt(
     last_invalid_action: str,
     observation_limit: int = OBSERVATION_ACTION_LIMIT,
     last_review_feedback: str = "",
+    last_rejected_delta: dict[str, object] | None = None,
     uiux_mode: str = "off",
     active_guidance: list[dict[str, object]] | None = None,
     source_inspected: bool = False,
@@ -2689,9 +2789,15 @@ def _designer_prompt(
         if last_invalid_action
         else ""
     )
+    rejected_delta = (
+        " Your rejected delta follows; change only what the review names and keep every other node, edge and "
+        "mapping it contains: " + json.dumps(last_rejected_delta, ensure_ascii=False, sort_keys=True)
+        if prompt_review_feedback and last_rejected_delta
+        else ""
+    )
     review_correction = (
         "The operator rejected your previous proposed action. Address this review before choosing the next action: "
-        f"{prompt_review_feedback}\n\n"
+        f"{prompt_review_feedback}{rejected_delta}\n\n"
         if prompt_review_feedback
         else ""
     )
@@ -2723,8 +2829,8 @@ def _designer_prompt(
         "from ui_runtime_context.composition_chain or runtime targets of other UI nodes, and runtime_binding.attachment "
         "owner_path#owner_symbol must equal the hop just before the target. Nodes on the same screen share one screen_id. "
         "required_inputs lists every runtime input the screen needs to become usable (records to show or select, "
-        "session/auth, data loaded from another use case), including every required prop of an AS-IS component you "
-        "modify or reuse. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
+        "session/auth, data loaded from another use case), including every required prop of an AS-IS component a "
+        "screen node modifies or reuses. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
         "new_boundary when this Design adds the provider (binding is that node's VDN-* id); external_use_case when the "
         "approved Requirement says the data comes from another use case, citing the precondition or flow-step id from "
         "ui_runtime_context.dependency_refs whose text states that dependency, and then runnable_status=externally_blocked; "
@@ -2732,13 +2838,11 @@ def _designer_prompt(
         "authenticated session) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
         "has its provider; demo_fixture only with an approved DEC-* decision and "
         "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
-        "that supplies the input. delta_scaffold only lists the missing surface nodes. "
-        "active_partition.optional_wiring_operations holds ready-made composition_wiring modify nodes for each AS-IS hop on "
-        "the screen mount path: when a new input must flow down to the screen, declare it only on the screen node with "
-        "provided_by set to the topmost hop that receives it, and add the wiring operation of every hop it passes through, "
-        "changing only its <input names> placeholders. Otherwise, when an AS-IS hop on "
-        "composition_path does not already pass an input (see composition_chain.passes_props), add in the same delta a "
-        "modify node whose runtime_binding.target is that hop (the app root uses runtime_kind=entrypoint with relation owned_by). An "
+        "that supplies the input. When a new input must flow down to the screen, declare it only on the screen node "
+        "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta the "
+        "composition_wiring modify node of every AS-IS hop from provided_by down to the screen "
+        "(active_partition.harness_wiring_operations shows them, with <input names> filled from your required_inputs); "
+        "do not write those wiring nodes yourself, and you may reference their temp_ref in edges. An "
         "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
         "Requirement does not state. "
         if ui_v2_work
@@ -2769,17 +2873,27 @@ def _designer_prompt(
         "responsive, focus_flow, and the successful uiux guidance_refs. Guidance informs UX only; Requirement and "
         "repository source remain authoritative. "
         + (
-            "Design the whole screen, not only this partition: reuse feature_ux_decisions for the same screen_id and "
-            "keep them consistent. Screen-wide fields (screen, visual_contract, component layout) may describe the full "
-            "screen, but transitions, outcomes, feedback, focus_policies and runtime_states must implement only "
-            "active_requirement_slice. active_requirement_slice.outcome_context (if present) is this scenario's final "
+            "Design the whole screen, not only this partition: reuse the screen-wide fields of feature_ux_decisions "
+            "(screen, visual_contract, component layout) for the same screen_id and keep them consistent. "
+            "feature_ux_decisions.scenario_focus_policies and runtime_states belong to the scenarios they name: use them "
+            "only to keep element names consistent, never copy them into this scenario. Transitions, outcomes, feedback, "
+            "focus_policies and runtime_states must implement only active_requirement_slice. active_requirement_slice.outcome_context (if present) is this scenario's final "
             "user-observable result: show it in the final transition outcome, outcomes, feedback and "
             "runtime_states.success/error, but do not design how it is produced (that work belongs to other surfaces) and "
             "never add outcome_context ids to requirement_refs. Mark a runtime state owned by another scenario as {not_applicable:true,reason:"
             "'owned by <scenario id>'} and never add another scenario's behavior (for example its cancel or success "
             "outcome) to this node. Also fill screen{screen_id,purpose,entry_condition}; runtime_states for loading, "
             "ready, empty, error and success, each as {presentation,trigger} or {not_applicable:true,reason}; "
-            "visual_contract with hierarchy, layout as '<region>: <content>' items, typography, color_and_tokens, "
+            "visual_contract with hierarchy, "
+            + (
+                "layout as {region,layer,content} items where layer is 'page' for regions in the page flow and "
+                "'overlay' for a dialog, modal or popover drawn above the page and for every region rendered inside "
+                "it (for example a notice or retry action shown within the dialog); reuse the same region names, "
+                "layers and style_target_policy that feature_ux_decisions already set for this screen_id; "
+                if ui_layered_layout(graph)
+                else "layout as '<region>: <content>' items, "
+            )
+            + "typography, color_and_tokens, "
             "focus_appearance, responsive_rules, style_target_policy (reuse_existing only when ui_runtime_context "
             "styles has a stylesheet, otherwise new_stylesheet) and style_target_reason; focus_policies as structured "
             "decisions {event,source_removed,removed_element,primary_target,fallback_target,selection_strategy,"
@@ -2802,8 +2916,9 @@ def _designer_prompt(
         "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton, "
         "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
         "connect this projection to nodes of the same scenario already in the graph or in this delta, keeping exactly "
-        "one terminal edge last. Edges may only reference existing nodes; when the counterpart surface (for example the "
-        "API a UI calls) is not designed yet, leave that edge to its later partition instead of inventing an endpoint. "
+        "one terminal edge last. Every edge endpoint must be an existing VDN-* id or a temp_ref added in this same delta; "
+        "when the counterpart surface (for example the API a UI calls) is not designed yet, leave that edge to its later "
+        "partition instead of inventing an endpoint. "
         "When active_partition.path_insertion.required is true, preserve every supplied "
         "remove_edge and copied re-add operation, fill the two inserted edge contracts, and keep the terminal edge last; "
         "never submit the new surface as a disconnected node. For an alternative or exception scenario, inspect "
@@ -2931,8 +3046,11 @@ def _designer_prompt(
         "\"to\":\"provider field\",\"required\":true}],\"auth_mapping\":[],"
         "\"response_mapping\":[{\"from\":\"provider success\",\"to\":\"consumer outcome\","
         "\"required\":true}],\"error_mapping\":[]}}. Map every required API request field, non-public "
-        "authorization, success response, and 4xx/5xx response. This full provider mapping is required on both calls "
+        "authorization, success response, and 4xx/5xx response; 4xx/5xx statuses go only in error_mapping, and "
+        "response_mapping stays empty when the API declares no success response. This full provider mapping is required on both calls "
         "and returns edges when the provider is an API; a returns edge must not map only the response. "
+        "When the provider is a business_rule, input_mapping must map every name in its surface_contract.inputs as a "
+        "required target; declare only inputs the caller can actually supply. "
         "For service and persistence_adapter providers, when boundary_contract.provider_operation is a concrete "
         "identifier, runtime_binding.target.symbol must expose that exact callable. A file may host multiple symbols; "
         "never bind a query operation to a create/update/delete callable. "
@@ -3019,7 +3137,7 @@ def _feature_ux_decisions(graph: dict[str, object]) -> dict[str, object]:
         contract = _dict(node.get("surface_contract"))
         surface = _dict(contract.get("runtime_surface"))
         experience = _dict(contract.get("experience_contract"))
-        if str(node.get("surface") or "") != "ui" or not surface:
+        if str(node.get("surface") or "") != "ui" or not surface or is_composition_wiring(node):
             continue
         screen = screens.setdefault(
             str(surface.get("screen_id") or ""),
@@ -3030,12 +3148,18 @@ def _feature_ux_decisions(graph: dict[str, object]) -> dict[str, object]:
         screen["required_inputs"].extend(
             f"{item.get('name')} <- {item.get('source')}" for item in _dicts(surface.get("required_inputs"))
         )
-        for key in ("screen", "visual_contract", "focus_policies"):
+        for key in ("screen", "visual_contract"):
             if experience.get(key) and key not in screen:
                 screen[key] = experience[key]
+        # Focus policies are scenario behavior: keep their owner so a sibling scenario does not copy them.
+        screen.setdefault("scenario_focus_policies", []).extend(
+            {"scenario_id": str(node.get("scenario_id") or ""), **policy}
+            for policy in _dicts(experience.get("focus_policies"))
+        )
         screen.setdefault("_experiences", []).append(experience)
+        screen.setdefault("_scenarios", []).append(str(node.get("scenario_id") or ""))
     for screen in screens.values():
-        screen["runtime_states"] = _merged_runtime_states(screen.pop("_experiences"))
+        screen["runtime_states"] = _merged_runtime_states(screen.pop("_experiences"), screen.pop("_scenarios"))
     return screens
 
 
@@ -3173,7 +3297,10 @@ def _runtime_surface_scaffold(
                 "name": "<input the screen needs at runtime; remove this item when none>",
                 "source": "<existing_runtime|external_use_case|new_boundary|demo_fixture>",
                 "binding": "<provider path#symbol | VDN-* | PRE-*/MF-*/AF-*/EF-* from dependency_refs | DEC-*>",
-                "provided_by": "<hop on composition_path that supplies it>",
+                "provided_by": (
+                    f"<hop before the target on composition_path that supplies it; {entry} for external_use_case; "
+                    "never the target itself>"
+                ),
                 "requirement_refs": ["<ids from ui_runtime_context.dependency_refs when applicable>"],
                 "states": ["loading", "ready", "empty", "error"],
             }
@@ -3192,6 +3319,7 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
 
     context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
     has_stylesheet = bool(_strings(_dict(context.get("styles")).get("stylesheet_files")))
+    layered = ui_layered_layout(graph)
     if not fake_label:
         return {
             "screen": {
@@ -3205,7 +3333,11 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
             },
             "visual_contract": {
                 "hierarchy": ["<primary to secondary content order>"],
-                "layout": ["<region>: <content>"],
+                "layout": (
+                    [{"region": "<region name>", "layer": "<page|overlay>", "content": "<what the region shows>"}]
+                    if layered
+                    else ["<region>: <content>"]
+                ),
                 "typography": ["<heading/body/label decisions>"],
                 "color_and_tokens": ["<semantic color/token decisions>"],
                 "focus_appearance": ["<visible focus indicator>"],
@@ -3241,7 +3373,15 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
         },
         "visual_contract": {
             "hierarchy": ["Heading, then primary content, then status."],
-            "layout": ["header: screen title", "main: primary content", "footer: status region"],
+            "layout": (
+                [
+                    {"region": "header", "layer": "page", "content": "screen title"},
+                    {"region": "main", "layer": "page", "content": "primary content"},
+                    {"region": "footer", "layer": "page", "content": "status region"},
+                ]
+                if layered
+                else ["header: screen title", "main: primary content", "footer: status region"]
+            ),
             "typography": ["One h1 heading; body text for content."],
             "color_and_tokens": ["Semantic error and success colors."],
             "focus_appearance": ["Visible outline on focused controls."],
@@ -3986,7 +4126,7 @@ def _active_partition(
                 "completion_claims": [{"scenario_id": scenario_id, "surfaces": grouped_surfaces}],
                 "unresolved_items": [],
             },
-            **({"optional_wiring_operations": wiring_templates} if wiring_templates else {}),
+            **({"harness_wiring_operations": wiring_templates} if wiring_templates else {}),
         }
     return None
 
@@ -4029,6 +4169,47 @@ def _planned_reuse_candidates(
     ]
 
 
+def _main_flow_entry_node(
+    *,
+    requirement_model: dict[str, object],
+    graph: dict[str, object],
+) -> dict[str, object] | None:
+    nodes = _dicts(graph.get("nodes"))
+    main_scenario_ids = [
+        str(item.get("id") or "")
+        for item in _scenarios(requirement_model)
+        if str(item.get("kind") or "") == "main"
+    ]
+    main_id_set = set(main_scenario_ids)
+    main_rank = {scenario_id: index for index, scenario_id in enumerate(main_scenario_ids)}
+    entry_order: dict[str, int] = {}
+    for edge in _dicts(graph.get("edges")):
+        order = edge.get("order")
+        source_id = str(edge.get("from") or "")
+        if (
+            isinstance(order, int)
+            and str(edge.get("kind") or "") not in {"contains", "depends_on", "realized_by"}
+            and str(edge.get("scenario_id") or "") in main_id_set
+        ):
+            entry_order[source_id] = min(order, entry_order.get(source_id, order))
+    candidates = sorted(
+        (
+            item
+            for item in nodes
+            if str(item.get("scenario_id") or "") in main_id_set
+            and str(item.get("id") or "")
+            and not is_composition_wiring(item)
+        ),
+        key=lambda item: (
+            main_rank.get(str(item.get("scenario_id") or ""), len(main_rank)),
+            entry_order.get(str(item.get("id") or ""), 1 << 30),
+            _surface_rank(str(item.get("surface") or "")),
+            str(item.get("id") or ""),
+        ),
+    )
+    return candidates[0] if candidates else None
+
+
 def _branch_parent_scaffold(
     *,
     scenario: dict[str, object],
@@ -4068,22 +4249,10 @@ def _branch_parent_scaffold(
             and str(target.get("scenario_id") or "") in main_id_set
         ):
             return None
-    main_rank = {scenario_id: index for index, scenario_id in enumerate(main_scenario_ids)}
-    candidates = sorted(
-        (
-            item
-            for item in nodes
-            if str(item.get("scenario_id") or "") in main_id_set and str(item.get("id") or "")
-        ),
-        key=lambda item: (
-            main_rank.get(str(item.get("scenario_id") or ""), len(main_rank)),
-            _surface_rank(str(item.get("surface") or "")),
-            str(item.get("id") or ""),
-        ),
-    )
-    if not candidates:
+    # The parent is where the main flow starts: the source of its first ordered behavior edge, never wiring.
+    parent = _main_flow_entry_node(requirement_model=requirement_model, graph=graph)
+    if parent is None:
         return None
-    parent = candidates[0]
     parent_scenario_id = str(parent.get("scenario_id") or "")
     return {
         "branch_scenario_id": branch_id,
@@ -4124,6 +4293,7 @@ def _active_repair_task(
     repair_feedback: list[dict[str, object]],
     graph: dict[str, object],
     completed_targets: list[str],
+    requirement_model: dict[str, object] | None = None,
     landscape: dict[str, object] | None = None,
     source: str = "validator_feedback",
     active_partition: dict[str, object] | None = None,
@@ -4222,6 +4392,18 @@ def _active_repair_task(
     )
     writable_node_ids = [str(item.get("id") or "") for item in target_nodes if str(item.get("id") or "")]
     read_only_nodes = [item for item in scenario_nodes if str(item.get("id") or "") not in set(writable_node_ids)]
+    allowed_edge_endpoint_ids = [
+        str(item.get("id") or "") for item in scenario_nodes if str(item.get("id") or "")
+    ]
+    if (
+        str(graph.get("schema_version") or "") == GRAPH_VERSION_V2
+        and finding_codes
+        and finding_codes <= {"branch_parent_missing", "branch_parent_invalid"}
+    ):
+        parent = _main_flow_entry_node(requirement_model=requirement_model or {}, graph=graph)
+        parent_id = str((parent or {}).get("id") or "")
+        if parent_id and parent_id not in allowed_edge_endpoint_ids:
+            allowed_edge_endpoint_ids.append(parent_id)
     component_roots = {
         str(item.get("component_id") or ""): _strings(item.get("roots"))
         for item in _dicts((landscape or {}).get("components"))
@@ -4232,9 +4414,7 @@ def _active_repair_task(
         "component_id": partition_component_id,
         "writable_node_ids": writable_node_ids,
         "removable_edge_ids": removable_edge_ids,
-        "allowed_edge_endpoint_ids": [
-            str(item.get("id") or "") for item in scenario_nodes if str(item.get("id") or "")
-        ],
+        "allowed_edge_endpoint_ids": allowed_edge_endpoint_ids,
         "restricted_edge_pairs": [
             {
                 "from": str(item.get("from") or ""),
@@ -4718,6 +4898,179 @@ def _repair_target_present(
         }
         for finding in findings
     )
+
+
+def _wiring_hop_inputs(arguments: object, graph: dict[str, object]) -> dict[str, list[str]]:
+    """Inputs each AS-IS hop between provided_by and the screen must forward, for hops no earlier partition modeled."""
+
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    chain = {str(hop.get("ref") or ""): hop for hop in _dicts(context.get("composition_chain"))}
+    nodes = [_dict(op.get("node")) for op in _dicts(_dict(_dict(arguments).get("delta")).get("operations"))]
+    modeled = {
+        f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+        for node in _dicts(graph.get("nodes"))
+        if str(node.get("disposition") or "") in {"modify", "add"}
+        for target in [_dict(_dict(node.get("runtime_binding")).get("target"))]
+    }
+    needed: dict[str, list[str]] = {}
+    for node in nodes:
+        surface = _dict(_dict(node.get("surface_contract")).get("runtime_surface"))
+        if str(node.get("surface") or "") != "ui" or str(surface.get("role") or "") == "composition_wiring":
+            continue
+        path = _strings(surface.get("composition_path"))
+        for item in _dicts(surface.get("required_inputs")):
+            name, provided_by = str(item.get("name") or ""), str(item.get("provided_by") or "")
+            if provided_by not in path[:-1]:
+                continue  # ui_required_input_unbound reports this case
+            for index in range(path.index(provided_by), len(path) - 1):
+                hop, child = path[index], path[index + 1]
+                passed = _strings(_dict(_dict(chain.get(hop)).get("passes_props")).get(child))
+                if hop in chain and name not in passed and hop not in modeled and name not in needed.get(hop, []):
+                    needed.setdefault(hop, []).append(name)
+    return needed
+
+
+def _normalize_external_providers(arguments: object) -> object:
+    """Data from another use case enters at the app entrypoint; no AS-IS hop can own it, so the Harness fixes it.
+
+    composition_path starts at the entrypoint by contract, so path[0] is the only valid external provider.
+    """
+
+    changed = False
+    result = json.loads(json.dumps(arguments, ensure_ascii=False))
+    # Walk the copied JSON directly: _dict/_dicts return copies, and this function edits in place.
+    operations = (result.get("delta") or {}).get("operations") if isinstance(result, dict) else None
+    for op in operations if isinstance(operations, list) else []:
+        node = op.get("node") if isinstance(op, dict) else None
+        surface = ((node or {}).get("surface_contract") or {}).get("runtime_surface") if isinstance(node, dict) else None
+        if not isinstance(surface, dict) or str(node.get("surface") or "") != "ui":
+            continue
+        path = _strings(surface.get("composition_path"))
+        inputs = surface.get("required_inputs")
+        if str(surface.get("role") or "") == "composition_wiring" or len(path) < 2 or not isinstance(inputs, list):
+            continue
+        for item in inputs:
+            if (
+                isinstance(item, dict)
+                and str(item.get("source") or "") == "external_use_case"
+                and str(item.get("provided_by") or "") != path[0]
+            ):
+                item["provided_by"] = path[0]
+                changed = True
+    return result if changed else arguments
+
+
+def _materialize_delta_wiring(
+    *,
+    arguments: object,
+    active_partition: dict[str, object],
+    graph: dict[str, object],
+    run_id: str,
+) -> object:
+    """Write the composition_wiring node of every hop the delta's screen inputs pass through.
+
+    Wiring is mechanical (a template plus input names), so the Harness owns it instead of the Designer: a node the
+    Designer wrote for the same hop is replaced by the filled template, keeping its temp_ref for edges.
+    """
+
+    arguments = _normalize_external_providers(arguments)
+    needed = _wiring_hop_inputs(arguments, graph)
+    if not needed:
+        return arguments
+    templates = {
+        str(_dict(_dict(op.get("node")).get("surface_contract")).get("entrypoint") or ""): op
+        for op in _dicts(active_partition.get("harness_wiring_operations"))
+    }
+    unwired = [hop for hop in needed if hop not in templates]
+    if unwired:
+        raise HarnessError(
+            "designer_delta_invalid",
+            "Required inputs pass through hops the Harness cannot wire: "
+            + "; ".join(f"{hop} does not pass {', '.join(needed[hop])}" for hop in unwired)
+            + ". Bind each input to a provided_by hop on composition_path whose path down to the screen is AS-IS.",
+            run_id=run_id,
+        )
+    delta = dict(_dict(_dict(arguments).get("delta")))
+    operations = list(_dicts(delta.get("operations")))
+    authored: dict[str, int] = {}
+    for index, op in enumerate(operations):
+        node = _dict(op.get("node"))
+        target = _dict(_dict(node.get("runtime_binding")).get("target"))
+        ref = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+        if op.get("op") == "add_node" and ref in needed:
+            authored[ref] = index
+    inserted = []
+    for hop, names in needed.items():
+        filled = json.loads(
+            json.dumps(templates[hop], ensure_ascii=False).replace("<input names>", json.dumps(", ".join(names))[1:-1])
+        )
+        if hop in authored:
+            original = _dict(operations[authored[hop]].get("node"))
+            filled["node"]["temp_ref"] = str(original.get("temp_ref") or filled["node"]["temp_ref"])
+            operations[authored[hop]] = filled
+        else:
+            inserted.append(filled)
+    # Wiring nodes go before the Designer's edges so edges may reference their temp_ref.
+    head = 1 if operations and operations[0].get("op") == "set_partition_coverage" else 0
+    delta["operations"] = [*operations[:head], *inserted, *operations[head:]]
+    return {**_dict(arguments), "delta": delta}
+
+
+def _materialize_branch_parent(
+    *,
+    arguments: object,
+    active_partition: dict[str, object],
+    requirement_model: dict[str, object],
+    graph: dict[str, object],
+) -> object:
+    requirement = _dict(active_partition.get("branch_parent_requirement"))
+    scaffold_edge = _dict(requirement.get("edge"))
+    branch_scenario_id = str(requirement.get("branch_scenario_id") or "")
+    if not scaffold_edge or not branch_scenario_id:
+        return arguments
+    delta = _dict(_dict(arguments).get("delta"))
+    operations = _dicts(delta.get("operations"))
+    branch_entry_ref = str(scaffold_edge.get("from") or "")
+    added_temp_refs = {
+        str(_dict(op.get("node")).get("temp_ref") or "")
+        for op in operations
+        if str(op.get("op") or "") == "add_node"
+    }
+    if branch_entry_ref not in added_temp_refs:
+        return arguments
+    branch_node_ids = {
+        str(node.get("id") or "")
+        for node in _dicts(graph.get("nodes"))
+        if str(node.get("scenario_id") or "") == branch_scenario_id
+    }
+    branch_refs = branch_node_ids | added_temp_refs
+    main_scenario_ids = {
+        str(scenario.get("id") or "")
+        for scenario in _scenarios(requirement_model)
+        if str(scenario.get("kind") or "") == "main"
+    }
+    main_node_ids = {
+        str(node.get("id") or "")
+        for node in _dicts(graph.get("nodes"))
+        if str(node.get("scenario_id") or "") in main_scenario_ids
+    }
+    if any(
+        str(edge.get("kind") or "") == "depends_on"
+        and str(edge.get("from") or "") in branch_refs
+        and str(edge.get("to") or "") in main_node_ids
+        for op in operations
+        for edge in [_dict(op.get("edge"))]
+        if str(op.get("op") or "") == "add_edge"
+    ):
+        return arguments
+    result = deepcopy(_dict(arguments))
+    result_delta = _dict(result.get("delta"))
+    result_delta["operations"] = [
+        *_dicts(result_delta.get("operations")),
+        {"op": "add_edge", "edge": deepcopy(scaffold_edge)},
+    ]
+    result["delta"] = result_delta
+    return result
 
 
 def _validate_repair_delta_scope(

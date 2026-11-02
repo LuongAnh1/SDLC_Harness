@@ -38,6 +38,10 @@ UI_RUNTIME_STATES = ("loading", "ready", "empty", "error", "success")
 UI_VISUAL_GROUPS = ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules")
 UI_STYLE_TARGET_POLICIES = frozenset({"reuse_existing", "new_stylesheet"})
 UI_SURFACE_ROLES = frozenset({"screen", "composition_wiring"})
+# Run-pinned opt-in: layout items become {region, layer, content}; graphs without the pin keep '<region>: <content>'.
+UI_LAYOUT_CONTRACT_KEY = "designer_ui_layout_contract"
+UI_LAYERED_LAYOUT_V1 = "layered_layout_v1"
+UI_LAYOUT_LAYERS = ("page", "overlay")
 
 
 def is_composition_wiring(node: dict[str, object]) -> bool:
@@ -113,6 +117,31 @@ def ui_contract_v2(graph: dict[str, object]) -> bool:
     )
 
 
+def ui_layered_layout(graph: dict[str, object]) -> bool:
+    return ui_contract_v2(graph) and _dict_value(graph.get("snapshot_binding")).get(UI_LAYOUT_CONTRACT_KEY) == UI_LAYERED_LAYOUT_V1
+
+
+def ui_layout_pin(ui_contract_version: str) -> str:
+    """Layout contract pinned for new runs; only ui_experience_contract_v2 runs get layered layout."""
+
+    return UI_LAYERED_LAYOUT_V1 if ui_contract_version == UI_EXPERIENCE_CONTRACT_V2 else ""
+
+
+def layout_regions(visual: dict[str, object]) -> list[tuple[str, str, str]]:
+    """(region, layer, content) for each layout item; layer is '' for legacy '<region>: <content>' strings."""
+
+    regions: list[tuple[str, str, str]] = []
+    for item in visual.get("layout") if isinstance(visual.get("layout"), list) else []:
+        if isinstance(item, dict):
+            regions.append(
+                (str(item.get("region") or "").strip(), str(item.get("layer") or ""), str(item.get("content") or "").strip())
+            )
+        elif isinstance(item, str):
+            region, _, content = item.partition(":")
+            regions.append((region.strip(), "", content.strip()))
+    return regions
+
+
 def new_vertical_design_graph(
     *,
     run_id: str,
@@ -155,6 +184,7 @@ def validate_vertical_design_graph(
     if expected_binding is not None and any(binding.get(key) != item for key, item in expected_binding.items()):
         raise HarnessError("designer_input_drift", "Design graph no longer matches its frozen inputs.", run_id=run_id)
     ui_v2 = ui_contract_v2(value)
+    layered = ui_layered_layout(value)
 
     partitions = _dict_items(value.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)
     partition_keys: set[str] = set()
@@ -209,6 +239,7 @@ def validate_vertical_design_graph(
                 node_id=node_id,
                 run_id=run_id,
                 ui_v2=ui_v2,
+                layered=layered,
             )
         if graph_version == GRAPH_VERSION_V2 and node.get("runtime_binding") is not None:
             _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
@@ -376,6 +407,7 @@ def _validate_surface_contract(
     node_id: str,
     run_id: str,
     ui_v2: bool = False,
+    layered: bool = False,
 ) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != SURFACE_CONTRACT_VERSION:
         raise HarnessError(
@@ -445,6 +477,7 @@ def _validate_surface_contract(
                 node_id=node_id,
                 run_id=run_id,
                 expected_version=UI_EXPERIENCE_CONTRACT_V2 if ui_v2 else UIUX_EXPERIENCE_CONTRACT_VERSION,
+                layered=layered,
             )
         if ui_v2:
             _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
@@ -545,6 +578,7 @@ def _validate_ui_experience_contract(
     node_id: str,
     run_id: str,
     expected_version: str = UIUX_EXPERIENCE_CONTRACT_VERSION,
+    layered: bool = False,
 ) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != expected_version:
         raise HarnessError(
@@ -573,10 +607,22 @@ def _validate_ui_experience_contract(
             run_id=run_id,
         )
     if expected_version == UI_EXPERIENCE_CONTRACT_V2:
-        _validate_holistic_experience(value, node_id=node_id, run_id=run_id)
+        _validate_holistic_experience(value, node_id=node_id, run_id=run_id, layered=layered)
 
 
-def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run_id: str) -> None:
+def _layout_item_valid(item: object, layered: bool) -> bool:
+    if isinstance(item, dict):
+        return (
+            bool(str(item.get("region") or "").strip())
+            and item.get("layer") in UI_LAYOUT_LAYERS
+            and bool(str(item.get("content") or "").strip())
+        )
+    return not layered and isinstance(item, str) and bool(item.strip())
+
+
+def _validate_holistic_experience(
+    value: dict[str, object], *, node_id: str, run_id: str, layered: bool = False
+) -> None:
     """Structural checks only; whether the UX decisions are good stays with semantic review."""
 
     def invalid(detail: str) -> HarnessError:
@@ -620,8 +666,15 @@ def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run
     if not isinstance(visual, dict):
         raise invalid("visual_contract must be an object")
     for key in UI_VISUAL_GROUPS:
-        if not texts(visual.get(key)):
+        if key != "layout" and not texts(visual.get(key)):
             raise invalid(f"visual_contract.{key} needs at least one decision")
+    layout = visual.get("layout")
+    if not isinstance(layout, list) or not layout or not all(_layout_item_valid(item, layered) for item in layout):
+        raise invalid(
+            "visual_contract.layout needs {region,layer,content} items with layer " + "|".join(UI_LAYOUT_LAYERS)
+            if layered
+            else "visual_contract.layout needs at least one decision"
+        )
     if str(visual.get("style_target_policy") or "") not in UI_STYLE_TARGET_POLICIES:
         raise invalid("visual_contract.style_target_policy must be " + "|".join(sorted(UI_STYLE_TARGET_POLICIES)))
     if not str(visual.get("style_target_reason") or "").strip():
@@ -1158,8 +1211,9 @@ def _runtime_composition_findings(
         if not source or not target or str(edge.get("kind") or "") in {"contains", "depends_on", "realized_by"}:
             continue
         crosses_boundary = str(source.get("component_id") or "") != str(target.get("component_id") or "")
-        if crosses_boundary:
-            contract = _dict_value(edge.get("boundary_contract"))
+        contract = _dict_value(edge.get("boundary_contract"))
+        # Same-component calls are checked only when they declare a contract; older graphs omit it there.
+        if crosses_boundary or contract:
             provider = source if str(edge.get("kind") or "") == "returns" else target
             consumer = target if str(edge.get("kind") or "") == "returns" else source
             provider_target = _dict_value(_dict_value(provider.get("runtime_binding")).get("target"))
@@ -1174,7 +1228,8 @@ def _runtime_composition_findings(
                 str(consumer.get("component_id") or ""),
             )
             if (
-                provider_app
+                crosses_boundary
+                and provider_app
                 and consumer_app
                 and provider_app != consumer_app
                 and str(provider.get("surface") or "") != "api"
@@ -1549,7 +1604,50 @@ def _ui_runtime_surface_findings(
                         node=node,
                     )
                 )
+        if ui_layered_layout(graph):
+            findings.extend(_screen_visual_findings(screen_id, [node for node, _ in members]))
     return findings, reachable
+
+
+def _screen_visual_findings(screen_id: str, members: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Scenario nodes of one screen describe the same page: style target and each region's layer must agree."""
+
+    findings: list[dict[str, object]] = []
+    ordered = sorted(members, key=lambda item: (str(item.get("scenario_id") or ""), str(item.get("id") or "")))
+    first_policy: tuple[str, str] | None = None
+    first_layer: dict[str, tuple[str, str, str]] = {}
+    for node in ordered:
+        node_id = str(node.get("id") or "")
+        visual = _dict_value(_dict_value(_dict_value(node.get("surface_contract")).get("experience_contract")).get("visual_contract"))
+        policy = str(visual.get("style_target_policy") or "")
+        if policy and first_policy is None:
+            first_policy = (policy, node_id)
+        elif policy and first_policy is not None and policy != first_policy[0]:
+            findings.append(
+                _composition_finding(
+                    "ui_screen_style_inconsistent",
+                    f"{screen_id}:{node_id}:style_target_policy",
+                    f"UI node {node_id} sets style_target_policy={policy} but {first_policy[1]} on the same screen "
+                    f"{screen_id} sets {first_policy[0]}.",
+                    f"Use style_target_policy={first_policy[0]} like the other nodes of screen {screen_id}.",
+                    node=node,
+                )
+            )
+        for region, layer, _ in layout_regions(visual):
+            key = region.lower()
+            owner = first_layer.setdefault(key, (layer, node_id, region))
+            if owner[0] != layer:
+                findings.append(
+                    _composition_finding(
+                        "ui_screen_layout_inconsistent",
+                        f"{screen_id}:{node_id}:{key}",
+                        f"UI node {node_id} places region '{region}' on layer {layer} but {owner[1]} on the same "
+                        f"screen {screen_id} places it on layer {owner[0]}.",
+                        f"Put region '{owner[2]}' on layer {owner[0]}, or rename it if it is a different region.",
+                        node=node,
+                    )
+                )
+    return findings
 
 
 def _mapping_pairs(value: object) -> set[tuple[str, str]]:
@@ -1592,6 +1690,23 @@ def _boundary_contract_diagnostics(
     mismatches: list[str] = []
     if not contract:
         mismatches.append("add boundary_contract")
+    if str(provider.get("surface") or "") == "business_rule" and contract:
+        mapped = {
+            str(item.get("to") or "")
+            for item in contract.get("input_mapping", [])
+            if isinstance(item, dict) and bool(item.get("required"))
+        }
+        declared = [name for name in _strings(surface.get("inputs")) if name]
+        missing = [name for name in declared if name not in mapped]
+        if missing:
+            mismatches.append(f"map required input targets {missing}")
+        return {
+            "provider_surface": "business_rule",
+            "required_input_targets": declared,
+            "mapped_input_targets": sorted(mapped),
+            "missing_input_targets": missing,
+            "mismatches": mismatches,
+        }
     if str(provider.get("surface") or "") != "api":
         return {"provider_surface": str(provider.get("surface") or ""), "mismatches": mismatches}
     expected = f"{str(surface.get('method') or '').upper()} {str(surface.get('path') or '')}".strip()
@@ -1617,7 +1732,11 @@ def _boundary_contract_diagnostics(
         for item in responses
         if str(item.get("status") or "").startswith(("4", "5"))
     ]
-    response_missing = not _dict_items(
+    # An error-only API (for example a pure 503 path) has no success response to map.
+    has_success_response = any(
+        not str(item.get("status") or "").startswith(("4", "5")) for item in responses
+    )
+    response_missing = has_success_response and not _dict_items(
         contract.get("response_mapping", []), code="vertical_design_graph_invalid", run_id=""
     )
     error_missing = bool(error_statuses) and not _dict_items(

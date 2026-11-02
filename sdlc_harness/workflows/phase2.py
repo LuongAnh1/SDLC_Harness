@@ -14,6 +14,8 @@ from ..agents.designer import (
     SUPPORTED_GRAPH_VERSIONS,
     UI_CONTRACT_STATE_KEY,
     UI_EXPERIENCE_CONTRACT_V2,
+    UI_LAYOUT_CONTRACT_KEY,
+    ui_layout_pin,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
@@ -543,6 +545,7 @@ class PhaseTwoWorkflow:
                     UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
                 ),
                 UI_CONTRACT_STATE_KEY: ui_contract_version,
+                UI_LAYOUT_CONTRACT_KEY: ui_layout_pin(ui_contract_version),
                 VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
                 VERTICAL_TRACE_MODE_STATE_KEY: self.settings.vertical_trace_mode,
             }
@@ -1496,6 +1499,9 @@ def _vertical_snapshot_binding(
                 if isinstance(item, dict) and str(item.get("id") or "")
             ),
         }
+        # Pinned per run, so runs started before the layered layout contract keep their frozen binding.
+        if state.get(UI_LAYOUT_CONTRACT_KEY):
+            ui_contract[UI_LAYOUT_CONTRACT_KEY] = state[UI_LAYOUT_CONTRACT_KEY]
     return {
         **ui_contract,
         "requirement_contract_version": approved.contract_version,
