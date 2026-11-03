@@ -32,7 +32,12 @@ from sdlc_harness.agents.designer.execution import (
     _json_structure_hint,
     _parse_designer_tool_action,
 )
-from sdlc_harness.agents.designer.graph import UI_LAYERED_LAYOUT_V1, UI_LAYOUT_CONTRACT_KEY, graph_digest
+from sdlc_harness.agents.designer.graph import (
+    UI_LAYERED_LAYOUT_V1,
+    UI_LAYOUT_CONTRACT_KEY,
+    canonicalize_composition_wiring,
+    graph_digest,
+)
 from sdlc_harness.agents.designer.projections import render_design_projections, render_ui_feature_experience
 from sdlc_harness.agents.validator.design_validation import (
     _holistic_ui_review_instruction,
@@ -335,7 +340,7 @@ class _UiGraphFixture(unittest.TestCase):
             {"name": name, "source": "existing_runtime", "binding": ENTRY, "provided_by": ENTRY, "requirement_refs": [], "states": []}
             for name in ("title", "health")
         ]
-        return [
+        nodes = [
             self._node(
                 "VDN-1",
                 ENTRY,
@@ -359,6 +364,13 @@ class _UiGraphFixture(unittest.TestCase):
                 disposition="modify",
             ),
         ]
+        for node, child in zip(nodes, (SHELL, VIEW_REF)):
+            surface = node["surface_contract"]["runtime_surface"]
+            surface["role"] = "composition_wiring"
+            surface["forwarded_inputs"] = [
+                {"screen_id": "delete-screen", "to": child, "names": ["items"]}
+            ]
+        return nodes
 
     def _view(self, **overrides: object) -> dict[str, object]:
         options: dict[str, object] = {
@@ -376,6 +388,29 @@ class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
     def test_external_input_with_modified_hops_passes(self) -> None:
         categories = self._categories([*self._wiring_nodes(), self._view()])
         self.assertFalse({c for c in categories if c.startswith("ui_") or c == "composition_hop_unmodeled"}, categories)
+
+    def test_each_declared_input_is_tracked_on_every_wiring_hop(self) -> None:
+        view = self._view(inputs=[self._items_input(), self._items_input(name="agencySession")])
+        graph = self._graph([*self._wiring_nodes(), view])
+        self.assertIn(
+            "composition_hop_unmodeled",
+            {str(item["category"]) for item in design_bundle_findings(graph, landscape=LANDSCAPE)},
+        )
+
+        canonical = canonicalize_composition_wiring(graph)
+        self.assertNotIn(
+            "composition_hop_unmodeled",
+            {str(item["category"]) for item in design_bundle_findings(canonical, landscape=LANDSCAPE)},
+        )
+        wiring = [
+            node
+            for node in canonical["nodes"]
+            if node["surface_contract"]["runtime_surface"].get("role") == "composition_wiring"
+        ]
+        self.assertEqual(len(wiring), 2)
+        for node in wiring:
+            groups = node["surface_contract"]["runtime_surface"]["forwarded_inputs"]
+            self.assertEqual(groups[0]["names"], ["agencySession", "items"])
 
     def test_empty_default_input_without_hop_changes_is_blocked(self) -> None:
         # Mirrors run_20261030: the view is mounted but nothing upstream supplies its records.
@@ -651,6 +686,9 @@ class HolisticExperienceTest(_UiGraphFixture):
         self.assertIn("ui_visual_evidence_missing", self._categories([*self._wiring_nodes(), view]))
 
         shell, root = self._wiring_nodes()[1], self._wiring_nodes()[0]
+        for node in (shell, root):
+            node["surface_contract"]["runtime_surface"].pop("role", None)
+            node["surface_contract"]["runtime_surface"].pop("forwarded_inputs", None)
         shell["surface_contract"]["runtime_surface"]["screen_id"] = "delete-screen"
         root["surface_contract"]["runtime_surface"]["screen_id"] = "delete-screen"
         view = self._view_with_experience()
@@ -942,7 +980,7 @@ class WiringTemplateTest(_UiGraphFixture):
         view["surface_contract"]["experience_contract"] = holistic_experience(
             "delete-screen", list(self.context["evidence_refs"])
         )
-        graph = self._graph([*nodes, view])
+        graph = canonicalize_composition_wiring(self._graph([*nodes, view]))
         categories = {str(item["category"]) for item in design_bundle_findings(graph, landscape=self.REAL_LANDSCAPE)}
         self.assertFalse(
             {c for c in categories if c.startswith("ui_") or c in {"composition_hop_unmodeled", "runtime_attachment_missing"}},
@@ -1061,9 +1099,18 @@ class WiringTemplateTest(_UiGraphFixture):
 
         # Hops modeled by an earlier partition need no wiring; a hop without a template is rejected.
         unchanged = delta(view_op)
-        self.assertIs(
-            _materialize_delta_wiring(arguments=unchanged, active_partition={}, graph=self._graph(self._wiring_nodes()), run_id="r"),
-            unchanged,
+        rematerialized = _materialize_delta_wiring(
+            arguments=unchanged,
+            active_partition={},
+            graph=self._graph(self._wiring_nodes()),
+            run_id="r",
+        )
+        self.assertFalse(
+            any(
+                op.get("op") == "add_node"
+                and op["node"]["surface_contract"]["runtime_surface"].get("role") == "composition_wiring"
+                for op in rematerialized["delta"]["operations"]
+            )
         )
         with self.assertRaises(HarnessError) as raised:
             _materialize_delta_wiring(arguments=delta(view_op), active_partition={}, graph=graph, run_id="r")

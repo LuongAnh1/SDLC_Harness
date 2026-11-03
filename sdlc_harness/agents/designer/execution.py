@@ -1031,6 +1031,10 @@ class DesignerToolLoopExecutor:
                 if repair_task is not None
                 else OBSERVATION_ACTION_LIMIT
             )
+            scope_actions_remaining = int(
+                _dict(_progress(session).get("active_action_budget")).get("remaining") or 0
+            )
+            observation_limit = _observation_allowance(observation_limit, actions_remaining=scope_actions_remaining)
             pending_review = _dict(session.get("pending_step_review"))
             if pending_review and str(pending_review.get("owner") or "") == "llm_pre_call":
                 session["pending_step_review"] = None
@@ -1157,6 +1161,7 @@ class DesignerToolLoopExecutor:
                     uiux_mode=registry.uiux_mode,
                     active_guidance=_guidance_observations(session, guidance_key),
                     source_inspected=bool(_source_observation_refs(session, active_component_id)),
+                    actions_remaining=scope_actions_remaining,
                 )
                 system_prompt = "You are SDLC Harness Designer L3. Return exactly one JSON tool action."
                 profile_name = _designer_llm_profile_name(
@@ -1662,6 +1667,20 @@ class DesignerToolLoopExecutor:
                         )
                     _write_json_atomic(session_file, session)
             except HarnessError as exc:
+                if _accepts_shared_edge_no_change(exc, tool_id=tool_id, repair_task=repair_task):
+                    _mark_repair_targets_completed(session=session, arguments=arguments, repair_task=repair_task)
+                    self._record_observation(
+                        session,
+                        {
+                            "tool_id": tool_id,
+                            "arguments": arguments,
+                            "status": "accepted_no_change",
+                            "message": "This component needs no change for the shared edge finding; the other end has its own turn.",
+                        },
+                    )
+                    _update_designer_exchange(exchange_path, {"status": "succeeded", "no_change_for_shared_edge": True})
+                    _write_json_atomic(session_file, session)
+                    continue
                 if exc.error_code in {
                     "designer_tool_unknown",
                     "designer_tool_input_invalid",
@@ -2748,6 +2767,7 @@ def _designer_prompt(
     uiux_mode: str = "off",
     active_guidance: list[dict[str, object]] | None = None,
     source_inspected: bool = False,
+    actions_remaining: int | None = None,
 ) -> str:
     graph_contract = str(graph.get("schema_version") or GRAPH_VERSION)
     delta_contract = delta_version_for(graph_contract)
@@ -2795,6 +2815,8 @@ def _designer_prompt(
             "limit_before_delta": observation_limit,
             "used_since_delta": observations_since_delta,
             "must_propose_delta_now": (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit,
+            "source_inspected": source_inspected,
+            **({"actions_remaining_including_delta": actions_remaining} if actions_remaining is not None else {}),
         },
         "recent_observations": observations,
         "active_uiux_guidance": active_guidance or [],
@@ -3026,8 +3048,10 @@ def _designer_prompt(
         "or model the required surface as add using a component/root from the frozen landscape. "
         + construction_instruction
         + repair_instruction
-        + "For Graph V2, candidate anchors locate source but do not satisfy investigation: use repo.read or an available "
-        f"codegraph.query for the active component before its first delta. Make at most {observation_limit} distinct observation actions, "
+        + "For Graph V2, candidate anchors locate source but do not satisfy investigation. While observation_policy.source_inspected "
+        "is false, the next action must be repo.read or an available codegraph.query for the active component; a delta "
+        "proposed before that is rejected. observation_policy.actions_remaining_including_delta is the real budget of this "
+        f"target or partition and includes the delta: make at most {observation_limit} distinct observation actions, "
         "then you must call design.propose_delta before investigating another partition. If must_propose_delta_now is true, "
         "the only valid next action is design.propose_delta. Call complete only when active_partition and active_repair_task are null.\n\n"
         "Tools: landscape.search(query?,scenario_id?,surface?,component_id?,kind?); "
@@ -3316,6 +3340,7 @@ def _wiring_operation_templates(
                             "entrypoint": entry,
                             "composition_path": mounted[: index + 1],
                             "required_inputs": inherited,
+                            "forwarded_inputs": [],
                             "runnable_status": "bound",
                             "evidence_refs": refs,
                         },
@@ -4253,7 +4278,8 @@ def _active_repair_task(
     repair_feedback = _applicable_repair_feedback(repair_feedback, graph=graph)
     if not repair_feedback:
         return None
-    targets = _repair_work_targets(repair_feedback, nodes_by_id=nodes_by_id)
+    edges_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("edges"))}
+    targets = _repair_work_targets(repair_feedback, nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
     target = next((item for item in targets if str(item.get("target_id") or "") not in set(completed_targets)), None)
     if not isinstance(target, dict):
         return None
@@ -4275,7 +4301,7 @@ def _active_repair_task(
             for item in repair_feedback
             if target_id in {
                 str(candidate.get("target_id") or "")
-                for candidate in _repair_work_targets([item], nodes_by_id=nodes_by_id)
+                for candidate in _repair_work_targets([item], nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
             }
         ]
         target_edges = [item for item in edges if str(item.get("scenario_id") or "") == scenario_id]
@@ -4383,9 +4409,27 @@ def _active_repair_task(
         "edges_in_current_order": target_edges,
         "preserved_edges": preserved_edges,
     }
+    shared_edge_only = (
+        source != "inline_composition"
+        and target_id != "global"
+        and bool(findings)
+        and all(
+            _is_shared_edge_finding(item, nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
+            for item in findings
+        )
+    )
+    shared_edge_instruction = (
+        " Every finding here is on an edge shared with another component of this scenario, and that component gets its "
+        "own repair turn. Change this side only if the fix belongs here. If this side needs no change, submit a delta "
+        "whose only operation is the delta_scaffold set_partition_coverage operation unchanged; the Harness records this "
+        "side as unchanged and the Validator re-checks the edge afterwards."
+        if shared_edge_only
+        else ""
+    )
     return {
         "source": source,
         "target_id": target_id,
+        "shared_edge_only": shared_edge_only,
         "partition": task_partition,
         "findings": findings,
         "graph_context": graph_context,
@@ -4431,6 +4475,7 @@ def _active_repair_task(
             "Use remove_edge plus ordered add_edge operations when interaction order must change. "
             "A returns edge's boundary_contract.input_mapping repeats its paired calls/reads/writes edge exactly "
             "(consumer field -> provider field); only response_mapping and error_mapping flow provider -> consumer."
+            + shared_edge_instruction
         ),
     }
 
@@ -4650,12 +4695,49 @@ def _boundary_contract_repair_scaffold(
     }
 
 
+def _accepts_shared_edge_no_change(
+    exc: HarnessError, *, tool_id: str, repair_task: dict[str, object] | None
+) -> bool:
+    """A no-op delta closes a repair turn only when every finding is shared with another component's turn."""
+
+    return (
+        exc.error_code == "designer_delta_no_effect"
+        and tool_id == "design.propose_delta"
+        and repair_task is not None
+        and bool(repair_task.get("shared_edge_only"))
+    )
+
+
+def _shared_edge_endpoints(
+    edge: dict[str, object], *, nodes_by_id: dict[str, dict[str, object]]
+) -> list[dict[str, object]]:
+    """Endpoint nodes of an edge that belong to the edge's own scenario; other scenarios stay read-only."""
+
+    endpoints = [nodes_by_id.get(str(edge.get(key) or "")) for key in ("from", "to")]
+    scenario_id = str(edge.get("scenario_id") or "") or str((endpoints[0] or {}).get("scenario_id") or "")
+    return [item for item in endpoints if item is not None and str(item.get("scenario_id") or "") == scenario_id]
+
+
+def _is_shared_edge_finding(
+    finding: dict[str, object],
+    *,
+    nodes_by_id: dict[str, dict[str, object]],
+    edges_by_id: dict[str, dict[str, object]],
+) -> bool:
+    edge = edges_by_id.get(str(finding.get("subject_ref") or ""))
+    if edge is None:
+        return False
+    endpoints = _shared_edge_endpoints(edge, nodes_by_id=nodes_by_id)
+    return len({str(item.get("component_id") or "") for item in endpoints}) > 1
+
+
 def _repair_work_targets(
     repair_feedback: list[dict[str, object]],
     *,
     nodes_by_id: dict[str, dict[str, object]],
+    edges_by_id: dict[str, dict[str, object]] | None = None,
 ) -> list[dict[str, str]]:
-    """Split node-scoped bundle repairs by the graph's mutation partition."""
+    """Split node- and edge-scoped bundle repairs by the graph's mutation partition."""
 
     targets: list[dict[str, str]] = []
     seen: set[str] = set()
@@ -4677,9 +4759,12 @@ def _repair_work_targets(
             continue
         subject_ref = str(finding.get("subject_ref") or "")
         node = next((item for node_id, item in nodes_by_id.items() if node_id and node_id in subject_ref), None)
-        if node is not None:
-            scenario_id = str(node.get("scenario_id") or "")
-            component_id = str(node.get("component_id") or "")
+        edge = (edges_by_id or {}).get(subject_ref) if node is None else None
+        # An edge finding may need a change on either end, so each same-scenario endpoint partition gets a turn.
+        endpoint_nodes = _shared_edge_endpoints(edge, nodes_by_id=nodes_by_id) if edge is not None else []
+        for endpoint in endpoint_nodes or ([node] if node is not None else []):
+            scenario_id = str(endpoint.get("scenario_id") or "")
+            component_id = str(endpoint.get("component_id") or "")
             target_id = f"{scenario_id}@{component_id}"
             if target_id not in seen:
                 seen.add(target_id)
@@ -4690,6 +4775,7 @@ def _repair_work_targets(
                         "component_id": component_id,
                     }
                 )
+        if endpoint_nodes or node is not None:
             continue
         finding_targets = _finding_repair_targets(finding)
         for scenario_id in finding_targets:
@@ -4841,11 +4927,12 @@ def _repair_target_present(
     if not target_id:
         return False
     nodes_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("nodes"))}
+    edges_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("edges"))}
     return any(
         target_id
         in {
             str(candidate.get("target_id") or "")
-            for candidate in _repair_work_targets([finding], nodes_by_id=nodes_by_id)
+            for candidate in _repair_work_targets([finding], nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
         }
         for finding in findings
     )
@@ -4860,7 +4947,7 @@ def _wiring_hop_inputs(arguments: object, graph: dict[str, object]) -> dict[str,
     modeled = {
         f"{target.get('path') or ''}#{target.get('symbol') or ''}"
         for node in _dicts(graph.get("nodes"))
-        if str(node.get("disposition") or "") in {"modify", "add"}
+        if str(node.get("disposition") or "") in {"modify", "add"} and is_composition_wiring(node)
         for target in [_dict(_dict(node.get("runtime_binding")).get("target"))]
     }
     needed: dict[str, list[str]] = {}
@@ -5497,8 +5584,9 @@ def _activate_action_budget_scope(
     repair_task: dict[str, object] | None,
 ) -> None:
     if repair_task is not None:
+        # Each repair target (scenario@component) needs its own investigation and delta, so budget per target.
         scenario_id = active_partition_key.split("|", 1)[0] if active_partition_key else ""
-        scope = {"kind": "scenario_repair", "key": scenario_id}
+        scope = {"kind": "scenario_repair", "key": str(repair_task.get("target_id") or "") or scenario_id}
     elif active_partition_key:
         scope = {"kind": "partition", "key": active_partition_key}
     else:
@@ -5550,7 +5638,7 @@ def _action_budget_exhausted_message(session: dict[str, object]) -> str:
         budget = _dict(budgets.get("scenario_repair_action"))
         used = int(_dict(budget.get("used_by_key")).get(scope["key"]) or 0)
         if used >= int(budget.get("limit") or 0):
-            return f"Designer scenario {scope['key']} exhausted its repair action budget."
+            return f"Designer repair target {scope['key']} exhausted its repair action budget."
     else:
         budget = _dict(budgets.get("finalization_action"))
         if int(budget.get("used") or 0) >= int(budget.get("limit") or 0):
@@ -5688,6 +5776,12 @@ def _dicts(value: object) -> list[dict[str, Any]]:
 
 def _strings(value: object) -> list[str]:
     return [str(item) for item in value if str(item)] if isinstance(value, list) else []
+
+
+def _observation_allowance(limit: int, *, actions_remaining: int) -> int:
+    """Observations allowed before the delta, always keeping one action of the real scope budget for the delta."""
+
+    return max(0, min(limit, actions_remaining - 1))
 
 
 def _designer_llm_profile_name(

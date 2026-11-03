@@ -49,6 +49,131 @@ def is_composition_wiring(node: dict[str, object]) -> bool:
 
     surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
     return str(surface.get("role") or "") == "composition_wiring"
+
+
+def canonicalize_composition_wiring(graph: dict[str, object]) -> dict[str, object]:
+    """Refresh Harness-owned forwarding metadata from declared screen inputs."""
+
+    run_id = str(graph.get("run_id") or "")
+    validate_vertical_design_graph(graph, expected_run_id=run_id)
+    candidate = json.loads(json.dumps(graph, ensure_ascii=False))
+    candidate.pop("artifact_digest", None)
+    if not _materialize_composition_forwarding(candidate):
+        return graph
+    candidate["artifact_digest"] = graph_digest(candidate)
+    return validate_vertical_design_graph(candidate, expected_run_id=run_id)
+
+
+def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
+    """Derive every forwarded input by screen and child; never infer business inputs."""
+
+    if not ui_contract_v2(graph):
+        return False
+    run_id = str(graph.get("run_id") or "")
+    context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
+    chain = {
+        str(item.get("ref") or ""): item
+        for item in _dict_items(
+            context.get("composition_chain"),
+            code="vertical_design_graph_invalid",
+            run_id=run_id,
+        )
+    }
+    expected: dict[str, dict[tuple[str, str], set[str]]] = {}
+    requirement_refs: dict[str, set[str]] = {}
+    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
+    for node in nodes:
+        if str(node.get("surface") or "") != "ui" or is_composition_wiring(node):
+            continue
+        surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
+        screen_id = str(surface.get("screen_id") or "")
+        path = _strings(surface.get("composition_path"))
+        if not screen_id or len(path) < 2:
+            continue
+        for item in _dict_items(
+            surface.get("required_inputs"),
+            code="vertical_design_graph_invalid",
+            run_id=run_id,
+        ):
+            name = str(item.get("name") or "")
+            provided_by = str(item.get("provided_by") or "")
+            if not name or provided_by not in path[:-1]:
+                continue
+            for index in range(path.index(provided_by), len(path) - 1):
+                hop, child = path[index], path[index + 1]
+                passed = _strings(_dict_value(_dict_value(chain.get(hop)).get("passes_props")).get(child))
+                if hop not in chain or name in passed:
+                    continue
+                expected.setdefault(hop, {}).setdefault((screen_id, child), set()).add(name)
+                requirement_refs.setdefault(hop, set()).update(_strings(item.get("requirement_refs")))
+
+    changed = False
+    for node in nodes:
+        if not is_composition_wiring(node):
+            continue
+        target = _dict_value(_dict_value(node.get("runtime_binding")).get("target"))
+        hop = f"{target.get('path') or ''}#{target.get('symbol') or ''}"
+        groups = expected.get(hop, {})
+        forwarded = [
+            {"screen_id": screen_id, "to": child, "names": sorted(names)}
+            for (screen_id, child), names in sorted(groups.items())
+        ]
+        contract = _dict_value(node.get("surface_contract"))
+        surface = _dict_value(contract.get("runtime_surface"))
+        if surface.get("forwarded_inputs") != forwarded:
+            surface["forwarded_inputs"] = forwarded
+            changed = True
+        names = sorted({name for item in forwarded for name in _strings(item.get("names"))})
+        if names:
+            phrase = ", ".join(names)
+            symbol = str(target.get("symbol") or "Composition hop")
+            desired_contract = f"{symbol} forwards {phrase} to the next component on composition_path."
+            desired_transition = {
+                "from": "mounted",
+                "action": f"receive {phrase}",
+                "to": "forwarding",
+                "outcome": f"next component receives {phrase}",
+            }
+            if node.get("contract") != desired_contract:
+                node["contract"] = desired_contract
+                changed = True
+            if contract.get("transitions") != [desired_transition]:
+                contract["transitions"] = [desired_transition]
+                changed = True
+            if contract.get("outcomes") != [desired_transition["outcome"]]:
+                contract["outcomes"] = [desired_transition["outcome"]]
+                changed = True
+        merged_refs = sorted({*_strings(node.get("requirement_refs")), *requirement_refs.get(hop, set())})
+        if merged_refs and _strings(node.get("requirement_refs")) != merged_refs:
+            node["requirement_refs"] = merged_refs
+            changed = True
+        contract["runtime_surface"] = surface
+        node["surface_contract"] = contract
+    if changed:
+        graph["nodes"] = nodes
+    return changed
+
+
+def _composition_wiring_forwards(
+    node: dict[str, object],
+    *,
+    screen_id: str,
+    child: str,
+    name: str,
+) -> bool:
+    if not is_composition_wiring(node):
+        return False
+    surface = _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface"))
+    forwarded = surface.get("forwarded_inputs", [])
+    if not isinstance(forwarded, list):
+        return False
+    return any(
+        isinstance(item, dict)
+        and str(item.get("screen_id") or "") == screen_id
+        and str(item.get("to") or "") == child
+        and name in _strings(item.get("names"))
+        for item in forwarded
+    )
 RUNTIME_KINDS = frozenset(
     {
         "entrypoint",
@@ -611,6 +736,19 @@ def _validate_runtime_surface(value: object, *, node_id: str, run_id: str) -> No
         raise invalid("runnable_status must be " + "|".join(sorted(RUNNABLE_STATUSES)))
     if str(value.get("role") or "screen") not in UI_SURFACE_ROLES:
         raise invalid("role must be " + "|".join(sorted(UI_SURFACE_ROLES)))
+    forwarded = value.get("forwarded_inputs", [])
+    if not isinstance(forwarded, list) or any(
+        not isinstance(item, dict)
+        or not _SAFE_KEY.fullmatch(str(item.get("screen_id") or ""))
+        or not _is_symbol_ref(str(item.get("to") or ""))
+        or not isinstance(item.get("names"), list)
+        or not item.get("names")
+        or any(not isinstance(name, str) or not name.strip() for name in item.get("names", []))
+        for item in forwarded
+    ):
+        raise invalid("forwarded_inputs must contain screen_id, to <repo path>#<symbol>, and non-empty names")
+    if str(value.get("role") or "screen") != "composition_wiring" and forwarded:
+        raise invalid("forwarded_inputs is reserved for composition_wiring nodes")
     if not isinstance(value.get("evidence_refs", []), list):
         raise invalid("evidence_refs must be a list")
 
@@ -912,6 +1050,7 @@ def apply_designer_delta(
         code="designer_delta_invalid",
         run_id=run_id,
     )
+    _materialize_composition_forwarding(candidate)
     candidate["revision"] = int(graph.get("revision") or 0) + 1
     candidate["nodes"] = sorted(_dict_items(candidate.get("nodes"), code="designer_delta_invalid", run_id=run_id), key=lambda item: str(item.get("id") or ""))
     candidate["edges"] = sorted(
@@ -1584,14 +1723,23 @@ def _ui_runtime_surface_findings(
                 hop, child = path[index], path[index + 1]
                 passed = _strings(_dict_value(_dict_value(chain.get(hop)).get("passes_props")).get(child))
                 hop_node = planned_targets.get(hop)
-                modeled = hop_node is not None and str(hop_node.get("disposition") or "") in {"modify", "add"}
+                modeled = (
+                    hop_node is not None
+                    and str(hop_node.get("disposition") or "") in {"modify", "add"}
+                    and _composition_wiring_forwards(
+                        hop_node,
+                        screen_id=str(surface.get("screen_id") or ""),
+                        child=child,
+                        name=name,
+                    )
+                )
                 if hop in chain and name not in passed and not modeled:
                     findings.append(
                         _composition_finding(
                             "composition_hop_unmodeled",
                             f"{node_id}:{name}:{hop}",
-                            f"AS-IS {hop} does not pass {name} to {child}, and no Design node modifies it.",
-                            f"Add a modify node with runtime_binding target {hop} that supplies {name} to {child}.",
+                            f"AS-IS {hop} does not pass {name} to {child}, and its Harness-owned wiring does not declare that input for screen {surface.get('screen_id')}.",
+                            f"Materialize {name} in the composition_wiring forwarded_inputs for {hop} -> {child} and screen {surface.get('screen_id')}.",
                             node=node,
                         )
                     )

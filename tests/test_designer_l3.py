@@ -31,8 +31,10 @@ from sdlc_harness.agents.designer import (
 from sdlc_harness.agents.designer.tools import DesignerToolRegistry
 from sdlc_harness.agents.designer.execution import (
     REPAIR_OBSERVATION_ACTION_LIMIT,
+    _activate_action_budget_scope,
     _activate_repair_target,
     _active_partition,
+    _accepts_shared_edge_no_change,
     _active_repair_task,
     _action_budget_exhausted_message,
     _applicable_repair_feedback,
@@ -42,6 +44,7 @@ from sdlc_harness.agents.designer.execution import (
     _designer_action_budget_policy,
     _designer_llm_profile_name,
     _designer_prompt,
+    _observation_allowance,
     _is_exact_deterministic_repair_delta,
     _materialize_branch_parent,
     _repair_task_has_mutation_path,
@@ -357,6 +360,30 @@ class VerticalDesignGraphTest(unittest.TestCase):
         used = session["budgets"]["partition_action"]["used_by_key"]
         self.assertEqual(used, {"SC-1|web": 2, "SC-2|web": 1})
         self.assertEqual(session["budgets"]["action"]["used"], 3)
+
+    def test_observation_allowance_keeps_one_action_of_the_real_budget_for_the_delta(self) -> None:
+        self.assertEqual(_observation_allowance(6, actions_remaining=4), 3)
+        self.assertEqual(_observation_allowance(6, actions_remaining=12), 6)
+        self.assertEqual(_observation_allowance(6, actions_remaining=1), 0)
+        self.assertEqual(_observation_allowance(6, actions_remaining=0), 0)
+
+    def test_repair_action_budget_is_per_repair_target_not_per_scenario(self) -> None:
+        budgets = _new_action_budgets(
+            {"partition_limit": 2, "scenario_repair_limit": 2, "finalization_limit": 1, "calculated_global_limit": 20}
+        )
+        session = {"budgets": budgets}
+
+        _activate_action_budget_scope(session, active_partition_key="SC-3|api", repair_task={"target_id": "SC-3@api"})
+        _consume_action(session)
+        _consume_action(session)
+        self.assertIn("SC-3@api", _action_budget_exhausted_message(session))
+        _activate_action_budget_scope(session, active_partition_key="SC-3|web", repair_task={"target_id": "SC-3@web"})
+        self.assertEqual(_action_budget_exhausted_message(session), "")
+        _consume_action(session)
+
+        self.assertEqual(
+            session["budgets"]["scenario_repair_action"]["used_by_key"], {"SC-3@api": 2, "SC-3@web": 1}
+        )
 
     def test_invalid_evidence_and_stale_precondition_are_rejected(self) -> None:
         graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
@@ -2098,6 +2125,36 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(payload["scenario_matches"], [{"scenario_id": "SC-1"}])
         self.assertIn("read_scope is not", prompt)
 
+    def test_repair_prompt_states_real_budget_and_source_first_order(self) -> None:
+        prompt = _designer_prompt(
+            requirement_model={"use_case_id": "UC1"},
+            landscape={"scenario_matches": []},
+            graph={"schema_version": GRAPH_VERSION, "revision": 1, "artifact_digest": "sha256:g", "nodes": [], "edges": [], "partitions": []},
+            observations=[],
+            repair_feedback=[],
+            active_partition=None,
+            repair_task={"target_id": "SC-3@api", "partition": {"scenario_id": "SC-3", "component_id": "api"}},
+            observations_since_delta=0,
+            last_invalid_action="",
+            observation_limit=_observation_allowance(REPAIR_OBSERVATION_ACTION_LIMIT, actions_remaining=4),
+            source_inspected=False,
+            actions_remaining=4,
+        )
+
+        payload = json.loads(prompt.rsplit("\n\n", 1)[-1])
+        self.assertEqual(
+            payload["observation_policy"],
+            {
+                "limit_before_delta": 3,
+                "used_since_delta": 0,
+                "must_propose_delta_now": False,
+                "source_inspected": False,
+                "actions_remaining_including_delta": 4,
+            },
+        )
+        self.assertIn("While observation_policy.source_inspected is false, the next action must be repo.read", prompt)
+        self.assertIn("make at most 3 distinct observation actions", prompt)
+
     def test_repair_observations_remain_exact_and_invalid_budget_is_per_target(self) -> None:
         session = {
             "active_repair_target_id": "SC-1@web",
@@ -2598,6 +2655,118 @@ class DesignerResumeTest(unittest.TestCase):
             run_id="run-scope",
         )
         self.assertTrue(_repair_target_present(target_id="SC-1@web", findings=[finding], graph=graph))
+
+    def test_shared_edge_finding_gives_each_same_scenario_end_a_turn_and_allows_no_change(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-parent", "scenario_id": "SC-1", "component_id": "web"},
+                {"id": "VDN-web", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+            ],
+            "edges": [
+                {"id": "VDE-call", "scenario_id": "SC-3", "from": "VDN-web", "to": "VDN-api", "kind": "calls", "label": "x"},
+                {"id": "VDE-return", "scenario_id": "SC-3", "from": "VDN-api", "to": "VDN-web", "kind": "returns", "label": "y"},
+                {"id": "VDE-dep", "scenario_id": "SC-3", "from": "VDN-web", "to": "VDN-parent", "kind": "depends_on", "label": "z"},
+            ],
+            "partitions": [],
+        }
+        shared = {"id": "SEM-001", "category": "runtime_boundary_feasibility", "severity": "blocking", "subject_ref": "VDE-return"}
+        parent_edge = {"id": "SEM-002", "category": "behavior_order", "severity": "blocking", "subject_ref": "VDE-dep"}
+        landscape = {"components": [{"component_id": "web", "roots": ["apps/web"]}]}
+
+        api_task = _active_repair_task(repair_feedback=[shared], graph=graph, completed_targets=[], landscape=landscape)
+        web_task = _active_repair_task(
+            repair_feedback=[shared], graph=graph, completed_targets=["SC-3@api"], landscape=landscape
+        )
+        parent_task = _active_repair_task(repair_feedback=[parent_edge], graph=graph, completed_targets=[], landscape=landscape)
+
+        self.assertEqual((api_task["target_id"], web_task["target_id"]), ("SC-3@api", "SC-3@web"))
+        self.assertTrue(api_task["shared_edge_only"] and web_task["shared_edge_only"])
+        self.assertEqual(web_task["write_scope"]["writable_node_ids"], ["VDN-web"])
+        self.assertIn("If this side needs no change", web_task["instruction"])
+        # The other end lives in an approved scenario, so it is never a write target.
+        self.assertEqual(parent_task["target_id"], "SC-3@web")
+        self.assertEqual(parent_task["remaining_targets"], ["SC-3@web"])
+        self.assertFalse(parent_task["shared_edge_only"])
+        self.assertNotIn("If this side needs no change", parent_task["instruction"])
+
+        no_effect = HarnessError("designer_delta_no_effect", "no change")
+        self.assertTrue(_accepts_shared_edge_no_change(no_effect, tool_id="design.propose_delta", repair_task=web_task))
+        self.assertFalse(_accepts_shared_edge_no_change(no_effect, tool_id="design.propose_delta", repair_task=parent_task))
+        self.assertFalse(
+            _accepts_shared_edge_no_change(
+                HarnessError("designer_delta_invalid", "bad"), tool_id="design.propose_delta", repair_task=web_task
+            )
+        )
+
+    def test_mixed_repair_turn_still_requires_a_real_change(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-web", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+            ],
+            "edges": [{"id": "VDE-return", "scenario_id": "SC-3", "from": "VDN-api", "to": "VDN-web", "kind": "returns", "label": "y"}],
+            "partitions": [],
+        }
+        findings = [
+            {"id": "SEM-001", "category": "runtime_boundary_feasibility", "severity": "blocking", "subject_ref": "VDE-return"},
+            {"id": "SEM-002", "category": "decision_input_sufficiency", "severity": "blocking", "subject_ref": "VDN-api"},
+        ]
+
+        task = _active_repair_task(repair_feedback=findings, graph=graph, completed_targets=[])
+
+        self.assertEqual(task["target_id"], "SC-3@api")
+        self.assertFalse(task["shared_edge_only"])
+        self.assertFalse(
+            _accepts_shared_edge_no_change(
+                HarnessError("designer_delta_no_effect", "no change"), tool_id="design.propose_delta", repair_task=task
+            )
+        )
+
+    def test_validator_finding_on_an_edge_is_routed_to_its_source_partition(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-web", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+                {"id": "VDN-rule", "scenario_id": "SC-3", "component_id": "api"},
+            ],
+            "edges": [
+                {"id": "VDE-call", "scenario_id": "SC-3", "from": "VDN-web", "to": "VDN-api", "kind": "calls", "label": "x"},
+                {"id": "VDE-rule", "scenario_id": "SC-3", "from": "VDN-api", "to": "VDN-rule", "kind": "calls", "label": "y"},
+            ],
+            "partitions": [],
+        }
+        edge_finding = {
+            "id": "runtime-sc-3:SEM-001",
+            "category": "runtime_boundary_feasibility",
+            "severity": "blocking",
+            "subject_ref": "VDE-call",
+        }
+        node_finding = {
+            "id": "runtime-sc-3:SEM-002",
+            "category": "decision_input_sufficiency",
+            "severity": "blocking",
+            "subject_ref": "VDN-rule",
+        }
+
+        task = _active_repair_task(
+            repair_feedback=[node_finding, edge_finding],
+            graph=graph,
+            completed_targets=["SC-3@api"],
+            landscape={"components": [{"component_id": "web", "roots": ["apps/web"]}]},
+        )
+
+        self.assertIsNotNone(task)
+        self.assertEqual(task["target_id"], "SC-3@web")
+        self.assertEqual([item["id"] for item in task["findings"]], ["runtime-sc-3:SEM-001"])
+        self.assertIn("VDE-call", task["write_scope"]["removable_edge_ids"])
+        self.assertTrue(_repair_target_present(target_id="SC-3@web", findings=[edge_finding], graph=graph))
 
         invalid_arguments = {
             "delta": {
