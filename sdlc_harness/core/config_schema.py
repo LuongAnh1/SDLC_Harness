@@ -349,9 +349,10 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_DEVELOPER_WORKING_MEMORY_EVIDENCE_CHARS", "Working-memory evidence chars", "integer", 96000, "Ngân sách ký tự cho source evidence trong mỗi Developer input.", minimum=8000),
             _field("SDLC_DESIGN_REPAIR_LIMIT", "Design repair limit", "integer", 3, "Số vòng Designer sửa design.", minimum=0),
             _field("SDLC_DESIGN_VALIDATION_TRIALS", "Design validation trials", "integer", 3, "Số lượt semantic validator chấm cùng design.", minimum=1),
+            _field("SDLC_DESIGN_SEMANTIC_REVIEW_MODE", "Design semantic review", "enum", "legacy", "Legacy, sliced shadow, hoặc sliced enforce.", options=("legacy", "sliced_shadow", "sliced_enforce")),
             _field("SDLC_DESIGN_LLM_CALL_BUDGET", "Design LLM call hard cap", "integer", 128, "Cầu dao tổng cho call LLM của Phase 2; action Designer còn được giới hạn theo policy bên dưới.", minimum=1),
             _field("SDLC_DESIGNER_PARTITION_ACTION_BUDGET", "Designer actions per partition", "integer", 12, "Số action tối đa cho mỗi scenario/component partition; partition mới bắt đầu bộ đếm riêng.", minimum=1),
-            _field("SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET", "Designer repair actions per scenario", "integer", 4, "Số action dành riêng cho nối graph và repair của mỗi scenario.", minimum=0),
+            _field("SDLC_DESIGNER_SCENARIO_REPAIR_ACTION_BUDGET", "Designer repair actions per repair target", "integer", 4, "Số action dành cho mỗi lượt repair (scenario@component).", minimum=0),
             _field("SDLC_DESIGNER_FINALIZATION_ACTION_BUDGET", "Designer finalization actions", "integer", 4, "Số action dự phòng để hoàn tất toàn bộ Design sau các partition.", minimum=0),
             _field("SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP", "Designer global action hard cap", "integer", 128, "Chặn trước khi chạy nếu ngân sách tính từ số partition/scenario vượt ngưỡng vận hành này.", minimum=1),
             _field(

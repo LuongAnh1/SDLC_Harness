@@ -202,6 +202,7 @@ không dùng nó làm đầu vào.
 | `design_component_view_v<N>.json`, `design_surface_view_v<N>.json` | Deterministic projection renderer | Read-only views nhóm canonical node theo component/surface | Human review và public Read API |
 | `design_projection_manifest_v<N>.json` | Deterministic projection renderer | Graph digest/revision và refs của compatibility projections | Checkpoint/sync, integrity audit và downstream handoff |
 | `design_finding_ledger_v<N>.json` | L3 validation workflow | Blocker/warning/disputed findings đã sanitize theo Design version | Human review, revalidation và L4 finding interface |
+| `design_semantic_review_plan_v<N>.json` | Deterministic semantic review planner | Stable specialist tasks, exact claim ownership và graph coverage bound to one Design digest | Step-review replay, shadow comparison và audit trước checkpoint |
 | `vertical_trace_graph_v<N>.json` | L4 trace builder | Canonical Requirement-to-Design graph, bound to frozen Requirement and vertical Design digest | Shadow/enforce validation and Phase 3 handoff |
 | `vertical_trace_validation_v<N>.json` | L4 deterministic validator | Coverage, blockers and mode for the same trace graph digest | Human review and enforce-mode Phase 3 admission |
 | `designer_analysis_v<N>.md` | Designer Agent | Phân tích thiết kế và bối cảnh của version | Repair vòng sau, human review và audit |

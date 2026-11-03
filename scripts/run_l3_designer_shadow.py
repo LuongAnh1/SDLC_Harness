@@ -76,6 +76,11 @@ def main() -> int:
     parser.add_argument("--review-note", default="")
     parser.add_argument("--design-call-budget", type=int, default=128)
     parser.add_argument("--design-repair-limit", type=int, default=3)
+    parser.add_argument(
+        "--design-semantic-review-mode",
+        choices=("legacy", "sliced_shadow", "sliced_enforce"),
+        default="legacy",
+    )
     parser.add_argument("--vertical-trace-mode", choices=("shadow", "enforce"), default="shadow")
     parser.add_argument(
         "--ui-contract-version",
@@ -127,6 +132,7 @@ def main() -> int:
             "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
             "SDLC_VERTICAL_TRACE_MODE": args.vertical_trace_mode,
             "SDLC_DESIGN_VALIDATION_TRIALS": "1",
+            "SDLC_DESIGN_SEMANTIC_REVIEW_MODE": args.design_semantic_review_mode,
             "SDLC_DESIGN_LLM_CALL_BUDGET": str(max(4, args.design_call_budget)),
             "SDLC_DESIGN_REPAIR_LIMIT": str(max(0, args.design_repair_limit)),
             "SDLC_TARGET_REPO_PATH": str(target_repo),

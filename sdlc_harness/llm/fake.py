@@ -25,6 +25,16 @@ def fake_completion(prompt: str) -> str:
         return fake_traceability_sequence(prompt)
     if "Design Semantic Review v3" in prompt:
         return fake_design_semantic_review(prompt)
+    if (
+        "Design Semantic Scenario Review v2" in prompt
+        or "Design Semantic Runtime Review v2" in prompt
+        or "Design Semantic Global Review v2" in prompt
+    ):
+        return fake_design_semantic_specialist_review(prompt)
+    if "Design Semantic Coherence Review v2" in prompt:
+        return fake_design_semantic_coherence_review()
+    if "Design Semantic Adjudication v1" in prompt:
+        return fake_design_semantic_adjudication()
     if "Progressive Semantic Claim Review" in prompt:
         return fake_progressive_semantic_review(prompt)
     if "Progressive Targeted Repair Verification" in prompt:
@@ -556,6 +566,64 @@ def fake_design_semantic_review(prompt: str = "") -> str:
             "assessments": assessments,
             "findings": [],
         },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_design_semantic_specialist_review(prompt: str = "") -> str:
+    """Sliced semantic task fixture; it assesses only task-owned claims."""
+
+    packet = _json_object_after_marker(prompt, "Assigned review packet:\n")
+    task = packet.get("task") if isinstance(packet.get("task"), dict) else {}
+    claims = packet.get("claims") if isinstance(packet.get("claims"), list) else []
+    nodes = packet.get("nodes") if isinstance(packet.get("nodes"), list) else []
+    primary_ids = {
+        str(item) for item in task.get("primary_claim_ids", []) if str(item)
+    }
+    assessments = []
+    for claim in claims:
+        if not isinstance(claim, dict) or str(claim.get("claim_id") or "") not in primary_ids:
+            continue
+        scenario_id = str(claim.get("scenario_id") or "")
+        candidates = [
+            node
+            for node in nodes
+            if isinstance(node, dict)
+            and (not scenario_id or str(node.get("scenario_id") or "") == scenario_id)
+        ]
+        design_ref = str(candidates[0].get("id") or "") if candidates else ""
+        assessments.append(
+            {
+                "claim_id": str(claim.get("claim_id") or ""),
+                "status": "satisfied",
+                "design_refs": [design_ref] if design_ref else [],
+                "reason": "Fake specialist found exact Design evidence for the assigned claim.",
+            }
+        )
+    return json.dumps(
+        {
+            "ok": True,
+            "summary": "Fake sliced specialist review passed.",
+            "assessments": assessments,
+            "findings": [],
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_design_semantic_coherence_review() -> str:
+    return json.dumps(
+        {"ok": True, "summary": "Fake task results are coherent.", "findings": [], "conflicts": []},
+        ensure_ascii=False,
+        indent=2,
+    )
+
+
+def fake_design_semantic_adjudication() -> str:
+    return json.dumps(
+        {"ok": True, "summary": "Fake conflict resolved.", "drop_finding_ids": [], "findings": []},
         ensure_ascii=False,
         indent=2,
     )

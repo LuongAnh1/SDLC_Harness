@@ -255,6 +255,10 @@ def test_semantic_validator_uses_compact_canonical_source_order_and_claims() -> 
     assert "Source-of-truth order:" in prompt
     assert "Canonical Requirement review packet:" in prompt
     assert "Canonical Vertical Design Graph semantic view:" in prompt
+    assert "only repeats a required outcome is not evidence" in prompt
+    assert "A broken transport cannot also carry a new request or response" in prompt
+    assert "Repeating the promised outcome in node, edge or return prose" in prompt
+    assert "not mechanism evidence; block when" in prompt
     assert "REQUIREMENT_PACKET_SENTINEL" not in prompt
     assert "DESIGN_MARKDOWN_SENTINEL" not in prompt
     assert "Compatibility trace summary:" not in prompt

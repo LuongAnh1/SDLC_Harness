@@ -64,6 +64,7 @@ class Settings:
     requirement_contract_version: str
     design_repair_limit: int
     design_validation_trials: int
+    design_semantic_review_mode: str
     design_llm_call_budget: int
     designer_partition_action_budget: int
     designer_scenario_repair_action_budget: int
@@ -455,6 +456,11 @@ def load_settings(
     uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
     if uiux_skill_mode not in {"off", "enforce"}:
         uiux_skill_mode = "off"
+    design_semantic_review_mode = (
+        merged.get("SDLC_DESIGN_SEMANTIC_REVIEW_MODE", "legacy").strip().lower() or "legacy"
+    )
+    if design_semantic_review_mode not in {"legacy", "sliced_shadow", "sliced_enforce"}:
+        design_semantic_review_mode = "legacy"
     uiux_skill_root_raw = merged.get("SDLC_UIUX_SKILL_ROOT", "").strip()
     uiux_skill_root = Path(uiux_skill_root_raw).expanduser() if uiux_skill_root_raw else None
     if uiux_skill_root is not None and not uiux_skill_root.is_absolute():
@@ -509,6 +515,7 @@ def load_settings(
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
         design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
+        design_semantic_review_mode=design_semantic_review_mode,
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=128, minimum=1),
         designer_partition_action_budget=_int_value(
             merged.get("SDLC_DESIGNER_PARTITION_ACTION_BUDGET"),
