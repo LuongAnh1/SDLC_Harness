@@ -21,6 +21,10 @@ from ..core.errors import HarnessError
 from ..events import emit_current
 
 
+# shortcut: fixed 2 retries, move to config if providers need tuning
+LLM_TRANSPORT_RETRY_DELAYS = (1.0, 3.0)
+
+
 @dataclass(frozen=True)
 class LlmCompletion:
     """Nội dung cùng metadata cần để chẩn đoán output bị cắt hoặc sai schema."""
@@ -364,23 +368,40 @@ class LlmClient:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(
-                request,
-                timeout=timeout_seconds or self.settings.llm_timeout_seconds,
-            ) as response:
-                raw = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise HarnessError(
-                "requirement_refiner_failed",
-                f"LLM HTTP error {exc.code}: {body[:500]}",
-            ) from exc
-        except (OSError, http.client.HTTPException) as exc:
-            raise HarnessError(
-                "llm_transport_failed",
-                f"LLM request failed: {exc}",
-            ) from exc
+        raw = ""
+        for attempt in range(len(LLM_TRANSPORT_RETRY_DELAYS) + 1):
+            try:
+                with urllib.request.urlopen(
+                    request,
+                    timeout=timeout_seconds or self.settings.llm_timeout_seconds,
+                ) as response:
+                    raw = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:
+                body = exc.read().decode("utf-8", errors="replace")
+                raise HarnessError(
+                    "requirement_refiner_failed",
+                    f"LLM HTTP error {exc.code}: {body[:500]}",
+                ) from exc
+            except (OSError, http.client.HTTPException) as exc:
+                if attempt == len(LLM_TRANSPORT_RETRY_DELAYS):
+                    raise HarnessError(
+                        "llm_transport_failed",
+                        f"LLM request failed: {exc}",
+                    ) from exc
+                delay_seconds = LLM_TRANSPORT_RETRY_DELAYS[attempt]
+                emit_current(
+                    category="llm",
+                    event_type="llm_call_retry",
+                    message="Retrying LLM call after a transport failure.",
+                    data={
+                        "attempt": attempt + 2,
+                        "max_attempts": len(LLM_TRANSPORT_RETRY_DELAYS) + 1,
+                        "delay_seconds": delay_seconds,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                time.sleep(delay_seconds)
 
         try:
             data = json.loads(raw)

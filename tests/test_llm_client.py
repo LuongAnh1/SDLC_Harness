@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import http.client
+from io import BytesIO
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
+import urllib.error
 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
@@ -57,14 +59,55 @@ class LlmClientPayloadTests(unittest.TestCase):
             },
         )
 
-    def test_incomplete_response_is_reported_as_transport_failure(self) -> None:
+    def test_incomplete_read_twice_then_success_retries_three_times(self) -> None:
         with TemporaryDirectory() as temp_dir:
             client = LlmClient(self._settings(Path(temp_dir), mode="deepseek"))
-            with patch("urllib.request.urlopen", return_value=_IncompleteResponse()):
+            with (
+                patch(
+                    "urllib.request.urlopen",
+                    side_effect=[_IncompleteResponse(), _IncompleteResponse(), _FakeResponse()],
+                ) as urlopen,
+                patch("sdlc_harness.llm.client.time.sleep") as sleep,
+            ):
+                result = client.complete(system="system", prompt="prompt")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual([call.args[0] for call in sleep.call_args_list], [1.0, 3.0])
+
+    def test_always_incomplete_response_fails_after_three_attempts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            client = LlmClient(self._settings(Path(temp_dir), mode="deepseek"))
+            with (
+                patch("urllib.request.urlopen", return_value=_IncompleteResponse()) as urlopen,
+                patch("sdlc_harness.llm.client.time.sleep"),
+            ):
                 with self.assertRaises(HarnessError) as raised:
                     client.complete(system="system", prompt="prompt")
 
         self.assertEqual(raised.exception.error_code, "llm_transport_failed")
+        self.assertEqual(urlopen.call_count, 3)
+
+    def test_http_error_is_not_retried(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://provider.invalid/chat/completions",
+            503,
+            "unavailable",
+            hdrs=None,
+            fp=BytesIO(b"unavailable"),
+        )
+        with TemporaryDirectory() as temp_dir:
+            client = LlmClient(self._settings(Path(temp_dir), mode="deepseek"))
+            with (
+                patch("urllib.request.urlopen", side_effect=error) as urlopen,
+                patch("sdlc_harness.llm.client.time.sleep") as sleep,
+            ):
+                with self.assertRaises(HarnessError) as raised:
+                    client.complete(system="system", prompt="prompt")
+
+        self.assertEqual(raised.exception.error_code, "requirement_refiner_failed")
+        self.assertEqual(urlopen.call_count, 1)
+        sleep.assert_not_called()
 
     def test_deepseek_payload_explicitly_disables_thinking(self) -> None:
         with TemporaryDirectory() as temp_dir:
