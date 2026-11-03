@@ -347,9 +347,30 @@ class PhaseTwoTest(unittest.TestCase):
     def test_settings_reads_design_repair_limit(self) -> None:
         self.assertEqual(self.settings.design_repair_limit, 2)
         self.assertEqual(self.settings.design_validation_trials, 3)
+        self.assertEqual(self.settings.design_semantic_review_mode, "legacy")
         self.assertEqual(self.settings.design_llm_call_budget, 16)
         self.assertEqual(self.settings.designer_partition_action_budget, 12)
         self.assertEqual(self.settings.designer_scenario_repair_action_budget, 4)
+
+    def test_sliced_enforce_persists_review_plan_and_reaches_design_checkpoint(self) -> None:
+        settings = replace(
+            self.settings,
+            design_semantic_review_mode="sliced_enforce",
+            design_validation_trials=1,
+        )
+        created = self._create_phase1_run()
+
+        response = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
+
+        self.assertEqual(response["status"], "waiting_design_approval")
+        plan_ref = response["latest_artifacts"]["design_semantic_review_plan"]
+        plan = json.loads((self.repo_root / plan_ref).read_text(encoding="utf-8"))
+        self.assertEqual(plan["schema_version"], "semantic_review_plan_v2")
+        self.assertGreater(plan["coverage"]["task_count"], 0)
+        report_ref = response["latest_artifacts"]["design_validation_report"]
+        report = json.loads((self.repo_root / report_ref).read_text(encoding="utf-8"))
+        self.assertEqual(report["version"], "design_validation_report_v5_sliced")
+        self.assertEqual(report["semantic_mode"], "design_validation_sliced_v1")
         self.assertEqual(self.settings.designer_finalization_action_budget, 4)
         self.assertEqual(self.settings.designer_global_action_hard_cap, 128)
         settings = load_settings(
@@ -1405,6 +1426,43 @@ class OnlyClass {
 
         self.assertEqual(resumed["status"], "waiting_design_approval")
 
+    def test_revalidate_design_advances_past_interrupted_unpublished_validation(self) -> None:
+        settings = replace(self.settings, design_validation_trials=1)
+        created = self._create_phase1_run()
+        run_id = str(created["run_id"])
+        PhaseTwoWorkflow(settings).approve_checkpoint(run_id=run_id)
+
+        first = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={"enabled": True, "review_input": True},
+        ).revalidate_design(run_id=run_id)
+        self.assertEqual(first["status"], "design_paused", first)
+
+        workflow = PhaseTwoWorkflow(settings)
+        state = workflow.store.read_state(run_id)
+        old_review = dict(state["designer_execution"]["validator_step_review"])
+        state["status"] = "design_validating"
+        state["current_phase"] = "design_validating"
+        state["designer_execution"]["status"] = "validating_existing"
+        workflow.store.write_state(state)
+
+        second = PhaseTwoWorkflow(
+            settings,
+            designer_step_review={"enabled": True, "review_input": True},
+        ).revalidate_design(run_id=run_id)
+
+        self.assertEqual(second["status"], "design_paused", second)
+        recovered = workflow.store.read_state(run_id)
+        self.assertEqual(recovered["designer_execution"]["design_version"], 3)
+        self.assertIn(
+            "design_validator_execution/design_v3/",
+            str(recovered["designer_execution"]["validator_step_review"]["exchange_path"]).replace("\\", "/"),
+        )
+        old_exchange = json.loads(
+            (self.repo_root / str(old_review["exchange_path"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(old_exchange["status"], "superseded")
+
     def test_revalidate_design_recovers_feedback_from_latest_finding_ledger(self) -> None:
         created = self._create_phase1_run()
         PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=str(created["run_id"]))
@@ -1658,6 +1716,33 @@ class OnlyClass {
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["status"], "waiting_design_approval")
         self.assertEqual(payload["last_sync"]["phase"], "design_checkpoint")
+
+
+
+class RepairSessionOrdinalTests(unittest.TestCase):
+    def _session(self, run_dir: Path, ordinal: int, *, status: str, feedback: list[dict[str, object]]) -> None:
+        session_dir = run_dir / "designer_execution" / f"design_v{ordinal}"
+        session_dir.mkdir(parents=True)
+        (session_dir / "designer_loop_session_v1.json").write_text(json.dumps({"status": status}), encoding="utf-8")
+        (session_dir / "designer_loop_manifest_v1.json").write_text(
+            json.dumps({"authority": {"repair_feedback": feedback}}), encoding="utf-8"
+        )
+
+    def test_next_repair_never_reuses_a_completed_session_built_for_other_feedback(self) -> None:
+        from sdlc_harness.workflows.phase2 import _unused_repair_session_ordinal
+
+        old = [{"id": "runtime-sc-3:SEM-001", "subject_ref": "VDN-a"}]
+        new = [{"id": "runtime-sc-3:SEM-001", "subject_ref": "VDE-b"}]
+        with tempfile.TemporaryDirectory() as directory:
+            run_dir = Path(directory)
+            self.assertEqual(_unused_repair_session_ordinal(run_dir, ordinal=18, repair_feedback=new), 18)
+            self._session(run_dir, 18, status="completed", feedback=old)
+            self.assertEqual(_unused_repair_session_ordinal(run_dir, ordinal=18, repair_feedback=new), 19)
+            # Re-entering the same completed repair (same feedback) keeps its session.
+            self.assertEqual(_unused_repair_session_ordinal(run_dir, ordinal=18, repair_feedback=old), 18)
+            # A paused or blocked session is resumable; drift checks stay with the Designer manifest.
+            self._session(run_dir, 19, status="paused", feedback=old)
+            self.assertEqual(_unused_repair_session_ordinal(run_dir, ordinal=19, repair_feedback=new), 19)
 
 
 if __name__ == "__main__":

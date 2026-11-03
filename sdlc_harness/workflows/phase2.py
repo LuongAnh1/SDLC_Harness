@@ -15,6 +15,7 @@ from ..agents.designer import (
     UI_CONTRACT_STATE_KEY,
     UI_EXPERIENCE_CONTRACT_V2,
     UI_LAYOUT_CONTRACT_KEY,
+    canonicalize_composition_wiring,
     ui_layout_pin,
     UIUX_CONTRACT_STATE_KEY,
     UIUX_CONTRACT_VERSION,
@@ -88,6 +89,7 @@ _PHASE2_ARTIFACT_KEYS = frozenset(
         "requirement_design_trace",
         "missing_design_links",
         "design_validation_report",
+        "design_semantic_review_plan",
         "design_quality_report",
         "vertical_design_graph",
         "design_component_view",
@@ -209,6 +211,7 @@ class PhaseTwoWorkflow:
         status = str(state.get("status") or "")
         phase = str(state.get("current_phase") or "")
         last_error = _dict_value(state.get("last_error"))
+        execution = _dict_value(state.get("designer_execution"))
         recoverable_trace_failure = (
             status == "failed"
             and phase.startswith("design_")
@@ -237,7 +240,12 @@ class PhaseTwoWorkflow:
             and phase.startswith("design_")
             and bool(_string_dict(state.get("latest_artifacts")).get("vertical_design_graph"))
         )
-        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_plan_step_review and not recoverable_plan_checkpoint and not recoverable_vertical_design_block and not recoverable_paused_design and (
+        recoverable_interrupted_validation = (
+            status == "design_validating"
+            and phase == "design_validating"
+            and bool(str(execution.get("validation_graph_path") or ""))
+        )
+        if not recoverable_trace_failure and not recoverable_routing_failure and not recoverable_plan_step_review and not recoverable_plan_checkpoint and not recoverable_vertical_design_block and not recoverable_paused_design and not recoverable_interrupted_validation and (
             phase != "design_review" or status not in {"waiting_design_approval", "blocked"}
         ):
             raise HarnessError(
@@ -245,7 +253,7 @@ class PhaseTwoWorkflow:
                 f"Run is not waiting on a design checkpoint: {run_id}",
                 run_id=run_id,
             )
-        if recoverable_paused_design:
+        if recoverable_paused_design or recoverable_interrupted_validation:
             self._supersede_pending_design_step_review(state=state, run_id=run_id)
         if recoverable_plan_step_review:
             self._supersede_pending_plan_step_review(
@@ -278,7 +286,7 @@ class PhaseTwoWorkflow:
         versions = _design_versions(state)
         existing_graph = (
             self._blocked_session_graph(state=state, run_id=run_id)
-            if recoverable_vertical_design_block or recoverable_paused_design
+            if recoverable_vertical_design_block or recoverable_paused_design or recoverable_interrupted_validation
             else None
         )
         if existing_graph is None:
@@ -289,11 +297,11 @@ class PhaseTwoWorkflow:
                 "Run has no canonical or recoverable persisted vertical Design graph.",
                 run_id=run_id,
             )
+        existing_graph = canonicalize_composition_wiring(existing_graph)
         start_version = _next_design_version(self.store.run_dir(run_id) / "artifacts")
-        prior_execution = _dict_value(state.get("designer_execution"))
         session_ordinal = max(
             start_version,
-            int(prior_execution.get("session_ordinal") or 0) + 1,
+            int(execution.get("session_ordinal") or 0) + 1,
         )
         initial_repair_feedback = self._persisted_design_feedback(state=state, run_id=run_id)
         initial_repair_feedback.extend(design_bundle_findings(existing_graph))
@@ -639,6 +647,7 @@ class PhaseTwoWorkflow:
             if str(item.get("canonical_key") or "")
         )
         repair_stalled = False
+        semantic_inconclusive = False
         validation: DesignValidationResult | None = None
         trace_validation = None
         design_paths: dict[str, str] = {}
@@ -657,6 +666,10 @@ class PhaseTwoWorkflow:
                 else relative_iteration
             )
             ordinal = base_ordinal + ordinal_offset
+            if not validation_only_iteration:
+                ordinal = _unused_repair_session_ordinal(
+                    self.store.run_dir(run_id), ordinal=ordinal, repair_feedback=repair_feedback
+                )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -871,6 +884,8 @@ class PhaseTwoWorkflow:
             trace_blockers = list(trace_validation.blocking_findings) if trace_validation is not None else []
             enforced_trace_blockers = trace_blockers if trace_mode == "enforce" else []
             deterministic_blockers = [*bundle_blockers, *enforced_trace_blockers]
+            semantic_plan: dict[str, object] = {}
+            semantic_plan_path = ""
             if deterministic_blockers:
                 validation = DesignValidationResult(
                     traceability=traceability,
@@ -900,6 +915,17 @@ class PhaseTwoWorkflow:
                             label="Design Validator",
                         )
                     )
+                if self.settings.design_semantic_review_mode != "legacy":
+                    semantic_plan = validator.build_review_plan(
+                        canonical_requirement=approved.canonical_model,
+                        vertical_design_graph=graph,
+                    )
+                    semantic_plan_file = self.store.write_json_artifact(
+                        run_id,
+                        f"design_semantic_review_plan_v{version}.json",
+                        semantic_plan,
+                    )
+                    semantic_plan_path = self.store.relative(semantic_plan_file)
                 try:
                     validation = validator.review(
                         requirement_packet=approved.requirement_packet,
@@ -912,6 +938,13 @@ class PhaseTwoWorkflow:
                         vertical_design_graph=graph,
                         repair_iterations=repair_iteration,
                         validation_trials=self.settings.design_validation_trials,
+                        semantic_review_mode=self.settings.design_semantic_review_mode,
+                        semantic_review_plan=semantic_plan or None,
+                        semantic_call_budget=self.llm.remaining,
+                        semantic_task_cache=(
+                            self.store.run_dir(run_id) / "design_validator_execution" / "semantic_task_cache_v1.json"
+                        ),
+                        semantic_task_cache_version=version,
                     )
                 except LlmStepReviewRequired as exc:
                     state = self.store.read_state(run_id)
@@ -941,7 +974,12 @@ class PhaseTwoWorkflow:
                     self.store.write_state(state)
                     return self._status_response(state, created_new_run=False)
             validation_payload = validation.to_dict()
-            validation_payload["version"] = "design_validation_report_v4_vertical_graph"
+            validation_payload["version"] = (
+                "design_validation_report_v5_sliced"
+                if self.settings.design_semantic_review_mode != "legacy"
+                else "design_validation_report_v4_vertical_graph"
+            )
+            validation_payload["semantic_mode"] = validation.mode
             validation_payload["mode"] = design_contract_version
             graph_path = self.store.write_json_artifact(run_id, f"vertical_design_graph_v{version}.json", graph)
             component_path = self.store.write_json_artifact(
@@ -983,6 +1021,8 @@ class PhaseTwoWorkflow:
                 "design_component_view": self.store.relative(component_path),
                 "design_surface_view": self.store.relative(surface_path),
             }
+            if semantic_plan_path:
+                vertical_paths["design_semantic_review_plan"] = semantic_plan_path
             ui_feature = render_ui_feature_experience(graph)
             if ui_feature is not None:
                 ui_feature_json = self.store.write_json_artifact(
@@ -1107,6 +1147,9 @@ class PhaseTwoWorkflow:
             self.store.write_state(state)
             if validation.ok:
                 break
+            if validation.inconclusive and self.settings.design_semantic_review_mode != "legacy":
+                semantic_inconclusive = True
+                break
             current_digest = str(graph.get("artifact_digest") or "")
             current_blocker_keys = frozenset(item.canonical_key for item in validation.blocking_findings)
             repair_stalled = (
@@ -1129,8 +1172,16 @@ class PhaseTwoWorkflow:
             raise HarnessError("designer_failed", "L3 Designer did not produce a validated graph.", run_id=run_id)
         if not validation.ok:
             error = HarnessError(
-                "design_repair_stalled" if repair_stalled else "design_repair_exhausted",
-                f"Vertical Design graph still has {len(validation.blocking_findings)} blocker(s).",
+                (
+                    "design_semantic_review_inconclusive"
+                    if semantic_inconclusive
+                    else ("design_repair_stalled" if repair_stalled else "design_repair_exhausted")
+                ),
+                (
+                    "Semantic Design review did not complete; revalidate the same Design before approval."
+                    if semantic_inconclusive
+                    else f"Vertical Design graph still has {len(validation.blocking_findings)} blocker(s)."
+                ),
                 run_id=run_id,
             )
             state.update(
@@ -1443,6 +1494,7 @@ def _quality_reports(
         "design_validation": {
             "ok": validation.ok,
             "mode": validation.mode,
+            "semantic_mode": validation.mode,
             "gate_stage": gate_stage,
             "versions": versions,
             "blocking_count": len(validation.blocking_findings),
@@ -1456,6 +1508,11 @@ def _quality_reports(
             "llm_calls": validation.semantic_consensus.get("llm_calls", {}),
             "summary": summary,
             "report": paths["design_validation_report"],
+            **(
+                {"semantic_review_plan": paths["design_semantic_review_plan"]}
+                if paths.get("design_semantic_review_plan")
+                else {}
+            ),
         },
     }
 
@@ -1736,11 +1793,37 @@ def _design_versions(state: dict[str, object]) -> list[str]:
     return [str(item) for item in versions] if isinstance(versions, list) else []
 
 
+
+def _unused_repair_session_ordinal(
+    run_dir: Path, *, ordinal: int, repair_feedback: list[dict[str, object]]
+) -> int:
+    """Skip Designer sessions that already completed for different repair feedback; resumable sessions are reused."""
+
+    feedback = json.dumps(repair_feedback, ensure_ascii=False, sort_keys=True)
+    while True:
+        session_dir = run_dir / "designer_execution" / f"design_v{ordinal}"
+        try:
+            session = json.loads((session_dir / "designer_loop_session_v1.json").read_text(encoding="utf-8"))
+            manifest = json.loads((session_dir / "designer_loop_manifest_v1.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ordinal
+        previous = json.dumps(
+            _dict_value(manifest.get("authority")).get("repair_feedback") or [], ensure_ascii=False, sort_keys=True
+        )
+        if str(session.get("status") or "") != "completed" or previous == feedback:
+            return ordinal
+        ordinal += 1
+
 def _next_design_version(artifact_dir: Path) -> int:
     versions = []
     for path in artifact_dir.glob("design_artifact_v*.md"):
         suffix = path.stem.rsplit("_v", 1)[-1]
         if suffix.isdigit():
+            versions.append(int(suffix))
+    execution_dir = artifact_dir.parent / "design_validator_execution"
+    for path in execution_dir.glob("design_v*"):
+        suffix = path.name.rsplit("_v", 1)[-1]
+        if path.is_dir() and suffix.isdigit():
             versions.append(int(suffix))
     return max(versions, default=0) + 1
 
