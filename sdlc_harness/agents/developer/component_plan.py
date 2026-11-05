@@ -13,6 +13,7 @@ from ...profiles import (
     PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
 )
+from ...profiles.runtime_config import runtime_config_impact_issues
 from ..designer.graph import GRAPH_VERSION_V2, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
 
@@ -43,6 +44,7 @@ _IMMUTABLE_UNIT_FIELDS = {
     "boundary_contracts",
     "surface_contracts",
     "code_entities",
+    "ui_obligations",
 }
 
 
@@ -109,6 +111,7 @@ def build_component_work_units(
         if str(_dict(trace_nodes.get(source)).get("kind") or "") == "acceptance_criterion" and target in nodes:
             acceptance_by_design.setdefault(target, set()).add(source)
 
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
     units: list[dict[str, object]] = []
     unit_by_node: dict[str, str] = {}
     for (scenario_id, component_id), group_nodes in sorted(grouped.items()):
@@ -204,6 +207,9 @@ def build_component_work_units(
             "boundary_contracts": [],
             "surface_contracts": surface_contracts,
         }
+        obligations = [row for node in group_nodes for row in _ui_obligations(node)] if entity_graph else []
+        if obligations:
+            unit["ui_obligations"] = obligations
         if "data" in surfaces:
             intents = sorted(
                 {
@@ -222,7 +228,6 @@ def build_component_work_units(
         units.append(unit)
 
     units_by_id = {str(item["unit_id"]): item for item in units}
-    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
     scenario_rank = _scenario_rank(trace_graph)
     scenario_kinds = {
         str(item.get("id") or ""): str(item.get("scenario_kind") or "")
@@ -348,6 +353,102 @@ def _bind_code_entities(
         record = {"entity": entity, "design_node_ids": node_ids, "unit_ids": owners}
         for unit_id in owners:
             units_by_id[unit_id].setdefault("code_entities", []).append(record)
+        # The first unit that attaches this symbol to an owner wires it; later units reuse that wiring.
+        wired: dict[tuple[str, str, str], str] = {}
+        for unit_id in owners:
+            for binding in _dicts(units_by_id[unit_id].get("runtime_bindings")):
+                if str(binding.get("design_node_id") or "") not in node_ids:
+                    continue
+                attachment = _dict(binding.get("attachment"))
+                key = (
+                    str(attachment.get("relation") or "").strip(),
+                    planning_policy.normalize_editable_path(attachment.get("owner_path")),
+                    str(attachment.get("owner_symbol") or "").strip(),
+                )
+                if key[1] and wired.setdefault(key, unit_id) != unit_id:
+                    binding["attachment_wired_by"] = wired[key]
+
+    for unit in units_by_id.values():
+        required = _wiring_endpoints(unit, planning_policy)
+        unit["planned_code_targets"] = [
+            target
+            for target in _dicts(unit.get("planned_code_targets"))
+            if (str(target.get("path") or ""), str(target.get("symbol") or "")) in required
+        ]
+
+
+def _wiring_endpoints(unit: dict[str, object], planning_policy: PlanningPathPolicy) -> set[tuple[str, str]]:
+    """Runtime targets plus the attachment owners this unit must wire itself."""
+
+    endpoints = set()
+    for binding in _dicts(unit.get("runtime_bindings")):
+        target = _dict(binding.get("target"))
+        endpoints.add((target.get("path"), target.get("symbol")))
+        if not binding.get("attachment_wired_by"):
+            attachment = _dict(binding.get("attachment"))
+            endpoints.add((attachment.get("owner_path"), attachment.get("owner_symbol")))
+    return {
+        (planning_policy.normalize_editable_path(path), str(symbol or "").strip())
+        for path, symbol in endpoints
+        if planning_policy.normalize_editable_path(path)
+    }
+
+
+def _ui_obligations(node: dict[str, object]) -> list[dict[str, str]]:
+    """Enumerate a UI contract's behavior, accessibility, focus and responsive items with stable ids."""
+
+    if str(node.get("surface") or "") != "ui":
+        return []
+    contract = _dict(node.get("surface_contract"))
+    experience = _dict(contract.get("experience_contract"))
+    rows: list[tuple[str, str, str]] = []
+    for name, state in sorted(_dict(experience.get("runtime_states")).items()):
+        if isinstance(state, dict) and not state.get("not_applicable"):
+            rows.append(("state", str(name), f"{name}: {state.get('trigger') or ''}".strip()))
+    for index, value in enumerate(_strings(contract.get("validations")), start=1):
+        rows.append(("validation", str(index), value))
+    for index, item in enumerate(_dicts(contract.get("transitions")), start=1):
+        rows.append(
+            ("transition", str(index), f"{item.get('from') or ''} -> {item.get('to') or ''} on {item.get('action') or ''}")
+        )
+    for index, item in enumerate(_dicts(experience.get("feedback")), start=1):
+        rows.append(("feedback", str(index), str(item.get("trigger") or "")))
+    for kind in ("accessibility", "focus_flow", "responsive"):
+        for index, value in enumerate(_strings(experience.get(kind)), start=1):
+            rows.append((kind, str(index), value))
+    for index, item in enumerate(_dicts(experience.get("focus_policies")), start=1):
+        rows.append(("focus_policy", str(index), str(item.get("event") or "")))
+    node_id = str(node.get("id") or "")
+    return [{"id": f"{node_id}:{kind}.{key}", "summary": summary} for kind, key, summary in rows]
+
+
+def unit_write_scope(unit: dict[str, object], planning_policy: PlanningPathPolicy) -> dict[str, object]:
+    """Files a Design V2 unit may target, mirroring the runtime-wiring rule in component_plan_issues."""
+
+    files = sorted(
+        {
+            normalized
+            for binding in _dicts(unit.get("runtime_bindings"))
+            for raw in (
+                _dict(binding.get("target")).get("path"),
+                _dict(binding.get("attachment")).get("owner_path"),
+            )
+            for normalized in [planning_policy.normalize_editable_path(raw)]
+            if normalized
+        }
+    )
+    if not files:
+        return {}
+    surfaces = _strings(unit.get("surfaces"))
+    also = []
+    # Same conditions as _target_allowed_for_unit plus the V2 boundary-contract rule.
+    if _dicts(unit.get("boundary_contracts")) and str(unit.get("component_id") or "") == "api" and "api" in surfaces:
+        also.append("shared contract files under the `contracts` component root")
+    if "data" in surfaces:
+        also.append("packages/db/prisma/schema.prisma and packages/db/prisma/migrations/<id>_<name>/migration.sql")
+    if "ui" in surfaces:
+        also.append("stylesheets under the planning policy's `ui_stylesheets` root")
+    return {"files": files, "also_allowed": also}
 
 
 def merge_work_unit_updates(
@@ -395,9 +496,21 @@ def merge_work_unit_updates(
                 planning_policy=planning_policy,
             )
         unit["planned_code_targets"] = targets
-        unit["test_intents"] = _canonical_test_intents(patch.get("test_intents")) or _dicts(
-            unit.get("test_intents")
+        # A patch adds tests and drops only the ids it names, so a repair never rewrites kept tests.
+        dropped = set(_strings(patch.get("remove_test_intents")))
+        unit["test_intents"] = _canonical_test_intents(
+            [
+                *(item for item in _dicts(unit.get("test_intents")) if test_intent_id(item) not in dropped),
+                *_dicts(patch.get("test_intents")),
+            ]
         )
+        if "unverified_obligations" in patch:
+            declared = {
+                str(item.get("id") or "").strip(): str(item.get("reason") or "").strip()
+                for item in [*_dicts(unit.get("unverified_obligations")), *_dicts(patch.get("unverified_obligations"))]
+                if str(item.get("id") or "").strip()
+            }
+            unit["unverified_obligations"] = [{"id": key, "reason": declared[key]} for key in sorted(declared)]
         evidence_refs = _strings(patch.get("repo_evidence_refs"))
         if evidence_refs:
             unit["repo_evidence_refs"] = sorted(set(evidence_refs))
@@ -445,18 +558,7 @@ def _target_removals(
         )
         for item in _dicts(patch.get("remove_planned_code_targets"))
     }
-    protected = {
-        (planning_policy.normalize_editable_path(path), str(symbol or "").strip())
-        for binding in _dicts(unit.get("runtime_bindings"))
-        for path, symbol in (
-            (_dict(binding.get("target")).get("path"), _dict(binding.get("target")).get("symbol")),
-            (
-                _dict(binding.get("attachment")).get("owner_path"),
-                _dict(binding.get("attachment")).get("owner_symbol"),
-            ),
-        )
-    }
-    return {item for item in requested - protected if item[0]}
+    return {item for item in requested - _wiring_endpoints(unit, planning_policy) if item[0]}
 
 
 def _assign_typescript_database_barrel_owner(
@@ -861,6 +963,14 @@ def component_plan_issues(
         issues.append(f"Plan version must be `{COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION}`.")
     if _dict(structured_plan.get("inputs")) != expected_inputs:
         issues.append("Component-aware plan input binding is stale or incomplete.")
+    if isinstance(expected_inputs.get("repo_runtime_config"), dict):
+        issues.extend(
+            runtime_config_impact_issues(
+                structured_plan=structured_plan,
+                repo_runtime_config=_dict(expected_inputs.get("repo_runtime_config")),
+                planning_policy=planning_policy,
+            )
+        )
     units = _dicts(structured_plan.get("work_units"))
     actual_by_id = {str(item.get("unit_id") or ""): item for item in units}
     expected_with_targets: list[dict[str, object]] = []
@@ -961,14 +1071,11 @@ def component_plan_issues(
                         f"Work unit {unit_id} has unapproved support target "
                         f"`{target_key[0]}#{target_key[1]}` outside runtime wiring."
                     )
-        for binding in _dicts(unit.get("runtime_bindings")):
-            target_path = str(_dict(binding.get("target")).get("path") or "")
-            owner_path = str(_dict(binding.get("attachment")).get("owner_path") or "")
-            for required_path in {target_path, owner_path} - {""}:
-                if required_path not in target_paths:
-                    issues.append(
-                        f"Work unit {unit_id} omits runtime wiring target `{required_path}`."
-                    )
+        for required_path in sorted({path for path, _ in _wiring_endpoints(unit, planning_policy)}):
+            if required_path not in target_paths:
+                issues.append(
+                    f"Work unit {unit_id} omits runtime wiring target `{required_path}`."
+                )
         known_edge_ids = set(_strings(unit.get("design_edge_ids")))
         for boundary in _dicts(unit.get("boundary_contracts")):
             if str(boundary.get("design_edge_id") or "") not in known_edge_ids:
@@ -976,6 +1083,19 @@ def component_plan_issues(
         tests = _dicts(unit.get("test_intents"))
         if not tests:
             issues.append(f"Work unit {unit_id} has no test intent.")
+        obligation_ids = {str(item.get("id") or "") for item in _dicts(_dict(expected).get("ui_obligations"))}
+        tested = {ref for item in tests for ref in _strings(item.get("obligation_refs"))}
+        declared = _dicts(unit.get("unverified_obligations"))
+        unverified = {str(item.get("id") or "") for item in declared if str(item.get("reason") or "").strip()}
+        unknown = (tested | {str(item.get("id") or "") for item in declared}) - obligation_ids
+        if unknown:
+            issues.append(f"Work unit {unit_id} references unknown UI obligations: {sorted(unknown)}")
+        unaccounted = obligation_ids - tested - unverified
+        if unaccounted:
+            issues.append(
+                f"Work unit {unit_id} leaves UI obligations neither tested nor declared unverified "
+                f"with a reason: {sorted(unaccounted)}"
+            )
         covered_acceptance = {
             ref for item in tests for ref in _strings(item.get("acceptance_refs"))
         }
@@ -1501,13 +1621,14 @@ def _target_allowed_for_unit(
 
 def _canonical_test_intents(value: object) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = set()
+    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
     for item in _dicts(value):
         stage_id = str(item.get("stage_id") or "").strip()
         intent = str(item.get("intent") or "").strip()
         acceptance_refs = tuple(sorted(set(_strings(item.get("acceptance_refs")))))
         target_paths = tuple(sorted(set(_safe_relative_paths(item.get("target_paths")))))
-        key = (stage_id, intent, acceptance_refs, target_paths)
+        obligation_refs = tuple(sorted(set(_strings(item.get("obligation_refs")))))
+        key = (stage_id, intent, acceptance_refs, target_paths, obligation_refs)
         if stage_id and intent and key not in seen:
             seen.add(key)
             result.append(
@@ -1516,9 +1637,18 @@ def _canonical_test_intents(value: object) -> list[dict[str, object]]:
                     "intent": intent,
                     "acceptance_refs": list(acceptance_refs),
                     "target_paths": list(target_paths),
+                    **({"obligation_refs": list(obligation_refs)} if obligation_refs else {}),
                 }
             )
     return result
+
+
+def test_intent_id(item: dict[str, object]) -> str:
+    """Content id of a test intent, so a repair can drop one without resending the others."""
+
+    canonical = _canonical_test_intents([item])
+    payload = json.dumps(canonical[0] if canonical else {}, ensure_ascii=False, sort_keys=True)
+    return "TI-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
 
 
 def _dedupe_test_intents(items: list[dict[str, object]]) -> list[dict[str, object]]:

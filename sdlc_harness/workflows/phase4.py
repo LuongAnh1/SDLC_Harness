@@ -47,6 +47,7 @@ from ..artifacts.writers import (
 from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import LlmClient
+from ..profiles.runtime_config import unsupported_runtime_config_changes
 from ..profiles import (
     CodeTracePolicy,
     PlanningPathPolicy,
@@ -219,6 +220,14 @@ class _PhaseFourCore:
             review=review,
             run_id=run_id,
         )
+        unsupported_config = unsupported_runtime_config_changes(structured_plan)
+        if unsupported_config:
+            raise HarnessError(
+                "runtime_config_execution_unsupported",
+                "Phase 4 cannot materialize runtime configuration kinds yet: "
+                + ", ".join(sorted({str(item.get("kind")) for item in unsupported_config})),
+                run_id=run_id,
+            )
         if review.get("ok") is not True:
             raise HarnessError(
                 "implementation_plan_review_not_passed",

@@ -48,6 +48,8 @@ from ..profiles import (
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
+from ..profiles.runtime_config import runtime_config_policy
+from ..repo_context.runtime_config import collect_repo_runtime_config
 from ..repo_context import (
     CodeGraphContextProvider,
     discover_profile_source_files,
@@ -134,13 +136,16 @@ class PhaseThreeWorkflow:
         """Replay approved Phase 3 exchanges and pause at the next provider output."""
 
         state = self.store.read_state(run_id)
-        if str(state.get("status") or "") != "implementation_plan_step_review_required":
+        pinned_review = state.get("implementation_plan_step_review")
+        status = str(state.get("status") or "")
+        # A replay killed mid-way leaves an in-flight status; approved exchanges replay identically.
+        interrupted = status in _STEP_REVIEW_REPLAY_STATUSES and _dict_value(pinned_review).get("enabled") is True
+        if status != "implementation_plan_step_review_required" and not interrupted:
             raise HarnessError(
                 "implementation_plan_step_review_not_pending",
                 f"Run has no pending Phase 3 step review: {run_id}",
                 run_id=run_id,
             )
-        pinned_review = state.get("implementation_plan_step_review")
         if isinstance(pinned_review, dict):
             decision = {
                 key: self.plan_step_review[key]
@@ -220,6 +225,13 @@ class PhaseThreeWorkflow:
         planning_policy, prompt_directive, verification_policy = _phase3_profile_context(
             state=state,
             run_id=run_id,
+        )
+        component_plan_inputs = _with_runtime_config(
+            component_plan_inputs,
+            contract_version=plan_contract_version,
+            planning_policy=planning_policy,
+            target_path=target_path,
+            target_files=target_files,
         )
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
@@ -523,6 +535,13 @@ class PhaseThreeWorkflow:
                 artifact_paths=artifact_paths,
                 requirement_revision=frozen_requirement.canonical_model.revision,
                 requirement_contract_version=frozen_requirement.contract_version,
+            )
+            component_plan_inputs = _with_runtime_config(
+                component_plan_inputs,
+                contract_version=plan_contract_version,
+                planning_policy=planning_policy,
+                target_path=target_path,
+                target_files=target_files,
             )
             repo_context = self.repo_context_provider.collect(
                 target_path=target_path,
@@ -1102,6 +1121,26 @@ class PhaseThreeWorkflow:
         }
 
 
+def _with_runtime_config(
+    inputs: dict[str, object],
+    *,
+    contract_version: str,
+    planning_policy,
+    target_path: Path,
+    target_files: list[str],
+) -> dict[str, object]:
+    """Bind a V4 plan to the runtime config facts the Planner and Validator both see."""
+
+    if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION or not runtime_config_policy(
+        planning_policy.project_profile_id
+    ):
+        return inputs
+    return {
+        **inputs,
+        "repo_runtime_config": collect_repo_runtime_config(target_path=target_path, source_files=target_files),
+    }
+
+
 def _target_source_files(
     target_path: Path,
     *,
@@ -1144,6 +1183,42 @@ def _next_implementation_plan_version(artifact_dir: Path) -> int:
         if match:
             versions.append(int(match.group(1)))
     return max(versions, default=0) + 1
+
+
+_STEP_REVIEW_REPLAY_STATUSES = {
+    "implementation_planning",
+    "implementation_plan_validating",
+    "implementation_plan_repairing",
+}
+
+
+def _previous_review_round(
+    previous_plan: dict[str, object],
+    plan: dict[str, object],
+    review: object,
+) -> dict[str, object]:
+    """What the next Validator round re-checks: the last blocking issues and what the repair changed."""
+
+    before = {str(unit.get("unit_id") or ""): unit for unit in _dict_list(previous_plan.get("work_units"))}
+    return {
+        "blocking_issues": list(getattr(review, "issues", [])),
+        "changed_unit_ids": sorted(
+            str(unit.get("unit_id") or "")
+            for unit in _dict_list(plan.get("work_units"))
+            if unit != before.get(str(unit.get("unit_id") or ""))
+        ),
+        "changed_plan_fields": [
+            key
+            for key in ("runtime_config_impact", "implementation_signature_contract")
+            if previous_plan.get(key) != plan.get(key)
+        ],
+    }
+
+
+def _plan_review_error_code(review: object, *, stalled: bool) -> str:
+    if getattr(review, "inconclusive", False):
+        return "implementation_plan_review_inconclusive"
+    return "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
 
 
 def _plan_review_fingerprint(structured_plan: dict[str, object], issues: list[str]) -> str:

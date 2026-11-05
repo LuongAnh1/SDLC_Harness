@@ -182,9 +182,14 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     assert "Never emit design_element_id" in prompt
     assert "`packages/contracts/src/...` target" in prompt
     assert "Harness assigns repo-profile" in prompt
-    assert "A UI objective is only executable" in prompt
-    assert "CSS class names without an owned or verified style" in prompt
-    assert "static markup alone" in prompt
+    # The old "map focus/responsive to tests or report non-executable" rules contradicted the
+    # stage capabilities; obligations now route such items to unverified_obligations.
+    assert "A UI objective is only executable" not in prompt
+    assert "non-executable" not in prompt
+    assert "CSS class names without owned style rules" in prompt
+    assert "static\n  markup does not cover interaction or focus" in prompt
+    assert "A repair is a patch" in prompt
+    assert "in a repair, only\n  for targets of the units you update" in prompt
     assert "owner of required auth and input mappings" in prompt
     assert "apps/web/src/CulturalHeritageInsertionForm.tsx" in prompt
     assert "Legacy Class graph" not in prompt

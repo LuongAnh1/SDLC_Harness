@@ -559,7 +559,7 @@ def load_settings(
             maximum=300,
         ),
         vertical_trace_mode=vertical_trace_mode,
-        implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=2, minimum=0),
+        implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=4, minimum=0),
         implementation_plan_step_review_enabled=_bool_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED")
         ),

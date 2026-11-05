@@ -16,6 +16,11 @@ from typing import Any
 
 from ..requirements import RequirementModelV2
 from ...core.config import phase3_llm_call_options
+from ...profiles.runtime_config import (
+    canonical_runtime_config_impact,
+    runtime_config_policy,
+    runtime_config_prompt_context,
+)
 from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...profiles import (
@@ -33,7 +38,9 @@ from .component_plan import (
     canonicalize_work_unit_dependencies,
     component_plan_projections,
     merge_work_unit_updates,
+    test_intent_id,
     rebind_legacy_mappings_to_work_units,
+    unit_write_scope,
 )
 
 
@@ -649,6 +656,7 @@ class DeveloperPlanAgent:
             signature_targets=signature_targets,
             repair_feedback="",
             previous_review={},
+            component_plan_inputs=component_plan_inputs,
         )
         units = merge_work_unit_updates(
             units=skeleton,
@@ -717,6 +725,7 @@ class DeveloperPlanAgent:
             "work_units": units,
             **projections,
             "implementation_signature_contract": signature_contract,
+            **_runtime_config_slot(component_plan_inputs, llm_payload.get("runtime_config_impact")),
             "design_adjustments": [],
             "assumptions": [
                 "Phase 3 only plans approved full-stack work; Phase 4 owns source mutation.",
@@ -820,7 +829,12 @@ class DeveloperPlanAgent:
             verification_policy=verification_policy,
             signature_targets=signature_targets,
             repair_feedback=developer_feedback,
-            previous_review=_compact_review(review_report),
+            # The review summary also describes warnings; repair sees the blocking issues only.
+            previous_review={
+                key: value for key, value in _compact_review(review_report).items() if key != "summary"
+            },
+            component_plan_inputs=component_plan_inputs,
+            runtime_config_decision=previous.get("runtime_config_impact"),
         )
         affected_unit_ids = set(_affected_unit_ids(review_report))
         proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
@@ -836,6 +850,12 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         units = canonicalize_work_unit_dependencies(units)
+        affected_paths = {
+            str(target.get("path") or "")
+            for unit in units
+            if str(unit.get("unit_id") or "") in affected_unit_ids
+            for target in _dict_items(unit.get("planned_code_targets"))
+        }
         if any(_dict_items(item.get("remove_planned_code_targets")) for item in proposed_updates):
             # Mappings bound before the patch may still point at a target the patch removed.
             legacy_mappings = rebind_legacy_mappings_to_work_units(
@@ -873,7 +893,12 @@ class DeveloperPlanAgent:
                     llm_payload=llm_payload,
                     developer_feedback=developer_feedback,
                 ),
-                signature_targets=signature_targets,
+                # A repair re-signs only the targets of the units the review cited.
+                signature_targets=[
+                    target
+                    for target in signature_targets
+                    if not affected_unit_ids or str(target.get("target_path") or "") in affected_paths
+                ],
             ),
             bind_to_mapped_symbol=True,
         )
@@ -914,6 +939,11 @@ class DeveloperPlanAgent:
             "work_units": units,
             **projections,
             "implementation_signature_contract": signature_contract,
+            **_runtime_config_slot(
+                component_plan_inputs,
+                llm_payload.get("runtime_config_impact"),
+                previous=previous.get("runtime_config_impact"),
+            ),
             "verification_stage_ids": list(verification_policy.stage_ids),
             "repair_iteration": iteration,
             "repair_source": "validator_review_plan",
@@ -954,6 +984,8 @@ class DeveloperPlanAgent:
         signature_targets: list[dict[str, object]],
         repair_feedback: str,
         previous_review: dict[str, object],
+        component_plan_inputs: dict[str, object] | None = None,
+        runtime_config_decision: object = None,
     ) -> dict[str, object]:
         if not self.llm_client:
             return {}
@@ -971,6 +1003,11 @@ class DeveloperPlanAgent:
             signature_targets=signature_targets,
             repair_feedback=repair_feedback,
             previous_review=previous_review,
+            runtime_config=_runtime_config_prompt(
+                component_plan_inputs or {},
+                planning_policy,
+                current_decision=runtime_config_decision,
+            ),
         )
         raw = _complete_phase3_json(
             self.llm_client,
@@ -987,13 +1024,74 @@ class DeveloperPlanAgent:
             return {"_developer_llm_parse_error": exc.message}
 
 
-def _units_for_prompt(units: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Drop contract copies the prompt already carries in the Vertical Design slice."""
+_RUNTIME_CONFIG_RULES = """Runtime configuration rules:
+- Return `runtime_config_impact` for the whole plan: `required` with typed `changes`, or
+  `not_required` with a reason. Design never lists configuration; decide it from the planned
+  code and the repository facts above.
+- A change is needed when planned code reads a value that differs per environment (for
+  example the base URL of an external system), imports a package no workspace manifest
+  lists, or needs a service the product itself runs that the compose file lacks. An external
+  system is reached through its configured URL; never add a compose service or stub for it.
+  Reuse an existing env var or dependency instead of declaring it again.
+- Each change names its owning `unit_id` and only the fields listed for its kind. `read_by`
+  and `used_by` must be planned source targets of that unit. Defaults are non-secret and
+  keep the product and its tests runnable without the variable set.
+- Never edit locked configuration; Harness materializes manifests, lockfiles and compose.
+- In a repair, `current_decision` is the plan's present decision. Return the full updated
+  decision whenever a file or unit it names changes; otherwise it is kept as is.
+"""
 
-    return [
-        {key: value for key, value in unit.items() if key not in {"surface_contracts", "boundary_contracts"}}
-        for unit in units
-    ]
+
+def _runtime_config_prompt(
+    component_plan_inputs: dict[str, object],
+    planning_policy: PlanningPathPolicy,
+    current_decision: object = None,
+) -> dict[str, object]:
+    facts = component_plan_inputs.get("repo_runtime_config")
+    policy = runtime_config_policy(planning_policy.project_profile_id)
+    if not isinstance(facts, dict) or policy is None:
+        return {}
+    context: dict[str, object] = {"repository": facts, "policy": runtime_config_prompt_context(policy)}
+    if isinstance(current_decision, dict):
+        context["current_decision"] = canonical_runtime_config_impact(current_decision)
+    return context
+
+
+def _runtime_config_slot(
+    component_plan_inputs: dict[str, object],
+    proposed: object,
+    *,
+    previous: object = None,
+) -> dict[str, object]:
+    """Harness-created decision slot; a repair without a new decision keeps the previous one."""
+
+    if not isinstance(component_plan_inputs.get("repo_runtime_config"), dict):
+        return {}
+    decision = canonical_runtime_config_impact(proposed)
+    if not decision["status"] and previous is not None:
+        decision = canonical_runtime_config_impact(previous)
+    return {"runtime_config_impact": decision}
+
+
+def _units_for_prompt(
+    units: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy | None = None,
+) -> list[dict[str, object]]:
+    """Drop contract copies the prompt already carries; add each unit's write scope."""
+
+    result = []
+    for unit in units:
+        item = {key: value for key, value in unit.items() if key not in {"surface_contracts", "boundary_contracts"}}
+        if _dict_items(unit.get("test_intents")):
+            # Ids let a repair drop one test without resending the others.
+            item["test_intents"] = [
+                {"id": test_intent_id(test), **test} for test in _dict_items(unit.get("test_intents"))
+            ]
+        scope = unit_write_scope(unit, planning_policy) if planning_policy else {}
+        if scope:
+            item["write_scope"] = scope
+        result.append(item)
+    return result
 
 
 def _complete_phase3_json(
@@ -1036,6 +1134,7 @@ def _component_plan_prompt(
     signature_targets: list[dict[str, object]],
     repair_feedback: str,
     previous_review: dict[str, object],
+    runtime_config: dict[str, object] | None = None,
 ) -> str:
     node_ids = {node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))}
     design_slice = {
@@ -1069,6 +1168,14 @@ def _component_plan_prompt(
         ],
     }
     language = prompt_directive.developer_plan_context() if prompt_directive else {}
+    runtime_config_section = (
+        "Runtime configuration (Harness-extracted repository facts and policy; read-only):\n"
+        + json.dumps(runtime_config, ensure_ascii=False, indent=2)
+        + "\n"
+        + _RUNTIME_CONFIG_RULES
+        if runtime_config
+        else ""
+    )
     repair = (
         "\nRepair feedback:\n"
         + repair_feedback
@@ -1105,12 +1212,24 @@ Return JSON only:
           "stage_id": "one approved stage",
           "intent": "verification intent",
           "acceptance_refs": ["AC-..."],
-          "target_paths": ["exact profile-approved test path"]
+          "target_paths": ["exact profile-approved test path"],
+          "obligation_refs": ["ui_obligations ids this test observes"]
         }}
       ],
+      "unverified_obligations": [
+        {{"id": "ui_obligations id no active stage fully observes", "reason": "what stays unobserved and why"}}
+      ],
+      "remove_test_intents": ["id of an existing test intent to drop"],
       "repo_evidence_refs": ["evidence refs used for this unit"]
     }}
   ],
+  "runtime_config_impact": {{
+    "status": "required|not_required",
+    "reason": "why the planned code does or does not need runtime configuration",
+    "changes": [
+      {{"kind": "env_var", "unit_id": "existing WU id", "name": "UPPER_SNAKE", "default": "non-secret default", "read_by": "planned source path", "purpose": "why"}}
+    ]
+  }},
   "implementation_signature_contract": {{
     "entries": [
       {{
@@ -1147,21 +1266,19 @@ Rules:
 - Treat the `surface_contract` of every Design node in a unit's design_node_ids and the
   `boundary_contract` of every edge in its design_edge_ids (both in the Vertical Design slice;
   the work units below omit these copies) as immutable approved behavior. For UI work,
-  make the objective, targets, and tests realize its component structure, feedback,
-  accessibility, responsive behavior, focus flow, and guidance references.
-- A UI objective is only executable when it names every non-empty experience-contract
-  category. Map focus/navigation, accessibility, responsive rules, feedback, data source,
-  authentication, and runtime attachment to exact code and test targets instead of hiding
-  them behind a happy-path summary.
-- Do not claim responsive coverage from CSS class names without an owned or verified style
-  implementation. Do not claim interaction/focus coverage from static markup alone; use the
-  repository's actual DOM-capable test convention or report the plan as non-executable.
+  `ui_obligations` lists the contract items each unit must account for.
+- Map data source, authentication and runtime attachment to exact code targets. The objective
+  says what the unit builds and through which seams; it does not restate the contract, which
+  the Vertical Design slice already carries.
+- CSS class names without owned style rules do not cover responsive behavior, and static
+  markup does not cover interaction or focus; record such items in `unverified_obligations`.
 - For every boundary, identify the owner of required auth and input mappings plus the caller
   that supplies them. A completed dependency ID without its component/surface/artifacts is
   not sufficient execution evidence.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
   wiring, except approved shared-contract files, data schema/migration artifacts and UI
-  stylesheets.
+  stylesheets. A unit's `write_scope` lists exactly the files it may target: put new
+  helpers, clients and adapters as exported symbols inside those files, never in a new file.
 - A UI unit may own stylesheet targets under the planning policy's `ui_stylesheets` root.
   Choose the style mechanism from repository evidence; when the contract needs responsive,
   focus-appearance or visual-token rules and no stylesheet exists, plan one stylesheet next to
@@ -1177,18 +1294,40 @@ Rules:
   exact `packages/contracts/src/...` target to the nearest API work unit. Include the
   shared-contract barrel only when repository evidence requires its export.
 - Do not add database, API, or Web barrel/index targets. Harness assigns repo-profile
-  package entrypoints to one provider work unit after this enrichment step.
+  package entrypoints to one provider work unit after this enrichment step; leave an
+  entrypoint Harness already placed in a unit as it is.
 - Do not change dependency or order in prose. Harness serializes units that share code,
   test, contract, schema, or migration artifacts.
 - `code_entities` lists, in implementation order, every unit whose Design nodes bind to the
   same code symbol. A later unit extends the code an earlier unit creates: its objective and
   tests add only its own scenario's behavior and must stay compatible with the contracts of
-  the other listed design_node_ids, which appear in the Vertical Design slice.
-- For a repair, return only affected unit updates.
-- planned_code_targets only adds targets. To drop a target the review calls unapproved or
-  unnecessary, list its exact path and symbol in remove_planned_code_targets. Targets seeded
-  from runtime_bindings cannot be removed.
-- Emit exactly one signature entry for every Harness-owned signature target below.
+  the other listed design_node_ids, which appear in the Vertical Design slice. When the
+  extension changes how earlier code is called (a new parameter, dependency or response),
+  keep the earlier call working (optional parameter, injected dependency with a default) or
+  add a test intent here that updates the earlier unit's test file, named by exact path.
+- A runtime binding with `attachment_wired_by` is already attached to its owner by that earlier
+  unit. Target the owner file when this unit adds something the owner must create, inject or
+  pass on (for example a client with a network default that tests replace); otherwise leave
+  the owner file untouched.
+- `ui_obligations` lists, with stable ids, the states, validations, transitions, feedback,
+  accessibility, focus and responsive items of the unit's UI contracts. Account for every id:
+  list it in `obligation_refs` of a test intent whose stage can observe it, or in
+  `unverified_obligations` with the reason, or in both when a test observes part of it and the
+  rest needs a stage the profile does not activate. Roles, aria attributes, accessible names and
+  state-dependent markup are observable by static rendering; focus movement, keyboard
+  interaction and viewport layout need a stage the profile may not activate. The rule review
+  rejects a unit that leaves an id unaccounted for.
+- A repair is a patch. Return only the units the review names, and in them only what changes:
+  - `planned_code_targets` and `test_intents` add to what the unit already has; never resend
+    an existing target or test. Drop an existing test by listing its `id` in
+    `remove_test_intents`, and drop a target the review calls unapproved or unnecessary by
+    listing its exact path and symbol in `remove_planned_code_targets`. Targets seeded from
+    runtime_bindings cannot be removed.
+  - `unverified_obligations` entries add to or replace the unit's entries with the same id.
+  - Send `objective` only when the review requires it to change; keep its unchanged sentences
+    word for word and add the new ones.
+- Emit one signature entry for every Harness-owned signature target below; in a repair, only
+  for targets of the units you update.
 - Copy `target_path` and `target_symbol` exactly. Harness owns Design-to-code binding;
   never derive a class/method owner from the legacy Class graph and never invent a target.
 - Multiple legacy Design operations may trace to one function/component target. Describe
@@ -1204,7 +1343,7 @@ Planning policy:
 {json.dumps(planning_policy.prompt_context(), ensure_ascii=False, indent=2)}
 Verification policy:
 {json.dumps(verification_policy.prompt_context(), ensure_ascii=False, indent=2)}
-Language directive:
+{runtime_config_section}Language directive:
 {json.dumps(language, ensure_ascii=False, indent=2)}
 Harness-owned signature targets:
 {json.dumps(
@@ -1219,7 +1358,7 @@ Harness-owned signature targets:
     indent=2,
 )}
 Harness-owned work units:
-{json.dumps(_units_for_prompt(units), ensure_ascii=False, indent=2)}
+{json.dumps(_units_for_prompt(units, planning_policy), ensure_ascii=False, indent=2)}
 Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:
@@ -1553,6 +1692,7 @@ def _parse_component_plan_payload(raw: str) -> dict[str, object]:
         "implementation_signature_contract": _object_dict(
             parsed.get("implementation_signature_contract")
         ),
+        "runtime_config_impact": _object_dict(parsed.get("runtime_config_impact")),
     }
 
 
@@ -2756,6 +2896,8 @@ def _markdown_plan(
                 lines.append(
                     f"- Test `{test.get('stage_id', '')}`: {test.get('intent', '')}"
                 )
+            for item in _dict_items(unit.get("unverified_obligations")):
+                lines.append(f"- Unverified `{item.get('id', '')}`: {item.get('reason', '')}")
             for binding in _dict_items(unit.get("surface_contracts")):
                 if str(binding.get("surface") or "") != "ui":
                     continue
@@ -2782,6 +2924,24 @@ def _markdown_plan(
                     ]
                 )
 
+    runtime_config = structured.get("runtime_config_impact")
+    if isinstance(runtime_config, dict):
+        lines.extend(
+            [
+                "",
+                "## Runtime Configuration",
+                "",
+                f"- Decision: `{runtime_config.get('status') or 'undecided'}` — "
+                f"{runtime_config.get('reason') or 'n/a'}",
+            ]
+        )
+        for change in _dict_items(runtime_config.get("changes")):
+            details = ", ".join(
+                f"{key}={value}"
+                for key, value in change.items()
+                if key not in {"kind", "unit_id"} and value != ""
+            )
+            lines.append(f"- `{change.get('kind')}` in `{change.get('unit_id')}`: {details}")
     lines.extend(
         [
             "",

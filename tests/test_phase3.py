@@ -526,6 +526,29 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(second["status"], "implementation_plan_step_review_required")
         self.assertNotEqual(second["pending_step_review"]["call_id"], first_pending["call_id"])
 
+        # A continuation killed mid-replay leaves an in-flight status; the next continue resumes it.
+        store = PhaseOneWorkflow(self.settings).store
+        interrupted = store.read_state(self.run_id)
+        interrupted.update({"status": "implementation_plan_validating", "pending_step_review": None})
+        store.write_state(interrupted)
+        third = PhaseThreeWorkflow(
+            self.settings,
+            plan_step_review={
+                "enabled": True,
+                "call_id": second["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_implementation_plan_step_review(run_id=self.run_id)
+        self.assertIn(third["status"], {"implementation_plan_step_review_required", "waiting_implementation_plan_review"})
+
+        finished = store.read_state(self.run_id)
+        finished.update({"status": "waiting_implementation_plan_review", "implementation_plan_step_review": None})
+        store.write_state(finished)
+        with self.assertRaises(HarnessError):
+            PhaseThreeWorkflow(self.settings, plan_step_review={"enabled": True}).continue_implementation_plan_step_review(
+                run_id=self.run_id
+            )
+
     def test_new_design_checkpoint_supersedes_approved_plan_exchange(self) -> None:
         approved = self._create_phase2_run()
         store = PhaseOneWorkflow(self.settings).store
@@ -710,6 +733,9 @@ class PhaseThreeTest(unittest.TestCase):
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
         self.assertEqual(structured["version"], "implementation_plan_structured_v4")
         self.assertEqual(structured["planning_mode"], "llm_component_aware_plan_v1")
+        self.assertEqual(structured["inputs"]["repo_runtime_config"]["schema_version"], "repo_runtime_config_v1")
+        self.assertEqual(structured["runtime_config_impact"]["status"], "not_required")
+        self.assertIn("## Runtime Configuration", content)
         self.assertTrue(structured["work_units"])
         self.assertEqual(structured["repo_context"]["mode"], "fake_codegraph_context_v1")
         self.assertTrue(structured["implementation_steps"])

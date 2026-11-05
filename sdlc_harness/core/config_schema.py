@@ -374,7 +374,7 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Shadow chỉ ghi nhận; enforce chặn checkpoint khi Requirement-to-Design trace không đạt.",
                 options=("shadow", "enforce"),
             ),
-            _field("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", "Plan repair limit", "integer", 2, "Số vòng sửa implementation plan.", minimum=0),
+            _field("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", "Plan repair limit", "integer", 4, "Số vòng sửa implementation plan.", minimum=0),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED", "Pause implementation-plan LLM steps", "boolean", False, "Dừng Phase 3 tại từng input/output LLM để người vận hành kiểm tra."),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED", "Review implementation-plan LLM input", "boolean", True, "Dừng trước khi gửi từng input LLM của Phase 3."),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED", "Review implementation-plan LLM output", "boolean", True, "Dừng sau khi nhận từng output LLM của Phase 3."),
