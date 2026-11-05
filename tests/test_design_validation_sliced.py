@@ -6,6 +6,7 @@ import tempfile
 
 from sdlc_harness.agents.validator import DesignValidator, TraceabilityResult
 from sdlc_harness.agents.validator.semantic_review import (
+    _branch_entry,
     build_semantic_review_plan,
     materialize_task_context,
 )
@@ -925,7 +926,7 @@ def _branch_entries(graph: dict[str, object]) -> list[dict[str, object]]:
     return context["branch_entries"]
 
 
-def test_branch_entry_reports_parent_transitions_taken_and_not_taken_by_exact_state() -> None:
+def test_branch_entry_reports_parent_transitions_leading_to_and_after_entry_by_exact_state() -> None:
     [entry] = _branch_entries(
         _branch_graph(
             [
@@ -937,8 +938,35 @@ def test_branch_entry_reports_parent_transitions_taken_and_not_taken_by_exact_st
 
     assert entry["status"] == "resolved"
     assert entry["parent_entry_state"] == "dialog open"
-    assert [item["action"] for item in entry["parent_transitions_taken_before_entry"]] == ["open dialog"]
-    assert [item["action"] for item in entry["parent_transitions_not_taken_at_entry"]] == ["confirm", "complete"]
+    assert [item["action"] for item in entry["parent_transitions_leading_to_entry"]] == ["open dialog"]
+    assert [item["action"] for item in entry["parent_transitions_after_entry"]] == ["confirm", "complete"]
+
+
+def test_branch_entry_lists_paths_to_and_after_entry_in_a_cyclic_parent() -> None:
+    def ui(transitions: list[tuple[str, str, str]]) -> dict[str, object]:
+        return {
+            "surface_contract": {
+                "transitions": [{"from": a, "action": act, "to": b} for a, act, b in transitions],
+            }
+        }
+
+    parent = ui(
+        [
+            ("idle", "open", "confirming"),
+            ("confirming", "confirm", "deleting"),
+            ("deleting", "fail", "error"),
+            ("error", "retry", "idle"),
+        ]
+    )
+    child = ui([("confirming", "cancel", "idle")])
+
+    entry = _branch_entry({"id": "E", "from": "C", "to": "P"}, nodes_by_id={"C": child, "P": parent})
+
+    assert entry["parent_entry_state"] == "confirming"
+    # The retry cycle makes the delete path one way to reach the entry state again ...
+    assert [item["action"] for item in entry["parent_transitions_leading_to_entry"]] == ["open", "fail", "retry"]
+    # ... while every transition reachable from the entry state is still listed as able to follow it.
+    assert [item["action"] for item in entry["parent_transitions_after_entry"]] == ["open", "confirm", "fail", "retry"]
 
 
 def test_branch_entry_never_guesses_a_similar_or_ambiguous_parent_state() -> None:

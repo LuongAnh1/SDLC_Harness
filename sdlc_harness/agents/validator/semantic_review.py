@@ -382,12 +382,11 @@ def _branch_entry(edge: dict[str, object], *, nodes_by_id: dict[str, dict[str, A
         **entry,
         "status": "resolved",
         "parent_entry_state": state,
-        "parent_transitions_taken_before_entry": [
+        # Reachability, not history: in a cyclic parent a transition can both lead to and follow the entry state.
+        "parent_transitions_leading_to_entry": [
             item for item in parent_transitions if item["to"] in before and item["from"] in before and item["from"] != state
         ],
-        "parent_transitions_not_taken_at_entry": [
-            item for item in parent_transitions if item["from"] in after and item["from"] not in before - {state}
-        ],
+        "parent_transitions_after_entry": [item for item in parent_transitions if item["from"] in after],
     }
 
 

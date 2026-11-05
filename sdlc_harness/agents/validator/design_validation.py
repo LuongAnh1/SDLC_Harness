@@ -1833,9 +1833,12 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   its own declared state or transition, or a declared external input. response_mapping and error_mapping flow back to
   the consumer.
 - branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
-  parent_entry_state: parent_transitions_taken_before_entry have happened and parent_transitions_not_taken_at_entry
-  have not, so values and events those transitions would produce do not exist yet. An unresolved entry means the
-  Design does not state where the branch starts; do not assume one.
+  parent_entry_state. parent_transitions_leading_to_entry are the transitions on some path that can reach
+  parent_entry_state: they are the conditions for being in that state, not a record that each one ran on this pass.
+  parent_transitions_after_entry are the transitions that can follow parent_entry_state; at the moment the branch
+  starts they have not run on this pass, so values and events they would produce do not exist yet. In a cyclic parent
+  one transition can appear in both lists. An unresolved entry means the Design does not state where the branch
+  starts; do not assume one.
 - approved_context holds approved Requirement preconditions and the Requirement text behind each declared external
   input. Treat them as facts the scenario may rely on.
 """.strip()
