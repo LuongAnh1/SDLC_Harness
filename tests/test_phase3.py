@@ -1885,7 +1885,8 @@ Thanks."""
         self.assertFalse((self.runtime_root / "runs" / str(approved["run_id"]) / "sync" / "tool_sync_report_v3.json").exists())
 
     def test_validator_llm_invalid_json_blocks_with_review_report(self) -> None:
-        settings = self._settings(SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT="0")
+        # Repairs are allowed, but unparsable Validator output must never feed one.
+        settings = self._settings(SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT="2")
         approved = PhaseOneWorkflow(settings).start_or_get_run(
             dataset="eTour",
             use_case="UC1",
@@ -1898,10 +1899,13 @@ Thanks."""
         response = workflow.approve_design_checkpoint(run_id=str(approved["run_id"]))
 
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "implementation_plan_review_failed")
+        self.assertEqual(response["last_error"]["error_code"], "implementation_plan_review_inconclusive")
         report = response["quality_reports"]["implementation_plan_review"]
         self.assertFalse(report["ok"])
-        self.assertEqual(report["llm_review"]["parse_error"], "Implementation plan LLM review did not return valid JSON.")
+        self.assertTrue(report["inconclusive"])
+        self.assertEqual(report["issue_count"], 0)
+        self.assertIn("did not return valid JSON", report["llm_review"]["reason"])
+        self.assertEqual(report["versions"], ["v1"])
         self.assertTrue(response["latest_artifacts"]["implementation_plan_review"].endswith("implementation_plan_review_v1.json"))
 
     def test_validator_review_detects_scope_violation(self) -> None:

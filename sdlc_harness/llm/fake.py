@@ -44,7 +44,7 @@ def fake_completion(prompt: str) -> str:
     if "Component-aware Implementation Plan V4" in prompt:
         return fake_component_aware_implementation_plan(prompt)
     if "Implementation Plan LLM Review v1" in prompt:
-        return fake_implementation_plan_review()
+        return fake_implementation_plan_review(prompt)
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan(prompt)
     if "Code Trace LLM Review v1" in prompt:
@@ -493,9 +493,33 @@ def fake_traceability_sequence(prompt: str) -> str:
     return json.dumps(trace, ensure_ascii=False, indent=2)
 
 
-def fake_implementation_plan_review() -> str:
+def fake_implementation_plan_review(prompt: str = "") -> str:
     """LLM review giả lập cho Phase 3 implementation plan."""
 
+    if '"findings": [' in prompt:
+        plan = _json_object_after_marker(prompt, "Structured implementation plan JSON:\n")
+        reviewed_design_ids = sorted(
+            {
+                str(design_id)
+                for unit in plan.get("work_units", [])
+                if isinstance(unit, dict)
+                for field in ("design_node_ids", "design_edge_ids")
+                for design_id in unit.get(field, [])
+                if str(design_id).strip()
+            }
+        )
+        return json.dumps(
+            {
+                "summary": (
+                    "Implementation plan covers the approved requirement/design graph, "
+                    "keeps Phase 3 read-only, and gives Phase 4 enough code/test targets."
+                ),
+                "reviewed_design_ids": reviewed_design_ids,
+                "findings": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
     return json.dumps(
         {
             "ok": True,
@@ -818,6 +842,9 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
         test_root = str(component.get("source_root") or "apps/api/src").rstrip("/")
         test_suffix = str(component.get("test_suffix") or ".test.ts")
         test_path = f"{test_root}/DeleteCulturalHeritageFlow{test_suffix}"
+        obligation_ids = [
+            str(item.get("id") or "") for item in unit.get("ui_obligations", []) if isinstance(item, dict)
+        ]
         update: dict[str, object] = {
             "unit_id": unit_id,
             "title": str(unit.get("title") or f"Implement {component_id} change"),
@@ -829,6 +856,7 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
                     "intent": f"Verify the approved behavior for {unit_id}.",
                     "acceptance_refs": acceptance_refs,
                     "target_paths": [test_path],
+                    **({"obligation_refs": obligation_ids} if obligation_ids else {}),
                 }
             ],
             "repo_evidence_refs": list(unit.get("repo_evidence_refs", [])),
@@ -845,6 +873,17 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
             "summary": "Fake component-aware plan enriched every Harness-owned work unit.",
             "repo_evidence": ["Fake mode uses the frozen planning policy and approved graph bindings."],
             "work_unit_updates": updates,
+            **(
+                {
+                    "runtime_config_impact": {
+                        "status": "not_required",
+                        "reason": "Fake mode plans no environment-specific configuration.",
+                        "changes": [],
+                    }
+                }
+                if "Runtime configuration rules:" in prompt
+                else {}
+            ),
             "implementation_signature_contract": _fake_typescript_implementation_signature_contract(
                 prompt,
                 unit_updates=updates,

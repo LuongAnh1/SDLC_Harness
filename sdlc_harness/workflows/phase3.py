@@ -289,6 +289,8 @@ class PhaseThreeWorkflow:
         previous_fingerprint = ""
         stalled = False
         repair_limit = self.settings.implementation_plan_repair_limit
+        prior_plan: dict[str, object] = {}
+        prior_review = None
         for repair_iteration in range(repair_limit + 1):
             version = start_version + repair_iteration
             state.update(
@@ -302,6 +304,11 @@ class PhaseThreeWorkflow:
                 }
             )
             self.store.write_state(state)
+            previous_round = (
+                _previous_review_round(prior_plan, plan_draft.structured, prior_review)
+                if prior_review is not None
+                else None
+            )
             review = self.validator.review(
                 structured_plan=plan_draft.structured,
                 requirement_packet=requirement_packet,
@@ -320,6 +327,7 @@ class PhaseThreeWorkflow:
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
+                previous_round=previous_round,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -355,13 +363,14 @@ class PhaseThreeWorkflow:
             }
             state.update({"latest_artifacts": merged_artifacts, "quality_reports": quality_reports})
             self.store.write_state(state)
-            if review.ok or repair_iteration >= repair_limit:
+            if review.ok or review.inconclusive or repair_iteration >= repair_limit:
                 break
             fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
             if fingerprint == previous_fingerprint:
                 stalled = True
                 break
             previous_fingerprint = fingerprint
+            prior_plan, prior_review = plan_draft.structured, review
             feedback = review.developer_feedback or "\n".join(review.issues)
             plan_draft = self.developer.repair_plan(
                 previous_draft=plan_draft,
@@ -399,10 +408,14 @@ class PhaseThreeWorkflow:
                 component_plan_inputs=component_plan_inputs,
             )
         if review is None or not review.ok:
-            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
+            error_code = _plan_review_error_code(review, stalled=stalled)
             error = HarnessError(
                 error_code,
-                f"Implementation plan revalidation stopped with {len(review.issues) if review else 0} issue(s).",
+                (
+                    review.summary
+                    if review is not None and review.inconclusive
+                    else f"Implementation plan revalidation stopped with {len(review.issues) if review else 0} issue(s)."
+                ),
                 run_id=run_id,
             )
             state.update(
@@ -596,6 +609,8 @@ class PhaseThreeWorkflow:
         previous_fingerprint = ""
         stalled = False
         repair_limit = self.settings.implementation_plan_repair_limit
+        prior_plan: dict[str, object] = {}
+        prior_review = None
         for repair_iteration in range(repair_limit + 1):
             version = repair_iteration + 1
             if repair_iteration == 0:
@@ -624,6 +639,11 @@ class PhaseThreeWorkflow:
                 )
             self.store.write_state(state)
 
+            previous_round = (
+                _previous_review_round(prior_plan, plan_draft.structured, prior_review)
+                if prior_review is not None
+                else None
+            )
             review = self.validator.review(
                 structured_plan=plan_draft.structured,
                 requirement_packet=requirement_packet,
@@ -642,6 +662,7 @@ class PhaseThreeWorkflow:
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
                 component_plan_inputs=component_plan_inputs,
+                previous_round=previous_round,
             )
             plan_paths = write_phase3_implementation_plan(
                 store=self.store,
@@ -684,7 +705,7 @@ class PhaseThreeWorkflow:
                 }
             )
             self.store.write_state(state)
-            if review.ok or repair_iteration >= repair_limit:
+            if review.ok or review.inconclusive or repair_iteration >= repair_limit:
                 break
 
             fingerprint = _plan_review_fingerprint(plan_draft.structured, review.issues)
@@ -692,6 +713,7 @@ class PhaseThreeWorkflow:
                 stalled = True
                 break
             previous_fingerprint = fingerprint
+            prior_plan, prior_review = plan_draft.structured, review
             feedback = review.developer_feedback or "\n".join(review.issues)
             try:
                 plan_draft = self.developer.repair_plan(
@@ -741,11 +763,13 @@ class PhaseThreeWorkflow:
                 run_id=run_id,
             )
         if not review.ok:
-            error_code = "implementation_plan_repair_stalled" if stalled else "implementation_plan_review_failed"
+            error_code = _plan_review_error_code(review, stalled=stalled)
             error = HarnessError(
                 error_code,
                 (
-                    f"Validator.review_plan found {len(review.issues)} issue(s) "
+                    review.summary
+                    if review.inconclusive
+                    else f"Validator.review_plan found {len(review.issues)} issue(s) "
                     f"after {review.repair_iterations} repair iteration(s)."
                 ),
                 run_id=run_id,

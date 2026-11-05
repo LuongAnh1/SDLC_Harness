@@ -803,3 +803,243 @@ def test_revalidation_version_and_cli_contract(tmp_path: Path):
     )
     assert args.command == "revalidate-implementation-plan"
     assert args.implementation_plan_repair_limit == "5"
+
+
+def test_v4_review_repairs_from_blocking_issues_only_and_fails_closed_on_truncation(monkeypatch) -> None:
+    from sdlc_harness.profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+
+    class _Answer:
+        settings = None
+
+        def __init__(self, completion: LlmCompletion) -> None:
+            self.completion = completion
+
+        def complete_with_metadata(self, **_: object) -> LlmCompletion:
+            return self.completion
+
+    def review(completion: LlmCompletion) -> ImplementationPlanReview:
+        validator = ImplementationPlanValidator(_Answer(completion))
+        monkeypatch.setattr(validator, "review_rules", lambda **_: ImplementationPlanReview(ok=True, mode="rules"))
+        return validator.review(
+            structured_plan={
+                "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+                "work_units": [
+                    {"unit_id": "WU-AAAAAAAAAAAA", "design_node_ids": ["VDN-1"], "design_edge_ids": []}
+                ],
+            },
+            requirement_packet="requirement",
+            design_artifact="design",
+            requirement_design_trace={},
+            class_graph={},
+            sequence_graph={},
+            canonical_requirement={"acceptance_criteria": [{"id": "AC-1"}]},
+            vertical_design_graph={"nodes": [{"id": "VDN-1"}], "edges": []},
+            vertical_trace_graph={"nodes": [], "edges": []},
+        )
+
+    blocked = review(
+        LlmCompletion(
+            content=json.dumps(
+                {
+                    "summary": "Warning: an ETOUR stub would help local runs.",
+                    "reviewed_design_ids": ["VDN-1"],
+                    "findings": [
+                        {
+                            "category": "test",
+                            "severity": "blocking",
+                            "unit_ids": ["WU-AAAAAAAAAAAA"],
+                            "refs": ["AC-1", "VDN-1"],
+                            "issue": "The 409 outcome is untested.",
+                            "expected_change": "Add a unit intent for the 409 outcome.",
+                        },
+                        {
+                            "category": "implementation_quality",
+                            "severity": "warning",
+                            "unit_ids": ["WU-AAAAAAAAAAAA"],
+                            "refs": ["VDN-1"],
+                            "issue": "A local ETOUR stub could help operators.",
+                            "expected_change": "No plan repair is required.",
+                        },
+                    ],
+                }
+            ),
+            finish_reason="stop",
+        )
+    )
+    assert blocked.affected_unit_ids == ["WU-AAAAAAAAAAAA"]
+    assert blocked.developer_feedback == (
+        "[test] Units: WU-AAAAAAAAAAAA. Refs: AC-1, VDN-1. "
+        "Issue: The 409 outcome is untested. Expected: Add a unit intent for the 409 outcome."
+    )
+    assert len(blocked.test_issues) == 1
+    assert blocked.implementation_quality_issues == []
+    assert not blocked.inconclusive
+
+    truncated = review(LlmCompletion(content="", finish_reason="length"))
+    assert truncated.inconclusive and not truncated.ok and truncated.issues == []
+    assert "finish_reason=length" in truncated.summary
+    assert truncated.to_dict()["inconclusive"] is True
+
+
+def test_v4_review_retries_contract_errors_once_and_rejects_unknown_ids(monkeypatch) -> None:
+    from sdlc_harness.profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+
+    class _Answers:
+        settings = None
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+            self.answers = [
+                {
+                    "summary": "bad id",
+                    "reviewed_design_ids": [],
+                    "findings": [
+                        {
+                            "category": "test",
+                            "severity": "blocking",
+                            "unit_ids": ["WU-BBBBBBBBBBBB"],
+                            "refs": ["VDN-1"],
+                            "issue": "Missing test.",
+                            "expected_change": "Add the test.",
+                        }
+                    ],
+                },
+                {"summary": "corrected", "reviewed_design_ids": ["VDN-1"], "findings": []},
+            ]
+
+        def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+            self.calls.append(dict(kwargs))
+            return LlmCompletion(content=json.dumps(self.answers.pop(0)), finish_reason="stop")
+
+    client = _Answers()
+    validator = ImplementationPlanValidator(client)
+    monkeypatch.setattr(validator, "review_rules", lambda **_: ImplementationPlanReview(ok=True, mode="rules"))
+    review = validator.review(
+        structured_plan={
+            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+            "work_units": [
+                {"unit_id": "WU-AAAAAAAAAAAA", "design_node_ids": ["VDN-1"], "design_edge_ids": []}
+            ],
+        },
+        requirement_packet="requirement",
+        design_artifact="design",
+        requirement_design_trace={},
+        class_graph={},
+        sequence_graph={},
+        vertical_design_graph={"nodes": [{"id": "VDN-1"}], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+    )
+
+    assert review.ok and not review.inconclusive
+    assert len(client.calls) == 2
+    assert "unknown ids: WU-BBBBBBBBBBBB" in str(client.calls[1]["prompt"])
+    assert "`reviewed_design_ids` is missing ids: VDN-1" in str(client.calls[1]["prompt"])
+
+
+def test_v4_review_is_inconclusive_after_two_contract_errors(monkeypatch) -> None:
+    from sdlc_harness.profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+
+    invalid = json.dumps({"summary": "invalid", "findings": [{"category": "test"}]})
+
+    class _InvalidAnswers:
+        settings = None
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def complete_with_metadata(self, **_: object) -> LlmCompletion:
+            self.calls += 1
+            return LlmCompletion(content=invalid, finish_reason="stop")
+
+    client = _InvalidAnswers()
+    validator = ImplementationPlanValidator(client)
+    monkeypatch.setattr(validator, "review_rules", lambda **_: ImplementationPlanReview(ok=True, mode="rules"))
+    review = validator.review(
+        structured_plan={
+            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+            "work_units": [{"unit_id": "WU-AAAAAAAAAAAA"}],
+        },
+        requirement_packet="requirement",
+        design_artifact="design",
+        requirement_design_trace={},
+        class_graph={},
+        sequence_graph={},
+        vertical_design_graph={"nodes": [{"id": "VDN-1"}], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+    )
+
+    assert client.calls == 2
+    assert review.inconclusive and not review.ok and review.issues == []
+    assert "contract is invalid" in review.summary
+
+
+def test_v4_review_prompt_carries_write_scope_and_only_later_rounds_carry_memory() -> None:
+    from sdlc_harness.profiles import COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    from sdlc_harness.workflows.phase3 import _previous_review_round
+
+    project = get_project_profile("typescript_fullstack_v1")
+    planning = build_planning_path_policy(project=project, language=get_language_profile(project.language_profile_id))
+    unit = {
+        "unit_id": "WU-1",
+        "surfaces": ["ui"],
+        "design_node_ids": ["VDN-1"],
+        "design_edge_ids": ["VDE-1"],
+        "runtime_bindings": [
+            {"target": {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}, "attachment": {"owner_path": "apps/web/src/AppShell.tsx"}}
+        ],
+    }
+    plan = {"version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION, "work_units": [unit]}
+
+    def prompt(previous_round: dict[str, object] | None) -> str:
+        return _llm_review_prompt(
+            structured_plan=plan,
+            requirement_packet="req",
+            design_artifact="design",
+            requirement_design_trace={},
+            class_graph={},
+            sequence_graph={},
+            rule_review=ImplementationPlanReview(ok=True, mode="rules"),
+            planning_policy=planning,
+            vertical_design_graph={
+                "nodes": [
+                    {
+                        "id": "VDN-1",
+                        "scenario_id": "SC-1",
+                        "name": "Screen",
+                        "contract": "Submit the confirmed deletion.",
+                        "surface_contract": {"transitions": [{"action": "confirm", "to": "pending"}]},
+                    }
+                ],
+                "edges": [
+                    {
+                        "id": "VDE-1",
+                        "scenario_id": "SC-1",
+                        "from": "VDN-1",
+                        "to": "VDN-2",
+                        "label": "submit deletion",
+                        "boundary_contract": {"provider_operation": "DELETE /items/{id}"},
+                    }
+                ],
+            },
+            previous_round=previous_round,
+        )
+
+    first = prompt(None)
+    assert '"write_scope":{"files":["apps/web/src/AppShell.tsx","apps/web/src/Screen.tsx"]' in first
+    assert '"findings": [' in first
+    assert '"reviewed_design_ids": ["every exact VDN/VDE id from all work units"]' in first
+    assert '"severity": "blocking|warning"' in first
+    assert "never abbreviate or invent ids" in first
+    assert "Do not cap the number of findings" in first
+    assert "from a reducer transition or final-state assertion alone" in first
+    assert "Do not return `ok` or `developer_feedback`" in first
+    assert '"approved_design_contracts":{"nodes":[{"id":"VDN-1"' in first
+    assert '"boundary_contract":{"provider_operation":"DELETE /items/{id}"}' in first
+    assert "Vertical Design/Trace JSON" not in first
+    assert "Previous review round" not in first
+
+    repaired = {**plan, "work_units": [{**unit, "objective": "changed"}]}
+    previous = _previous_review_round(plan, repaired, ImplementationPlanReview(ok=False, mode="m", test_issues=["WU-1 misses 409."]))
+    assert previous == {"blocking_issues": ["WU-1 misses 409."], "changed_unit_ids": ["WU-1"], "changed_plan_fields": []}
+    later = prompt(previous)
+    assert "Previous review round (check it first)" in later and "WU-1 misses 409." in later

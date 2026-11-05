@@ -111,39 +111,36 @@ def test_active_typescript_developer_prompt_has_no_java_assumptions(repair_feedb
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 
-def test_active_typescript_validator_prompt_uses_same_directive() -> None:
+def _v4_review_prompt(structured_plan: dict[str, object]) -> str:
     policy, directive, verification_policy = _typescript_prompt_context()
-    prompt = _llm_review_prompt(
-        structured_plan={
-            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-            "planning_profile": policy.metadata(),
-            "design_mappings": [],
-        },
+    return _llm_review_prompt(
+        structured_plan={"version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION, **structured_plan},
         requirement_packet="Delete one approved record.",
         design_artifact="Approved service and repository design.",
-        requirement_design_trace={},
-        class_graph={"nodes": []},
-        sequence_graph={"sequenceDiagrams": []},
-        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v2"),
+        requirement_design_trace={"class_trace": [{"note": "UNIQUE-LEGACY-TRACE"}]},
+        class_graph={"nodes": [{"note": "UNIQUE-CLASS"}]},
+        sequence_graph={"sequenceDiagrams": [{"note": "UNIQUE-SEQUENCE"}]},
+        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v4"),
         planning_policy=policy,
         prompt_directive=directive,
         verification_policy=verification_policy,
     )
+
+
+def test_active_typescript_validator_prompt_uses_same_directive() -> None:
+    prompt = _v4_review_prompt({"design_mappings": []})
     lowered = prompt.lower()
 
     assert '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     assert "TypeScript" in prompt
     assert '"policy_version": "verification_stage_policy_v1"' in prompt
-    assert "Work-unit identity, membership, dependency, order and runtime_bindings are Harness-owned" in prompt
+    assert "Work-unit identity, membership, dependency, order, runtime_bindings, requirement_refs" in prompt
     assert "Do not invent a new business component or work unit" in prompt
     assert "A `typecheck` intent targets a non-test source" in prompt
-    assert "legacy Class graph supplies signature trace identity" in prompt
-    assert "shared-contract, client-adapter, or migration" in prompt
-    assert "every non-empty experience-contract category" in prompt
-    assert "CSS class names without owned or" in prompt
-    assert "static markup alone does not" in prompt
-    assert "required boundary auth/input mappings" in prompt
-    assert "concrete migration artifact" in prompt
+    assert "Do not re-audit that mapping item by item" in prompt
+    assert "do not require a compose service or stub for it" in prompt
+    for legacy in ("UNIQUE-LEGACY-TRACE", "UNIQUE-CLASS", "UNIQUE-SEQUENCE", "Class graph JSON"):
+        assert legacy not in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
 
 
@@ -283,16 +280,15 @@ def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice()
 
 
 def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> None:
-    policy, directive, verification_policy = _typescript_prompt_context()
-    prompt = _llm_review_prompt(
-        structured_plan={
-            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    prompt = _v4_review_prompt(
+        {
             "work_units": [
                 {
                     "unit_id": "WU-1",
                     "planned_code_targets": [{"path": "apps/web/src/Screen.tsx"}],
                     "surface_contracts": [{"note": "UNIQUE-SURFACE"}],
                     "boundary_contracts": [{"note": "UNIQUE-BOUNDARY"}],
+                    "ui_obligations": [{"id": "VDN-1:state.ready", "summary": "UNIQUE-OBLIGATION"}],
                 }
             ],
             "design_mappings": [{"note": "UNIQUE-MAPPING"}],
@@ -300,21 +296,19 @@ def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> Non
             "proposed_files": [{"note": "UNIQUE-FILE"}],
             "test_intents": [{"note": "UNIQUE-TEST"}],
             "implementation_signature_contract": {"entries": [{"note": "UNIQUE-SIGNATURE"}]},
-        },
-        requirement_packet="Delete one approved record.",
-        design_artifact="Approved design.",
-        requirement_design_trace={},
-        class_graph={"nodes": []},
-        sequence_graph={"sequenceDiagrams": []},
-        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v2"),
-        planning_policy=policy,
-        prompt_directive=directive,
-        verification_policy=verification_policy,
+        }
     )
 
-    for omitted in ("UNIQUE-SURFACE", "UNIQUE-BOUNDARY", "UNIQUE-MAPPING", "UNIQUE-STEP", "UNIQUE-FILE", "UNIQUE-TEST"):
+    for omitted in (
+        "UNIQUE-SURFACE",
+        "UNIQUE-BOUNDARY",
+        "UNIQUE-OBLIGATION",
+        "UNIQUE-MAPPING",
+        "UNIQUE-STEP",
+        "UNIQUE-FILE",
+        "UNIQUE-TEST",
+    ):
         assert omitted not in prompt
     assert "UNIQUE-SIGNATURE" in prompt
     assert "apps/web/src/Screen.tsx" in prompt
     assert "stage_capabilities" in prompt
-
