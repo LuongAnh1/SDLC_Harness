@@ -42,6 +42,7 @@ _IMMUTABLE_UNIT_FIELDS = {
     "runtime_bindings",
     "boundary_contracts",
     "surface_contracts",
+    "code_entities",
 }
 
 
@@ -221,6 +222,8 @@ def build_component_work_units(
         units.append(unit)
 
     units_by_id = {str(item["unit_id"]): item for item in units}
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
+    scenario_rank = _scenario_rank(trace_graph)
     scenario_kinds = {
         str(item.get("id") or ""): str(item.get("scenario_kind") or "")
         for item in _dicts(trace_graph.get("nodes"))
@@ -264,7 +267,8 @@ def build_component_work_units(
         source_scenario = str(_dict(nodes.get(source_node)).get("scenario_id") or "")
         target_scenario = str(_dict(nodes.get(target_node)).get("scenario_id") or "")
         if (
-            kind == "depends_on"
+            not entity_graph
+            and kind == "depends_on"
             and source_scenario != target_scenario
             and scenario_kinds.get(source_scenario) in {"alternative", "exception"}
             and scenario_kinds.get(target_scenario) == "main"
@@ -282,7 +286,16 @@ def build_component_work_units(
                 ):
                     refs.append(target_unit)
 
-    ordered_ids = _topological_order(units, scenario_rank=_scenario_rank(trace_graph))
+    if entity_graph:
+        _bind_code_entities(
+            units_by_id=units_by_id,
+            nodes=nodes,
+            unit_by_node=unit_by_node,
+            scenario_rank=scenario_rank,
+            planning_policy=planning_policy,
+        )
+
+    ordered_ids = _topological_order(units, scenario_rank=scenario_rank)
     order_by_id = {unit_id: index for index, unit_id in enumerate(ordered_ids, start=1)}
     for unit in units:
         unit["order"] = order_by_id[str(unit["unit_id"])]
@@ -297,6 +310,44 @@ def build_component_work_units(
             key=lambda item: str(item.get("design_node_id") or ""),
         )
     return sorted(units, key=lambda item: int(item.get("order") or 0))
+
+
+def _bind_code_entities(
+    *,
+    units_by_id: dict[str, dict[str, object]],
+    nodes: dict[str, dict[str, object]],
+    unit_by_node: dict[str, str],
+    scenario_rank: dict[str, tuple[int, int]],
+    planning_policy: PlanningPathPolicy,
+) -> None:
+    """Group actionable nodes by exact runtime target and order the units that share one."""
+
+    entity_nodes: dict[str, list[str]] = {}
+    for node_id in sorted(unit_by_node):
+        target = _dict(_dict(nodes[node_id].get("runtime_binding")).get("target"))
+        path = planning_policy.normalize_editable_path(target.get("path"))
+        if path:
+            entity = f"{path}#{str(target.get('symbol') or '').strip()}"
+            entity_nodes.setdefault(entity, []).append(node_id)
+
+    def owner_rank(unit_id: str) -> tuple[object, ...]:
+        unit = units_by_id[unit_id]
+        return (
+            *scenario_rank.get(str(unit.get("scenario_id") or ""), (4, 10**9)),
+            str(unit.get("component_id") or ""),
+            unit_id,
+        )
+
+    for entity, node_ids in sorted(entity_nodes.items()):
+        owners = sorted({unit_by_node[node_id] for node_id in node_ids}, key=owner_rank)
+        # A later scenario extends the code an earlier scenario created, never the reverse.
+        for earlier, later in zip(owners, owners[1:]):
+            refs = units_by_id[later]["depends_on"]
+            if isinstance(refs, list) and earlier not in refs:
+                refs.append(earlier)
+        record = {"entity": entity, "design_node_ids": node_ids, "unit_ids": owners}
+        for unit_id in owners:
+            units_by_id[unit_id].setdefault("code_entities", []).append(record)
 
 
 def merge_work_unit_updates(
@@ -323,6 +374,13 @@ def merge_work_unit_updates(
             surfaces=_strings(unit.get("surfaces")),
             planning_policy=planning_policy,
         )
+        removals = _target_removals(patch, unit=unit, planning_policy=planning_policy)
+        if removals:
+            targets = [
+                target
+                for target in targets
+                if (str(target.get("path") or ""), str(target.get("symbol") or "")) not in removals
+            ]
         if (
             planning_policy.project_profile_id == "typescript_fullstack_v1"
             and any(
@@ -370,6 +428,35 @@ def merge_work_unit_updates(
         result,
         planning_policy=planning_policy,
     )
+
+
+def _target_removals(
+    patch: dict[str, object],
+    *,
+    unit: dict[str, object],
+    planning_policy: PlanningPathPolicy,
+) -> set[tuple[str, str]]:
+    """Exact Planner removals, minus the runtime targets and owners seeded by Harness."""
+
+    requested = {
+        (
+            planning_policy.normalize_editable_path(item.get("path")),
+            str(item.get("symbol") or "").strip(),
+        )
+        for item in _dicts(patch.get("remove_planned_code_targets"))
+    }
+    protected = {
+        (planning_policy.normalize_editable_path(path), str(symbol or "").strip())
+        for binding in _dicts(unit.get("runtime_bindings"))
+        for path, symbol in (
+            (_dict(binding.get("target")).get("path"), _dict(binding.get("target")).get("symbol")),
+            (
+                _dict(binding.get("attachment")).get("owner_path"),
+                _dict(binding.get("attachment")).get("owner_symbol"),
+            ),
+        )
+    }
+    return {item for item in requested - protected if item[0]}
 
 
 def _assign_typescript_database_barrel_owner(
@@ -475,6 +562,7 @@ def rebind_legacy_mappings_to_work_units(
         str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))
     }
     targets_by_name: dict[str, tuple[str, list[dict[str, object]]]] = {}
+    runtime_target_by_name: dict[str, dict[str, object]] = {}
     for unit in units:
         targets = _dicts(unit.get("planned_code_targets"))
         component_id = str(unit.get("component_id") or "")
@@ -483,6 +571,22 @@ def rebind_legacy_mappings_to_work_units(
             name = str(node.get("name") or "").strip()
             if name and targets:
                 targets_by_name[name] = (component_id, targets)
+            runtime = _dict(_dict(node.get("runtime_binding")).get("target"))
+            runtime_key = (
+                planning_policy.normalize_editable_path(runtime.get("path")),
+                str(runtime.get("symbol") or "").strip(),
+            )
+            runtime_target = next(
+                (
+                    candidate
+                    for candidate in targets
+                    if (str(candidate.get("path") or ""), str(candidate.get("symbol") or "").strip())
+                    == runtime_key
+                ),
+                None,
+            )
+            if name and runtime_target:
+                runtime_target_by_name[name] = runtime_target
     signature_symbols = {
         str(item.get("design_element_id") or ""): str(item.get("qualified_name") or "").strip()
         for item in _dicts(signature_entries)
@@ -550,7 +654,8 @@ def rebind_legacy_mappings_to_work_units(
                 None,
             )
         if target is None:
-            target = _best_named_target(name=owner, targets=targets)
+            # The node's own runtime target outranks name similarity with Planner-added helpers.
+            target = runtime_target_by_name.get(owner) or _best_named_target(name=owner, targets=targets)
         if not target:
             rebound.append(item)
             continue
@@ -818,6 +923,8 @@ def component_plan_issues(
                 for binding in _dicts(expected.get("runtime_bindings"))
             }
             allowed_targets.discard(("", ""))
+            # Write scope is per file: a new exported symbol inside a runtime-wired file stays wired.
+            allowed_paths = {path for path, _ in allowed_targets if path}
             has_boundary_contract = bool(_dicts(expected.get("boundary_contracts")))
             for target in targets:
                 target_key = (
@@ -840,11 +947,15 @@ def component_plan_issues(
                     and target_key[0] == _TYPESCRIPT_DATABASE_BARREL
                     and not target_key[1]
                 )
+                is_ui_stylesheet = "ui" in _strings(unit.get("surfaces")) and planning_policy.is_stylesheet_path(
+                    target_key[0]
+                )
                 if (
-                    target_key not in allowed_targets
+                    target_key[0] not in allowed_paths
                     and not is_shared_contract
                     and not is_data_schema_artifact
                     and not is_database_barrel
+                    and not is_ui_stylesheet
                 ):
                     issues.append(
                         f"Work unit {unit_id} has unapproved support target "
@@ -883,7 +994,9 @@ def component_plan_issues(
                 valid_stage_target = (
                     planning_policy.is_test_path(path)
                     if stage_id == "unit"
-                    else path in target_paths and not planning_policy.is_test_path(path)
+                    else path in target_paths
+                    and not planning_policy.is_test_path(path)
+                    and not planning_policy.is_stylesheet_path(path)
                     if stage_id == "typecheck"
                     else False
                 )
@@ -1107,6 +1220,8 @@ def _structural_plan_issues(
         return found
 
     parent_scenarios: dict[str, set[str]] = {}
+    branch_entry_units: dict[str, set[str]] = {}
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
     scenario_edges: dict[str, list[dict[str, object]]] = {}
     for edge in _dicts(design_graph.get("edges")):
         source_node = str(edge.get("from") or "")
@@ -1133,6 +1248,8 @@ def _structural_plan_issues(
             and scenario_kinds.get(target_scenario) == "main"
         ):
             parent_scenarios.setdefault(source_scenario, set()).add(target_scenario)
+            if source_unit:
+                branch_entry_units.setdefault(source_scenario, set()).add(source_unit)
         if not edge.get("boundary_contract"):
             continue
         edge_id = str(edge.get("id") or "")
@@ -1151,6 +1268,9 @@ def _structural_plan_issues(
         if scenario_kinds.get(scenario_id) not in {"alternative", "exception"}:
             continue
         parents = parent_scenarios.get(scenario_id, set())
+        # With code entities a branch unit only needs the path its entry unit opens to the parent.
+        if entity_graph and parents and unit_id not in branch_entry_units.get(scenario_id, set()):
+            continue
         parent_units = {
             candidate_id
             for candidate_id, candidate in units_by_id.items()
@@ -1285,16 +1405,57 @@ def _topological_order(
             ),
         )
         if not ready:
+            cycles = _dependency_cycles(remaining)
             raise HarnessError(
                 "implementation_plan_dependency_cycle",
-                f"Component-aware work units contain a dependency cycle: {sorted(remaining)}",
+                "Component-aware work units contain a dependency cycle: "
+                f"{cycles or sorted(remaining)}",
             )
-        for unit_id in ready:
-            ordered.append(unit_id)
-            remaining.pop(unit_id)
+        # One unit at a time: the highest-ranked scenario slice finishes before a later one starts.
+        unit_id = ready[0]
+        ordered.append(unit_id)
+        remaining.pop(unit_id)
         for dependencies in remaining.values():
-            dependencies.difference_update(ready)
+            dependencies.discard(unit_id)
     return ordered
+
+
+def _dependency_cycles(remaining: dict[str, set[str]]) -> list[list[str]]:
+    """Tarjan SCC over unresolved units: return only the components that really loop."""
+
+    index: dict[str, int] = {}
+    low: dict[str, int] = {}
+    stack: list[str] = []
+    on_stack: set[str] = set()
+    cycles: list[list[str]] = []
+
+    def visit(unit_id: str) -> None:
+        index[unit_id] = low[unit_id] = len(index)
+        stack.append(unit_id)
+        on_stack.add(unit_id)
+        for dependency in sorted(remaining.get(unit_id, set())):
+            if dependency not in remaining:
+                continue
+            if dependency not in index:
+                visit(dependency)
+                low[unit_id] = min(low[unit_id], low[dependency])
+            elif dependency in on_stack:
+                low[unit_id] = min(low[unit_id], index[dependency])
+        if low[unit_id] == index[unit_id]:
+            component: list[str] = []
+            while True:
+                member = stack.pop()
+                on_stack.discard(member)
+                component.append(member)
+                if member == unit_id:
+                    break
+            if len(component) > 1 or unit_id in remaining.get(unit_id, set()):
+                cycles.append(sorted(component))
+
+    for unit_id in sorted(remaining):
+        if unit_id not in index:
+            visit(unit_id)
+    return sorted(cycles)
 
 
 def _canonical_targets(

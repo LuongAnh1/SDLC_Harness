@@ -134,7 +134,7 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     assert '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     assert "TypeScript" in prompt
     assert '"policy_version": "verification_stage_policy_v1"' in prompt
-    assert "Work-unit identity, membership, dependency, and order are Harness-owned" in prompt
+    assert "Work-unit identity, membership, dependency, order and runtime_bindings are Harness-owned" in prompt
     assert "Do not invent a new business component or work unit" in prompt
     assert "A `typecheck` intent targets a non-test source" in prompt
     assert "legacy Class graph supplies signature trace identity" in prompt
@@ -239,3 +239,77 @@ def test_codegraph_context_prioritizes_runtime_wiring_terms() -> None:
     assert "registerDeleteCulturalHeritageRoute" in query
     assert "createApp" in query
     assert "DELETE /cultural-heritage/{id}" in query
+
+
+def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    marker = "UNIQUE-SURFACE-CONTRACT-TEXT"
+    node = {"id": "VDN-1", "surface_contract": {"note": marker}}
+    edge = {"id": "VDE-1", "from": "VDN-1", "to": "VDN-1", "boundary_contract": {"note": "UNIQUE-BOUNDARY"}}
+    prompt = _component_plan_prompt(
+        run_id="run_dedupe",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[
+            {
+                "unit_id": "WU-1",
+                "design_node_ids": ["VDN-1"],
+                "design_edge_ids": ["VDE-1"],
+                "surface_contracts": [{"design_node_id": "VDN-1", "surface_contract": node["surface_contract"]}],
+                "boundary_contracts": [{"design_edge_id": "VDE-1", "note": "UNIQUE-BOUNDARY"}],
+            }
+        ],
+        vertical_design_graph={"nodes": [node], "edges": [edge]},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+    )
+
+    assert prompt.count(marker) == 1
+    assert prompt.count("UNIQUE-BOUNDARY") == 1
+    assert "ui_stylesheets" in prompt
+    assert "stage_capabilities" in prompt
+    assert "stays unverified until such a stage" in prompt
+
+
+def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    prompt = _llm_review_prompt(
+        structured_plan={
+            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+            "work_units": [
+                {
+                    "unit_id": "WU-1",
+                    "planned_code_targets": [{"path": "apps/web/src/Screen.tsx"}],
+                    "surface_contracts": [{"note": "UNIQUE-SURFACE"}],
+                    "boundary_contracts": [{"note": "UNIQUE-BOUNDARY"}],
+                }
+            ],
+            "design_mappings": [{"note": "UNIQUE-MAPPING"}],
+            "implementation_steps": [{"note": "UNIQUE-STEP"}],
+            "proposed_files": [{"note": "UNIQUE-FILE"}],
+            "test_intents": [{"note": "UNIQUE-TEST"}],
+            "implementation_signature_contract": {"entries": [{"note": "UNIQUE-SIGNATURE"}]},
+        },
+        requirement_packet="Delete one approved record.",
+        design_artifact="Approved design.",
+        requirement_design_trace={},
+        class_graph={"nodes": []},
+        sequence_graph={"sequenceDiagrams": []},
+        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v2"),
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+    )
+
+    for omitted in ("UNIQUE-SURFACE", "UNIQUE-BOUNDARY", "UNIQUE-MAPPING", "UNIQUE-STEP", "UNIQUE-FILE", "UNIQUE-TEST"):
+        assert omitted not in prompt
+    assert "UNIQUE-SIGNATURE" in prompt
+    assert "apps/web/src/Screen.tsx" in prompt
+    assert "stage_capabilities" in prompt
+

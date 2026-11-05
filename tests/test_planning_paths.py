@@ -215,6 +215,29 @@ def test_policy_accepts_only_profile_owned_file_kinds():
     assert all(policy.normalize_editable_path(path) == "" for path in rejected)
 
 
+def test_policy_accepts_ui_stylesheets_as_non_source_web_targets():
+    policy = _policy()
+    for path in ("apps/web/src/Screen.css", "apps/web/src/screens/Screen.css"):
+        assert policy.normalize_editable_path(path) == path
+        assert policy.is_stylesheet_path(path)
+        assert policy.component_for_path(path) == "web"
+        assert policy.normalize_mapping_path(path) == ""
+        assert not policy.is_test_path(path)
+    for path in ("apps/api/src/Service.css", "packages/contracts/src/x.css", "Screen.css"):
+        assert policy.normalize_editable_path(path) == ""
+        assert not policy.is_stylesheet_path(path)
+    assert policy.prompt_context()["special_roots"]["ui_stylesheets"] == {
+        "root": "apps/web/src",
+        "suffixes": [".css"],
+    }
+
+
+def test_verification_prompt_context_states_active_stage_capabilities():
+    context = _verification_policy().prompt_context()
+    assert set(context["stage_capabilities"]) == set(context["stage_ids"])
+    assert "no DOM" in context["stage_capabilities"]["unit"]
+
+
 def test_profiled_planner_keeps_deterministic_targets_when_llm_returns_java_paths():
     class_graph, sequence_graph = _graphs()
     policy = _policy()

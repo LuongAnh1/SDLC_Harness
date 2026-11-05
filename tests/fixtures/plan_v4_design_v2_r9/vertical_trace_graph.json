@@ -1,0 +1,1912 @@
+{
+  "schema_version": "vertical_trace_graph_v1",
+  "revision": 1,
+  "run_id": "run_20261102_100240_755e94d0",
+  "phase_gate": "design",
+  "binding": {
+    "requirement_revision": 1,
+    "requirement_digest": "sha256:0674cd973a04f989e75b32301b79aa2da00adca476b3ba2dd59fd26dc8f7f3fb",
+    "design_contract_version": "vertical_design_graph_v2",
+    "design_graph_revision": 15,
+    "design_graph_digest": "sha256:c4356ab9f7a07b1412f70941f3a7557601e3225e007efa1d80f4d9e37e9636c6",
+    "snapshot_binding_digest": "sha256:3a5b92d9e5ddc747b3635d1e45d11b0c1cab47edbe94fad48ed8d6e6395f6394"
+  },
+  "partitions": [
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-1",
+      "component_id": "api",
+      "coverage": {
+        "api": "covered",
+        "business_rule": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-1",
+      "component_id": "database",
+      "coverage": {
+        "data": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-1",
+      "component_id": "web",
+      "coverage": {
+        "ui": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-2",
+      "component_id": "web",
+      "coverage": {
+        "business_rule": "covered",
+        "ui": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-3",
+      "component_id": "api",
+      "coverage": {
+        "api": "covered",
+        "business_rule": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-3",
+      "component_id": "database",
+      "coverage": {
+        "data": "covered"
+      }
+    },
+    {
+      "use_case_id": "UC-1",
+      "scenario_id": "SC-3",
+      "component_id": "web",
+      "coverage": {
+        "ui": "covered"
+      }
+    }
+  ],
+  "nodes": [
+    {
+      "id": "AC-1",
+      "layer": "requirement",
+      "kind": "acceptance_criterion",
+      "claim_type": "acceptance_criterion",
+      "label": "Given the agency has logged, the Agency Operator views the list of CulturalHeritage as a result of SearchCulturalHeritage, selects a cultural heritage, activates a function of elimination, and confirms the operation, the system deletes the cultural choice and notifies the successful elimination of the cultural.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "MF-4",
+        "BR-1",
+        "POST-1"
+      ],
+      "evidence_refs": [
+        "E-4",
+        "E-5",
+        "E-6",
+        "E-7",
+        "E-8",
+        "E-9"
+      ],
+      "status": "explicit"
+    },
+    {
+      "id": "AC-2",
+      "layer": "requirement",
+      "kind": "acceptance_criterion",
+      "claim_type": "acceptance_criterion",
+      "label": "When the Agency Operator confirms cancellation, the system blocks input controls to avoid multiple submissions, keeps them blocked until cancellation handling finishes, re-enables them, and the operation is cancelled.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "AF-1"
+      ],
+      "evidence_refs": [
+        "E-10"
+      ],
+      "status": "human_decision"
+    },
+    {
+      "id": "AC-3",
+      "layer": "requirement",
+      "kind": "acceptance_criterion",
+      "claim_type": "acceptance_criterion",
+      "label": "If the connection to the ETOUR server is interrupted before the deletion completes, the deletion is treated as failed: the operation is rolled back, the selected CulturalHeritage remains unchanged, no success notification is shown, and the Agency Operator is informed that the connection was interrupted so the operation can be retried.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "EF-1"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ],
+      "status": "human_decision"
+    },
+    {
+      "id": "AC-4",
+      "layer": "requirement",
+      "kind": "acceptance_criterion",
+      "claim_type": "acceptance_criterion",
+      "label": "Given the Agency Operator confirms cancellation, the system blocks input controls until cancellation handling finishes and then re-enables them; confirming deletion does not trigger this block.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "QR-1"
+      ],
+      "evidence_refs": [
+        "E-12"
+      ],
+      "status": "human_decision"
+    },
+    {
+      "id": "AF-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "alternative_flow",
+      "label": "The Agency Operator confirms cancellation of the deletion operation before deletion completes. The pending deletion is aborted, the selected CulturalHeritage remains unchanged, a cancellation confirmation is shown, input controls are re-enabled, and no deletion-success notification is shown.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-10"
+      ],
+      "status": ""
+    },
+    {
+      "id": "BR-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "business_rule",
+      "label": "The system deletes the selected cultural choice after the Agency Operator confirms the operation.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-5",
+        "E-7",
+        "E-8"
+      ],
+      "status": "explicit"
+    },
+    {
+      "id": "EF-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "exception_flow",
+      "label": "Interruption of connection to the server ETOUR. The deletion is treated as failed: the operation is rolled back, the selected CulturalHeritage remains unchanged, no success notification is shown, and the Agency Operator is informed that the connection was interrupted so the operation can be retried.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-11"
+      ],
+      "status": ""
+    },
+    {
+      "id": "MF-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "main_flow",
+      "label": "ACT-1 View the list of CulturalHeritage as a result of the use case SearchCulturalHeritage, select a cultural heritage item, and activate a function of elimination. CulturalHeritage",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-5"
+      ],
+      "status": ""
+    },
+    {
+      "id": "MF-2",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "main_flow",
+      "label": "System Ask for confirmation.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-6"
+      ],
+      "status": ""
+    },
+    {
+      "id": "MF-3",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "main_flow",
+      "label": "ACT-1 Confirm the operation.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-7"
+      ],
+      "status": ""
+    },
+    {
+      "id": "MF-4",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "main_flow",
+      "label": "System Delete the cultural choice. cultural choice",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-8"
+      ],
+      "status": ""
+    },
+    {
+      "id": "POST-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "postcondition",
+      "label": "The system notifies the successful elimination of the cultural.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-9"
+      ],
+      "status": "explicit"
+    },
+    {
+      "id": "PRE-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "precondition",
+      "label": "The agency has logged.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-4"
+      ],
+      "status": "explicit"
+    },
+    {
+      "id": "QR-1",
+      "layer": "requirement",
+      "kind": "requirement_claim",
+      "claim_type": "quality_requirement",
+      "label": "The system blocks input controls on receipt of confirmation of cancellation to avoid multiple submissions, keeps them blocked until cancellation handling finishes, and then re-enables them; this block is not triggered by confirmation of deletion.",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": [
+        "E-12"
+      ],
+      "status": "human_decision"
+    },
+    {
+      "id": "SC-1",
+      "layer": "requirement",
+      "kind": "scenario",
+      "scenario_kind": "main",
+      "label": "Delete the selected CulturalHeritage after confirmation",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "MF-4",
+        "BR-1"
+      ],
+      "evidence_refs": [
+        "E-2",
+        "E-3",
+        "E-4",
+        "E-5",
+        "E-6",
+        "E-7",
+        "E-8",
+        "E-9",
+        "E-12"
+      ]
+    },
+    {
+      "id": "SC-2",
+      "layer": "requirement",
+      "kind": "scenario",
+      "scenario_kind": "alternative",
+      "label": "Cancel the deletion operation",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "AF-1"
+      ],
+      "evidence_refs": [
+        "E-10",
+        "E-12"
+      ]
+    },
+    {
+      "id": "SC-3",
+      "layer": "requirement",
+      "kind": "scenario",
+      "scenario_kind": "exception",
+      "label": "Connection interruption during deletion",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [
+        "EF-1"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ]
+    },
+    {
+      "id": "SURF:SC-1:api",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-1 api",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "surface": "api",
+      "status": "required",
+      "reason": "Deletion is triggered by an actor-facing action and changes persisted domain state, requiring an application request boundary.",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "evidence_refs": [
+        "E-8",
+        "E-9"
+      ]
+    },
+    {
+      "id": "SURF:SC-1:business_rule",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-1 business_rule",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "surface": "business_rule",
+      "status": "required",
+      "reason": "The source requires confirmation before deleting the selected cultural choice.",
+      "requirement_refs": [
+        "BR-1",
+        "MF-3",
+        "MF-4",
+        "AC-1"
+      ],
+      "evidence_refs": [
+        "E-7",
+        "E-8"
+      ]
+    },
+    {
+      "id": "SURF:SC-1:data",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-1 data",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "surface": "data",
+      "status": "required",
+      "reason": "The flow deletes the selected cultural choice.",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "evidence_refs": [
+        "E-8"
+      ]
+    },
+    {
+      "id": "SURF:SC-1:ui",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-1 ui",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "surface": "ui",
+      "status": "required",
+      "reason": "The Agency Operator views the CulturalHeritage list, selects an item, activates elimination, and confirms deletion through actor-facing interaction. Input-control blocking is cancellation-specific and does not apply to this main deletion scenario.",
+      "requirement_refs": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "AC-4"
+      ],
+      "evidence_refs": [
+        "E-5",
+        "E-6",
+        "E-7",
+        "E-12"
+      ]
+    },
+    {
+      "id": "SURF:SC-2:api",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-2 api",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "surface": "api",
+      "status": "not_applicable",
+      "reason": "The source describes cancellation of the operation but states no backend request or persisted-state change for that cancellation path.",
+      "requirement_refs": [],
+      "evidence_refs": []
+    },
+    {
+      "id": "SURF:SC-2:business_rule",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-2 business_rule",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "surface": "business_rule",
+      "status": "required",
+      "reason": "The cancellation branch is resolved: confirmed cancellation aborts the pending deletion, keeps the selected CulturalHeritage unchanged, blocks input controls while cancellation is processed, shows a cancellation confirmation, re-enables controls, and does not show a deletion-success notification.",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2"
+      ],
+      "evidence_refs": [
+        "E-10"
+      ]
+    },
+    {
+      "id": "SURF:SC-2:data",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-2 data",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "surface": "data",
+      "status": "not_applicable",
+      "reason": "No persisted-state change is stated for the cancellation alternative.",
+      "requirement_refs": [],
+      "evidence_refs": []
+    },
+    {
+      "id": "SURF:SC-2:ui",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-2 ui",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "surface": "ui",
+      "status": "required",
+      "reason": "The Agency Operator cancels through an actor-facing interaction; on confirmed cancellation the pending deletion is aborted, the selected CulturalHeritage remains unchanged, input controls are blocked while cancellation is processed, a cancellation confirmation is shown, controls are re-enabled, and no deletion-success notification is shown.",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2",
+        "AC-4"
+      ],
+      "evidence_refs": [
+        "E-10",
+        "E-12"
+      ]
+    },
+    {
+      "id": "SURF:SC-3:api",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-3 api",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "surface": "api",
+      "status": "required",
+      "reason": "The interruption is to the ETOUR server connection, and the answered behavior requires the server boundary to roll back the in-progress deletion and report the failure rather than a success.",
+      "requirement_refs": [
+        "EF-1"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ]
+    },
+    {
+      "id": "SURF:SC-3:business_rule",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-3 business_rule",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "surface": "business_rule",
+      "status": "required",
+      "reason": "The rule is now resolved: an interrupted deletion is treated as failed, rolled back with the CulturalHeritage unchanged, and the operator is informed so the operation can be retried.",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ]
+    },
+    {
+      "id": "SURF:SC-3:data",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-3 data",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "surface": "data",
+      "status": "required",
+      "reason": "The answer-backed outcome determines the persisted state on interruption: the in-progress deletion is rolled back and the selected CulturalHeritage remains unchanged.",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ]
+    },
+    {
+      "id": "SURF:SC-3:ui",
+      "layer": "requirement",
+      "kind": "surface_requirement",
+      "label": "SC-3 ui",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "surface": "ui",
+      "status": "required",
+      "reason": "The answer-backed outcome is observable to the Agency Operator: no success notification is shown and the operator is informed that the connection was interrupted so the operation can be retried.",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [
+        "E-11"
+      ]
+    },
+    {
+      "id": "UC-1",
+      "layer": "requirement",
+      "kind": "use_case",
+      "label": "DeleteCulturalHeritage",
+      "scenario_id": "",
+      "component_id": "",
+      "surface": "",
+      "requirement_refs": [],
+      "evidence_refs": []
+    },
+    {
+      "id": "VDN-17b0bc2770432ef2",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "ui_interaction",
+      "label": "Root forwards runtime inputs",
+      "scenario_id": "SC-1",
+      "component_id": "web",
+      "surface": "ui",
+      "disposition": "modify",
+      "requirement_refs": [
+        "AC-4",
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "PRE-1"
+      ],
+      "evidence_refs": [
+        "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+      ],
+      "contract": "Root forwards agencyOperatorSession, culturalHeritageRecords to the next component on composition_path."
+    },
+    {
+      "id": "VDN-7591323b8e28fe0f",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "business_rule",
+      "label": "ETOUR connection interruption rollback rule",
+      "scenario_id": "SC-3",
+      "component_id": "api",
+      "surface": "business_rule",
+      "disposition": "add",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [],
+      "contract": "Idempotent interruption rollback rule for the confirmed CulturalHeritage deletion: it is invoked with culturalHeritageId, the operator confirmation and the etourConnectionInterrupted observation that the request boundary produced from its completed outbound idempotent DELETE to the ETOUR CulturalHeritage service. The rule uses the same culturalHeritageId-derived key as the boundary's deletion attempt. When etourConnectionInterrupted is true it reconciles the ETOUR-side attempt under that key, drives the attempt and the local persistence transaction to the not-committed state so the selected CulturalHeritage remains unchanged at the ETOUR boundary and in the store, produces no success notification, and reports the interruption failure for a safe idempotent retry. When etourConnectionInterrupted is false the confirmed deletion proceeds and commits."
+    },
+    {
+      "id": "VDN-8154a2b82dcbdedd",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "ui_interaction",
+      "label": "CulturalHeritage deletion cancellation confirmation on the confirmation dialog",
+      "scenario_id": "SC-2",
+      "component_id": "web",
+      "surface": "ui",
+      "disposition": "add",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2",
+        "AC-4"
+      ],
+      "evidence_refs": [],
+      "contract": "Alternative path where the Agency Operator confirms cancellation of the CulturalHeritage deletion while the elimination confirmation dialog is open: input controls are blocked while the cancellation is handled, the deletion request is never dispatched, the selected cultural heritage stays unchanged, the cancellation confirmation is shown, controls are re-enabled and no deletion-success notification appears."
+    },
+    {
+      "id": "VDN-9c276a1d75ac9f49",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "api_contract",
+      "label": "DELETE CulturalHeritage request boundary",
+      "scenario_id": "SC-1",
+      "component_id": "api",
+      "surface": "api",
+      "disposition": "add",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "evidence_refs": [],
+      "contract": "Authenticated request boundary for the Agency Operator's confirmed elimination of one selected CulturalHeritage; rejects the request without deleting anything when the explicit confirmation is not present, and otherwise returns 204 after the deletion succeeds."
+    },
+    {
+      "id": "VDN-aebba2a693dbdd96",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "data_operation",
+      "label": "CulturalHeritage deletion interruption rollback persistence",
+      "scenario_id": "SC-3",
+      "component_id": "database",
+      "surface": "data",
+      "disposition": "add",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [],
+      "contract": "Transaction-bound persistence for an interrupted confirmed CulturalHeritage deletion: deleteCulturalHeritageRecord is called with the selected culturalHeritageId and the etourConnectionInterrupted observation. It opens an explicit database transaction keyed by culturalHeritageId. When etourConnectionInterrupted is true the adapter performs no delete or rolls back the staged delete, leaves the CulturalHeritage record unchanged and returns the interruption failure; when false it deletes the CulturalHeritage and commits. No success state is persisted for an interrupted deletion."
+    },
+    {
+      "id": "VDN-aebccf9fe2287c31",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "business_rule",
+      "label": "Cancellation rule that cancels the CulturalHeritage deletion before the request is dispatched",
+      "scenario_id": "SC-2",
+      "component_id": "web",
+      "surface": "business_rule",
+      "disposition": "add",
+      "requirement_refs": [
+        "AF-1",
+        "AC-2"
+      ],
+      "evidence_refs": [],
+      "contract": "When the Agency Operator confirms cancellation while the elimination confirmation dialog for the selected CulturalHeritage is open, the deletion request is never dispatched, the selected CulturalHeritage stays unchanged, input controls stay blocked until the cancellation is handled and are then re-enabled, and only a cancellation confirmation is produced with no deletion-success notification."
+    },
+    {
+      "id": "VDN-b2af0c88ed45e400",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "api_contract",
+      "label": "Interrupted CulturalHeritage deletion request boundary",
+      "scenario_id": "SC-3",
+      "component_id": "api",
+      "surface": "api",
+      "disposition": "add",
+      "requirement_refs": [
+        "EF-1"
+      ],
+      "evidence_refs": [],
+      "contract": "Idempotent request boundary for a confirmed CulturalHeritage deletion: the boundary issues the confirmed deletion to the ETOUR CulturalHeritage service as an outbound idempotent DELETE keyed by culturalHeritageId and synchronously observes its outcome to produce etourConnectionInterrupted. When the connection is interrupted before the deletion commits, the boundary reconciles the same attempt under that key and invokes the deletion rule under the same key, so the ETOUR-side attempt and the local persistence transaction resolve together, the selected CulturalHeritage remains unchanged at the ETOUR boundary and in the persistence store, no success is reported, and the Agency Operator can retry idempotently; it returns 503 with that failure. When the Agency Operator is not logged in it returns 401."
+    },
+    {
+      "id": "VDN-b31b85277d1d8727",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "ui_interaction",
+      "label": "AppShell forwards runtime inputs",
+      "scenario_id": "SC-1",
+      "component_id": "web",
+      "surface": "ui",
+      "disposition": "modify",
+      "requirement_refs": [
+        "AC-4",
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "PRE-1"
+      ],
+      "evidence_refs": [
+        "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ],
+      "contract": "AppShell forwards agencyOperatorSession, culturalHeritageRecords to the next component on composition_path."
+    },
+    {
+      "id": "VDN-c08451c6db1f6af4",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "business_rule",
+      "label": "Confirmation-gated CulturalHeritage elimination rule",
+      "scenario_id": "SC-1",
+      "component_id": "api",
+      "surface": "business_rule",
+      "disposition": "add",
+      "requirement_refs": [
+        "BR-1",
+        "MF-3",
+        "MF-4",
+        "AC-1"
+      ],
+      "evidence_refs": [],
+      "contract": "Applies deletion of the selected CulturalHeritage only after the Agency Operator has explicitly confirmed the operation; without that confirmation the operation is rejected and no cultural choice is removed."
+    },
+    {
+      "id": "VDN-e05e8071615706e0",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "ui_interaction",
+      "label": "CulturalHeritage deletion screen with confirmation dialog and success notice",
+      "scenario_id": "SC-1",
+      "component_id": "web",
+      "surface": "ui",
+      "disposition": "add",
+      "requirement_refs": [
+        "MF-1",
+        "MF-2",
+        "MF-3",
+        "AC-4"
+      ],
+      "evidence_refs": [],
+      "contract": "Screen where the Agency Operator views the CulturalHeritage list, selects a cultural heritage, activates elimination, confirms the operation, and then sees the deleted item gone from the list with a notice of the successful elimination."
+    },
+    {
+      "id": "VDN-e56af334b66c19a6",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "ui_interaction",
+      "label": "CulturalHeritage deletion connection-interruption error on the confirmation dialog",
+      "scenario_id": "SC-3",
+      "component_id": "web",
+      "surface": "ui",
+      "disposition": "add",
+      "requirement_refs": [
+        "EF-1",
+        "AC-3"
+      ],
+      "evidence_refs": [],
+      "contract": "Exception projection on the CulturalHeritage deletion confirmation dialog: when the connection to the ETOUR server is interrupted before the confirmed deletion completes, the deletion is treated as failed, the selected cultural heritage stays unchanged and listed, no success notification is shown, and the dialog alert region informs the Agency Operator that the connection was interrupted so the confirmed operation can be retried."
+    },
+    {
+      "id": "VDN-f972f22cbbcf1e2f",
+      "layer": "design",
+      "kind": "design_element",
+      "design_kind": "data_operation",
+      "label": "CulturalHeritage record deletion persistence",
+      "scenario_id": "SC-1",
+      "component_id": "database",
+      "surface": "data",
+      "disposition": "add",
+      "requirement_refs": [
+        "MF-4",
+        "BR-1",
+        "AC-1"
+      ],
+      "evidence_refs": [],
+      "contract": "Deletes the single CulturalHeritage record identified by culturalHeritageId from persistent storage and reports whether one record was removed."
+    }
+  ],
+  "edges": [
+    {
+      "id": "VTE-00888180fb2778c5",
+      "from": "SC-1",
+      "to": "BR-1",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-01253e607c77f303",
+      "from": "MF-1",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-02c0c42e1788f99e",
+      "from": "AC-2",
+      "to": "VDN-8154a2b82dcbdedd",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-05377b9d7e1a5d84",
+      "from": "SURF:SC-1:ui",
+      "to": "MF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-05ef585b0eeb95d9",
+      "from": "SC-1",
+      "to": "MF-1",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-05ef6cb8de4b4708",
+      "from": "MF-4",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-08bc5d34a7fc6682",
+      "from": "SC-2",
+      "to": "SURF:SC-2:api",
+      "kind": "requires_surface",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-0e72bc80ee94a1be",
+      "from": "SURF:SC-1:ui",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-12d5d2bc0a7c887b",
+      "from": "BR-1",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-13ff3e85e266ee59",
+      "from": "SURF:SC-1:business_rule",
+      "to": "AC-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-151c35030d77418b",
+      "from": "SC-3",
+      "to": "EF-1",
+      "kind": "contains",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-1659fb27ff3f361d",
+      "from": "SURF:SC-3:api",
+      "to": "EF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-1f3068860954f660",
+      "from": "SC-1",
+      "to": "MF-4",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-2139177ff6f9196c",
+      "from": "SURF:SC-2:ui",
+      "to": "AF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-216830bd8a7cc41b",
+      "from": "SC-1",
+      "to": "MF-3",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-2578db1afb600032",
+      "from": "SC-2",
+      "to": "SURF:SC-2:business_rule",
+      "kind": "requires_surface",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-27b1e4934c90db61",
+      "from": "SC-3",
+      "to": "SURF:SC-3:business_rule",
+      "kind": "requires_surface",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-2a94069df845b7b6",
+      "from": "AC-4",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-2af05eee443da00f",
+      "from": "SURF:SC-2:ui",
+      "to": "VDN-8154a2b82dcbdedd",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-2bb30a943cc73c70",
+      "from": "UC-1",
+      "to": "SC-1",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-2bba7a647dc9c315",
+      "from": "AC-4",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-2f3c6a41355b42ae",
+      "from": "VDN-c08451c6db1f6af4",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "returns",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-7301b1415d915ed3",
+      "label": "the rule returns the successful elimination or the rejection to the deletion route",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 7
+    },
+    {
+      "id": "VTE-2f47e4d5892ed185",
+      "from": "SURF:SC-3:data",
+      "to": "VDN-aebba2a693dbdd96",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-322f0389ce674d4a",
+      "from": "MF-2",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-333d8bb78bb0cca1",
+      "from": "SURF:SC-1:ui",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-33867ae3f626214e",
+      "from": "MF-2",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-3a91c34014f0d5b7",
+      "from": "AC-2",
+      "to": "VDN-aebccf9fe2287c31",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-3bb2161458cb22c7",
+      "from": "VDN-8154a2b82dcbdedd",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "depends_on",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "source_edge_id": "VDE-9ad7bfbafbad5893",
+      "label": "SC-2 depends on SC-1",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 1
+    },
+    {
+      "id": "VTE-3bf726d947b43163",
+      "from": "EF-1",
+      "to": "VDN-b2af0c88ed45e400",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-3cb8ec9f3b63e92a",
+      "from": "SURF:SC-3:ui",
+      "to": "VDN-e56af334b66c19a6",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-3e24bc8157d98b2d",
+      "from": "SC-1",
+      "to": "SURF:SC-1:api",
+      "kind": "requires_surface",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-3ecc9ad548bd255f",
+      "from": "SURF:SC-3:data",
+      "to": "AC-3",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-3f330d7a29b88cdc",
+      "from": "SURF:SC-2:business_rule",
+      "to": "AC-2",
+      "kind": "satisfies",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-3f7fca58214be310",
+      "from": "AC-1",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-4030f9132338b650",
+      "from": "SURF:SC-3:api",
+      "to": "VDN-b2af0c88ed45e400",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-43722d3b9cdf2cc5",
+      "from": "SURF:SC-3:ui",
+      "to": "AC-3",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-43941081315e5460",
+      "from": "SC-1",
+      "to": "SURF:SC-1:business_rule",
+      "kind": "requires_surface",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-4adcae15eb27d2c9",
+      "from": "SURF:SC-1:business_rule",
+      "to": "MF-4",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-4bdb0529eb8841e7",
+      "from": "AF-1",
+      "to": "VDN-8154a2b82dcbdedd",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-4d9966b89c3998f4",
+      "from": "EF-1",
+      "to": "VDN-e56af334b66c19a6",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-4ffec8e6d4ceb9f0",
+      "from": "AC-1",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-51bc5c04824fe439",
+      "from": "AF-1",
+      "to": "VDN-aebccf9fe2287c31",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-529241fd00e40623",
+      "from": "SURF:SC-1:api",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-53fa4983c6e1ff15",
+      "from": "VDN-9c276a1d75ac9f49",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "returns",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-c2174598b7b142f5",
+      "label": "the request boundary returns the successful elimination (204) or the rejection (409) to the CulturalHeritage screen",
+      "guard": "",
+      "branch_group": "",
+      "terminal": true,
+      "order": 8
+    },
+    {
+      "id": "VTE-54402e83baef2e19",
+      "from": "VDN-aebba2a693dbdd96",
+      "to": "VDN-7591323b8e28fe0f",
+      "kind": "returns",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-58263f60eea24ec4",
+      "label": "persistence reports the rolled-back interruption failure and unchanged CulturalHeritage back to the rule",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 5
+    },
+    {
+      "id": "VTE-5af573f7536558f7",
+      "from": "EF-1",
+      "to": "VDN-7591323b8e28fe0f",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-5b35db677051147d",
+      "from": "SURF:SC-3:business_rule",
+      "to": "EF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-5f79d57ea4d908f9",
+      "from": "SURF:SC-1:business_rule",
+      "to": "BR-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-5fb96fb5ee441d49",
+      "from": "VDN-b2af0c88ed45e400",
+      "to": "VDN-e56af334b66c19a6",
+      "kind": "returns",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-8ce120fc1da21f21",
+      "label": "the request boundary reports the connection-interruption failure to the confirmation dialog for retry",
+      "guard": "",
+      "branch_group": "",
+      "terminal": true,
+      "order": 7
+    },
+    {
+      "id": "VTE-610c72a10a7370ae",
+      "from": "VDN-17b0bc2770432ef2",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "calls",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-80a489e58a5b6d7f",
+      "label": "Root forwards runtime inputs to AppShell",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 1
+    },
+    {
+      "id": "VTE-698641f35097294b",
+      "from": "SC-3",
+      "to": "SURF:SC-3:ui",
+      "kind": "requires_surface",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-6d0dab1aad9d1da9",
+      "from": "EF-1",
+      "to": "VDN-aebba2a693dbdd96",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-6ec82436075fceba",
+      "from": "VDN-c08451c6db1f6af4",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "kind": "writes",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-c8df64f6b031285f",
+      "label": "the confirmation-gated rule deletes the selected CulturalHeritage record by its identifier",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 5
+    },
+    {
+      "id": "VTE-6f8447476b57fa93",
+      "from": "SURF:SC-3:business_rule",
+      "to": "VDN-7591323b8e28fe0f",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-71867ca916f162f4",
+      "from": "AC-4",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-7250edcb987f7f91",
+      "from": "SURF:SC-1:data",
+      "to": "AC-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-7727f49aaf20998a",
+      "from": "UC-1",
+      "to": "SC-3",
+      "kind": "contains",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-785a9b8c7598c596",
+      "from": "MF-3",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-79666f067888655e",
+      "from": "SURF:SC-2:ui",
+      "to": "AC-2",
+      "kind": "satisfies",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-7db9fea455cf470c",
+      "from": "AC-4",
+      "to": "VDN-8154a2b82dcbdedd",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-83a670908097d1fc",
+      "from": "SC-3",
+      "to": "AC-3",
+      "kind": "contains",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-870bcdbcc8e3bce6",
+      "from": "AC-3",
+      "to": "VDN-aebba2a693dbdd96",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-897d31e869f52d32",
+      "from": "MF-3",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-8a912a278842fcaa",
+      "from": "MF-2",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-8aa01c68c13e1fb3",
+      "from": "SURF:SC-1:ui",
+      "to": "AC-4",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-8ef9ac8bd74ef5e1",
+      "from": "SC-2",
+      "to": "SURF:SC-2:data",
+      "kind": "requires_surface",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-8f4d8c6bfd3b3370",
+      "from": "MF-4",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-91085a001f0a18c4",
+      "from": "AC-3",
+      "to": "VDN-7591323b8e28fe0f",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-9392d14eeabf7753",
+      "from": "SURF:SC-1:data",
+      "to": "MF-4",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-93de45bb068291a4",
+      "from": "VDN-8154a2b82dcbdedd",
+      "to": "VDN-aebccf9fe2287c31",
+      "kind": "calls",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "source_edge_id": "VDE-63dff33432416583",
+      "label": "the operator's confirmed cancellation from the open confirmation dialog is resolved by the cancellation rule",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 2
+    },
+    {
+      "id": "VTE-93e5302f4de649de",
+      "from": "SURF:SC-1:ui",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-97a847f10abd2950",
+      "from": "SC-1",
+      "to": "AC-1",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-9a4a089b89f7ded2",
+      "from": "SURF:SC-2:ui",
+      "to": "AC-4",
+      "kind": "satisfies",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-9bbb6c3b4906d21d",
+      "from": "VDN-aebccf9fe2287c31",
+      "to": "VDN-8154a2b82dcbdedd",
+      "kind": "returns",
+      "scenario_id": "SC-2",
+      "component_id": "",
+      "source_edge_id": "VDE-8a6d9f9989ffe699",
+      "label": "the rule returns the never-dispatched deletion, the unchanged selection and the cancellation confirmation to the screen",
+      "guard": "",
+      "branch_group": "",
+      "terminal": true,
+      "order": 3
+    },
+    {
+      "id": "VTE-9c5580987ef93727",
+      "from": "MF-1",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-a138b27c5a38a4c9",
+      "from": "VDN-7591323b8e28fe0f",
+      "to": "VDN-aebba2a693dbdd96",
+      "kind": "writes",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-b92cb5e27a9f7bc7",
+      "label": "the interruption rollback rule attempts to delete the selected CulturalHeritage record by its identifier",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 4
+    },
+    {
+      "id": "VTE-a2f1712509ec3dce",
+      "from": "SC-2",
+      "to": "SURF:SC-2:ui",
+      "kind": "requires_surface",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-a603669a0d2cfc10",
+      "from": "BR-1",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-a70cbfd0ff25dae7",
+      "from": "VDN-f972f22cbbcf1e2f",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "returns",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-18beb329b6b03994",
+      "label": "persistence reports the deletion of the selected CulturalHeritage back to the rule",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 6
+    },
+    {
+      "id": "VTE-a73018aa76691ab5",
+      "from": "SURF:SC-3:business_rule",
+      "to": "AC-3",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-aa4dc715a0d13a2e",
+      "from": "BR-1",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-ab1422b8820dfcb0",
+      "from": "SC-1",
+      "to": "SURF:SC-1:ui",
+      "kind": "requires_surface",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-ad842ac0c1fe70f9",
+      "from": "SC-3",
+      "to": "SURF:SC-3:data",
+      "kind": "requires_surface",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-af5523ea81f6c873",
+      "from": "AC-3",
+      "to": "VDN-e56af334b66c19a6",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-b111050a49985fe4",
+      "from": "SURF:SC-1:business_rule",
+      "to": "MF-3",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-b607088ca404532c",
+      "from": "MF-4",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-b6203af60555f0b5",
+      "from": "SURF:SC-1:api",
+      "to": "MF-4",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-b7bfc203f388a126",
+      "from": "SURF:SC-1:data",
+      "to": "BR-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-b7f6136ca9d4ed55",
+      "from": "MF-3",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-b89eca554a4b60e0",
+      "from": "SURF:SC-1:business_rule",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-b9a2d12ad077822c",
+      "from": "SC-2",
+      "to": "AC-4",
+      "kind": "contains",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-bb7f71d5d161d101",
+      "from": "SC-2",
+      "to": "AF-1",
+      "kind": "contains",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-c0dacad440879abd",
+      "from": "SURF:SC-1:ui",
+      "to": "MF-2",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-c150079492be6899",
+      "from": "SURF:SC-3:ui",
+      "to": "EF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-c2fa5451606cdb35",
+      "from": "MF-1",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-c356d3749104faea",
+      "from": "VDN-7591323b8e28fe0f",
+      "to": "VDN-b2af0c88ed45e400",
+      "kind": "returns",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-aa294e2d409bff3f",
+      "label": "the rule reports the rolled-back interruption failure to the deletion boundary",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 6
+    },
+    {
+      "id": "VTE-c457dfe13a1cb498",
+      "from": "SURF:SC-2:business_rule",
+      "to": "VDN-aebccf9fe2287c31",
+      "kind": "realizes",
+      "scenario_id": "SC-2",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-c62830baecf060e4",
+      "from": "SURF:SC-1:data",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "database"
+    },
+    {
+      "id": "VTE-c6d131617075aed4",
+      "from": "SC-1",
+      "to": "MF-2",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-c796b8be1a5e8e09",
+      "from": "SURF:SC-1:api",
+      "to": "AC-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-c8ae03f3238f426a",
+      "from": "SURF:SC-3:data",
+      "to": "EF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-cef2b86441e2759c",
+      "from": "AC-1",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-d10478c273eaab6f",
+      "from": "VDN-e56af334b66c19a6",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "depends_on",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-15c3a950c5fc4aac",
+      "label": "SC-3 depends on SC-1",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 1
+    },
+    {
+      "id": "VTE-d357a59fdd3253ae",
+      "from": "SC-1",
+      "to": "AC-4",
+      "kind": "contains",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-d3efc6c0a8744f80",
+      "from": "SURF:SC-2:business_rule",
+      "to": "AF-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-d8024b6744a3abdf",
+      "from": "AC-1",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-d8dd3f5e3d849b4e",
+      "from": "SURF:SC-1:api",
+      "to": "BR-1",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-da03abc80d8d5339",
+      "from": "UC-1",
+      "to": "SC-2",
+      "kind": "contains",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-da585a4722eed5d8",
+      "from": "SC-2",
+      "to": "AC-2",
+      "kind": "contains",
+      "scenario_id": "SC-2",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-ddad79d53fc36d1c",
+      "from": "VDN-9c276a1d75ac9f49",
+      "to": "VDN-c08451c6db1f6af4",
+      "kind": "calls",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-e19a23f52c0239e0",
+      "label": "the deletion route invokes the confirmation-gated elimination rule with the culturalHeritageId and the operator confirmation",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 4
+    },
+    {
+      "id": "VTE-dded741f61a7e4c8",
+      "from": "VDN-b31b85277d1d8727",
+      "to": "VDN-e05e8071615706e0",
+      "kind": "calls",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-31c47d879e1ee5f4",
+      "label": "AppShell renders CulturalHeritageScreen with the available CulturalHeritage records for selection and elimination",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 2
+    },
+    {
+      "id": "VTE-df75e239f679a9be",
+      "from": "VDN-e05e8071615706e0",
+      "to": "VDN-9c276a1d75ac9f49",
+      "kind": "calls",
+      "scenario_id": "SC-1",
+      "component_id": "",
+      "source_edge_id": "VDE-611d516003182d09",
+      "label": "the operator's confirmed elimination is submitted to the DELETE cultural heritage request boundary",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 3
+    },
+    {
+      "id": "VTE-e0d1c436e79f163a",
+      "from": "SC-3",
+      "to": "SURF:SC-3:api",
+      "kind": "requires_surface",
+      "scenario_id": "SC-3",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-e6223655489ea38a",
+      "from": "PRE-1",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-e73058ace0ce70fb",
+      "from": "MF-3",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-e939a1e53838fb12",
+      "from": "VDN-b2af0c88ed45e400",
+      "to": "VDN-7591323b8e28fe0f",
+      "kind": "calls",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-3997ca427492e037",
+      "label": "the deletion boundary invokes the deletion rule with the selected CulturalHeritage identifier, the operator confirmation and the observed ETOUR connection interruption signal",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 3
+    },
+    {
+      "id": "VTE-ed2a6397571ced44",
+      "from": "PRE-1",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-f4398161c4895449",
+      "from": "VDN-e56af334b66c19a6",
+      "to": "VDN-b2af0c88ed45e400",
+      "kind": "calls",
+      "scenario_id": "SC-3",
+      "component_id": "",
+      "source_edge_id": "VDE-c01771968c035f59",
+      "label": "the confirmation dialog forwards the interrupted confirmed elimination to the DELETE CulturalHeritage request boundary",
+      "guard": "",
+      "branch_group": "",
+      "terminal": false,
+      "order": 2
+    },
+    {
+      "id": "VTE-f674c36f07e8a546",
+      "from": "SC-1",
+      "to": "SURF:SC-1:data",
+      "kind": "requires_surface",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-fa66c9c3b321c283",
+      "from": "AC-1",
+      "to": "VDN-17b0bc2770432ef2",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    },
+    {
+      "id": "VTE-fc4c368b94009b0f",
+      "from": "AC-3",
+      "to": "VDN-b2af0c88ed45e400",
+      "kind": "realizes",
+      "scenario_id": "SC-3",
+      "component_id": "api"
+    },
+    {
+      "id": "VTE-fc5f8bed566bc858",
+      "from": "SURF:SC-1:ui",
+      "to": "MF-3",
+      "kind": "satisfies",
+      "scenario_id": "SC-1",
+      "component_id": ""
+    },
+    {
+      "id": "VTE-fe2ab04998dbde2c",
+      "from": "AC-1",
+      "to": "VDN-b31b85277d1d8727",
+      "kind": "realizes",
+      "scenario_id": "SC-1",
+      "component_id": "web"
+    }
+  ],
+  "artifact_digest": "sha256:dcb98e90d3b948124f6749ca94d89faed3d69abbe13ad4fee34b670a7252b11e"
+}

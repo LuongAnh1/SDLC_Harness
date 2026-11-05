@@ -31,6 +31,16 @@ _ACTIVE_STAGE_IDS_BY_PROJECT = {
     # bất biến; Chặng B phải phát hành policy/profile version mới để mở rộng.
     "typescript_fullstack_v1": ("typecheck", "unit"),
 }
+# What each active stage can observe; fixed by the profile's protected tsconfig/vitest config.
+_STAGE_CAPABILITIES_BY_PROJECT = {
+    "typescript_fullstack_v1": {
+        "typecheck": "TypeScript compiler over the workspace: proves types, imports and exported "
+        "signatures of .ts/.tsx sources; runs no code and does not read stylesheets.",
+        "unit": "Vitest in a Node environment with no DOM and no browser: runs exported TypeScript "
+        "functions and React rendered to static markup; cannot observe focus movement, keyboard "
+        "events, live-region announcements, CSS or viewport-dependent layout.",
+    },
+}
 _PROHIBITED_EXECUTION_FIELDS = {
     "command",
     "argv",
@@ -57,7 +67,13 @@ class VerificationStagePolicy:
         }
 
     def prompt_context(self) -> dict[str, object]:
-        return self.metadata()
+        capabilities = _STAGE_CAPABILITIES_BY_PROJECT.get(self.project_profile_id, {})
+        return {
+            **self.metadata(),
+            "stage_capabilities": {
+                stage_id: capabilities[stage_id] for stage_id in self.stage_ids if stage_id in capabilities
+            },
+        }
 
 
 def profiled_plan_contract_issues(

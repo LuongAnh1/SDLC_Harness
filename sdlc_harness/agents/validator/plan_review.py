@@ -908,11 +908,23 @@ def _llm_review_prompt(
         if canonical_requirement
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
-    compact_plan = {
-        key: value
-        for key, value in structured_plan.items()
-        if key not in {"requirement_coverage", "repair_history", "repo_context"}
-    }
+    component_aware = structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    # V4 projections are rendered from work_units and checked by the rule review; unit contract
+    # copies duplicate the Vertical Design nodes/edges below.
+    omitted = {"requirement_coverage", "repair_history", "repo_context"} | (
+        {"implementation_steps", "proposed_files", "design_mappings", "test_intents"} if component_aware else set()
+    )
+    compact_plan = {key: value for key, value in structured_plan.items() if key not in omitted}
+    if component_aware:
+        compact_plan["work_units"] = [
+            {
+                key: value
+                for key, value in unit.items()
+                if key not in {"surface_contracts", "boundary_contracts"}
+            }
+            for unit in structured_plan.get("work_units", [])
+            if isinstance(unit, dict)
+        ]
     compact_trace = {
         key: requirement_design_trace.get(key, [])
         for key in ("version", "class_trace", "sequence_trace")
@@ -949,15 +961,20 @@ def _llm_review_prompt(
         """
 Component-aware V4 boundaries:
 - Vertical Design nodes define the complete approved work-unit/component scope.
-  Do not invent a new business component or work unit. Supporting artifacts in an
-  existing repository component are allowed when repo evidence makes them necessary
-  for an executable approved flow.
-- Work-unit identity, membership, dependency, and order are Harness-owned. Do not
-  ask Developer.plan to change them. Review only Planner-owned objectives, targets,
+  Do not invent a new business component or work unit. Supporting code belongs inside
+  files a unit already owns through its runtime bindings, plus shared contracts, data
+  schema/migration artifacts and UI stylesheets; ask for an in-file seam (exported helper,
+  injected dependency) rather than a new support file, which the rule review rejects.
+- Work-unit identity, membership, dependency, order and runtime_bindings are Harness-owned.
+  Do not ask Developer.plan to change them. Review only Planner-owned objectives, targets,
   migration decisions, tests, evidence, and signature content.
-- Compatibility fields are projections, not a second plan. Fail them only when they
-  contradict canonical work-unit targets or signatures; feedback must be repairable
-  through Planner-owned fields.
+- `code_entities` marks units that edit the same code symbol in order. Block when a later
+  unit's objective or tests would break behavior an earlier listed unit's contract requires.
+- Compatibility projections (steps, proposed files, design mappings, top-level test
+  intents) are rendered from work_units and checked by the rule review, so they are omitted
+  below. Unit surface/boundary contracts are the Vertical Design node `surface_contract` and
+  edge `boundary_contract` values for the unit's design_node_ids/design_edge_ids.
+  Feedback must be repairable through Planner-owned fields.
 - A `unit` intent targets a test file. A `typecheck` intent targets a non-test source
   file already owned by the same work unit.
 - The legacy Class graph supplies signature trace identity, not callable type authority.
@@ -966,13 +983,19 @@ Component-aware V4 boundaries:
   accepts input, returns data/status, persists identity, or renders UI.
 - When repo evidence shows an existing shared-contract, client-adapter, or migration
   convention, require the plan to use it if otherwise Web/API/data boundaries would
-  have to invent incompatible shapes. Attach supporting files to an approved unit;
-  require upstream Design change only when no approved unit can own them.
+  have to invent incompatible shapes. Attach supporting code to an approved unit's files;
+  require upstream Design change only when no approved unit can own it.
 - For every UI surface, verify that the objective, exact code targets, and test intents
   cover every non-empty experience-contract category: component structure, feedback,
   accessibility, responsive behavior, and focus flow. CSS class names without owned or
   verified style rules do not implement responsive behavior; static markup alone does not
-  verify interaction or focus navigation.
+  verify interaction or focus navigation. A UI unit may own a stylesheet under the policy's
+  `ui_stylesheets` root.
+- Judge each test intent against the verification policy's `stage_capabilities`. Block a
+  test intent that claims a stage verifies behavior outside its capability, and block
+  contract decisions the planned code could expose to a capable stage but leaves untested.
+  Do not block because behavior needs a stage the profile does not activate when the unit
+  objective states that it stays unverified; report it as a warning in summary only.
 - Verify that required boundary auth/input mappings and runtime attachments have an explicit
   owner/caller target. A dependency ID without its component, surfaces, and produced artifacts
   is not sufficient evidence that downstream wiring is executable.

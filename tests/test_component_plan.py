@@ -6,12 +6,19 @@ from copy import deepcopy
 import json
 from pathlib import Path
 
+import pytest
+
 from sdlc_harness.agents.designer import (
     DELTA_VERSION,
+    GRAPH_VERSION_V1,
+    GRAPH_VERSION_V2,
     RUNTIME_BINDING_VERSION,
     apply_designer_delta,
+    delta_version_for,
     new_vertical_design_graph,
 )
+from sdlc_harness.agents.developer.component_plan import _topological_order
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     build_component_work_units,
@@ -547,6 +554,16 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
     polluted_web["planned_code_targets"].append(
         {"path": "apps/web/src/main.tsx", "symbol": "main", "action": "create_or_update"}
     )
+    polluted_web["planned_code_targets"].append(
+        {"path": "apps/web/src/CulturalHeritageDeleteScreen.css", "symbol": "", "action": "create_or_update"}
+    )
+    polluted_web["planned_code_targets"].append(
+        {
+            "path": "apps/web/src/CulturalHeritageDeleteScreen.tsx",
+            "symbol": "getDeleteScreenViewState",
+            "action": "create_or_update",
+        }
+    )
     polluted_units = canonicalize_work_unit_dependencies(polluted_units)
     projections = component_plan_projections(
         units=polluted_units,
@@ -580,6 +597,8 @@ def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -
         },
     )
     assert any("main.tsx#main` outside runtime wiring" in issue for issue in issues)
+    assert not any("CulturalHeritageDeleteScreen.css" in issue for issue in issues)
+    assert not any("getDeleteScreenViewState" in issue for issue in issues)
     assert any("no connected runtime work-unit path" in issue for issue in issues)
 
 
@@ -1156,3 +1175,326 @@ def test_missing_contract_marker_keeps_historical_v3() -> None:
     assert resolve_implementation_plan_contract(
         {"implementation_plan_contract_version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION}
     ) == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
+
+
+def _graph_with_main_and_branch(contract_version: str) -> tuple[dict[str, object], dict[str, object]]:
+    """Main SC-1 UI, an exception SC-3 UI that depends on it, and a SC-3 API node with no edge."""
+
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "requirement_v2" / "uc2.json").read_text(encoding="utf-8")
+    )
+    model = RequirementModelV2.from_dict(payload)
+    graph = new_vertical_design_graph(
+        run_id=model.run_id,
+        snapshot_binding={
+            "requirement_digest": "sha256:req",
+            "repo_landscape_digest": "sha256:repo",
+            "workspace_ref": "run_workspace_v1",
+            "base_sha": "abc123",
+        },
+        contract_version=contract_version,
+    )
+    scenarios = {item["id"]: item for item in model.scenario_contract["scenarios"]}
+
+    def add(graph, scenario_id, component_id, surface, kind, temp_ref, edges=()):
+        contract = scenarios[scenario_id]["surfaces"][surface]
+        return apply_designer_delta(
+            graph,
+            {
+                "schema_version": delta_version_for(contract_version),
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": model.use_case["id"],
+                    "scenario_id": scenario_id,
+                    "component_id": component_id,
+                },
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {surface: "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": temp_ref,
+                            "semantic_key": f"{scenario_id}:{component_id}:{surface}",
+                            "name": f"{scenario_id} {surface}",
+                            "kind": kind,
+                            "surface": surface,
+                            "disposition": "add",
+                            "requirement_refs": contract["requirement_refs"],
+                            "evidence_refs": [],
+                            "evidence_reason": "New behavior.",
+                            "contract": f"Realize {surface} for {scenario_id}.",
+                        },
+                    },
+                    *[{"op": "add_edge", "edge": edge} for edge in edges],
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs=set(),
+        )
+
+    graph, main_refs = add(graph, "SC-1", "web", "ui", "ui_interaction", "tmp:main-ui")
+    graph, _ = add(
+        graph,
+        "SC-3",
+        "web",
+        "ui",
+        "ui_interaction",
+        "tmp:branch-ui",
+        edges=[
+            {
+                "from": "tmp:branch-ui",
+                "to": main_refs["tmp:main-ui"],
+                "kind": "depends_on",
+                "label": "Branch starts from the main screen",
+                "scenario_id": "SC-3",
+                "branch_group": "",
+                "guard": "",
+                "terminal": False,
+            }
+        ],
+    )
+    graph, _ = add(graph, "SC-3", "api", "api", "api_contract", "tmp:branch-api")
+    return graph, build_vertical_trace_graph(requirement_model=model, design_graph=graph)
+
+
+def test_blanket_branch_dependency_stays_for_v1_and_is_dropped_for_v2() -> None:
+    planning, _ = _policy()
+    for version, expect_main_dependency in ((GRAPH_VERSION_V1, True), (GRAPH_VERSION_V2, False)):
+        graph, trace = _graph_with_main_and_branch(version)
+        units = build_component_work_units(
+            design_graph=graph,
+            trace_graph=trace,
+            repo_landscape={"anchors": []},
+            planning_policy=planning,
+        )
+        main_ui = next(u for u in units if u["scenario_id"] == "SC-1")
+        branch_ui = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "web")
+        branch_api = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "api")
+        assert branch_ui["depends_on"] == [main_ui["unit_id"]], version
+        assert (main_ui["unit_id"] in branch_api["depends_on"]) is expect_main_dependency, version
+
+
+def _r9_units() -> tuple[list[dict[str, object]], dict[str, str]]:
+    root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
+    planning, _ = _policy()
+    units = build_component_work_units(
+        design_graph=json.loads((root / "vertical_design_graph.json").read_text(encoding="utf-8")),
+        trace_graph=json.loads((root / "vertical_trace_graph.json").read_text(encoding="utf-8")),
+        repo_landscape=json.loads((root / "repo_landscape.json").read_text(encoding="utf-8")),
+        planning_policy=planning,
+    )
+    return units, {u["unit_id"]: f"{u['scenario_id']}/{u['component_id']}" for u in units}
+
+
+def test_r9_design_v2_units_depend_on_shared_code_entities() -> None:
+    units, name = _r9_units()
+    deps = {name[u["unit_id"]]: sorted(name[d] for d in u["depends_on"]) for u in units}
+
+    assert deps == {
+        "SC-1/database": [],
+        "SC-1/api": ["SC-1/database"],
+        "SC-1/web": ["SC-1/api"],
+        "SC-2/web": ["SC-1/web"],
+        "SC-3/database": ["SC-1/database"],
+        "SC-3/api": ["SC-1/api", "SC-3/database"],
+        "SC-3/web": ["SC-1/web", "SC-2/web", "SC-3/api"],
+    }
+    assert [name[u["unit_id"]] for u in units] == [
+        "SC-1/database",
+        "SC-1/api",
+        "SC-1/web",
+        "SC-2/web",
+        "SC-3/database",
+        "SC-3/api",
+        "SC-3/web",
+    ]
+    sc3_web = next(u for u in units if name[u["unit_id"]] == "SC-3/web")
+    screen = next(
+        item
+        for item in sc3_web["code_entities"]
+        if item["entity"] == "apps/web/src/CulturalHeritageScreen.tsx#CulturalHeritageScreen"
+    )
+    assert [name[unit_id] for unit_id in screen["unit_ids"]] == ["SC-1/web", "SC-2/web", "SC-3/web"]
+    assert len(screen["design_node_ids"]) == 3
+    assert canonicalize_work_unit_dependencies(units) == units
+
+
+def test_r9_code_entities_and_dependencies_are_immutable_for_the_planner() -> None:
+    units, _ = _r9_units()
+    planning, _ = _policy()
+    unit = units[-1]
+    merged = merge_work_unit_updates(
+        units=units,
+        updates=[{"unit_id": unit["unit_id"], "code_entities": [], "depends_on": []}],
+        planning_policy=planning,
+    )
+    current = next(u for u in merged if u["unit_id"] == unit["unit_id"])
+    assert current["code_entities"] == unit["code_entities"]
+    assert current["depends_on"] == unit["depends_on"]
+
+
+def test_planner_helpers_do_not_steal_legacy_bindings_from_runtime_targets() -> None:
+    from sdlc_harness.agents.developer.planner import _design_mappings
+
+    root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
+    load = lambda name: json.loads((root / f"{name}.json").read_text(encoding="utf-8"))  # noqa: E731
+    units, name = _r9_units()
+    planning, _ = _policy()
+    with_helpers = deepcopy(units)
+    helpers = {
+        "SC-1/web": ("apps/web/src/CulturalHeritageScreen.tsx", "getCulturalHeritageDeletionViewState"),
+        "SC-2/web": ("apps/web/src/CulturalHeritageScreen.tsx", "getCulturalHeritageCancellationViewState"),
+        "SC-3/api": ("apps/api/src/cultural-heritage.ts", "getCulturalHeritageDeletionKey"),
+    }
+    for unit in with_helpers:
+        if name[unit["unit_id"]] in helpers:
+            path, symbol = helpers[name[unit["unit_id"]]]
+            unit["planned_code_targets"].append({"path": path, "symbol": symbol, "action": "create_or_update"})
+    base = _design_mappings(
+        class_graph=load("class_diagram_graph"),
+        sequence_graph=load("sequence_diagram_graph"),
+        target_files=[],
+        target_repo_path="target",
+        requirement_design_trace={},
+        planning_policy=planning,
+    )
+
+    def bound(candidate_units: list[dict[str, object]]) -> dict[str, str]:
+        return {
+            str(item.get("design_element_id")): str(item.get("planned_code_target"))
+            for item in rebind_legacy_mappings_to_work_units(
+                units=candidate_units,
+                design_graph=load("vertical_design_graph"),
+                legacy_mappings=base,
+                planning_policy=planning,
+            )
+        }
+
+    assert bound(with_helpers) == bound(units)
+    assert not any("ViewState" in target or "DeletionKey" in target for target in bound(with_helpers).values())
+
+
+def test_repair_that_removes_a_target_rebinds_legacy_mappings_to_final_units() -> None:
+    from sdlc_harness.agents.developer import DeveloperPlanAgent
+    from sdlc_harness.agents.developer.planner import ImplementationPlanDraft
+
+    root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
+    load = lambda name: json.loads((root / f"{name}.json").read_text(encoding="utf-8"))  # noqa: E731
+    units, name = _r9_units()
+    planning, verification = _policy()
+    sc3_api = next(u for u in units if name[u["unit_id"]] == "SC-3/api")
+    extra = {"path": "apps/api/src/etour-client.ts", "symbol": "deleteCulturalHeritage", "action": "create_or_update"}
+    previous_units = deepcopy(units)
+    next(u for u in previous_units if u["unit_id"] == sc3_api["unit_id"])["planned_code_targets"].append(extra)
+
+    class StubClient:
+        settings = None
+
+        def complete(self, *, system: str, prompt: str, **_: object) -> str:
+            return json.dumps(
+                {
+                    "summary": "Remove the unapproved client file.",
+                    "work_unit_updates": [
+                        {
+                            "unit_id": sc3_api["unit_id"],
+                            "remove_planned_code_targets": [
+                                {"path": extra["path"], "symbol": extra["symbol"]}
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    draft = DeveloperPlanAgent(StubClient()).repair_plan(
+        previous_draft=ImplementationPlanDraft(
+            markdown="",
+            structured={"work_units": previous_units, "implementation_signature_contract": {}},
+        ),
+        review_report={"ok": False, "affected_unit_ids": [sc3_api["unit_id"]]},
+        developer_feedback="Remove the unapproved support target.",
+        iteration=1,
+        run_id="run_20261102_100240_755e94d0",
+        source_ref="dataset_use_case:eTour:UC1",
+        issue_key="UC1",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        requirement_design_trace={},
+        class_graph=load("class_diagram_graph"),
+        sequence_graph=load("sequence_diagram_graph"),
+        target_repo_path="target",
+        target_repo_remote="origin",
+        target_base_branch="main",
+        planned_branch="feature/test",
+        target_files=[],
+        requirement_graph={},
+        planning_policy=planning,
+        verification_policy=verification,
+        contract_version=COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+        vertical_design_graph=load("vertical_design_graph"),
+        vertical_trace_graph=load("vertical_trace_graph"),
+        repo_landscape=load("repo_landscape"),
+        component_plan_inputs={},
+    )
+
+    repaired = next(u for u in draft.structured["work_units"] if u["unit_id"] == sc3_api["unit_id"])
+    assert extra["path"] not in {t["path"] for t in repaired["planned_code_targets"]}
+    assert not any(
+        extra["path"] in str(item.get("planned_code_target") or "")
+        for item in draft.structured["design_mappings"]
+    )
+
+
+def test_planner_removes_its_own_targets_but_not_runtime_targets() -> None:
+    planning, _ = _policy()
+    unit = {
+        "unit_id": "WU-A",
+        "order": 1,
+        "scenario_id": "SC-1",
+        "component_id": "web",
+        "surfaces": ["ui"],
+        "depends_on": [],
+        "planned_code_targets": [
+            {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"},
+            {"path": "apps/web/src/AppShell.tsx", "symbol": "AppShell"},
+            {"path": "apps/web/src/main.tsx", "symbol": "main"},
+        ],
+        "runtime_bindings": [
+            {
+                "target": {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"},
+                "attachment": {"owner_path": "apps/web/src/AppShell.tsx", "owner_symbol": "AppShell"},
+            }
+        ],
+        "test_intents": [],
+    }
+    merged = merge_work_unit_updates(
+        units=[unit],
+        updates=[
+            {
+                "unit_id": "WU-A",
+                "remove_planned_code_targets": [
+                    {"path": "apps/web/src/main.tsx", "symbol": "main"},
+                    {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"},
+                    {"path": "apps/web/src/AppShell.tsx", "symbol": "AppShell"},
+                ],
+            }
+        ],
+        planning_policy=planning,
+    )
+    assert {(t["path"], t["symbol"]) for t in merged[0]["planned_code_targets"]} == {
+        ("apps/web/src/Screen.tsx", "Screen"),
+        ("apps/web/src/AppShell.tsx", "AppShell"),
+    }
+
+
+def test_dependency_cycle_reports_only_the_looping_units() -> None:
+    units = [
+        {"unit_id": "WU-A", "depends_on": ["WU-B"]},
+        {"unit_id": "WU-B", "depends_on": ["WU-A"]},
+        {"unit_id": "WU-C", "depends_on": ["WU-A"]},
+        {"unit_id": "WU-D", "depends_on": []},
+    ]
+    with pytest.raises(HarnessError) as error:
+        _topological_order(units)
+    assert error.value.error_code == "implementation_plan_dependency_cycle"
+    assert "[['WU-A', 'WU-B']]" in error.value.message

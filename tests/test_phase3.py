@@ -1739,6 +1739,51 @@ Thanks."""
         self.assertEqual(state["last_error"]["error_code"], "implementation_plan_developer_failed")
         self.assertEqual(state["last_error"]["run_id"], approved["run_id"])
 
+    def test_admission_failure_after_checkpoint_clear_marks_run_instead_of_stalling(self) -> None:
+        approved = self._create_phase2_run()
+        run_id = str(approved["run_id"])
+        cases = {
+            "implementation_plan_contract_invalid": ("implementation_planning", "failed"),
+            "implementation_plan_design_composition_blocked": ("design_review", "blocked"),
+        }
+        for error_code, (phase, status) in cases.items():
+            with self.subTest(error_code=error_code):
+                workflow = PhaseThreeWorkflow(self.settings)
+                state = workflow.store.read_state(run_id)
+                state.update({"current_phase": "design_review", "status": "waiting_design_approval"})
+                workflow.store.write_state(state)
+
+                def fail_admission(**_kwargs: object) -> None:
+                    raise HarnessError(error_code, "admission failed")
+
+                workflow._component_plan_context = fail_admission  # type: ignore[method-assign]
+                with self.assertRaises(HarnessError) as ctx:
+                    workflow._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
+
+                self.assertEqual(ctx.exception.error_code, error_code)
+                recovered = workflow.store.read_state(run_id)
+                self.assertEqual(recovered["current_phase"], phase)
+                self.assertEqual(recovered["status"], status)
+                self.assertIsNone(recovered["pending_checkpoint"])
+                self.assertEqual(recovered["last_error"]["error_code"], error_code)
+
+    def test_corrupt_design_artifact_after_checkpoint_clear_marks_run_failed(self) -> None:
+        approved = self._create_phase2_run()
+        run_id = str(approved["run_id"])
+        workflow = PhaseThreeWorkflow(self.settings)
+        state = workflow.store.read_state(run_id)
+        (self.repo_root / str(state["latest_artifacts"]["class_diagram_graph"])).write_text(
+            "{not json", encoding="utf-8"
+        )
+
+        with self.assertRaises(HarnessError):
+            workflow._approve_design_checkpoint_locked(run_id=run_id, resume_step_review=True)
+
+        recovered = workflow.store.read_state(run_id)
+        self.assertEqual(recovered["current_phase"], "implementation_planning")
+        self.assertEqual(recovered["status"], "failed")
+        self.assertIsNone(recovered["pending_checkpoint"])
+
     def test_component_routing_failure_returns_run_to_design_revalidation(self) -> None:
         approved = self._create_phase2_run()
         workflow = PhaseThreeWorkflow(self.settings)

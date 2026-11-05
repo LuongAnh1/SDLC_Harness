@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 
 PLANNING_PATH_POLICY_VERSION = "planning_path_policy_v1"
+# shortcut: stylesheet roots are fixed like the prisma/e2e roots; move into ComponentProfile
+# when a second project profile needs stylesheets.
+STYLESHEET_ROOTS = {"apps/web/src": (".css",)}
 _WINDOWS_DRIVE_PATTERN = re.compile(r"^[a-zA-Z]:")
 
 
@@ -80,6 +83,11 @@ class PlanningPathPolicy:
                 "browser_e2e": {
                     "root": "tests/e2e",
                     "suffixes": [".spec.ts", ".spec.tsx"],
+                },
+                **{
+                    "ui_stylesheets": {"root": root, "suffixes": list(suffixes)}
+                    for root, suffixes in STYLESHEET_ROOTS.items()
+                    if any(root in roots for _, roots in self.component_roots)
                 },
             },
         }
@@ -205,6 +213,8 @@ class PlanningPathPolicy:
             return path if path.endswith((".prisma", ".sql")) else ""
         if component_id == "e2e":
             return path if path.endswith((".spec.ts", ".spec.tsx")) else ""
+        if self.is_stylesheet_path(path):
+            return path
         rule = self.rule(component_id)
         source_suffixes = tuple(source for source, _ in rule.suffix_pairs)
         suffixes = tuple(sorted((*self.language_test_suffixes, *source_suffixes), key=len, reverse=True))
@@ -226,6 +236,13 @@ class PlanningPathPolicy:
             return ""
         component_id, _ = self._owned_root(path)
         return component_id
+
+    def is_stylesheet_path(self, value: object) -> bool:
+        path = _canonical_path(value)
+        if not path:
+            return False
+        component_id, root = self._owned_root(path)
+        return bool(component_id) and path.endswith(STYLESHEET_ROOTS.get(root, ()))
 
     def is_test_path(self, value: object) -> bool:
         path = _canonical_path(value)

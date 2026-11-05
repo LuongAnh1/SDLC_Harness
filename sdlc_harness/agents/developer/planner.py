@@ -789,7 +789,7 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         preserved = canonicalize_work_unit_dependencies(preserved)
-        legacy_mappings = _design_mappings(
+        base_mappings = _design_mappings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             target_files=target_files,
@@ -800,7 +800,7 @@ class DeveloperPlanAgent:
         legacy_mappings = rebind_legacy_mappings_to_work_units(
             units=preserved,
             design_graph=vertical_design_graph,
-            legacy_mappings=legacy_mappings,
+            legacy_mappings=base_mappings,
             planning_policy=planning_policy,
         )
         signature_targets = _implementation_signature_targets(
@@ -836,6 +836,18 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         units = canonicalize_work_unit_dependencies(units)
+        if any(_dict_items(item.get("remove_planned_code_targets")) for item in proposed_updates):
+            # Mappings bound before the patch may still point at a target the patch removed.
+            legacy_mappings = rebind_legacy_mappings_to_work_units(
+                units=units,
+                design_graph=vertical_design_graph,
+                legacy_mappings=base_mappings,
+                planning_policy=planning_policy,
+            )
+            signature_targets = _implementation_signature_targets(
+                mappings=legacy_mappings,
+                class_graph=class_graph,
+            )
         projections = component_plan_projections(
             units=units,
             design_graph=vertical_design_graph,
@@ -975,6 +987,15 @@ class DeveloperPlanAgent:
             return {"_developer_llm_parse_error": exc.message}
 
 
+def _units_for_prompt(units: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Drop contract copies the prompt already carries in the Vertical Design slice."""
+
+    return [
+        {key: value for key, value in unit.items() if key not in {"surface_contracts", "boundary_contracts"}}
+        for unit in units
+    ]
+
+
 def _complete_phase3_json(
     llm_client: Any,
     *,
@@ -1071,6 +1092,9 @@ Return JSON only:
       "planned_code_targets": [
         {{"path": "profile-approved repo-relative path", "symbol": "optional qualified symbol"}}
       ],
+      "remove_planned_code_targets": [
+        {{"path": "exact existing target path", "symbol": "exact existing target symbol"}}
+      ],
       "migration_impact": {{
         "status": "required|not_required",
         "reason": "decision grounded in the approved data contract",
@@ -1120,7 +1144,9 @@ Rules:
 - When another data unit already owns the same schema migration, mark a read-only
   consumer `not_required` and explain that it uses the approved shared schema.
 - Do not invent Requirement, Design, component, dependency or work-unit IDs.
-- Treat each work unit's `surface_contracts` as immutable approved behavior. For UI work,
+- Treat the `surface_contract` of every Design node in a unit's design_node_ids and the
+  `boundary_contract` of every edge in its design_edge_ids (both in the Vertical Design slice;
+  the work units below omit these copies) as immutable approved behavior. For UI work,
   make the objective, targets, and tests realize its component structure, feedback,
   accessibility, responsive behavior, focus flow, and guidance references.
 - A UI objective is only executable when it names every non-empty experience-contract
@@ -1134,7 +1160,19 @@ Rules:
   that supplies them. A completed dependency ID without its component/surface/artifacts is
   not sufficient execution evidence.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
-  wiring, except approved shared-contract files and data schema/migration artifacts.
+  wiring, except approved shared-contract files, data schema/migration artifacts and UI
+  stylesheets.
+- A UI unit may own stylesheet targets under the planning policy's `ui_stylesheets` root.
+  Choose the style mechanism from repository evidence; when the contract needs responsive,
+  focus-appearance or visual-token rules and no stylesheet exists, plan one stylesheet next to
+  the screen component in the first unit that owns that component (code_entities order) and
+  import it there. Later units extend the same file.
+- Bind every test intent to a verification stage whose stated capability can observe the
+  behavior it claims. Put decisions the contract fixes (state transitions, focus targets,
+  announcement text, which controls are blocked) in exported pure functions inside the
+  planned targets so the `unit` stage can test them. When behavior needs a DOM or browser that
+  no active stage provides, say in the objective that it stays unverified until such a stage
+  exists; never claim a test proves it.
 - When Web and API cross a boundary and the profile has a contracts component, add an
   exact `packages/contracts/src/...` target to the nearest API work unit. Include the
   shared-contract barrel only when repository evidence requires its export.
@@ -1142,7 +1180,14 @@ Rules:
   package entrypoints to one provider work unit after this enrichment step.
 - Do not change dependency or order in prose. Harness serializes units that share code,
   test, contract, schema, or migration artifacts.
+- `code_entities` lists, in implementation order, every unit whose Design nodes bind to the
+  same code symbol. A later unit extends the code an earlier unit creates: its objective and
+  tests add only its own scenario's behavior and must stay compatible with the contracts of
+  the other listed design_node_ids, which appear in the Vertical Design slice.
 - For a repair, return only affected unit updates.
+- planned_code_targets only adds targets. To drop a target the review calls unapproved or
+  unnecessary, list its exact path and symbol in remove_planned_code_targets. Targets seeded
+  from runtime_bindings cannot be removed.
 - Emit exactly one signature entry for every Harness-owned signature target below.
 - Copy `target_path` and `target_symbol` exactly. Harness owns Design-to-code binding;
   never derive a class/method owner from the legacy Class graph and never invent a target.
@@ -1174,7 +1219,7 @@ Harness-owned signature targets:
     indent=2,
 )}
 Harness-owned work units:
-{json.dumps(units, ensure_ascii=False, indent=2)}
+{json.dumps(_units_for_prompt(units), ensure_ascii=False, indent=2)}
 Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:

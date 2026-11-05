@@ -1,0 +1,890 @@
+{
+  "schema_version": "repo_landscape_v1",
+  "run_id": "run_20261102_100240_755e94d0",
+  "snapshot": {
+    "workspace_ref": "run_workspace_v1",
+    "base_sha": "db07a7e66f006d0cc5ed73ff6449b02f8d935ad7",
+    "head_sha": "db07a7e66f006d0cc5ed73ff6449b02f8d935ad7",
+    "project_profile_id": "typescript_fullstack_v1",
+    "project_profile_schema": "project_profile_v1",
+    "language_profile_id": "typescript_v1",
+    "language_profile_schema": "language_profile_v1",
+    "target_manifest_digest": "sha256:0d4d25230fa1523c431357e990fa0df25dad3641ce1b5e5eb2bcd2c17fcef8ba"
+  },
+  "discovery": {
+    "mode": "codegraph_enriched",
+    "codegraph": {
+      "status": "used",
+      "query_digest": "sha256:17df8af67c1fbb5dfb3dabfafe9783215bf0ebe200b6826671b73d71b5249d89",
+      "result_digest": "sha256:477d2233a2300736a8d5152cfd1690116611c5ff072aa387500371da1ce881c8",
+      "matched_anchor_refs": []
+    }
+  },
+  "components": [
+    {
+      "component_id": "web",
+      "roots": [
+        "apps/web/src"
+      ],
+      "file_refs": [
+        "apps/web/src/AppShell.test.tsx",
+        "apps/web/src/AppShell.tsx",
+        "apps/web/src/health-client.test.ts",
+        "apps/web/src/health-client.ts",
+        "apps/web/src/main.tsx",
+        "apps/web/src/vite-env.d.ts"
+      ]
+    },
+    {
+      "component_id": "api",
+      "roots": [
+        "apps/api/src"
+      ],
+      "file_refs": [
+        "apps/api/src/app.test.ts",
+        "apps/api/src/app.ts",
+        "apps/api/src/health.test.ts",
+        "apps/api/src/health.ts",
+        "apps/api/src/server.ts"
+      ]
+    },
+    {
+      "component_id": "contracts",
+      "roots": [
+        "packages/contracts/src"
+      ],
+      "file_refs": [
+        "packages/contracts/src/health.ts",
+        "packages/contracts/src/index.ts"
+      ]
+    },
+    {
+      "component_id": "database",
+      "roots": [
+        "packages/db/src",
+        "packages/db/prisma"
+      ],
+      "file_refs": [
+        "packages/db/prisma/.gitkeep",
+        "packages/db/prisma/migrations/20261021000100_bootstrap_system_metadata/migration.sql",
+        "packages/db/prisma/migrations/migration_lock.toml",
+        "packages/db/prisma/schema.prisma",
+        "packages/db/src/client.ts",
+        "packages/db/src/config.test.ts",
+        "packages/db/src/config.ts",
+        "packages/db/src/health.test.ts",
+        "packages/db/src/health.ts",
+        "packages/db/src/index.ts",
+        "packages/db/src/seed.ts",
+        "packages/db/src/smoke.ts"
+      ]
+    },
+    {
+      "component_id": "e2e",
+      "roots": [
+        "tests/e2e"
+      ],
+      "file_refs": [
+        "tests/e2e/health.spec.ts"
+      ]
+    }
+  ],
+  "anchors": [
+    {
+      "anchor_id": "RLA-02442eba0aff90ae",
+      "kind": "test",
+      "component_id": "database",
+      "path": "packages/db/src/health.test.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-0394bbfc69cf866b",
+      "kind": "test",
+      "component_id": "e2e",
+      "path": "tests/e2e/health.spec.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-0979a4ec8e914d2c",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": "apps/web/vite.config.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-10b6cf0e5d2278ab",
+      "kind": "migration",
+      "component_id": "database",
+      "path": "packages/db/prisma/migrations/migration_lock.toml",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-1379ad8e796afd66",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/seed.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-155535c73b7d6db0",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "packages/contracts/tsconfig.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-17b7a8d7593d2beb",
+      "kind": "manifest",
+      "component_id": "profile",
+      "path": "apps/web/package.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-1ce74aff37afae17",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/smoke.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-1d33fe75847367a2",
+      "kind": "ui_entrypoint",
+      "component_id": "web",
+      "path": "apps/web/src/main.tsx",
+      "symbol": "main",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-26c7a57c5a1ffab5",
+      "kind": "source_file",
+      "component_id": "web",
+      "path": "apps/web/src/AppShell.tsx",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-2bb3fcd7edc2a840",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": ".sdlc/verify-bootstrap.test.mjs",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-32bd5649f50f3e36",
+      "kind": "test",
+      "component_id": "web",
+      "path": "apps/web/src/health-client.test.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-3c13247625c60798",
+      "kind": "service_symbol",
+      "component_id": "web",
+      "path": "apps/web/src/health-client.ts",
+      "symbol": "fetchHealth",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-3c7a1c7a1db15ff6",
+      "kind": "service_symbol",
+      "component_id": "contracts",
+      "path": "packages/contracts/src/health.ts",
+      "symbol": "HEALTH_ENDPOINT",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-3f31d59bf0ebd184",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "tsconfig.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-442b73d207cfaf8e",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/health.ts",
+      "symbol": "databaseHealth",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-444a074e7648cc36",
+      "kind": "data_operation",
+      "component_id": "database",
+      "path": "packages/db/src/smoke.ts",
+      "symbol": "systemMetadata.count",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-46b8a070cda16443",
+      "kind": "source_file",
+      "component_id": "web",
+      "path": "apps/web/src/vite-env.d.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-483f0d6b4d95070d",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/client.ts",
+      "symbol": "getDatabaseClient",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-48f4d7a1c3424312",
+      "kind": "manifest",
+      "component_id": "profile",
+      "path": "apps/api/package.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-49c13d728fbddacb",
+      "kind": "test",
+      "component_id": "web",
+      "path": "apps/web/src/AppShell.test.tsx",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-4e36cf13bc6a378c",
+      "kind": "service_symbol",
+      "component_id": "api",
+      "path": "apps/api/src/health.ts",
+      "symbol": "readHealth",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-4f37894f45f720c5",
+      "kind": "source_file",
+      "component_id": "web",
+      "path": "apps/web/src/health-client.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-589fef0146f01b54",
+      "kind": "test",
+      "component_id": "api",
+      "path": "apps/api/src/app.test.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-59605c8eaa97aa94",
+      "kind": "source_file",
+      "component_id": "contracts",
+      "path": "packages/contracts/src/health.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-5b6b7be0c92bbff7",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/health.ts",
+      "symbol": "DatabaseProbe",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-5ec8dd37c44afeb5",
+      "kind": "source_file",
+      "component_id": "api",
+      "path": "apps/api/src/app.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-69b037ef118e5fa4",
+      "kind": "service_symbol",
+      "component_id": "api",
+      "path": "apps/api/src/health.ts",
+      "symbol": "HealthService",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-6aae16539b9cdc8b",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": "package-lock.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-7196edc777da51fa",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/client.ts",
+      "symbol": "closeDatabase",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-7aa000ee8b2c86e4",
+      "kind": "manifest",
+      "component_id": "profile",
+      "path": "packages/db/package.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-7be90944257af7da",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "playwright.config.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-80db8c635b61fb03",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": ".sdlc/target-profile.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-869e1cc2d8efec95",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "vitest.config.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-880a4fca9e0f035f",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/config.ts",
+      "symbol": "resolveDatabaseUrl",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-8bda88bfdfdb6c25",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": "packages/db/prisma7.config.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-8f538d7291a4db4e",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "apps/web/tsconfig.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-93f8d20681eda6e8",
+      "kind": "source_file",
+      "component_id": "api",
+      "path": "apps/api/src/health.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-9403e0f1d9e26e80",
+      "kind": "test",
+      "component_id": "api",
+      "path": "apps/api/src/health.test.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-9665676779815563",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/health.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-98bb7fbd8c4244fb",
+      "kind": "api_route",
+      "component_id": "api",
+      "path": "apps/api/src/app.ts",
+      "symbol": "GET HEALTH_ENDPOINT",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-9edbefa9ce8e4154",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "packages/db/tsconfig.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-a0bf5428ffc8bb53",
+      "kind": "source_file",
+      "component_id": "api",
+      "path": "apps/api/src/server.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-a17e292995f33460",
+      "kind": "source_file",
+      "component_id": "web",
+      "path": "apps/web/src/main.tsx",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-ae438a5f00a9a5d0",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/index.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-b02136ecbb5cfdb5",
+      "kind": "source_file",
+      "component_id": "contracts",
+      "path": "packages/contracts/src/index.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-b90ececce269febf",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/prisma/.gitkeep",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-b9745c8283bac723",
+      "kind": "test",
+      "component_id": "database",
+      "path": "packages/db/src/config.test.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-b9a474fab0b94c10",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/config.ts",
+      "symbol": "DEFAULT_DATABASE_URL",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-bcb146175d6efc7d",
+      "kind": "service_symbol",
+      "component_id": "api",
+      "path": "apps/api/src/health.ts",
+      "symbol": "HealthSnapshot",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-bdb3f2989e54b553",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "tsconfig.base.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-c07195c634e1ce1c",
+      "kind": "manifest",
+      "component_id": "profile",
+      "path": "packages/contracts/package.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-c329a01243dce4ad",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/client.ts",
+      "symbol": "createDatabaseClient",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-c96fbbaca2a0ce86",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "apps/api/tsconfig.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-cb3a3d102f8d6b69",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": ".github/workflows/ci.yml",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-cc23cadb99a63259",
+      "kind": "ui_component",
+      "component_id": "web",
+      "path": "apps/web/src/AppShell.tsx",
+      "symbol": "AppShell",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-d40f5aa1b46895d8",
+      "kind": "verification_config",
+      "component_id": "profile",
+      "path": "compose.yaml",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-d4edf5bf368d81b8",
+      "kind": "data_model",
+      "component_id": "database",
+      "path": "packages/db/prisma/schema.prisma",
+      "symbol": "SystemMetadata",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-d5c550195194a8d5",
+      "kind": "manifest",
+      "component_id": "profile",
+      "path": "package.json",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-d7c79e1e9db02b0a",
+      "kind": "service_symbol",
+      "component_id": "api",
+      "path": "apps/api/src/app.ts",
+      "symbol": "createApp",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-dea19854894111e8",
+      "kind": "service_symbol",
+      "component_id": "contracts",
+      "path": "packages/contracts/src/health.ts",
+      "symbol": "HealthContract",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-e500b67376f47468",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/prisma/schema.prisma",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-e67823c7e8eeca86",
+      "kind": "data_operation",
+      "component_id": "database",
+      "path": "packages/db/src/smoke.ts",
+      "symbol": "systemMetadata.findUnique",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-e974aceca9b4327f",
+      "kind": "ui_component",
+      "component_id": "web",
+      "path": "apps/web/src/AppShell.tsx",
+      "symbol": "AppShellProps",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-ed2273ccb274d3d3",
+      "kind": "source_file",
+      "component_id": "profile",
+      "path": ".sdlc/verify-bootstrap.mjs",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-f6a7e49f563545bc",
+      "kind": "service_symbol",
+      "component_id": "database",
+      "path": "packages/db/src/health.ts",
+      "symbol": "DatabaseHealth",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-f8e1d32d2609f3cf",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/config.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-fa3b252a0beacfa6",
+      "kind": "source_file",
+      "component_id": "database",
+      "path": "packages/db/src/client.ts",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-fc6ac6f8df5dfbf4",
+      "kind": "migration",
+      "component_id": "database",
+      "path": "packages/db/prisma/migrations/20261021000100_bootstrap_system_metadata/migration.sql",
+      "symbol": "",
+      "evidence_source": "bounded_profile_scan"
+    },
+    {
+      "anchor_id": "RLA-fde73fa48f1bfb4e",
+      "kind": "service_symbol",
+      "component_id": "contracts",
+      "path": "packages/contracts/src/health.ts",
+      "symbol": "HealthStatus",
+      "evidence_source": "bounded_profile_scan"
+    }
+  ],
+  "scenario_matches": [
+    {
+      "scenario_id": "SC-1",
+      "surface": "api",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-3c7a1c7a1db15ff6",
+        "RLA-4e36cf13bc6a378c",
+        "RLA-589fef0146f01b54",
+        "RLA-59605c8eaa97aa94",
+        "RLA-5ec8dd37c44afeb5",
+        "RLA-69b037ef118e5fa4",
+        "RLA-93f8d20681eda6e8",
+        "RLA-9403e0f1d9e26e80",
+        "RLA-98bb7fbd8c4244fb",
+        "RLA-a0bf5428ffc8bb53",
+        "RLA-b02136ecbb5cfdb5",
+        "RLA-bcb146175d6efc7d",
+        "RLA-d7c79e1e9db02b0a",
+        "RLA-dea19854894111e8",
+        "RLA-fde73fa48f1bfb4e"
+      ]
+    },
+    {
+      "scenario_id": "SC-1",
+      "surface": "business_rule",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-3c7a1c7a1db15ff6",
+        "RLA-4e36cf13bc6a378c",
+        "RLA-589fef0146f01b54",
+        "RLA-59605c8eaa97aa94",
+        "RLA-5ec8dd37c44afeb5",
+        "RLA-69b037ef118e5fa4",
+        "RLA-93f8d20681eda6e8",
+        "RLA-9403e0f1d9e26e80",
+        "RLA-98bb7fbd8c4244fb",
+        "RLA-a0bf5428ffc8bb53",
+        "RLA-b02136ecbb5cfdb5",
+        "RLA-bcb146175d6efc7d",
+        "RLA-d7c79e1e9db02b0a",
+        "RLA-dea19854894111e8",
+        "RLA-fde73fa48f1bfb4e"
+      ]
+    },
+    {
+      "scenario_id": "SC-1",
+      "surface": "data",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-02442eba0aff90ae",
+        "RLA-10b6cf0e5d2278ab",
+        "RLA-1379ad8e796afd66",
+        "RLA-1ce74aff37afae17",
+        "RLA-442b73d207cfaf8e",
+        "RLA-444a074e7648cc36",
+        "RLA-483f0d6b4d95070d",
+        "RLA-5b6b7be0c92bbff7",
+        "RLA-7196edc777da51fa",
+        "RLA-880a4fca9e0f035f",
+        "RLA-9665676779815563",
+        "RLA-ae438a5f00a9a5d0",
+        "RLA-b90ececce269febf",
+        "RLA-b9745c8283bac723",
+        "RLA-b9a474fab0b94c10",
+        "RLA-c329a01243dce4ad",
+        "RLA-d4edf5bf368d81b8",
+        "RLA-e500b67376f47468",
+        "RLA-e67823c7e8eeca86",
+        "RLA-f6a7e49f563545bc",
+        "RLA-f8e1d32d2609f3cf",
+        "RLA-fa3b252a0beacfa6",
+        "RLA-fc6ac6f8df5dfbf4"
+      ]
+    },
+    {
+      "scenario_id": "SC-1",
+      "surface": "ui",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-1d33fe75847367a2",
+        "RLA-26c7a57c5a1ffab5",
+        "RLA-32bd5649f50f3e36",
+        "RLA-3c13247625c60798",
+        "RLA-46b8a070cda16443",
+        "RLA-49c13d728fbddacb",
+        "RLA-4f37894f45f720c5",
+        "RLA-a17e292995f33460",
+        "RLA-cc23cadb99a63259",
+        "RLA-e974aceca9b4327f"
+      ]
+    },
+    {
+      "scenario_id": "SC-2",
+      "surface": "business_rule",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-3c7a1c7a1db15ff6",
+        "RLA-4e36cf13bc6a378c",
+        "RLA-589fef0146f01b54",
+        "RLA-59605c8eaa97aa94",
+        "RLA-5ec8dd37c44afeb5",
+        "RLA-69b037ef118e5fa4",
+        "RLA-93f8d20681eda6e8",
+        "RLA-9403e0f1d9e26e80",
+        "RLA-98bb7fbd8c4244fb",
+        "RLA-a0bf5428ffc8bb53",
+        "RLA-b02136ecbb5cfdb5",
+        "RLA-bcb146175d6efc7d",
+        "RLA-d7c79e1e9db02b0a",
+        "RLA-dea19854894111e8",
+        "RLA-fde73fa48f1bfb4e"
+      ]
+    },
+    {
+      "scenario_id": "SC-2",
+      "surface": "ui",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-1d33fe75847367a2",
+        "RLA-26c7a57c5a1ffab5",
+        "RLA-32bd5649f50f3e36",
+        "RLA-3c13247625c60798",
+        "RLA-46b8a070cda16443",
+        "RLA-49c13d728fbddacb",
+        "RLA-4f37894f45f720c5",
+        "RLA-a17e292995f33460",
+        "RLA-cc23cadb99a63259",
+        "RLA-e974aceca9b4327f"
+      ]
+    },
+    {
+      "scenario_id": "SC-3",
+      "surface": "api",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-3c7a1c7a1db15ff6",
+        "RLA-4e36cf13bc6a378c",
+        "RLA-589fef0146f01b54",
+        "RLA-59605c8eaa97aa94",
+        "RLA-5ec8dd37c44afeb5",
+        "RLA-69b037ef118e5fa4",
+        "RLA-93f8d20681eda6e8",
+        "RLA-9403e0f1d9e26e80",
+        "RLA-98bb7fbd8c4244fb",
+        "RLA-a0bf5428ffc8bb53",
+        "RLA-b02136ecbb5cfdb5",
+        "RLA-bcb146175d6efc7d",
+        "RLA-d7c79e1e9db02b0a",
+        "RLA-dea19854894111e8",
+        "RLA-fde73fa48f1bfb4e"
+      ]
+    },
+    {
+      "scenario_id": "SC-3",
+      "surface": "business_rule",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-3c7a1c7a1db15ff6",
+        "RLA-4e36cf13bc6a378c",
+        "RLA-589fef0146f01b54",
+        "RLA-59605c8eaa97aa94",
+        "RLA-5ec8dd37c44afeb5",
+        "RLA-69b037ef118e5fa4",
+        "RLA-93f8d20681eda6e8",
+        "RLA-9403e0f1d9e26e80",
+        "RLA-98bb7fbd8c4244fb",
+        "RLA-a0bf5428ffc8bb53",
+        "RLA-b02136ecbb5cfdb5",
+        "RLA-bcb146175d6efc7d",
+        "RLA-d7c79e1e9db02b0a",
+        "RLA-dea19854894111e8",
+        "RLA-fde73fa48f1bfb4e"
+      ]
+    },
+    {
+      "scenario_id": "SC-3",
+      "surface": "data",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-02442eba0aff90ae",
+        "RLA-10b6cf0e5d2278ab",
+        "RLA-1379ad8e796afd66",
+        "RLA-1ce74aff37afae17",
+        "RLA-442b73d207cfaf8e",
+        "RLA-444a074e7648cc36",
+        "RLA-483f0d6b4d95070d",
+        "RLA-5b6b7be0c92bbff7",
+        "RLA-7196edc777da51fa",
+        "RLA-880a4fca9e0f035f",
+        "RLA-9665676779815563",
+        "RLA-ae438a5f00a9a5d0",
+        "RLA-b90ececce269febf",
+        "RLA-b9745c8283bac723",
+        "RLA-b9a474fab0b94c10",
+        "RLA-c329a01243dce4ad",
+        "RLA-d4edf5bf368d81b8",
+        "RLA-e500b67376f47468",
+        "RLA-e67823c7e8eeca86",
+        "RLA-f6a7e49f563545bc",
+        "RLA-f8e1d32d2609f3cf",
+        "RLA-fa3b252a0beacfa6",
+        "RLA-fc6ac6f8df5dfbf4"
+      ]
+    },
+    {
+      "scenario_id": "SC-3",
+      "surface": "ui",
+      "status": "candidate",
+      "candidate_anchor_refs": [
+        "RLA-1d33fe75847367a2",
+        "RLA-26c7a57c5a1ffab5",
+        "RLA-32bd5649f50f3e36",
+        "RLA-3c13247625c60798",
+        "RLA-46b8a070cda16443",
+        "RLA-49c13d728fbddacb",
+        "RLA-4f37894f45f720c5",
+        "RLA-a17e292995f33460",
+        "RLA-cc23cadb99a63259",
+        "RLA-e974aceca9b4327f"
+      ]
+    }
+  ],
+  "conformance_findings": [],
+  "uncertainties": [],
+  "summary": {
+    "component_count": 5,
+    "file_count": 47,
+    "anchor_count": 70,
+    "inspected_file_count": 47,
+    "inspected_bytes": 184035,
+    "blocking_count": 0,
+    "warning_count": 0,
+    "unmatched_surface_count": 0
+  },
+  "artifact_digest": "sha256:552e8f0f88dc644f219a80b38965255a99a9c308802d4cb640edb7bb7691412e"
+}

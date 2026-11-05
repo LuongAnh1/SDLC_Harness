@@ -1,0 +1,337 @@
+{
+  "version": "class_diagram_graph_v25",
+  "nodes": [
+    {
+      "id": "VDN-17b0bc2770432ef2",
+      "type": "class",
+      "className": "Root forwards runtime inputs",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "execute",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "ui_interaction",
+      "disposition": "modify",
+      "evidenceRefs": [
+        "repo:apps/web/src/main.tsx#L9@sha256:a4a8f377c304a5f4c48ec1da0847ea8f6eb77da21fbfb3ad96498c0b3c1060e8"
+      ]
+    },
+    {
+      "id": "VDN-7591323b8e28fe0f",
+      "type": "class",
+      "className": "ETOUR connection interruption rollback rule",
+      "stereotype": "api",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theDeletionBoundaryInvokesTheDeletionRuleWithTheSelectedCulturalHeritageIdentifierTheOperatorConfirmationAndTheObservedETOURConnectionInterruptionSignal",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "business_rule",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-8154a2b82dcbdedd",
+      "type": "class",
+      "className": "CulturalHeritage deletion cancellation confirmation on the confirmation dialog",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "execute",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "ui_interaction",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-9c276a1d75ac9f49",
+      "type": "class",
+      "className": "DELETE CulturalHeritage request boundary",
+      "stereotype": "api",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theOperatorSConfirmedEliminationIsSubmittedToTheDELETECulturalHeritageRequestBoundary",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "api_contract",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-aebba2a693dbdd96",
+      "type": "class",
+      "className": "CulturalHeritage deletion interruption rollback persistence",
+      "stereotype": "database",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theInterruptionRollbackRuleAttemptsToDeleteTheSelectedCulturalHeritageRecordByItsIdentifier",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "data_operation",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-aebccf9fe2287c31",
+      "type": "class",
+      "className": "Cancellation rule that cancels the CulturalHeritage deletion before the request is dispatched",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theOperatorSConfirmedCancellationFromTheOpenConfirmationDialogIsResolvedByTheCancellationRule",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "business_rule",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-b2af0c88ed45e400",
+      "type": "class",
+      "className": "Interrupted CulturalHeritage deletion request boundary",
+      "stereotype": "api",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theConfirmationDialogForwardsTheInterruptedConfirmedEliminationToTheDELETECulturalHeritageRequestBoundary",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "api_contract",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-b31b85277d1d8727",
+      "type": "class",
+      "className": "AppShell forwards runtime inputs",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "rootForwardsRuntimeInputsToAppShell",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "ui_interaction",
+      "disposition": "modify",
+      "evidenceRefs": [
+        "repo:apps/web/src/AppShell.tsx#L8@sha256:08f9c99ed11aaec9631241415064be3d387464a037a699e18436e5835ed7a547"
+      ]
+    },
+    {
+      "id": "VDN-c08451c6db1f6af4",
+      "type": "class",
+      "className": "Confirmation-gated CulturalHeritage elimination rule",
+      "stereotype": "api",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theDeletionRouteInvokesTheConfirmationGatedEliminationRuleWithTheCulturalHeritageIdAndTheOperatorConfirmation",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "business_rule",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-e05e8071615706e0",
+      "type": "class",
+      "className": "CulturalHeritage deletion screen with confirmation dialog and success notice",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "appshellRendersCulturalHeritageScreenWithTheAvailableCulturalHeritageRecordsForSelectionAndElimination",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "ui_interaction",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-e56af334b66c19a6",
+      "type": "class",
+      "className": "CulturalHeritage deletion connection-interruption error on the confirmation dialog",
+      "stereotype": "web",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "execute",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "ui_interaction",
+      "disposition": "add",
+      "evidenceRefs": []
+    },
+    {
+      "id": "VDN-f972f22cbbcf1e2f",
+      "type": "class",
+      "className": "CulturalHeritage record deletion persistence",
+      "stereotype": "database",
+      "attributes": [],
+      "methods": [
+        {
+          "visibility": "+",
+          "name": "theConfirmationGatedRuleDeletesTheSelectedCulturalHeritageRecordByItsIdentifier",
+          "parameters": [],
+          "returnType": "void"
+        }
+      ],
+      "designKind": "data_operation",
+      "disposition": "add",
+      "evidenceRefs": []
+    }
+  ],
+  "relationships": [
+    {
+      "from": "VDN-17b0bc2770432ef2",
+      "to": "VDN-b31b85277d1d8727",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-b31b85277d1d8727",
+      "to": "VDN-e05e8071615706e0",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-e05e8071615706e0",
+      "to": "VDN-9c276a1d75ac9f49",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-9c276a1d75ac9f49",
+      "to": "VDN-c08451c6db1f6af4",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-c08451c6db1f6af4",
+      "to": "VDN-f972f22cbbcf1e2f",
+      "relation": "-->",
+      "kind": "writes"
+    },
+    {
+      "from": "VDN-f972f22cbbcf1e2f",
+      "to": "VDN-c08451c6db1f6af4",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-c08451c6db1f6af4",
+      "to": "VDN-9c276a1d75ac9f49",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-9c276a1d75ac9f49",
+      "to": "VDN-e05e8071615706e0",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-8154a2b82dcbdedd",
+      "to": "VDN-e05e8071615706e0",
+      "relation": "-->",
+      "kind": "depends_on"
+    },
+    {
+      "from": "VDN-8154a2b82dcbdedd",
+      "to": "VDN-aebccf9fe2287c31",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-aebccf9fe2287c31",
+      "to": "VDN-8154a2b82dcbdedd",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-e56af334b66c19a6",
+      "to": "VDN-e05e8071615706e0",
+      "relation": "-->",
+      "kind": "depends_on"
+    },
+    {
+      "from": "VDN-e56af334b66c19a6",
+      "to": "VDN-b2af0c88ed45e400",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-b2af0c88ed45e400",
+      "to": "VDN-7591323b8e28fe0f",
+      "relation": "-->",
+      "kind": "calls"
+    },
+    {
+      "from": "VDN-7591323b8e28fe0f",
+      "to": "VDN-aebba2a693dbdd96",
+      "relation": "-->",
+      "kind": "writes"
+    },
+    {
+      "from": "VDN-aebba2a693dbdd96",
+      "to": "VDN-7591323b8e28fe0f",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-7591323b8e28fe0f",
+      "to": "VDN-b2af0c88ed45e400",
+      "relation": "-->",
+      "kind": "returns"
+    },
+    {
+      "from": "VDN-b2af0c88ed45e400",
+      "to": "VDN-e56af334b66c19a6",
+      "relation": "-->",
+      "kind": "returns"
+    }
+  ],
+  "others": [],
+  "created_at": "2026-11-03T09:13:17Z"
+}

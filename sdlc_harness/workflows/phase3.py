@@ -73,6 +73,7 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
         "implementation_target_component_invalid",
         "implementation_plan_component_invalid",
         "implementation_plan_dependency_cycle",
+        "implementation_plan_design_composition_blocked",
     }
 )
 
@@ -503,33 +504,34 @@ class PhaseThreeWorkflow:
         self.store.write_state(state)
 
         requirement_packet = frozen_requirement.requirement_packet
-        design_artifact = design_abs_path.read_text(encoding="utf-8")
-        requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
-        class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
-        sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
-        (
-            plan_contract_version,
-            vertical_design_graph,
-            vertical_trace_graph,
-            repo_landscape,
-            component_plan_inputs,
-        ) = self._component_plan_context(
-            state=state,
-            run_id=run_id,
-            artifact_paths=artifact_paths,
-            requirement_revision=frozen_requirement.canonical_model.revision,
-            requirement_contract_version=frozen_requirement.contract_version,
-        )
         issue_key = _issue_key_from_state(state)
-        repo_context = self.repo_context_provider.collect(
-            target_path=target_path,
-            target_files=target_files,
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-            issue_key=issue_key,
-            vertical_design_graph=vertical_design_graph,
-        ).to_dict()
         try:
+            # State already left the Design checkpoint, so admission failures must still mark the run.
+            design_artifact = design_abs_path.read_text(encoding="utf-8")
+            requirement_design_trace = _read_json_artifact(trace_abs_path, run_id=run_id)
+            class_graph = _read_json_artifact(class_graph_abs_path, run_id=run_id)
+            sequence_graph = _read_json_artifact(sequence_graph_abs_path, run_id=run_id)
+            (
+                plan_contract_version,
+                vertical_design_graph,
+                vertical_trace_graph,
+                repo_landscape,
+                component_plan_inputs,
+            ) = self._component_plan_context(
+                state=state,
+                run_id=run_id,
+                artifact_paths=artifact_paths,
+                requirement_revision=frozen_requirement.canonical_model.revision,
+                requirement_contract_version=frozen_requirement.contract_version,
+            )
+            repo_context = self.repo_context_provider.collect(
+                target_path=target_path,
+                target_files=target_files,
+                class_graph=class_graph,
+                sequence_graph=sequence_graph,
+                issue_key=issue_key,
+                vertical_design_graph=vertical_design_graph,
+            ).to_dict()
             plan_draft = self.developer.plan(
                 run_id=run_id,
                 source_ref=str(state.get("source_ref") or ""),
@@ -890,7 +892,7 @@ class PhaseThreeWorkflow:
         composition_findings = design_bundle_findings(design_graph, landscape=landscape)
         if composition_findings:
             raise HarnessError(
-                "implementation_plan_contract_invalid",
+                "implementation_plan_design_composition_blocked",
                 f"Vertical Design graph has {len(composition_findings)} unresolved runtime composition blocker(s).",
                 run_id=run_id,
             )
