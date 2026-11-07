@@ -1211,7 +1211,14 @@ def _component_plan_prompt(
     )
     browser_qa_rule = (
         "Browser QA is active. Put every UI obligation in at least one `qa_test_intents` "
-        "entry and do not mark UI obligations unverified."
+        "entry and do not mark UI obligations unverified. For each `runtime_input` obligation "
+        "whose approved Design source is `external_use_case`, keep the production dependency "
+        "external and make the QA intent name a concrete browser-only setup grounded in this "
+        "repo (seed, route interception, or entrypoint injection) plus its exact test path; do "
+        "not replace it with empty/default data or silently turn it into a production provider. "
+        "If no repo-grounded setup exists, state that unresolved gap in the owning objective "
+        "and QA intent so review can block it instead of inventing an API, fixture decision, "
+        "or production provider."
         if browser_qa_active
         else "Browser QA is inactive. Record UI behavior that active stages cannot observe in "
         "`unverified_obligations`."

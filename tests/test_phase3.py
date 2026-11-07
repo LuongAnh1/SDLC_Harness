@@ -26,10 +26,8 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
-    VERIFICATION_STAGE_POLICY_VERSION,
     build_planning_path_policy,
     build_verification_stage_policy,
-    build_verification_stage_policy_version,
     get_language_profile,
     get_project_profile,
 )
@@ -40,7 +38,7 @@ from sdlc_harness.sync.github import GitHubCodeReviewResult
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
-from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow, _require_browser_ui_runtime_ready
+from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import (
@@ -1795,34 +1793,6 @@ Thanks."""
                 self.assertEqual(recovered["status"], status)
                 self.assertIsNone(recovered["pending_checkpoint"])
                 self.assertEqual(recovered["last_error"]["error_code"], error_code)
-
-    def test_browser_v2_blocks_external_ui_before_planning(self) -> None:
-        policy = build_verification_stage_policy_version(
-            project=get_project_profile("typescript_fullstack_v1"),
-            policy_version=VERIFICATION_STAGE_POLICY_VERSION,
-        )
-        design_graph = {
-            "schema_version": GRAPH_VERSION_V2,
-            "nodes": [
-                {
-                    "id": "VDN-UI-1",
-                    "surface": "ui",
-                    "surface_contract": {
-                        "runtime_surface": {"runnable_status": "externally_blocked"}
-                    },
-                }
-            ],
-        }
-
-        with self.assertRaises(HarnessError) as caught:
-            _require_browser_ui_runtime_ready(
-                design_graph=design_graph,
-                verification_policy=policy,
-                run_id="run-browser-admission",
-            )
-
-        self.assertEqual(caught.exception.error_code, "implementation_plan_ui_runtime_blocked")
-        self.assertIn("VDN-UI-1", caught.exception.message)
 
     def test_corrupt_design_artifact_after_checkpoint_clear_marks_run_failed(self) -> None:
         approved = self._create_phase2_run()

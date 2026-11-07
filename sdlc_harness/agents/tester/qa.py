@@ -252,6 +252,9 @@ Rules:
   obligations, boundaries, and fixture use. Do not reconstruct these contracts from summaries.
 - A demo fixture is allowed only when its runtime input cites an accepted D-* decision included in
   `approved_runtime_decisions`; otherwise fail closed instead of inventing data or mocks.
+- An `external_use_case` input stays a production dependency. A Plan-approved QA intent may supply
+  it only inside the browser test through the concrete seed, route-interception, or entrypoint-
+  injection setup named by that intent; do not change the production Design or invent an API.
 - Prefer the UI/API sources that appear first in `code_under_test.files`; they were ordered from the
   QA-owning units and their direct dependencies within the fixed code budget.
 - Do not modify production files, package manifests, configs, lockfiles, or scripts.

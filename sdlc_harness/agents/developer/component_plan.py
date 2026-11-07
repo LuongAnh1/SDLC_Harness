@@ -400,13 +400,32 @@ def _wiring_endpoints(unit: dict[str, object], planning_policy: PlanningPathPoli
 
 
 def _ui_obligations(node: dict[str, object]) -> list[dict[str, str]]:
-    """Enumerate a UI contract's behavior, accessibility, focus and responsive items with stable ids."""
+    """Enumerate UI behavior and externally supplied runtime inputs with stable ids."""
 
     if str(node.get("surface") or "") != "ui":
         return []
     contract = _dict(node.get("surface_contract"))
     experience = _dict(contract.get("experience_contract"))
+    runtime_surface = _dict(contract.get("runtime_surface"))
     rows: list[tuple[str, str, str]] = []
+    external_inputs = sorted(
+        (
+            item
+            for item in _dicts(runtime_surface.get("required_inputs"))
+            if str(item.get("source") or "") == "external_use_case"
+        ),
+        key=lambda item: str(item.get("name") or ""),
+    )
+    for item in external_inputs:
+        name = str(item.get("name") or "")
+        rows.append(
+            (
+                "runtime_input",
+                name,
+                f"{name}: external_use_case via {item.get('binding') or ''}; "
+                f"provided by {item.get('provided_by') or ''}",
+            )
+        )
     for name, state in sorted(_dict(experience.get("runtime_states")).items()):
         if isinstance(state, dict) and not state.get("not_applicable"):
             rows.append(("state", str(name), f"{name}: {state.get('trigger') or ''}".strip()))

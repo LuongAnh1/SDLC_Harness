@@ -1214,10 +1214,16 @@ Component-aware V5 boundaries:
   A runtime binding with `attachment_wired_by` is already attached by that earlier unit, so
   the later unit needs its owner file only when its own change requires it there.
 - The rule review checked that every UI contract item (state, validation, transition,
-  feedback, accessibility, focus and responsive rule) is in a test intent's `obligation_refs`
+  feedback, accessibility, focus, responsive rule and external runtime input) is in a test intent's `obligation_refs`
   or in `unverified_obligations` with a reason. Do not re-audit that mapping item by item.
   Block an `unverified_obligations` entry only when its reason is false because an active
   stage could observe it.
+- For each approved Design `runtime_surface.required_inputs` item whose source is
+  `external_use_case`, verify that the owning QA intent gives Browser QA a concrete,
+  repo-grounded test-only setup (such as an established seed, route interception, or
+  entrypoint injection) and an exact browser test target while preserving the production
+  dependency as external. Missing, empty/default, or invented setup is a blocker; do not
+  require the product Design to add a provider merely so Browser QA can run.
 - Compatibility projections (steps, proposed files, design mappings, top-level test
   intents) are rendered from work_units and checked by the rule review, so they are omitted
   below. Each unit's `approved_design_contracts` contains only the exact Vertical Design

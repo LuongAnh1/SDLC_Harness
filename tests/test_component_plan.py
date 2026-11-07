@@ -1592,6 +1592,8 @@ def test_r9_ui_obligations_must_each_be_tested_or_declared_unverified() -> None:
     sc1 = obligations["SC-1/web"]
     assert "VDN-e05e8071615706e0:validation.1" in sc1
     assert "VDN-e05e8071615706e0:state.loading" in sc1
+    assert "VDN-e05e8071615706e0:runtime_input.culturalHeritageRecords" in sc1
+    assert "VDN-e05e8071615706e0:runtime_input.agencyOperatorSession" in sc1
     # States another scenario owns (not_applicable) are not obligations of this unit.
     assert not any(":state." in item for item in obligations["SC-2/web"])
     for kind in ("accessibility.1", "focus_flow.1", "focus_policy.1", "responsive.1"):

@@ -225,6 +225,7 @@ class ProfiledQaTest(unittest.TestCase):
         self.assertIn("TypeScript Vitest", llm.prompts[0])
         self.assertNotIn("src/test/java", llm.prompts[0])
         self.assertNotIn("complete Java test source", llm.prompts[0])
+        self.assertIn("An `external_use_case` input stays a production dependency", llm.prompts[0])
 
     def test_profiled_parser_rejects_out_of_policy_or_unbound_scenario_path(self) -> None:
         invalid_payloads = (

@@ -20,8 +20,10 @@ from sdlc_harness.llm.fake import fake_completion
 from sdlc_harness.repo_context.codegraph import _context_query
 from sdlc_harness.profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
     build_planning_path_policy,
     build_verification_stage_policy,
+    build_verification_stage_policy_version,
     build_profile_snapshot,
     get_language_profile,
     get_project_profile,
@@ -262,6 +264,10 @@ def test_codegraph_context_prioritizes_runtime_wiring_terms() -> None:
 
 def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice() -> None:
     policy, directive, verification_policy = _typescript_prompt_context()
+    verification_policy = build_verification_stage_policy_version(
+        project=get_project_profile("typescript_fullstack_v1"),
+        policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+    )
     marker = "UNIQUE-SURFACE-CONTRACT-TEXT"
     node = {"id": "VDN-1", "surface_contract": {"note": marker}}
     edge = {"id": "VDE-1", "from": "VDN-1", "to": "VDN-1", "boundary_contract": {"note": "UNIQUE-BOUNDARY"}}
@@ -294,6 +300,8 @@ def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice()
     assert "ui_stylesheets" in prompt
     assert "stage_capabilities" in prompt
     assert "stays unverified until such a stage" in prompt
+    assert "`runtime_input` obligation" in prompt
+    assert "route interception" in prompt
 
 
 def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> None:
@@ -329,3 +337,5 @@ def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> Non
     assert "UNIQUE-SIGNATURE" in prompt
     assert "apps/web/src/Screen.tsx" in prompt
     assert "stage_capabilities" in prompt
+    assert "preserving the production" in prompt
+    assert "Missing, empty/default, or invented setup is a blocker" in prompt
