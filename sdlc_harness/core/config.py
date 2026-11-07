@@ -79,6 +79,7 @@ class Settings:
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
     vertical_trace_mode: str
+    verification_policy_version: str
     implementation_plan_repair_limit: int
     implementation_plan_step_review_enabled: bool
     implementation_plan_step_review_input_enabled: bool
@@ -456,6 +457,15 @@ def load_settings(
     uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
     if uiux_skill_mode not in {"off", "enforce"}:
         uiux_skill_mode = "off"
+    verification_policy_version = merged.get(
+        "SDLC_VERIFICATION_POLICY_VERSION",
+        "verification_stage_policy_v1",
+    ).strip()
+    if verification_policy_version not in {
+        "verification_stage_policy_v1",
+        "verification_stage_policy_v2",
+    }:
+        verification_policy_version = "verification_stage_policy_v1"
     design_semantic_review_mode = (
         merged.get("SDLC_DESIGN_SEMANTIC_REVIEW_MODE", "legacy").strip().lower() or "legacy"
     )
@@ -559,6 +569,7 @@ def load_settings(
             maximum=300,
         ),
         vertical_trace_mode=vertical_trace_mode,
+        verification_policy_version=verification_policy_version,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=4, minimum=0),
         implementation_plan_step_review_enabled=_bool_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED")

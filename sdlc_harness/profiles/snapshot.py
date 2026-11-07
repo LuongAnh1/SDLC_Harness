@@ -12,7 +12,13 @@ from .registry import get_language_profile, get_project_profile
 
 
 PROFILE_SNAPSHOT_STATE_KEY = "profile_snapshot"
-PROFILE_SNAPSHOT_VERSION = "profile_snapshot_v1"
+LEGACY_PROFILE_SNAPSHOT_VERSION = "profile_snapshot_v1"
+PROFILE_SNAPSHOT_VERSION = LEGACY_PROFILE_SNAPSHOT_VERSION
+FULLSTACK_PROFILE_SNAPSHOT_VERSION = "profile_snapshot_v2"
+LEGACY_VERIFICATION_POLICY_VERSION = "verification_stage_policy_v1"
+FULLSTACK_VERIFICATION_POLICY_VERSION = "verification_stage_policy_v2"
+LEGACY_QA_POLICY_VERSION = "qa_test_policy_v1"
+BROWSER_QA_POLICY_VERSION = "qa_test_policy_v2"
 _SHA256_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _GIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,64}$")
 
@@ -37,6 +43,8 @@ class ProfileSnapshotV1:
     language_profile_schema: str
     target_remote: str
     target_base_branch: str
+    verification_policy_version: str = LEGACY_VERIFICATION_POLICY_VERSION
+    qa_policy_version: str = LEGACY_QA_POLICY_VERSION
     target_manifest_schema: str | None = None
     target_manifest_digest: str | None = None
     base_sha: str | None = None
@@ -45,7 +53,7 @@ class ProfileSnapshotV1:
 
     def __post_init__(self) -> None:
         version = _required_text(self.version, field_name="version")
-        if version != PROFILE_SNAPSHOT_VERSION:
+        if version not in {LEGACY_PROFILE_SNAPSHOT_VERSION, FULLSTACK_PROFILE_SNAPSHOT_VERSION}:
             raise _invalid(f"Unsupported profile snapshot version: {version}")
         for field_name in (
             "project_profile_id",
@@ -54,8 +62,26 @@ class ProfileSnapshotV1:
             "language_profile_schema",
             "target_remote",
             "target_base_branch",
+            "verification_policy_version",
+            "qa_policy_version",
         ):
             _required_text(getattr(self, field_name), field_name=field_name)
+        allowed_policy_pairs = {
+            (LEGACY_VERIFICATION_POLICY_VERSION, LEGACY_QA_POLICY_VERSION),
+            (FULLSTACK_VERIFICATION_POLICY_VERSION, BROWSER_QA_POLICY_VERSION),
+        }
+        if (self.verification_policy_version, self.qa_policy_version) not in allowed_policy_pairs:
+            raise _invalid("Profile snapshot verification and QA policy versions are incompatible.")
+        if self.version == LEGACY_PROFILE_SNAPSHOT_VERSION and (
+            self.verification_policy_version != LEGACY_VERIFICATION_POLICY_VERSION
+            or self.qa_policy_version != LEGACY_QA_POLICY_VERSION
+        ):
+            raise _invalid("Legacy profile snapshots may use only legacy verification and QA policies.")
+        if self.version == FULLSTACK_PROFILE_SNAPSHOT_VERSION and (
+            self.verification_policy_version != FULLSTACK_VERIFICATION_POLICY_VERSION
+            or self.qa_policy_version != BROWSER_QA_POLICY_VERSION
+        ):
+            raise _invalid("Profile snapshot v2 requires full-stack verification and browser QA policies.")
 
         binding = (
             self.target_manifest_schema,
@@ -104,6 +130,8 @@ class ProfileSnapshotV1:
             "language_profile_schema": self.language_profile_schema,
             "target_remote": self.target_remote,
             "target_base_branch": self.target_base_branch,
+            "verification_policy_version": self.verification_policy_version,
+            "qa_policy_version": self.qa_policy_version,
         }
         if self.is_workspace_bound:
             payload.update(
@@ -208,6 +236,16 @@ class ProfileSnapshotV1:
                     field_name="target_base_branch",
                     run_id=run_id,
                 ),
+                verification_policy_version=_required_text(
+                    value.get("verification_policy_version", LEGACY_VERIFICATION_POLICY_VERSION),
+                    field_name="verification_policy_version",
+                    run_id=run_id,
+                ),
+                qa_policy_version=_required_text(
+                    value.get("qa_policy_version", LEGACY_QA_POLICY_VERSION),
+                    field_name="qa_policy_version",
+                    run_id=run_id,
+                ),
                 target_manifest_schema=(
                     _required_text(
                         value.get("target_manifest_schema"),
@@ -293,12 +331,15 @@ class ProfileSnapshotV1:
         run_id: str | None = None,
     ) -> "ProfileSnapshotV1":
         candidate = ProfileSnapshotV1(
+            version=self.version,
             project_profile_id=self.project_profile_id,
             project_profile_schema=self.project_profile_schema,
             language_profile_id=self.language_profile_id,
             language_profile_schema=self.language_profile_schema,
             target_remote=self.target_remote,
             target_base_branch=self.target_base_branch,
+            verification_policy_version=self.verification_policy_version,
+            qa_policy_version=self.qa_policy_version,
             target_manifest_schema=target_manifest_schema,
             target_manifest_digest=target_manifest_digest,
             base_sha=base_sha,
@@ -319,18 +360,31 @@ def build_profile_snapshot(
     project_profile_id: str,
     target_remote: str,
     target_base_branch: str,
+    verification_policy_version: str = LEGACY_VERIFICATION_POLICY_VERSION,
+    qa_policy_version: str = LEGACY_QA_POLICY_VERSION,
 ) -> ProfileSnapshotV1:
     """Resolve registry identity once and freeze it for a newly created run."""
 
     project = get_project_profile(project_profile_id)
     language = get_language_profile(project.language_profile_id)
+    snapshot_version = (
+        LEGACY_PROFILE_SNAPSHOT_VERSION
+        if (
+            verification_policy_version == LEGACY_VERIFICATION_POLICY_VERSION
+            and qa_policy_version == LEGACY_QA_POLICY_VERSION
+        )
+        else FULLSTACK_PROFILE_SNAPSHOT_VERSION
+    )
     snapshot = ProfileSnapshotV1(
+        version=snapshot_version,
         project_profile_id=project.profile_id,
         project_profile_schema=project.schema_version,
         language_profile_id=language.profile_id,
         language_profile_schema=language.schema_version,
         target_remote=str(target_remote).strip(),
         target_base_branch=str(target_base_branch).strip(),
+        verification_policy_version=verification_policy_version,
+        qa_policy_version=qa_policy_version,
     )
     validated = ProfileSnapshotV1.from_dict(snapshot.to_dict())
     validated.resolve_profiles()

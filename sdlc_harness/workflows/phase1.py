@@ -246,6 +246,12 @@ class PhaseOneWorkflow:
                 project_profile_id=self.settings.project_profile_id,
                 target_remote=self.settings.target_repo_remote,
                 target_base_branch=self.settings.target_base_branch,
+                verification_policy_version=self.settings.verification_policy_version,
+                qa_policy_version=(
+                    "qa_test_policy_v2"
+                    if self.settings.verification_policy_version == "verification_stage_policy_v2"
+                    else "qa_test_policy_v1"
+                ),
             ).to_dict()
         self.store.write_state(state)
         self.store.register_active_run(source.source_ref, run_id)

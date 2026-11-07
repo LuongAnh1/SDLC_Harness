@@ -17,7 +17,8 @@ if TYPE_CHECKING:
     from .snapshot import ProfileSnapshotV1
 
 
-QA_TEST_POLICY_VERSION = "qa_test_policy_v1"
+LEGACY_QA_TEST_POLICY_VERSION = "qa_test_policy_v1"
+QA_TEST_POLICY_VERSION = "qa_test_policy_v2"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,8 @@ class QaTestPolicy:
     framework: str
     component_rules: tuple[QaComponentTestRule, ...]
     planning_policy: PlanningPathPolicy
+    browser_test_root: str = ""
+    browser_test_suffix: str = ""
 
     def metadata(self) -> dict[str, object]:
         return {
@@ -46,6 +49,15 @@ class QaTestPolicy:
             "language_profile_id": self.language_profile_id,
             "policy_version": self.policy_version,
             "framework": self.framework,
+            "browser": (
+                {
+                    "framework": "playwright",
+                    "test_root": self.browser_test_root,
+                    "test_suffix": self.browser_test_suffix,
+                }
+                if self.browser_test_root
+                else {}
+            ),
             "components": [
                 {
                     "component_id": rule.component_id,
@@ -75,8 +87,25 @@ class QaTestPolicy:
                 return path
         return ""
 
+    def normalize_browser_test_path(self, value: object) -> str:
+        """Return one profile-owned Playwright path or an empty string."""
 
-def build_qa_test_policy(*, planning_policy: PlanningPathPolicy) -> QaTestPolicy:
+        path = self.planning_policy.normalize_editable_path(value)
+        if (
+            not path
+            or not self.browser_test_root
+            or not path.startswith(f"{self.browser_test_root}/")
+            or not path.endswith(self.browser_test_suffix)
+        ):
+            return ""
+        return path
+
+
+def build_qa_test_policy(
+    *,
+    planning_policy: PlanningPathPolicy,
+    policy_version: str = LEGACY_QA_TEST_POLICY_VERSION,
+) -> QaTestPolicy:
     """Tạo QA policy cho profile hiện được A3 hỗ trợ."""
 
     if (
@@ -95,13 +124,17 @@ def build_qa_test_policy(*, planning_policy: PlanningPathPolicy) -> QaTestPolicy
         )
         for rule in planning_policy.component_rules
     )
+    if policy_version not in {LEGACY_QA_TEST_POLICY_VERSION, QA_TEST_POLICY_VERSION}:
+        raise HarnessError("qa_test_policy_not_supported", f"Unsupported QA test policy: {policy_version}")
     return QaTestPolicy(
         project_profile_id=planning_policy.project_profile_id,
         language_profile_id=planning_policy.language_profile_id,
-        policy_version=QA_TEST_POLICY_VERSION,
+        policy_version=policy_version,
         framework="vitest",
         component_rules=rules,
         planning_policy=planning_policy,
+        browser_test_root="tests/e2e" if policy_version == QA_TEST_POLICY_VERSION else "",
+        browser_test_suffix=".spec.ts" if policy_version == QA_TEST_POLICY_VERSION else "",
     )
 
 
@@ -114,7 +147,12 @@ def qa_test_policy_from_snapshot(
 
     planning_policy = planning_path_policy_from_snapshot(snapshot, run_id=run_id)
     try:
-        return build_qa_test_policy(planning_policy=planning_policy)
+        return build_qa_test_policy(
+            planning_policy=planning_policy,
+            policy_version=str(
+                getattr(snapshot, "qa_policy_version", "") or LEGACY_QA_TEST_POLICY_VERSION
+            ),
+        )
     except HarnessError as exc:
         if run_id and exc.run_id is None:
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc

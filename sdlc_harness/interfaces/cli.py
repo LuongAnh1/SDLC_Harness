@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
     start.add_argument("--use-case", required=True)
     start.add_argument("--requested-by", required=True)
     start.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    start.add_argument(
+        "--verification-policy-version",
+        choices=["verification_stage_policy_v1", "verification_stage_policy_v2"],
+        default=None,
+    )
     _add_sync_mode_argument(start)
     start.add_argument("--runtime-root", default=None)
 
@@ -37,6 +42,11 @@ def build_parser() -> argparse.ArgumentParser:
     start_jira.add_argument("--issue-key", required=True)
     start_jira.add_argument("--requested-by", required=True)
     start_jira.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    start_jira.add_argument(
+        "--verification-policy-version",
+        choices=["verification_stage_policy_v1", "verification_stage_policy_v2"],
+        default=None,
+    )
     _add_sync_mode_argument(start_jira)
     start_jira.add_argument("--runtime-root", default=None)
 
@@ -212,6 +222,7 @@ _SETTINGS_OVERRIDE_ARGUMENTS: dict[str, str] = {
     "uiux_skill_root": "SDLC_UIUX_SKILL_ROOT",
     "uiux_skill_timeout_seconds": "SDLC_UIUX_SKILL_TIMEOUT_SECONDS",
     "vertical_trace_mode": "SDLC_VERTICAL_TRACE_MODE",
+    "verification_policy_version": "SDLC_VERIFICATION_POLICY_VERSION",
     "implementation_plan_repair_limit": "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
     "implementation_repair_limit": "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
     "qa_repair_limit": "SDLC_QA_REPAIR_LIMIT",
