@@ -1982,6 +1982,8 @@ class DesignerResumeTest(unittest.TestCase):
         )
         self.assertNotIn('"surfaces":["ui|api|business_rule|data|interaction"]', prompt)
         self.assertIn("schema_version exactly design_surface_contract_v1", prompt)
+        self.assertIn("A UI transition outcome is the observable postcondition", prompt)
+        self.assertIn("it is not a separately ordered runtime event or mechanism", prompt)
         self.assertIn("never put Requirement provenance E-*", prompt)
         self.assertIn("For disposition=add, leave node.evidence_refs empty", prompt)
         self.assertNotIn("active_repair_task write_scope", prompt)

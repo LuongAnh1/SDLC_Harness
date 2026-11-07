@@ -294,6 +294,8 @@ def test_planner_collapses_reviews_and_exposes_shared_surfaces() -> None:
     assert tasks[0]["primary_claim_ids"] == []
     assert tasks[0]["context_claim_ids"] == tasks[1]["primary_claim_ids"]
     assert tasks[0]["coverage_keys"] == ["boundary:VDE-boundary-1"]
+    assert "every outcome declared by its boundary coverage keys" in tasks[0]["focus"]
+    assert "complete executable path" not in tasks[0]["focus"]
     assert tasks[0]["node_ids"] == tasks[1]["node_ids"]
     assert all(key.startswith("claim:") for key in tasks[1]["coverage_keys"])
     shared = first["shared_surfaces"][0]
@@ -643,6 +645,8 @@ def test_sliced_enforce_runs_specialist_then_coherence() -> None:
     assert "Do not discard a shared acceptance criterion or rule" in client.prompts[0]
     assert "Design Semantic Scenario Review v2" in client.prompts[0]
     assert "already passed a separate runtime review" in client.prompts[0]
+    assert "Treat runtime feasibility as" in client.prompts[0]
+    assert "do not re-review or re-report transport" in client.prompts[0]
     assert "runtime_status" not in client.prompts[0]
     assert "compact relationship index" in client.prompts[1]
     assert "fixed scenario-local presentation categories" in client.prompts[1]
@@ -659,11 +663,24 @@ def test_each_task_type_gets_only_its_scope_instruction() -> None:
     validator = DesignValidator(client)
 
     for task_type in ("scenario_behavior", "cross_cutting", "scenario_runtime"):
-        validator._semantic_task_review(task_context={"task": {"task_type": task_type}}, rule_review={})
+        validator._semantic_task_review(
+            task_context={"task": {"task_type": task_type, "focus": "duplicated task focus"}},
+            rule_review={},
+        )
 
     behavior, global_review, runtime = client.prompts
     assert behavior.startswith("Design Semantic Scenario Review v2")
     assert "new Requirements.\n\nScenario-task scope:" in behavior
+    assert "Treat runtime feasibility as" in behavior
+    assert "do not re-review or re-report transport" in behavior
+    assert "Runtime wiring is intentionally omitted" in behavior
+    assert "A node from another scenario is compact branch evidence only" in behavior
+    assert "edges[].boundary_contract.input_mapping" not in behavior
+    assert "ui_repo_context describes the current AS-IS repository" not in behavior
+    assert "ui_runtime_input_binding" not in behavior
+    assert "Do not assume every task contains a finding" in behavior
+    assert "An invented blocker and a missed blocker" not in behavior
+    assert "For runtime, a step on the modeled path" not in behavior
     assert "Global-task scope:" not in behavior and "Runtime-task scope:" not in behavior
     assert global_review.startswith("Design Semantic Global Review v2")
     assert "new Requirements.\n\nGlobal-task scope:" in global_review
@@ -672,8 +689,19 @@ def test_each_task_type_gets_only_its_scope_instruction() -> None:
     assert runtime.startswith("Design Semantic Runtime Review v2")
     assert "new Requirements.\n\nRuntime-task scope:" in runtime
     assert "return an empty assessments array" in runtime
+    assert "Review the assigned scenario through every boundary:<edge id> in coverage_keys" in runtime
+    assert "A provider-node outcome not named by a covered edge is in scope only" in runtime
+    assert "A UI transition outcome is its observable postcondition" in runtime
+    assert "repeated wording in the outcome and an edge mapping is not by itself" in runtime
+    assert "Do not turn hypothetical outcomes or repair alternatives into findings" in runtime
+    assert "modeled but non-required alternative or error outcome is a warning" in runtime
     assert "Do not infer that a provider re-tests an upstream guard" in runtime
+    assert "edges[].boundary_contract.input_mapping" in runtime
+    assert "ui_repo_context describes the current AS-IS repository" in runtime
     assert "add does not prove a new store is empty" in runtime
+    assert "ui_state_coverage" not in runtime
+    assert "Task focus:" not in runtime
+    assert "duplicated task focus" not in runtime
     assert "remediation_mode" not in runtime
     assert "typed contracts cannot express the required behavior" not in runtime
     assert "Scenario-task scope:" not in runtime and "Global-task scope:" not in runtime
@@ -1229,6 +1257,85 @@ def test_branch_entry_reports_parent_transitions_leading_to_and_after_entry_by_e
     assert [item["action"] for item in entry["parent_transitions_after_entry"]] == ["confirm", "complete"]
 
 
+def test_behavior_packet_keeps_behavior_evidence_but_drops_runtime_and_foreign_scenario_detail() -> None:
+    graph = _branch_graph(
+        [
+            {"from": "dialog open", "to": "cancelling", "action": "cancel"},
+            {"from": "cancelling", "to": "cancelled", "action": "finish"},
+        ]
+    )
+    parent, child = graph["nodes"]
+    parent["runtime_binding"] = {"target": {"path": "parent.tsx", "symbol": "Parent"}}
+    parent["surface_contract"]["experience_contract"] = {"focus_flow": ["foreign detail"]}
+    child["runtime_binding"] = {"target": {"path": "child.tsx", "symbol": "Child"}}
+    child["surface_contract"].update(
+        {
+            "runtime_surface": {"required_inputs": [{"name": "runtimeOnly"}]},
+            "experience_contract": {"focus_flow": ["active behavior"]},
+        }
+    )
+    graph["nodes"].append(
+        {
+            "id": "VDN-rule",
+            "scenario_id": "SC-2",
+            "surface": "business_rule",
+            "surface_contract": {"decision": "cancelled means done"},
+        }
+    )
+    graph["edges"].append(
+        {
+            "id": "VDE-call",
+            "scenario_id": "SC-2",
+            "from": "VDN-child",
+            "to": "VDN-rule",
+            "kind": "calls",
+            "order": 2,
+            "boundary_contract": {
+                "consumer_operation": "show cancellation completed",
+                "provider_operation": "runtimeOnly",
+                "auth_mapping": [{"from": "session", "to": "session"}],
+                "input_mapping": [{"from": "confirmed", "to": "confirmed"}],
+                "response_mapping": [{"from": "cancelled", "to": "completion visible"}],
+                "error_mapping": [],
+            },
+        }
+    )
+    graph["snapshot_binding"] = {"ui_repo_context": {"entrypoint": {"path": "main.tsx"}}}
+    claims = [
+        {
+            "claim_id": "SC-2:AF-1",
+            "claim_type": "requirement",
+            "scenario_id": "SC-2",
+            "requirement_ids": ["AF-1"],
+            "statement": "Cancellation completes.",
+        }
+    ]
+    task = next(
+        task
+        for task in build_semantic_review_plan(claims=claims, vertical_design_graph=graph)["tasks"]
+        if task["task_type"] == "scenario_behavior"
+    )
+
+    context = materialize_task_context(task, claims=claims, vertical_design_graph=graph, vertical_trace={})
+
+    child_view = next(node for node in context["nodes"] if node["id"] == "VDN-child")
+    parent_view = next(node for node in context["nodes"] if node["id"] == "VDN-parent")
+    call_view = next(edge for edge in context["edges"] if edge["id"] == "VDE-call")
+    assert child_view["surface_contract"]["experience_contract"] == {"focus_flow": ["active behavior"]}
+    assert "runtime_binding" not in child_view
+    assert "runtime_surface" not in child_view["surface_contract"]
+    assert parent_view == {
+        "id": "VDN-parent",
+        "scenario_id": "SC-1",
+        "surface_contract": {"transitions": parent["surface_contract"]["transitions"]},
+    }
+    assert call_view["boundary_contract"] == {
+        "consumer_operation": "show cancellation completed",
+        "response_mapping": [{"from": "cancelled", "to": "completion visible"}],
+    }
+    assert "ui_repo_context" not in context
+
+
 def test_branch_entry_lists_paths_to_and_after_entry_in_a_cyclic_parent() -> None:
     def ui(transitions: list[tuple[str, str, str]]) -> dict[str, object]:
         return {
@@ -1284,20 +1391,39 @@ def test_every_prompt_explains_packet_fields_severity_and_deterministic_scope() 
     for prompt in client.prompts:
         # A: Harness-owned vocabulary is defined instead of left for the model to guess.
         assert "Packet field guide" in prompt
-        assert "A declared external input is an\n  accepted dependency, not a missing provider." in prompt
-        assert "externally_blocked = runnable once its\n  declared external inputs exist" in prompt
         assert "branch_entries are Harness-derived from exact state names" in prompt
-        assert "approved_context holds approved Requirement preconditions" in prompt
+        assert "approved_context" in prompt
+        assert "Set ok=true exactly when findings contains no blocking item" in prompt
         # C: one explicit blocking/warning criterion, no use-case-specific examples.
-        assert "Severity:\n- blocking: the packet proves the defect." in prompt
+        assert "Severity:" in prompt
         assert "cancel API" not in prompt
         assert "not a test" not in prompt
         # F: the deterministic scope is listed, not implied by ok=true.
+        assert "branch parent wiring" in prompt
+        # Findings describe the required outcome on existing ids; they never design or invent a system.
+        assert "expected_change states one invariant that must become true" in prompt
+        assert "do not select, add, remove or reorder an edge" in prompt
+        assert "These ids authorize possible repair" in prompt
+        assert "they do not\n  prescribe which id must change" in prompt
+        assert "not introduce a system, service or dependency" in prompt
+
+    behavior, global_review, runtime = client.prompts
+    assert "Runtime wiring is intentionally omitted" in behavior
+    assert "A UI transition outcome is its observable postcondition" in behavior
+    assert "ui_repo_context describes the current AS-IS repository" not in behavior
+    assert "composition forwarded-input propagation" not in behavior
+    assert "primary claim or promised behavior guarantee" in behavior
+    assert "Do not assume every task contains a finding" in behavior
+    assert "An invented blocker and a missed blocker" not in behavior
+    for prompt in (global_review, runtime):
+        assert "A declared external input is an\n  accepted dependency, not a missing provider." in prompt
+        assert "externally_blocked = runnable once its\n  declared external inputs exist" in prompt
+        assert "ui_repo_context describes the current AS-IS repository" in prompt
         assert "composition forwarded-input propagation, branch parent wiring" in prompt
         assert "ok=true\nis not evidence that this Design is semantically sound" in prompt
-        # Findings describe the required outcome on existing ids; they never design or invent a system.
-        assert "expected_change states what must become true, in terms of existing node and edge ids" in prompt
-        assert "do not introduce a system, service or dependency" in prompt
+        assert "explicitly modeled but non-required alternative or error outcome" in prompt
+        assert "do not assume every\n  task contains a finding" in prompt
+        assert "An invented blocker and a missed blocker" not in prompt
 
 
 def test_each_task_type_gets_only_its_own_rules() -> None:
@@ -1308,11 +1434,12 @@ def test_each_task_type_gets_only_its_own_rules() -> None:
         validator._semantic_task_review(task_context={"task": {"task_type": task_type}}, rule_review={})
 
     behavior, global_review, runtime = client.prompts
-    runtime_rule = "a broken transport cannot also carry a request or response"
+    runtime_rule = "Review the assigned scenario through every boundary:<edge id> in coverage_keys"
     behavior_rule = "The UI experience contract (states, feedback, focus, accessibility, responsive layout)"
     global_rule = "Judge only primary global preconditions, postconditions, quality requirements and negative constraints"
     assert runtime_rule in runtime and runtime_rule not in behavior and runtime_rule not in global_review
     assert "is a\n  decision_input_sufficiency defect even when an input_mapping names it" in runtime
+    assert "Do not audit UI completeness, feedback" in runtime
     assert behavior_rule in behavior and behavior_rule not in runtime and behavior_rule not in global_review
     assert global_rule in global_review and global_rule not in runtime and global_rule not in behavior
 
@@ -1363,8 +1490,13 @@ def test_runtime_packet_drops_ui_experience_traces_and_audit_fields_but_keeps_be
     assert behavior_screen["surface_contract"]["experience_contract"] == {"focus_flow": ["x"]}
     for view in (runtime_screen, behavior_screen):
         assert not {"evidence_refs", "evidence_reason", "semantic_key", "source_observation_refs"} & set(view)
-        assert view["runtime_binding"] == {"target": {"symbol": "Screen"}, "attachment": {"relation": "rendered_by"}}
-        assert "evidence_refs" not in view["surface_contract"]["runtime_surface"]
+    assert runtime_screen["runtime_binding"] == {
+        "target": {"symbol": "Screen"},
+        "attachment": {"relation": "rendered_by"},
+    }
+    assert "evidence_refs" not in runtime_screen["surface_contract"]["runtime_surface"]
+    assert "runtime_binding" not in behavior_screen
+    assert "runtime_surface" not in behavior_screen["surface_contract"]
     # The graph itself is untouched.
     assert screen["evidence_refs"] and "experience_contract" in screen["surface_contract"]
     # E: approved Requirement facts behind declared external inputs, plus preconditions.
@@ -1421,6 +1553,34 @@ def test_contract_invalid_output_is_retried_once_with_the_exact_error() -> None:
     runtime = next(task for task in result.llm_review["tasks"] if task["task_id"] == "runtime-sc-1")
     assert runtime["contract_retries"] == 1
     assert result.llm_review["actual_calls"] == 4
+
+
+def test_contract_retry_preserves_previous_semantic_response_context() -> None:
+    invalid = _task_success("SC-1:MF-1", "SC-1:surface:ui")
+    invalid["assessments"] = [
+        *invalid["assessments"],
+        {
+            "claim_id": "SC-1:INVENTED",
+            "status": "satisfied",
+            "design_refs": ["VDN-ui-1"],
+            "reason": "Not a supplied claim.",
+        },
+    ]
+    invalid["findings"] = [_warning_finding("SEM-KEEP")]
+    corrected = _task_success("SC-1:MF-1", "SC-1:surface:ui")
+    corrected["findings"] = [_warning_finding("SEM-KEEP")]
+    client = StaticLlmClient([invalid, corrected, _coherence()])
+
+    result = _review(client)
+
+    assert result.ok
+    assert [item.finding_id for item in result.warnings] == ["scenario-sc-1:SEM-KEEP"]
+    retry_prompt = client.prompts[1]
+    assert "Previous JSON response:" in retry_prompt
+    assert '"claim_id":"SC-1:INVENTED"' in retry_prompt
+    assert '"id":"SEM-KEEP"' in retry_prompt
+    assert "Correct only the fields implicated by the Harness error" in retry_prompt
+    assert "Preserve every other semantic conclusion" in retry_prompt
 
 
 def test_empty_semantic_mutation_scope_is_retried_once() -> None:

@@ -103,10 +103,10 @@ def build_semantic_review_plan(
                     edge_ids=edge_ids,
                     coverage_keys=[f"boundary:{item}" for item in sorted(_ids(selected_boundaries))],
                     focus=(
-                        "Review only runtime feasibility of the complete executable path and every boundary contract: "
-                        "transport, response and error events can actually occur, causal order lets each guard observe "
-                        "its condition, decisions receive every input they test from a modeled provider on this path, and "
-                        "promised rollback, unchanged-state, atomicity or retry behavior has a credible runtime mechanism."
+                        "Review the assigned scenario and every outcome declared by its boundary coverage keys: "
+                        "transport, response and error events can occur, causal order lets each guard observe its "
+                        "condition, decisions receive every input they test, and promised rollback, unchanged-state, "
+                        "atomicity or retry behavior has a credible runtime mechanism."
                     ),
                 )
             )
@@ -252,8 +252,15 @@ def materialize_task_context(
         "graph_digest": graph.get("artifact_digest"),
         "task": task,
         "claims": selected_claims,
-        "nodes": [review_node_view(node, task_type=task_type) for node in selected_nodes],
-        "edges": [edge for edge in edges if str(edge.get("id") or "") in edge_ids],
+        "nodes": [
+            review_node_view(node, task_type=task_type, scenario_ids=scenario_ids)
+            for node in selected_nodes
+        ],
+        "edges": [
+            review_edge_view(edge, task_type=task_type)
+            for edge in edges
+            if str(edge.get("id") or "") in edge_ids
+        ],
         # Runtime feasibility is judged from the executable graph; Requirement-to-Design mappings serve claim reviews.
         **({} if task_type == "scenario_runtime" else {"trace_mappings": mappings}),
         "unresolved_items": graph.get("unresolved_items") or [],
@@ -267,7 +274,7 @@ def materialize_task_context(
                     if key in ui_context
                 }
             }
-            if ui_context
+            if ui_context and task_type != "scenario_behavior"
             else {}
         ),
     }
@@ -278,8 +285,13 @@ _AUDIT_NODE_KEYS = frozenset({"evidence_refs", "evidence_reason", "semantic_key"
 _AUDIT_EXPERIENCE_KEYS = frozenset({"guidance_refs", "repo_evidence_refs"})
 
 
-def review_node_view(node: dict[str, Any], *, task_type: str) -> dict[str, Any]:
-    """Project a node to the fields a semantic review call judges; runtime calls drop the UI experience contract."""
+def review_node_view(
+    node: dict[str, Any],
+    *,
+    task_type: str,
+    scenario_ids: set[str] | None = None,
+) -> dict[str, Any]:
+    """Project a node to the fields owned by its semantic task."""
 
     view = {key: value for key, value in node.items() if key not in _AUDIT_NODE_KEYS}
     binding = _dict_value(view.get("runtime_binding"))
@@ -293,7 +305,9 @@ def review_node_view(node: dict[str, Any], *, task_type: str) -> dict[str, Any]:
     if contract:
         contract = dict(contract)
         runtime_surface = _dict_value(contract.get("runtime_surface"))
-        if runtime_surface:
+        if task_type == "scenario_behavior":
+            contract.pop("runtime_surface", None)
+        elif runtime_surface:
             contract["runtime_surface"] = {key: value for key, value in runtime_surface.items() if key != "evidence_refs"}
         experience = _dict_value(contract.get("experience_contract"))
         if task_type == "scenario_runtime":
@@ -303,6 +317,43 @@ def review_node_view(node: dict[str, Any], *, task_type: str) -> dict[str, Any]:
                 key: value for key, value in experience.items() if key not in _AUDIT_EXPERIENCE_KEYS
             }
         view["surface_contract"] = contract
+    if task_type == "scenario_behavior":
+        view.pop("runtime_binding", None)
+        node_scenario = str(view.get("scenario_id") or "")
+        if scenario_ids and node_scenario not in {"", "global", *scenario_ids}:
+            compact_contract = {
+                key: value
+                for key, value in _dict_value(view.get("surface_contract")).items()
+                if key in {"states", "transitions"}
+            }
+            view = {
+                key: value
+                for key, value in view.items()
+                if key in {"id", "scenario_id", "kind", "name", "surface", "component_id", "use_case_id"}
+            }
+            if compact_contract:
+                view["surface_contract"] = compact_contract
+    return view
+
+
+def review_edge_view(edge: dict[str, Any], *, task_type: str) -> dict[str, Any]:
+    """Project runtime boundary detail out of a behavior review while retaining observable outcomes."""
+
+    view = dict(edge)
+    if task_type != "scenario_behavior":
+        return view
+    boundary = _dict_value(view.get("boundary_contract"))
+    if not boundary:
+        return view
+    behavior_boundary = {
+        key: value
+        for key, value in boundary.items()
+        if key in {"consumer_operation", "response_mapping", "error_mapping"} and value
+    }
+    if behavior_boundary:
+        view["boundary_contract"] = behavior_boundary
+    else:
+        view.pop("boundary_contract", None)
     return view
 
 

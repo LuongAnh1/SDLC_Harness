@@ -545,7 +545,10 @@ class DesignValidator:
                 )
                 cached_payload = task_cache.get(cache_key) if task_cache is not None else None
 
+                task_attempt_payload: dict[str, object] | None = None
+
                 def review_task(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                    nonlocal task_attempt_payload
                     task_payload = (
                         dict(cached_payload)
                         if cached_payload is not None and not correction
@@ -555,6 +558,7 @@ class DesignValidator:
                             correction=correction,
                         )
                     )
+                    task_attempt_payload = task_payload
                     _validate_semantic_assessments(
                         task_payload,
                         claims=task_claims,
@@ -568,7 +572,10 @@ class DesignValidator:
                         require_remediation_mode=False,
                     )
 
-                (payload, normalized), retries = _with_contract_retry(review_task)
+                (payload, normalized), retries = _with_contract_retry(
+                    review_task,
+                    previous_response=lambda: task_attempt_payload,
+                )
                 cache_hit = cached_payload is not None and retries == 0
                 if cache_hit:
                     skipped_calls += 1
@@ -616,7 +623,10 @@ class DesignValidator:
                 if str(node.get("id") or "") in shared_node_ids
             ]
 
+            coherence_attempt_payload: dict[str, object] | None = None
+
             def review_coherence(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                nonlocal coherence_attempt_payload
                 coherence_payload = self._semantic_coherence_review(
                     task_results=task_results,
                     relationship_index=relation_index(vertical_design_graph),
@@ -625,6 +635,7 @@ class DesignValidator:
                     shared_surface_nodes=shared_surface_nodes,
                     correction=correction,
                 )
+                coherence_attempt_payload = coherence_payload
                 normalized = _normalize_llm_findings(
                     coherence_payload,
                     valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
@@ -640,7 +651,10 @@ class DesignValidator:
                 )
                 return coherence_payload, normalized
 
-            (coherence, coherence_findings), retries = _with_contract_retry(review_coherence)
+            (coherence, coherence_findings), retries = _with_contract_retry(
+                review_coherence,
+                previous_response=lambda: coherence_attempt_payload,
+            )
             retry_calls += retries
             coherence_findings = [
                 replace(
@@ -738,9 +752,12 @@ class DesignValidator:
                     if str(claim.get("scenario_id") or "")
                 )
 
+                adjudication_attempt_payload: dict[str, object] | None = None
+
                 def review_adjudication(
                     correction: str,
                 ) -> tuple[dict[str, object], tuple[list[DesignFinding], dict[str, dict[str, str]]]]:
+                    nonlocal adjudication_attempt_payload
                     adjudication_payload = self._semantic_adjudication_review(
                         conflicts=conflicts,
                         findings=adjudication_findings,
@@ -748,6 +765,7 @@ class DesignValidator:
                         design_evidence=adjudication_design_evidence,
                         correction=correction,
                     )
+                    adjudication_attempt_payload = adjudication_payload
                     unknown_drops = (
                         set(_string_items(adjudication_payload.get("drop_finding_ids"))) - conflict_finding_ids
                     )
@@ -803,7 +821,10 @@ class DesignValidator:
                     )
                     return adjudication_payload, (new_findings, route_map)
 
-                (adjudication, adjudication_result), retries = _with_contract_retry(review_adjudication)
+                (adjudication, adjudication_result), retries = _with_contract_retry(
+                    review_adjudication,
+                    previous_response=lambda: adjudication_attempt_payload,
+                )
                 actual_calls += retries
                 adjudicated, route_map = adjudication_result
                 drop_ids = set(_string_items(adjudication.get("drop_finding_ids")))
@@ -922,6 +943,21 @@ class DesignValidator:
         task = _dict_value(task_context.get("task"))
         task_type = str(task.get("task_type") or "")
         header, scope, task_rules = _SEMANTIC_TASK_PROMPTS.get(task_type, _SEMANTIC_TASK_PROMPTS["cross_cutting"])
+        finding_categories = _SEMANTIC_FINDING_CATEGORIES.get(
+            task_type,
+            _SEMANTIC_FINDING_CATEGORIES["cross_cutting"],
+        )
+        severity_guide = _BEHAVIOR_SEVERITY_GUIDE if task_type == "scenario_behavior" else _SEVERITY_GUIDE
+        packet_field_guide = (
+            _BEHAVIOR_PACKET_FIELD_GUIDE if task_type == "scenario_behavior" else _PACKET_FIELD_GUIDE
+        )
+        deterministic_review_note = (
+            _BEHAVIOR_DETERMINISTIC_REVIEW_NOTE
+            if task_type == "scenario_behavior"
+            else _DETERMINISTIC_REVIEW_NOTE
+        )
+        review_context = dict(task_context)
+        review_context["task"] = {key: value for key, value in task.items() if key != "focus"}
         return f"""{header}
 
 Review only the assigned task. Primary claims require exactly one assessment each. Context claims are evidence only
@@ -931,29 +967,30 @@ new Requirements.
 {scope}
 
 Return one JSON object only:
-{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract","severity":"blocking|warning","message":"specific issue","expected_change":"what must become true, stated on existing node/edge ids","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["exact existing VDN-* or VDE-* id whose contract may need mutation"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
+{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"{finding_categories}","severity":"blocking|warning","message":"specific issue","expected_change":"one invariant that must become true across the cited existing ids; no repair instructions or alternatives","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["every exact existing VDN-* or VDE-* id whose contract may coherently change to satisfy the invariant"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
 
-{_PACKET_FIELD_GUIDE}
+{packet_field_guide}
 
-{_SEVERITY_GUIDE}
+{severity_guide}
 
 Rules:
+- Set ok=true exactly when findings contains no blocking item. Warnings keep ok=true.
 - Never invent a Requirement or Design reference. Every blocker cites a stable Requirement id and exact Design ref.
 - A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence.
-- expected_change states what must become true, in terms of existing node and edge ids. Do not prescribe a design,
-  and do not introduce a system, service or dependency that neither the approved Requirement nor the packet contains.
-- subject_ref is the exact node or edge where the defect is observed. diagram_ids is the non-empty mutation scope:
-  list only the exact existing node/edge ids whose contracts may need to change to make expected_change true. Include
-  every allowed repair target, omit evidence-only ids, and do not include subject_ref when it should remain read-only.
+- expected_change states one invariant that must become true across cited existing node and edge ids. Describe the
+  defect-free contract, not how to repair it: do not select, add, remove or reorder an edge; require a particular new
+  field, mapping, guard or trigger; or offer alternative repairs. Do not introduce a system, service or dependency
+  that neither the approved Requirement nor the packet contains.
+- subject_ref is the exact node or edge where the defect is observed. diagram_ids is the non-empty candidate mutation
+  scope: include every exact existing node/edge whose contract may coherently change to satisfy the invariant, and omit
+  evidence-only ids or subject_ref when it should remain read-only. These ids authorize possible repair; they do not
+  prescribe which id must change or how it changes.
 {task_rules}
 
-Task focus:
-{task.get("focus")}
-
 Assigned review packet:
-{json.dumps(task_context, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+{json.dumps(review_context, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
-{_DETERMINISTIC_REVIEW_NOTE}
+{deterministic_review_note}
 {json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 """.strip()
 
@@ -2252,6 +2289,9 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   consumer side must hold each value through a request field, an inbound mapping, a modeled response or error event,
   its own declared state or transition, or a declared external input. response_mapping and error_mapping flow back to
   the consumer.
+- A UI transition outcome is its observable postcondition, not a separately ordered runtime event or mechanism
+  evidence. Covered ordered edges may realize it; repeated wording in the outcome and an edge mapping is not by itself
+  a duplicate event. Report a defect only when explicit ordering, guards or mappings make them contradictory.
 - branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
   parent_entry_state. parent_transitions_leading_to_entry are the transitions on some path that can reach
   parent_entry_state: they are the conditions for being in that state, not a record that each one ran on this pass.
@@ -2261,6 +2301,27 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   starts; do not assume one.
 - approved_context holds approved Requirement preconditions and the Requirement text behind each declared external
   input. Treat them as facts the scenario may rely on.
+- ui_repo_context describes the current AS-IS repository. disposition=add or modify describes planned implementation,
+  so absence from AS-IS is not a defect by itself.
+""".strip()
+
+_BEHAVIOR_PACKET_FIELD_GUIDE = """
+Packet field guide (Harness-owned meanings; do not reinterpret them):
+- task.primary_claim_ids are assessed once each; task.coverage_keys list the claim ids owned by this call.
+- Active-scenario nodes contain the approved behavior contracts to judge: states, transitions, decisions, outcomes,
+  validations and UI experience. Runtime wiring is intentionally omitted because the runtime specialist passed it.
+- A UI transition outcome is its observable postcondition, not a separately ordered runtime event or mechanism
+  evidence. Ordered edges may realize it; repeated wording in the outcome and an edge mapping is not by itself a
+  duplicate event. Report a defect only when explicit ordering, guards or mappings make them contradictory.
+- A node from another scenario is compact branch evidence only. Use branch_entries, its states and transitions to
+  determine where this scenario starts; do not review that other scenario's behavior or UI contract here.
+- edges establish behavior order, guards, terminal outcomes and observable response/error semantics. Transport,
+  input propagation and authentication wiring are intentionally omitted because they already passed runtime review.
+- branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
+  parent_entry_state. parent_transitions_leading_to_entry are reachability conditions, not a history of transitions
+  that all ran on this pass. parent_transitions_after_entry have not run when the branch starts.
+- trace_mappings connect supplied Requirement ids and surface claims to exact Design ids.
+- approved_context contains approved Requirement preconditions and external facts; treat them as given.
 """.strip()
 
 _SEVERITY_GUIDE = """
@@ -2268,9 +2329,18 @@ Severity:
 - blocking: the packet proves the defect. For runtime, a step on the modeled path cannot execute as declared: an event
   cannot occur, a value a decision tests does not exist at that point, or a promised guarantee has no mechanism. For a
   claim, the Design omits or contradicts what the claim requires.
-- warning: the packet leaves the issue uncertain, or the issue does not stop the path or the claim (quality, wording,
-  an error branch outside the active path).
-- Decide from the packet alone. An invented blocker and a missed blocker each cost a full repair cycle.
+- warning: the packet leaves the issue uncertain, or the issue does not stop the assigned required path or primary
+  claim, such as a wording concern or an explicitly modeled but non-required alternative or error outcome.
+- Decide from the packet alone. Report only defects established by supplied path or claim evidence; do not assume every
+  task contains a finding.
+""".strip()
+
+_BEHAVIOR_SEVERITY_GUIDE = """
+Severity:
+- blocking: the packet proves that a primary claim or promised behavior guarantee cannot be satisfied as declared.
+- warning: the packet leaves the issue uncertain, or the issue does not stop a primary claim, such as a wording or
+  non-required UI-contract concern.
+- Decide from the packet alone. Do not assume every task contains a finding.
 """.strip()
 
 _REMEDIATION_GUIDE = """
@@ -2295,9 +2365,16 @@ None of these checks judges whether a value exists at the right time or whether 
 is not evidence that this Design is semantically sound:
 """.strip()
 
+_BEHAVIOR_DETERMINISTIC_REVIEW_NOTE = """
+Deterministic review: the Harness already enforced graph schema, stable IDs, endpoints and partition coverage, plus
+branch parent wiring and Requirement-to-Design trace coverage. A separate runtime specialist passed this scenario without a
+blocker, so runtime-only wiring is intentionally absent from this packet. These checks do not judge whether the
+remaining behavior and UI contracts satisfy the primary claims:
+""".strip()
+
 _RUNTIME_RULES = """
-- Check that every modeled transport, response and error event can actually occur. A cross-application call requires a
-  real transport/API surface; a broken transport cannot also carry a request or response.
+- A cross-application call requires a declared transport/API surface, runtime binding and boundary contract;
+  disposition=add or modify means that mechanism need not exist in the AS-IS repository yet.
 - Validate causal order: a condition may justify behavior only after a modeled runtime surface or edge can observe it;
   naming an error scenario does not prove when the error becomes known.
 - Every value a decision tests must exist on this path when the decision runs (see input_mapping in the field guide).
@@ -2318,6 +2395,8 @@ _RUNTIME_RULES = """
   reconciliation mechanism; when neither Requirement nor Design promises it, do not require one.
 - For role=composition_wiring, runtime_surface.forwarded_inputs is the authoritative propagation contract; a missing
   forwarded input is a structural defect already reported by deterministic review.
+- UI states and transitions may prove when a runtime value or event exists. Do not audit UI completeness, feedback,
+  focus, accessibility or responsive presentation in this runtime task.
 """.strip()
 
 _BEHAVIOR_RULES = """
@@ -2355,8 +2434,16 @@ Global-task scope:
 Runtime-task scope:
 - This task has no primary claims: return an empty assessments array. Context claims explain the intended scenario
   behavior and may be cited by findings.
-- Report only runtime feasibility defects of the active scenario path. Behavior, UX and Requirement satisfaction are
-  reviewed in a separate call that runs only when this runtime review has no blocking finding.
+- Review the assigned scenario through every boundary:<edge id> in coverage_keys. For each boundary, decide whether its
+  declared transport, response_mapping and
+  error_mapping events can occur in causal order. A provider-node outcome not named by a covered edge is in scope only
+  when the packet proves that the assigned required path can produce or consume it, or a cited Requirement or Design
+  guarantee requires it; it is not automatically an obligation of every edge that touches that provider.
+- A defect is blocking only when it prevents the required terminal path or breaks a guarantee promised by the
+  Requirement or Design. A defect confined to a modeled but non-required alternative or error outcome is a warning.
+- Do not turn hypothetical outcomes or repair alternatives into findings.
+- Behavior, UX and Requirement satisfaction are reviewed in a separate call that runs only when this runtime review
+  has no blocking finding.
 - Paths assigned to other scenario ids are reviewed separately.
 """.strip(),
         _RUNTIME_RULES,
@@ -2369,10 +2456,30 @@ Scenario-task scope:
   separate specialist calls, so their absence here is not a Design defect.
 - Do not discard a shared acceptance criterion or rule. Assess every obligation it places on the active scenario;
   defer only evidence that requires executing another scenario to that scenario's separate review.
-- Do not report another scenario path as missing from this bounded packet.
-- This scenario's runtime path already passed a separate runtime review without blockers.
+- This scenario's runtime path already passed a separate runtime review without blockers. Treat runtime feasibility as
+  established: use runtime details only as evidence for primary claims, and do not re-review or re-report transport,
+  input propagation or alternative runtime-outcome findings unless they make a primary claim missing or contradicted.
 """.strip(),
         _BEHAVIOR_RULES,
+    ),
+}
+
+_SEMANTIC_FINDING_CATEGORIES = {
+    "cross_cutting": (
+        "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|"
+        "decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|"
+        "unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|"
+        "interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract"
+    ),
+    "scenario_runtime": (
+        "cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|"
+        "data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|"
+        "authentication_contract|authorization_contract"
+    ),
+    "scenario_behavior": (
+        "behavior_order|terminal_state|cross_diagram_contract|negative_constraint|unsupported_assumption|"
+        "ui_state_coverage|ui_journey_coherence|interaction_feedback|accessibility|"
+        "responsive_attachment|authentication_contract|authorization_contract"
     ),
 }
 
@@ -2424,7 +2531,7 @@ class SemanticTaskCache:
         temp.replace(self.path)
 
 
-def _with_contract_retry(review: Any) -> tuple[Any, int]:
+def _with_contract_retry(review: Any, *, previous_response: Any = None) -> tuple[Any, int]:
     """Run one semantic review call; retry it once when its output breaks the Harness contract."""
 
     correction = ""
@@ -2436,18 +2543,38 @@ def _with_contract_retry(review: Any) -> tuple[Any, int]:
         except HarnessError as exc:
             if exc.error_code != "design_semantic_review_failed" or attempt:
                 raise
-            correction = exc.message
+            previous = previous_response() if previous_response is not None else None
+            correction = _contract_retry_instruction(
+                error=exc.message,
+                previous_response=previous if isinstance(previous, dict) else None,
+            )
     raise AssertionError("unreachable")
+
+
+def _contract_retry_instruction(*, error: str, previous_response: dict[str, object] | None) -> str:
+    parts = [
+        f"Your previous response to this same request was rejected before use: {error}",
+    ]
+    if previous_response is not None:
+        parts.extend(
+            [
+                "Previous JSON response:",
+                json.dumps(previous_response, ensure_ascii=False, separators=(",", ":"), sort_keys=True),
+                "Correct only the fields implicated by the Harness error. Preserve every other semantic conclusion, "
+                "assessment status, finding, evidence item and mutation scope unchanged.",
+            ]
+        )
+    parts.append(
+        "Return one complete corrected JSON object for the same request. Cite only exact IDs that appear in the "
+        "supplied packet."
+    )
+    return "\n".join(parts)
 
 
 def _with_contract_correction(prompt: str, correction: str) -> str:
     if not correction:
         return prompt
-    return (
-        f"{prompt}\n\nHarness contract correction:\nYour previous response to this same request was rejected before "
-        f"use: {correction}\nReturn one complete corrected JSON object for the same request. Cite only exact IDs that "
-        "appear in the supplied packet."
-    )
+    return f"{prompt}\n\nHarness contract correction:\n{correction}"
 
 
 def _semantic_json_completion(llm_client: Any, *, prompt: str) -> dict[str, object]:
