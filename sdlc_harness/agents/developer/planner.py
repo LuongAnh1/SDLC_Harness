@@ -27,6 +27,7 @@ from ...profiles import (
     LanguagePromptDirective,
     PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PlanningPathPolicy,
+    QA_INTENT_STAGE_OWNER,
     VerificationStagePolicy,
     build_implementation_signature_contract,
     get_language_profile,
@@ -1087,6 +1088,11 @@ def _units_for_prompt(
             item["test_intents"] = [
                 {"id": test_intent_id(test), **test} for test in _dict_items(unit.get("test_intents"))
             ]
+        if _dict_items(unit.get("qa_test_intents")):
+            item["qa_test_intents"] = [
+                {"id": test_intent_id(test), **test}
+                for test in _dict_items(unit.get("qa_test_intents"))
+            ]
         scope = unit_write_scope(unit, planning_policy) if planning_policy else {}
         if scope:
             item["write_scope"] = scope
@@ -1184,7 +1190,33 @@ def _component_plan_prompt(
         if repair_feedback.strip()
         else ""
     )
-    return f"""Component-aware Implementation Plan V4
+    repair_rules = (
+        """
+- This is a repair patch. Return only the units named by the review, and in them only what changes:
+  - `planned_code_targets`, `test_intents`, and `qa_test_intents` add to what the unit already
+    has; never resend an existing target or test. Drop an existing test by listing its `id` in
+    `remove_test_intents` or `remove_qa_test_intents`, and drop a target the review calls unapproved
+    or unnecessary by listing its exact path and symbol in `remove_planned_code_targets`. Targets
+    seeded from runtime_bindings cannot be removed.
+  - `unverified_obligations` entries add to or replace the unit's entries with the same id.
+  - Send `objective` only when the review requires it to change; keep its unchanged sentences
+    word for word and add the new ones.
+""".rstrip()
+        if repair_feedback.strip()
+        else ""
+    )
+    browser_qa_active = (
+        "browser_e2e" in verification_policy.stage_ids
+        and verification_policy.owner_for_stage("browser_e2e") == QA_INTENT_STAGE_OWNER
+    )
+    browser_qa_rule = (
+        "Browser QA is active. Put every UI obligation in at least one `qa_test_intents` "
+        "entry and do not mark UI obligations unverified."
+        if browser_qa_active
+        else "Browser QA is inactive. Record UI behavior that active stages cannot observe in "
+        "`unverified_obligations`."
+    )
+    return f"""Component-aware Implementation Plan V5
 
 Enrich the Harness-owned work units. Do not add, delete, merge, split or reorder units.
 Return JSON only:
@@ -1209,17 +1241,27 @@ Return JSON only:
       }},
       "test_intents": [
         {{
-          "stage_id": "one approved stage",
+          "stage_id": "one stage owned by developer_intent",
           "intent": "verification intent",
           "acceptance_refs": ["AC-..."],
           "target_paths": ["exact profile-approved test path"],
           "obligation_refs": ["ui_obligations ids this test observes"]
         }}
       ],
+      "qa_test_intents": [
+        {{
+          "stage_id": "browser_e2e",
+          "intent": "browser-observable acceptance intent for the independent QA agent",
+          "acceptance_refs": ["AC-..."],
+          "target_paths": ["tests/e2e/<scenario>.spec.ts"],
+          "obligation_refs": ["ui_obligations ids observed in the real browser"]
+        }}
+      ],
       "unverified_obligations": [
         {{"id": "ui_obligations id no active stage fully observes", "reason": "what stays unobserved and why"}}
       ],
       "remove_test_intents": ["id of an existing test intent to drop"],
+      "remove_qa_test_intents": ["id of an existing QA intent to drop"],
       "repo_evidence_refs": ["evidence refs used for this unit"]
     }}
   ],
@@ -1250,7 +1292,14 @@ Rules:
 - Update every work unit that lacks an exact target or test intent.
 - Never return command, argv, cwd, env or timeout fields.
 - Use only paths allowed by the immutable planning policy.
-- Keep every acceptance ref covered by at least one test intent in its owning unit.
+- Keep every acceptance ref covered by at least one `test_intents` or `qa_test_intents`
+  entry in its owning unit.
+- `qa_test_intents` belong to the independent QA agent and never expand Developer write scope.
+  Use only the `browser_e2e` stage and exact `tests/e2e/*.spec.ts` paths.
+- Stage ownership is authoritative: `test_intents` may use only `developer_intent` stages,
+  `qa_test_intents` may use only `qa_intent` stages, and `harness_global` stages must never
+  appear in either list because the Harness runs them for the whole implementation.
+- {browser_qa_rule}
 - A `unit` test intent must target an exact test file. A `typecheck` intent must
   target an exact non-test source file already listed in that work unit's
   planned_code_targets.
@@ -1317,15 +1366,7 @@ Rules:
   state-dependent markup are observable by static rendering; focus movement, keyboard
   interaction and viewport layout need a stage the profile may not activate. The rule review
   rejects a unit that leaves an id unaccounted for.
-- A repair is a patch. Return only the units the review names, and in them only what changes:
-  - `planned_code_targets` and `test_intents` add to what the unit already has; never resend
-    an existing target or test. Drop an existing test by listing its `id` in
-    `remove_test_intents`, and drop a target the review calls unapproved or unnecessary by
-    listing its exact path and symbol in `remove_planned_code_targets`. Targets seeded from
-    runtime_bindings cannot be removed.
-  - `unverified_obligations` entries add to or replace the unit's entries with the same id.
-  - Send `objective` only when the review requires it to change; keep its unchanged sentences
-    word for word and add the new ones.
+{repair_rules}
 - Emit one signature entry for every Harness-owned signature target below; in a repair, only
   for targets of the units you update.
 - Copy `target_path` and `target_symbol` exactly. Harness owns Design-to-code binding;
@@ -1683,7 +1724,7 @@ def _parse_component_plan_payload(raw: str) -> dict[str, object]:
     except json.JSONDecodeError as exc:
         raise HarnessError(
             "implementation_plan_developer_failed",
-            "Developer.plan V4 LLM did not return valid component-plan JSON.",
+            "Developer.plan V5 LLM did not return valid component-plan JSON.",
         ) from exc
     return {
         "summary": str(parsed.get("summary") or "").strip(),
@@ -2823,7 +2864,9 @@ def _markdown_plan(
     signature_entries = _dict_items(signature_contract.get("entries"))
     version_text = str(structured.get("version") or "")
     plan_label = (
-        "V4"
+        "V5"
+        if version_text.endswith("_v5")
+        else "V4"
         if version_text.endswith("_v4")
         else "V3"
         if version_text.endswith("_v3")

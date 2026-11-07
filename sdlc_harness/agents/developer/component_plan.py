@@ -10,7 +10,10 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    DEVELOPER_INTENT_STAGE_OWNER,
+    QA_INTENT_STAGE_OWNER,
     PlanningPathPolicy,
 )
 from ...profiles.runtime_config import runtime_config_impact_issues
@@ -56,6 +59,7 @@ def resolve_implementation_plan_contract(state: dict[str, object]) -> str:
         return PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION
     if value not in {
         COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
         PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     }:
         raise HarnessError(
@@ -202,6 +206,7 @@ def build_component_work_units(
             "depends_on": [],
             "planned_code_targets": seeded_targets,
             "test_intents": [],
+            "qa_test_intents": [],
             "repo_evidence_refs": evidence_refs,
             "runtime_bindings": runtime_bindings,
             "boundary_contracts": [],
@@ -504,6 +509,17 @@ def merge_work_unit_updates(
                 *_dicts(patch.get("test_intents")),
             ]
         )
+        dropped_qa = set(_strings(patch.get("remove_qa_test_intents")))
+        unit["qa_test_intents"] = _canonical_test_intents(
+            [
+                *(
+                    item
+                    for item in _dicts(unit.get("qa_test_intents"))
+                    if test_intent_id(item) not in dropped_qa
+                ),
+                *_dicts(patch.get("qa_test_intents")),
+            ]
+        )
         if "unverified_obligations" in patch:
             declared = {
                 str(item.get("id") or "").strip(): str(item.get("reason") or "").strip()
@@ -658,7 +674,7 @@ def rebind_legacy_mappings_to_work_units(
     planning_policy: PlanningPathPolicy,
     signature_entries: object = None,
 ) -> list[dict[str, object]]:
-    """Bind legacy Class/Sequence projections to canonical V4 code targets."""
+    """Bind legacy Class/Sequence projections to canonical V5 code targets."""
 
     design_nodes = {
         str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))
@@ -828,13 +844,14 @@ def component_plan_projections(
     legacy_mappings: list[dict[str, object]],
     planning_policy: PlanningPathPolicy | None = None,
 ) -> dict[str, list[dict[str, object]]]:
-    """Render legacy Phase 4 fields from V4 units; never create a second plan authority."""
+    """Render legacy Phase 4 fields from V5 units; never create a second plan authority."""
 
     design_nodes = {str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))}
     steps: list[dict[str, object]] = []
     files: dict[str, dict[str, object]] = {}
     vdn_mappings: list[dict[str, object]] = []
     all_test_intents: list[dict[str, object]] = []
+    all_qa_test_intents: list[dict[str, object]] = []
     for unit in units:
         unit_id = str(unit.get("unit_id") or "")
         targets = _dicts(unit.get("planned_code_targets"))
@@ -903,6 +920,7 @@ def component_plan_projections(
                     }
                 )
         all_test_intents.extend(_dicts(unit.get("test_intents")))
+        all_qa_test_intents.extend(_dicts(unit.get("qa_test_intents")))
 
     mappings = _dedupe_mappings([*legacy_mappings, *vdn_mappings])
     requirements = {str(item.get("id") or ""): item for item in _dicts(requirement_graph.get("requirements"))}
@@ -934,6 +952,14 @@ def component_plan_projections(
                         if str(item.get("intent") or "")
                     }
                 ),
+                "qa_test_intents": sorted(
+                    {
+                        str(item.get("intent") or "")
+                        for unit in related
+                        for item in _dicts(unit.get("qa_test_intents"))
+                        if str(item.get("intent") or "")
+                    }
+                ),
             }
         )
     return {
@@ -942,6 +968,7 @@ def component_plan_projections(
         "design_mappings": mappings,
         "requirement_coverage": coverage,
         "test_intents": _dedupe_test_intents(all_test_intents),
+        "qa_test_intents": _dedupe_test_intents(all_qa_test_intents),
     }
 
 
@@ -952,11 +979,12 @@ def component_plan_issues(
     expected_inputs: dict[str, object],
     planning_policy: PlanningPathPolicy,
     verification_stage_ids: list[str],
+    verification_stage_ownership: dict[str, str] | None = None,
     design_graph: dict[str, object] | None = None,
     trace_graph: dict[str, object] | None = None,
     repo_landscape: dict[str, object] | None = None,
 ) -> list[str]:
-    """Return deterministic V4 contract violations."""
+    """Return deterministic V5 contract violations."""
 
     issues: list[str] = []
     if structured_plan.get("version") != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
@@ -979,6 +1007,7 @@ def component_plan_issues(
         actual = _dict(actual_by_id.get(str(item.get("unit_id") or "")))
         item["planned_code_targets"] = _dicts(actual.get("planned_code_targets"))
         item["test_intents"] = _dicts(actual.get("test_intents"))
+        item["qa_test_intents"] = _dicts(actual.get("qa_test_intents"))
         if "migration_impact" in item:
             item["migration_impact"] = _dict(actual.get("migration_impact"))
         expected_with_targets.append(item)
@@ -991,6 +1020,7 @@ def component_plan_issues(
     if set(actual_by_id) != set(expected_by_id):
         issues.append("Component-aware plan work-unit identity does not match the approved Design graph.")
     allowed_stages = set(verification_stage_ids)
+    stage_owners = dict(verification_stage_ownership or {})
     strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION_V2
     for unit_id, unit in actual_by_id.items():
         expected = expected_by_id.get(unit_id)
@@ -1081,10 +1111,15 @@ def component_plan_issues(
             if str(boundary.get("design_edge_id") or "") not in known_edge_ids:
                 issues.append(f"Work unit {unit_id} has an unbound runtime boundary contract.")
         tests = _dicts(unit.get("test_intents"))
+        qa_tests = _dicts(unit.get("qa_test_intents"))
         if not tests:
             issues.append(f"Work unit {unit_id} has no test intent.")
         obligation_ids = {str(item.get("id") or "") for item in _dicts(_dict(expected).get("ui_obligations"))}
-        tested = {ref for item in tests for ref in _strings(item.get("obligation_refs"))}
+        tested = {
+            ref
+            for item in [*tests, *qa_tests]
+            for ref in _strings(item.get("obligation_refs"))
+        }
         declared = _dicts(unit.get("unverified_obligations"))
         unverified = {str(item.get("id") or "") for item in declared if str(item.get("reason") or "").strip()}
         unknown = (tested | {str(item.get("id") or "") for item in declared}) - obligation_ids
@@ -1096,8 +1131,25 @@ def component_plan_issues(
                 f"Work unit {unit_id} leaves UI obligations neither tested nor declared unverified "
                 f"with a reason: {sorted(unaccounted)}"
             )
+        if obligation_ids and "browser_e2e" in allowed_stages:
+            browser_tested = {
+                ref for item in qa_tests for ref in _strings(item.get("obligation_refs"))
+            }
+            missing_browser = obligation_ids - browser_tested
+            if missing_browser:
+                issues.append(
+                    f"Work unit {unit_id} leaves UI obligations outside browser QA coverage: "
+                    f"{sorted(missing_browser)}"
+                )
+            if unverified:
+                issues.append(
+                    f"Work unit {unit_id} declares UI obligations unverified while browser QA is active: "
+                    f"{sorted(unverified)}"
+                )
         covered_acceptance = {
-            ref for item in tests for ref in _strings(item.get("acceptance_refs"))
+            ref
+            for item in [*tests, *qa_tests]
+            for ref in _strings(item.get("acceptance_refs"))
         }
         missing_acceptance = set(_strings(unit.get("acceptance_refs"))) - covered_acceptance
         if missing_acceptance:
@@ -1106,6 +1158,11 @@ def component_plan_issues(
             stage_id = str(item.get("stage_id") or "")
             if stage_id not in allowed_stages:
                 issues.append(f"Work unit {unit_id} references unsupported verification stage `{stage_id}`.")
+            elif stage_owners and stage_owners.get(stage_id) != DEVELOPER_INTENT_STAGE_OWNER:
+                issues.append(
+                    f"Work unit {unit_id} developer test intent cannot claim stage `{stage_id}` "
+                    f"owned by `{stage_owners.get(stage_id) or 'unknown'}`."
+                )
             test_paths = _strings(item.get("target_paths"))
             if not test_paths:
                 issues.append(f"Work unit {unit_id} test intent has no exact target path.")
@@ -1145,6 +1202,25 @@ def component_plan_issues(
                             f"Work unit {unit_id} plans unit test `{path}` without matching "
                             f"source target `{source_path}`."
                         )
+        for item in qa_tests:
+            stage_id = str(item.get("stage_id") or "")
+            if (
+                stage_id != "browser_e2e"
+                or stage_id not in allowed_stages
+                or (stage_owners and stage_owners.get(stage_id) != QA_INTENT_STAGE_OWNER)
+            ):
+                issues.append(
+                    f"Work unit {unit_id} QA intent references unsupported stage `{stage_id}`."
+                )
+            qa_paths = _strings(item.get("target_paths"))
+            if not qa_paths:
+                issues.append(f"Work unit {unit_id} QA intent has no exact browser test path.")
+            for path in qa_paths:
+                if (
+                    planning_policy.normalize_editable_path(path) != path
+                    or planning_policy.component_for_path(path) != "e2e"
+                ):
+                    issues.append(f"Work unit {unit_id} has invalid QA browser target path `{path}`.")
         if "data" in _strings(unit.get("surfaces")):
             migration = _dict(unit.get("migration_impact"))
             status = str(migration.get("status") or "")

@@ -20,6 +20,7 @@ from ...profiles import (
     LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -44,6 +45,7 @@ def build_developer_work_packet(
     canonical_requirements: list[dict[str, object]] | None = None,
     requirement_contract: dict[str, object] | None = None,
     requirement_coverage: list[dict[str, object]] | None = None,
+    approved_runtime_decisions: list[dict[str, object]] | None = None,
     effective_design_contract: dict[str, object] | None = None,
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
@@ -105,10 +107,16 @@ def build_developer_work_packet(
     canonical_requirements = canonical_requirements or []
     requirement_contract = requirement_contract or {"version": "v1", "revision": 0, "artifact_refs": {}}
     requirement_coverage = requirement_coverage or []
+    approved_runtime_decisions = approved_runtime_decisions or []
     required_fields = ["path", "content"]
-    component_aware_contract = (
+    current_component_aware_contract = (
         structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
     )
+    previous_component_aware_contract = (
+        structured_plan.get("version")
+        == PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
+    )
+    component_aware_contract = current_component_aware_contract or previous_component_aware_contract
     current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
     legacy_profiled_contract = (
         structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
@@ -152,6 +160,10 @@ def build_developer_work_packet(
         "requirement_contract": requirement_contract,
         "canonical_requirements": canonical_requirements,
         "requirement_coverage": requirement_coverage,
+        "approved_runtime_decisions": _referenced_runtime_decisions(
+            units=_dict_items(structured_plan.get("work_units")),
+            decisions=approved_runtime_decisions,
+        ),
         "requirement_coverage_by_file": _group_requirement_coverage_by_file(
             requirement_coverage,
             planning_policy=planning_policy,
@@ -188,6 +200,7 @@ def build_developer_work_packet(
         ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),
+        "qa_test_intents": _dict_items(structured_plan.get("qa_test_intents")),
         "repo_evidence": _string_items(structured_plan.get("repo_evidence")),
         "current_files": [
             {
@@ -226,7 +239,7 @@ def _build_execution_units(
     run_id: str,
     package_dependencies: list[dict[str, object]] | None = None,
 ) -> list[dict[str, object]]:
-    """Project approved Plan V4 work units without inventing new execution scope."""
+    """Project approved component-aware work units without inventing new execution scope."""
 
     work_units = _dict_items(structured_plan.get("work_units"))
     if not work_units:
@@ -266,6 +279,7 @@ def _build_execution_units(
         migration = _dict_value(item.get("migration_impact"))
         raw_paths.extend(_string_items(migration.get("targets")))
         test_intents = _dict_items(item.get("test_intents"))
+        qa_test_intents = _dict_items(item.get("qa_test_intents"))
         for intent in test_intents:
             raw_paths.extend(_string_items(intent.get("target_paths")))
         unit_package_dependencies = [
@@ -297,10 +311,29 @@ def _build_execution_units(
                 run_id=run_id,
             )
         stage_ids = list(dict.fromkeys(str(row.get("stage_id") or "").strip() for row in test_intents))
-        if any(not stage_id or stage_id not in allowed_stages for stage_id in stage_ids):
+        if any(
+            not stage_id
+            or stage_id not in allowed_stages
+            or verification_policy.owner_for_stage(stage_id) != "developer_intent"
+            for stage_id in stage_ids
+        ):
             raise HarnessError(
                 "developer_execution_unit_stage_invalid",
-                f"Execution unit references an unsupported verification stage: {unit_id}",
+                f"Execution unit references a stage not owned by Developer intents: {unit_id}",
+                run_id=run_id,
+            )
+        qa_stage_ids = list(
+            dict.fromkeys(str(row.get("stage_id") or "").strip() for row in qa_test_intents)
+        )
+        if any(
+            not stage_id
+            or stage_id not in allowed_stages
+            or verification_policy.owner_for_stage(stage_id) != "qa_intent"
+            for stage_id in qa_stage_ids
+        ):
+            raise HarnessError(
+                "developer_execution_unit_stage_invalid",
+                f"Execution unit references a stage not owned by QA intents: {unit_id}",
                 run_id=run_id,
             )
         signature_ids = _signature_ids_for_targets(signatures=signatures, targets=targets)
@@ -322,6 +355,7 @@ def _build_execution_units(
             "runtime_bindings": _dict_items(item.get("runtime_bindings")),
             "boundary_contracts": _dict_items(item.get("boundary_contracts")),
             "surface_contracts": _dict_items(item.get("surface_contracts")),
+            "ui_obligations": _dict_items(item.get("ui_obligations")),
             "write_paths": write_paths,
             "test_target_paths": list(
                 dict.fromkeys(
@@ -335,6 +369,7 @@ def _build_execution_units(
             "required_stage_ids": stage_ids,
             "signature_entry_ids": signature_ids,
             "test_intents": test_intents,
+            "qa_test_intents": qa_test_intents,
             "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
             "package_dependencies": unit_package_dependencies,
         }
@@ -367,6 +402,32 @@ def _build_execution_units(
                     run_id=run_id,
                 )
     return projected
+
+
+def _referenced_runtime_decisions(
+    *,
+    units: list[dict[str, object]],
+    decisions: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Keep only accepted D-* decisions cited by typed demo-fixture runtime inputs."""
+
+    cited = {
+        ref
+        for unit in units
+        for surface in _dict_items(unit.get("surface_contracts"))
+        for runtime in [_dict_value(_dict_value(surface.get("surface_contract")).get("runtime_surface"))]
+        for item in _dict_items(runtime.get("required_inputs"))
+        if str(item.get("source") or "") == "demo_fixture"
+        for ref in [str(item.get("binding") or ""), *_string_items(item.get("requirement_refs"))]
+        if ref.startswith("D-")
+    }
+    return [
+        dict(item)
+        for item in decisions
+        if str(item.get("id") or "") in cited
+        and str(item.get("id") or "").startswith("D-")
+        and str(item.get("status") or "").strip().lower() == "accepted"
+    ]
 
 
 def refresh_developer_execution_context(

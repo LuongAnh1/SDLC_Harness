@@ -185,12 +185,29 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     assert "non-executable" not in prompt
     assert "CSS class names without owned style rules" in prompt
     assert "static\n  markup does not cover interaction or focus" in prompt
-    assert "A repair is a patch" in prompt
+    assert "This is a repair patch" not in prompt
     assert "in a repair, only\n  for targets of the units you update" in prompt
     assert "owner of required auth and input mappings" in prompt
     assert "apps/web/src/CulturalHeritageInsertionForm.tsx" in prompt
     assert "Legacy Class graph" not in prompt
     assert "Legacy Sequence graph" not in prompt
+
+    repair_prompt = _component_plan_prompt(
+        run_id="run_signature_targets",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="Repair WU-1.",
+        previous_review={"blocking_issues": ["missing test"]},
+    )
+    assert "This is a repair patch" in repair_prompt
 
 
 def test_fake_developer_plan_follows_language_directive() -> None:

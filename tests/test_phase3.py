@@ -26,8 +26,10 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    VERIFICATION_STAGE_POLICY_VERSION,
     build_planning_path_policy,
     build_verification_stage_policy,
+    build_verification_stage_policy_version,
     get_language_profile,
     get_project_profile,
 )
@@ -38,7 +40,7 @@ from sdlc_harness.sync.github import GitHubCodeReviewResult
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
-from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
+from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow, _require_browser_ui_runtime_ready
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import (
@@ -686,7 +688,7 @@ class PhaseThreeTest(unittest.TestCase):
             )
 
         self.assertEqual(error.exception.error_code, "implementation_plan_contract_invalid")
-        self.assertIn("Plan V4", error.exception.message)
+        self.assertIn("Plan V5", error.exception.message)
 
     def test_approve_design_checkpoint_creates_implementation_plan(self) -> None:
         approved = self._create_phase2_run()
@@ -712,7 +714,7 @@ class PhaseThreeTest(unittest.TestCase):
         plan_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan"])
         self.assertTrue(plan_path.exists())
         content = plan_path.read_text(encoding="utf-8")
-        self.assertIn("Implementation Plan V4", content)
+        self.assertIn("Implementation Plan V5", content)
         self.assertIn("Component Work Units", content)
         self.assertIn("Repo Evidence", content)
         self.assertIn("Implementation Steps", content)
@@ -731,7 +733,7 @@ class PhaseThreeTest(unittest.TestCase):
 
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v5")
         self.assertEqual(structured["planning_mode"], "llm_component_aware_plan_v1")
         self.assertEqual(structured["inputs"]["repo_runtime_config"]["schema_version"], "repo_runtime_config_v1")
         self.assertEqual(structured["runtime_config_impact"]["status"], "not_required")
@@ -755,7 +757,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(review["repair_iterations"], 0)
         self.assertEqual(
             review["implementation_plan_contract_version"],
-            "implementation_plan_structured_v4",
+            "implementation_plan_structured_v5",
         )
         self.assertRegex(review["implementation_plan_sha256"], r"^sha256:[0-9a-f]{64}$")
 
@@ -817,7 +819,7 @@ class PhaseThreeTest(unittest.TestCase):
             planned["latest_artifacts"]["implementation_plan_structured"]
         )
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
-        self.assertEqual(structured["version"], "implementation_plan_structured_v4")
+        self.assertEqual(structured["version"], "implementation_plan_structured_v5")
         self.assertIn("apps/api/src/ExistingService.ts", structured["repo_context"]["source_files"])
         self.assertTrue(
             all(path.endswith((".ts", ".tsx")) for path in structured["repo_context"]["source_files"])
@@ -875,7 +877,7 @@ class PhaseThreeTest(unittest.TestCase):
             )
         )
         self.assertEqual(len(signature_targets), len(set(signature_targets)))
-        self.assertIn("# Implementation Plan V4", plan_markdown)
+        self.assertIn("# Implementation Plan V5", plan_markdown)
         self.assertIn("## Approved Implementation Signatures", plan_markdown)
         self.assertIn("## Verification Plan", plan_markdown)
         self.assertIn("Stage `unit`", plan_markdown)
@@ -1428,7 +1430,7 @@ Thanks."""
         self.assertIn("Raw Markdown Artifact", confluence_body)
         self.assertIn('ac:parameter ac:name="language">markdown', confluence_body)
         self.assertIn("Design-to-code mappings", confluence_body)
-        self.assertIn("Implementation Plan V4", confluence_body)
+        self.assertIn("Implementation Plan V5", confluence_body)
         self.assertNotIn("<p>| Design element | Type | Planned code target | Reason | Test intent |</p>", confluence_body)
         jira_payload = calls[1][2]
         self.assertIsNotNone(jira_payload)
@@ -1771,6 +1773,7 @@ Thanks."""
         cases = {
             "implementation_plan_contract_invalid": ("implementation_planning", "failed"),
             "implementation_plan_design_composition_blocked": ("design_review", "blocked"),
+            "implementation_plan_ui_runtime_blocked": ("design_review", "blocked"),
         }
         for error_code, (phase, status) in cases.items():
             with self.subTest(error_code=error_code):
@@ -1792,6 +1795,34 @@ Thanks."""
                 self.assertEqual(recovered["status"], status)
                 self.assertIsNone(recovered["pending_checkpoint"])
                 self.assertEqual(recovered["last_error"]["error_code"], error_code)
+
+    def test_browser_v2_blocks_external_ui_before_planning(self) -> None:
+        policy = build_verification_stage_policy_version(
+            project=get_project_profile("typescript_fullstack_v1"),
+            policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+        )
+        design_graph = {
+            "schema_version": GRAPH_VERSION_V2,
+            "nodes": [
+                {
+                    "id": "VDN-UI-1",
+                    "surface": "ui",
+                    "surface_contract": {
+                        "runtime_surface": {"runnable_status": "externally_blocked"}
+                    },
+                }
+            ],
+        }
+
+        with self.assertRaises(HarnessError) as caught:
+            _require_browser_ui_runtime_ready(
+                design_graph=design_graph,
+                verification_policy=policy,
+                run_id="run-browser-admission",
+            )
+
+        self.assertEqual(caught.exception.error_code, "implementation_plan_ui_runtime_blocked")
+        self.assertIn("VDN-UI-1", caught.exception.message)
 
     def test_corrupt_design_artifact_after_checkpoint_clear_marks_run_failed(self) -> None:
         approved = self._create_phase2_run()

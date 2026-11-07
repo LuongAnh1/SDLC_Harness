@@ -281,6 +281,11 @@ class PhaseFourImplementationCycle:
                     for item in previous_packet.get("requirement_coverage", [])
                     if isinstance(item, dict)
                 ],
+                approved_runtime_decisions=[
+                    dict(item)
+                    for item in previous_packet.get("approved_runtime_decisions", [])
+                    if isinstance(item, dict)
+                ],
                 effective_design_contract=_dict_value(
                     previous_packet.get("effective_design_contract")
                 ),
@@ -793,7 +798,7 @@ class PhaseFourImplementationCycle:
         run_id: str,
         work_packet: dict[str, object],
     ) -> tuple[dict[str, object], str]:
-        """Upgrade an approved Plan V4 packet before the first Developer mutation only."""
+        """Upgrade an approved component-aware packet before the first Developer mutation only."""
 
         if work_packet.get("execution_units"):
             target_info = self._workspace_target_info(
@@ -893,6 +898,11 @@ class PhaseFourImplementationCycle:
             requirement_coverage=[
                 dict(item)
                 for item in work_packet.get("requirement_coverage", [])
+                if isinstance(item, dict)
+            ],
+            approved_runtime_decisions=[
+                dict(item)
+                for item in work_packet.get("approved_runtime_decisions", [])
                 if isinstance(item, dict)
             ],
             effective_design_contract=_dict_value(work_packet.get("effective_design_contract")),

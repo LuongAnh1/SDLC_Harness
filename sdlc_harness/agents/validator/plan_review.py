@@ -175,7 +175,7 @@ def _component_requirement_coverage_issues(
     structured_plan: dict[str, object],
     requirement_graph: dict[str, object],
 ) -> list[str]:
-    """Validate exact canonical IDs while Vertical Trace owns V4 design identity."""
+    """Validate exact canonical IDs while Vertical Trace owns V5 design identity."""
 
     issues: list[str] = []
     contract = structured_plan.get("requirement_contract")
@@ -690,6 +690,10 @@ class ImplementationPlanValidator:
                     expected_inputs=component_plan_inputs or {},
                     planning_policy=planning_policy,
                     verification_stage_ids=list(verification_policy.stage_ids),
+                    verification_stage_ownership={
+                        stage_id: verification_policy.owner_for_stage(stage_id)
+                        for stage_id in verification_policy.stage_ids
+                    },
                     design_graph=vertical_design_graph or {},
                     trace_graph=vertical_trace_graph or {},
                     repo_landscape=repo_landscape or {},
@@ -1040,10 +1044,18 @@ def _llm_review_prompt(
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
     component_aware = structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    # V4 projections are rendered from work_units and checked by the rule review; unit contract
+    # V5 projections are rendered from work_units and checked by the rule review; unit contract
     # copies duplicate the Vertical Design nodes/edges below.
     omitted = {"requirement_coverage", "repair_history", "repo_context"} | (
-        {"implementation_steps", "proposed_files", "design_mappings", "test_intents"} if component_aware else set()
+        {
+            "implementation_steps",
+            "proposed_files",
+            "design_mappings",
+            "test_intents",
+            "qa_test_intents",
+        }
+        if component_aware
+        else set()
     )
     compact_plan = {key: value for key, value in structured_plan.items() if key not in omitted}
     if component_aware:
@@ -1132,7 +1144,7 @@ def _llm_review_prompt(
         key: requirement_design_trace.get(key, [])
         for key in ("version", "class_trace", "sequence_trace")
     }
-    # V4 binds Design to code through work units and Harness-owned signature targets, so the
+    # V5 binds Design to code through work units and Harness-owned signature targets, so the
     # legacy trace and class/sequence graphs are not semantic review input.
     legacy_trace_section = (
         ""
@@ -1185,9 +1197,9 @@ def _llm_review_prompt(
         if verification_policy
         else {"policy_version": "legacy_command_compatibility_v1"}
     )
-    v4_boundaries = (
+    v5_boundaries = (
         """
-Component-aware V4 boundaries:
+Component-aware V5 boundaries:
 - Vertical Design nodes define the complete approved work-unit/component scope.
   Do not invent a new business component or work unit. Each unit's `write_scope` lists the
   files it may target; supporting code belongs inside those files, plus shared contracts,
@@ -1217,6 +1229,9 @@ Component-aware V4 boundaries:
   relevant stimulus, call and observable outcome when an active stage can verify them.
 - A `unit` intent targets a test file. A `typecheck` intent targets a non-test source
   file already owned by the same work unit.
+- Enforce `stage_ownership` from the verification policy: Developer `test_intents` use only
+  `developer_intent`, `qa_test_intents` use only `qa_intent`, and `harness_global` stages are
+  whole-run Harness checks rather than work-unit intents.
 - Harness binds every signature target. Require parameters and returns that make the
   approved Vertical Design behavior callable and testable; reject placeholder-only
   `(): void` contracts when the flow accepts input, returns data/status, persists
@@ -1294,7 +1309,7 @@ Do not return `ok` or `developer_feedback`; Harness derives both from validated 
   "developer_feedback": "actionable feedback for Developer.plan if repair is needed"
 }"""
     )
-    return f"""Implementation Plan LLM Review v1
+    return f"""Implementation Plan LLM Review V5
 
 You must compare the implementation plan against the approved requirement and design.
 The deterministic rule review already passed basic graph/schema checks. Your job is
@@ -1317,7 +1332,7 @@ Review boundaries:
   when the approved requirement/design explicitly defines those semantics. Do not
   invent a broader system contract as a reason to reject the plan.
 
-{v4_boundaries}
+{v5_boundaries}
 
 Language prompt directive:
 {json.dumps(language_context, ensure_ascii=False, indent=2)}

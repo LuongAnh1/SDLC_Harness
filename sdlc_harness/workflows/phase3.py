@@ -46,6 +46,7 @@ from ..profiles import (
     planning_path_policy_from_snapshot,
     prompt_directive_from_snapshot,
     read_profile_snapshot,
+    VerificationStagePolicy,
     verification_stage_policy_from_snapshot,
 )
 from ..profiles.runtime_config import runtime_config_policy
@@ -76,6 +77,7 @@ DESIGN_ROUTING_ERROR_CODES = frozenset(
         "implementation_plan_component_invalid",
         "implementation_plan_dependency_cycle",
         "implementation_plan_design_composition_blocked",
+        "implementation_plan_ui_runtime_blocked",
     }
 )
 
@@ -187,6 +189,12 @@ class PhaseThreeWorkflow:
                 return self._revalidate_implementation_plan_locked(run_id=run_id)
             except LlmStepReviewRequired as exc:
                 return self._pause_for_plan_step_review(run_id=run_id, progress=exc.progress)
+            except HarnessError as exc:
+                if exc.error_code not in DESIGN_ROUTING_ERROR_CODES:
+                    raise
+                state = self.store.read_state(run_id)
+                self._mark_phase3_failed(state, run_id=run_id, error=exc)
+                return self._status_response(self.store.read_state(run_id), created_new_run=False)
 
     def _revalidate_implementation_plan_locked(self, *, run_id: str) -> dict[str, object]:
         state = self.store.read_state(run_id)
@@ -224,6 +232,11 @@ class PhaseThreeWorkflow:
         target_files = _target_source_files(target_path, state=state, run_id=run_id)
         planning_policy, prompt_directive, verification_policy = _phase3_profile_context(
             state=state,
+            run_id=run_id,
+        )
+        _require_browser_ui_runtime_ready(
+            design_graph=vertical_design_graph,
+            verification_policy=verification_policy,
             run_id=run_id,
         )
         component_plan_inputs = _with_runtime_config(
@@ -548,6 +561,11 @@ class PhaseThreeWorkflow:
                 artifact_paths=artifact_paths,
                 requirement_revision=frozen_requirement.canonical_model.revision,
                 requirement_contract_version=frozen_requirement.contract_version,
+            )
+            _require_browser_ui_runtime_ready(
+                design_graph=vertical_design_graph,
+                verification_policy=verification_policy,
+                run_id=run_id,
             )
             component_plan_inputs = _with_runtime_config(
                 component_plan_inputs,
@@ -887,7 +905,7 @@ class PhaseThreeWorkflow:
         dict[str, object],
         dict[str, object],
     ]:
-        """Load the immutable Vertical Design inputs only for V4 runs."""
+        """Load the immutable Vertical Design inputs only for V5 runs."""
 
         contract_version = resolve_implementation_plan_contract(state)
         if (
@@ -896,7 +914,7 @@ class PhaseThreeWorkflow:
         ):
             raise HarnessError(
                 "implementation_plan_contract_invalid",
-                "Vertical Design Graph V2 requires Component-aware Plan V4.",
+                "Vertical Design Graph V2 requires Component-aware Plan V5.",
                 run_id=run_id,
             )
         if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
@@ -907,7 +925,7 @@ class PhaseThreeWorkflow:
         ):
             raise HarnessError(
                 "implementation_plan_contract_invalid",
-                "Component-aware Plan V4 requires enforced Vertical Design traceability.",
+                "Component-aware Plan V5 requires enforced Vertical Design traceability.",
                 run_id=run_id,
             )
         design_ref = _required_artifact(artifact_paths, "vertical_design_graph", run_id=run_id)
@@ -1153,7 +1171,7 @@ def _with_runtime_config(
     target_path: Path,
     target_files: list[str],
 ) -> dict[str, object]:
-    """Bind a V4 plan to the runtime config facts the Planner and Validator both see."""
+    """Bind a V5 plan to the runtime config facts the Planner and Validator both see."""
 
     if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION or not runtime_config_policy(
         planning_policy.project_profile_id
@@ -1198,6 +1216,40 @@ def _phase3_profile_context(*, state: dict[str, object], run_id: str):
         prompt_directive_from_snapshot(snapshot, run_id=run_id),
         verification_stage_policy_from_snapshot(snapshot, run_id=run_id),
     )
+
+
+def _require_browser_ui_runtime_ready(
+    *,
+    design_graph: dict[str, object],
+    verification_policy: VerificationStagePolicy,
+    run_id: str,
+) -> None:
+    """Block paid planning when the pinned browser suite cannot execute an approved UI surface."""
+
+    if (
+        str(design_graph.get("schema_version") or "") != GRAPH_VERSION_V2
+        or "browser_e2e" not in verification_policy.stage_ids
+    ):
+        return
+    blocked_nodes = sorted(
+        str(node.get("id") or "")
+        for node in _dict_list(design_graph.get("nodes"))
+        if str(node.get("surface") or "") == "ui"
+        and str(
+            _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface")).get(
+                "runnable_status"
+            )
+            or ""
+        )
+        == "externally_blocked"
+    )
+    if blocked_nodes:
+        raise HarnessError(
+            "implementation_plan_ui_runtime_blocked",
+            "Browser QA is pinned, but approved UI runtime surfaces remain externally blocked: "
+            + ", ".join(blocked_nodes),
+            run_id=run_id,
+        )
 
 
 def _next_implementation_plan_version(artifact_dir: Path) -> int:
