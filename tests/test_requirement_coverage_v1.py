@@ -172,6 +172,7 @@ def test_semantic_candidate_expands_existing_open_question_refs_to_stable_requir
     result = _validate_analysis(payload, normalized.model)
 
     assert result["question_candidates"][0]["affects"] == question["affects"]
+    assert result["question_candidates"][0]["existing_question_id"] == question["id"]
     assert result["normalizations"] == [
         {
             "kind": "existing_open_question_affects_expanded",
@@ -312,6 +313,75 @@ def test_semantic_candidate_cannot_overwrite_or_cross_link_deterministic_branch_
 
     assert len(merged["question_candidates"]) == len(deterministic["question_candidates"])
     assert all(set(item["affects"]) != {"AF-1", "EF-2"} for item in merged["question_candidates"])
+
+
+def test_shared_acceptance_ref_does_not_merge_distinct_semantic_candidate() -> None:
+    model = RequirementModelV2.from_dict(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8"))
+    )
+    deterministic = _deterministic_analysis(model)
+    semantic = deepcopy(deterministic)
+    semantic["question_candidates"] = [
+        {
+            "category": "quality_attributes",
+            "question": "When should the cancellation controls become available again?",
+            "why_it_matters": "The answer changes the observable acceptance check.",
+            "answer_mode": "short",
+            "options": [],
+            "recommended_option": None,
+            "suggested_answer": None,
+            "proposed_disposition": "human_required",
+            "decision_category": "observable_behavior",
+            "why_it_is_safe": None,
+            "reversible": False,
+            "impact": "medium",
+            "uncertainty": "high",
+            "affects": ["AC-3"],
+            "evidence_refs": ["E-10"],
+        }
+    ]
+
+    merged = _merge_analysis(deterministic, semantic)
+
+    assert any(set(item["affects"]) == {"AC-3"} for item in merged["question_candidates"])
+
+
+def test_candidate_reuses_only_explicit_existing_question_id() -> None:
+    model = RequirementModelV2.from_dict(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8"))
+    )
+    deterministic = _deterministic_analysis(model)
+    branch_candidate = next(
+        item for item in deterministic["question_candidates"] if item.get("subject_ref") == "AF-1"
+    )
+    distinct_candidate = {
+        "category": "quality_attributes",
+        "question": "When should the cancellation controls become available again?",
+        "why_it_matters": "The answer changes the observable acceptance check.",
+        "answer_mode": "short",
+        "options": [],
+        "recommended_option": None,
+        "suggested_answer": None,
+        "proposed_disposition": "human_required",
+        "decision_category": "observable_behavior",
+        "why_it_is_safe": None,
+        "reversible": False,
+        "impact": "medium",
+        "uncertainty": "high",
+        "affects": ["AC-3"],
+        "evidence_refs": ["E-10"],
+    }
+
+    revised, added = _adopt_candidates(
+        model,
+        [branch_candidate, distinct_candidate],
+        max_new_questions=1,
+    )
+
+    assert branch_candidate["adopted_question_id"] == "Q-1"
+    assert added == ["Q-5"]
+    assert distinct_candidate["adopted_question_id"] == "Q-5"
+    assert len(revised.open_questions) == 5
 
 
 def test_candidates_outside_five_question_boundary_are_recorded_as_deferred() -> None:

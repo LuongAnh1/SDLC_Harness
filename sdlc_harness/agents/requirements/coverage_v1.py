@@ -100,23 +100,10 @@ class RequirementCoverageReviewer:
         analysis["adopted_question_ids"] = added
         analysis["question_limit"] = question_limit
         analysis["existing_blocking_question_count"] = existing_blockers
-        open_affects = [
-            set(_string_list(item.get("affects")))
-            for item in revised.open_questions
-            if isinstance(item, dict) and item.get("status") == "open"
-        ]
-        represented_candidates = sum(
+        analysis["deferred_candidate_count"] = sum(
             1
             for candidate in analysis["question_candidates"]
-            if set(_string_list(candidate.get("affects")))
-            and any(
-                set(_string_list(candidate.get("affects"))).intersection(affected)
-                for affected in open_affects
-            )
-        )
-        analysis["deferred_candidate_count"] = max(
-            0,
-            len(analysis["question_candidates"]) - represented_candidates,
+            if not str(candidate.get("adopted_question_id") or "")
         )
         if analysis["deferred_candidate_count"]:
             deferred = analysis.get("deferred")
@@ -263,6 +250,13 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
     data = model.to_dict()
     candidates: list[dict[str, Any]] = []
     incomplete: list[str] = []
+    open_question_ids = {
+        str(item.get("id") or "")
+        for item in model.open_questions
+        if isinstance(item, dict)
+        and item.get("status") == "open"
+        and str(item.get("id") or "")
+    }
     flows = data.get("flows") if isinstance(data.get("flows"), dict) else {}
     for group in ("alternatives", "exceptions"):
         values = flows.get(group) if isinstance(flows, dict) else []
@@ -275,13 +269,19 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
             if not (missing_steps or missing_outcome):
                 continue
             incomplete.append(flow_id)
+            linked_question_ids = [
+                ref
+                for ref in _string_list(item.get("open_question_refs"))
+                if ref in open_question_ids
+            ]
+            if len(linked_question_ids) > 1:
+                continue
             parts = []
             if missing_steps:
                 parts.append("các bước hệ thống/người dùng thực hiện")
             if missing_outcome:
                 parts.append("kết quả quan sát được cuối nhánh")
-            candidates.append(
-                {
+            candidate = {
                     "category": "edge_failures" if group == "exceptions" else "interaction_ux",
                     "question": f"Với nhánh {flow_id}, {(' và '.join(parts))} cụ thể là gì?",
                     "why_it_matters": "Nếu thiếu thông tin này, Developer và QA không thể triển khai và kiểm thử nhánh một cách xác định.",
@@ -295,10 +295,13 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
                     "reversible": False,
                     "impact": "high",
                     "uncertainty": "high",
+                    "subject_ref": flow_id,
                     "affects": [flow_id, *_related_acceptance_refs(data, flow_id)],
                     "evidence_refs": _string_list(item.get("evidence_refs")),
                 }
-            )
+            if linked_question_ids:
+                candidate["existing_question_id"] = linked_question_ids[0]
+            candidates.append(candidate)
     coverage = []
     for category in COVERAGE_CATEGORIES:
         affected = incomplete if category in {"interaction_ux", "edge_failures", "completion_signals", "placeholders"} else []
@@ -377,6 +380,9 @@ def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> di
         issues.append("question_candidates must contain at most 5 items")
     normalizations: list[dict[str, object]] = []
     for index, item in enumerate(candidates):
+        if isinstance(item, dict):
+            for field in ("subject_ref", "existing_question_id", "adopted_question_id"):
+                item.pop(field, None)
         normalization = _normalize_candidate_question_refs(
             item,
             index=index,
@@ -417,6 +423,8 @@ def _normalize_candidate_question_refs(
     question_refs = [ref for ref in original if ref in open_question_affects]
     if not question_refs:
         return None
+    if len(question_refs) == 1:
+        item["existing_question_id"] = question_refs[0]
     normalized: list[str] = []
     for ref in original:
         replacements = open_question_affects.get(ref, [ref])
@@ -504,13 +512,27 @@ def _merge_analysis(deterministic: dict[str, Any], semantic: dict[str, Any] | No
     if semantic is None:
         return deterministic
     merged = deepcopy(semantic)
-    candidates = list(deterministic["question_candidates"])
-    seen = [set(_string_list(item.get("affects"))) for item in candidates]
-    for item in semantic["question_candidates"]:
+    candidates = deepcopy(deterministic["question_candidates"])
+    deterministic_subjects = {
+        str(item.get("subject_ref") or "")
+        for item in candidates
+        if str(item.get("subject_ref") or "")
+    }
+    seen = {_candidate_identity(item) for item in candidates}
+    cross_linked: list[dict[str, Any]] = []
+    for raw_item in semantic["question_candidates"]:
+        item = deepcopy(raw_item)
+        for field in ("subject_ref", "adopted_question_id"):
+            item.pop(field, None)
         affected = set(_string_list(item.get("affects")))
-        if affected and not any(affected.intersection(existing) for existing in seen):
-            candidates.append(deepcopy(item))
-            seen.append(affected)
+        if len(affected.intersection(deterministic_subjects)) > 1:
+            cross_linked.append(item)
+            continue
+        identity = _candidate_identity(item)
+        if identity in seen:
+            continue
+        candidates.append(item)
+        seen.add(identity)
     candidates.sort(
         key=lambda item: (
             _LEVEL_RANK.get(str(item.get("impact")), 9),
@@ -533,10 +555,30 @@ def _merge_analysis(deterministic: dict[str, Any], semantic: dict[str, Any] | No
         }
         for item in dropped
     )
+    deferred.extend(
+        {
+            "reason": "semantic_candidate_cross_links_deterministic_subjects",
+            "category": str(item.get("category") or ""),
+            "question": str(item.get("question") or ""),
+            "affects": _string_list(item.get("affects")),
+        }
+        for item in cross_linked
+    )
     merged["deferred"] = deferred
     merged["review_mode"] = "hybrid"
     merged["deterministic_candidate_count"] = len(deterministic["question_candidates"])
     return merged
+
+
+def _candidate_identity(item: dict[str, Any]) -> tuple[str, str, tuple[str, ...], str]:
+    """Deduplicate exact candidate identity, never a shared Requirement reference."""
+
+    return (
+        str(item.get("category") or ""),
+        str(item.get("decision_category") or ""),
+        tuple(sorted(_string_list(item.get("affects")))),
+        " ".join(str(item.get("question") or "").split()).casefold(),
+    )
 
 
 def _adopt_candidates(
@@ -549,18 +591,24 @@ def _adopt_candidates(
     questions = data["open_questions"]
     added: list[str] = []
     for candidate in candidates:
+        candidate.pop("adopted_question_id", None)
         affects = _string_list(candidate.get("affects"))
         if not _candidate_traceable(data, affects):
             continue
-        existing = next(
-            (
-                item
-                for item in questions
-                if isinstance(item, dict)
-                and item.get("status") == "open"
-                and set(affects).intersection(_string_list(item.get("affects")))
-            ),
-            None,
+        existing_question_id = str(candidate.get("existing_question_id") or "")
+        existing = (
+            next(
+                (
+                    item
+                    for item in questions
+                    if isinstance(item, dict)
+                    and item.get("status") == "open"
+                    and str(item.get("id") or "") == existing_question_id
+                ),
+                None,
+            )
+            if existing_question_id
+            else None
         )
         created = existing is None
         if created:
@@ -608,6 +656,7 @@ def _adopt_candidates(
                 "uncertainty": str(candidate["uncertainty"]),
             }
         )
+        candidate["adopted_question_id"] = str(existing["id"])
         _attach_question(data, str(existing["id"]), _string_list(existing.get("affects")))
     return RequirementModelV2.from_dict(data), added
 
