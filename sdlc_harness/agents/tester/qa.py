@@ -42,9 +42,16 @@ class QaGeneratedTestSuite:
     generation_profile: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
+        browser_mode = bool(
+            (self.generation_profile or {}).get("browser")
+        )
         return {
-            "version": "qa_generated_tests_v1",
-            "mode": "qa_generated_acceptance_tests_v1",
+            "version": "qa_generated_tests_v2" if browser_mode else "qa_generated_tests_v1",
+            "mode": (
+                "qa_generated_browser_acceptance_tests_v2"
+                if browser_mode
+                else "qa_generated_acceptance_tests_v1"
+            ),
             "summary": self.summary,
             "test_files": self.test_files,
             "scenarios": self.scenarios,
@@ -173,7 +180,7 @@ def _generated_suite_from_raw(
 ) -> QaGeneratedTestSuite:
     """Parse and validate one complete QA response before any test file is applied."""
 
-    payload = _parse_generated_tests_payload(raw, qa_policy=qa_policy)
+    payload = _parse_generated_tests_payload(raw, context=context, qa_policy=qa_policy)
     generated = QaGeneratedTestSuite(
         summary=str(payload.get("summary") or "").strip(),
         test_files=_dict_items(payload.get("test_files")),
@@ -193,16 +200,35 @@ def _profiled_qa_generation_prompt(
     context: dict[str, object],
     qa_policy: QaTestPolicy,
 ) -> str:
-    return f"""QA Tester Generate Profiled Acceptance Tests v1
+    browser_mode = bool(qa_policy.browser_test_root)
+    test_kind = "Playwright browser" if browser_mode else "Vitest"
+    example_path = (
+        "tests/e2e/approved-scenario.spec.ts"
+        if browser_mode
+        else "apps/api/src/example/SomeAcceptance.test.ts"
+    )
+    example_import = (
+        'import { expect, test } from "@playwright/test";'
+        if browser_mode
+        else 'import { describe, expect, it } from "vitest";'
+    )
+    ownership_rule = (
+        "Use the exact browser paths declared by work_packet_summary.qa_test_intents. "
+        "Drive the real Web/API/PostgreSQL runtime; use only approved demo HTTP fixtures for "
+        "external list/session inputs, never replace the application API with mocks."
+        if browser_mode
+        else "Keep tests co-located with the component code under test. Do not create Playwright/E2E specs."
+    )
+    return f"""QA Tester Generate Profiled Acceptance Tests v2
 
-Generate executable Vitest tests for the approved use case and current code.
+Generate executable {test_kind} tests for the approved use case and current code.
 Return JSON only with this shape:
 {{
   "summary": "short test-generation summary",
   "test_files": [
     {{
-      "path": "apps/api/src/example/SomeAcceptance.test.ts",
-      "content": "complete TypeScript Vitest source code",
+      "path": "{example_path}",
+      "content": "complete TypeScript test source beginning with {example_import}",
       "scenarios": ["scenario covered by this file"]
     }}
   ],
@@ -219,9 +245,15 @@ Return JSON only with this shape:
 }}
 
 Rules:
-- Generate at least one complete TypeScript Vitest test using imports from `vitest`.
+- Generate at least one complete TypeScript {test_kind} test using the policy-owned framework.
 - Use only a test root and exact suffix listed in QA Test Policy below.
-- Keep tests co-located with the component code under test. Do not create Playwright/E2E specs.
+- {ownership_rule}
+- Treat `qa_contract_slices` as the exact per-unit authority for UI states, runtime reachability,
+  obligations, boundaries, and fixture use. Do not reconstruct these contracts from summaries.
+- A demo fixture is allowed only when its runtime input cites an accepted D-* decision included in
+  `approved_runtime_decisions`; otherwise fail closed instead of inventing data or mocks.
+- Prefer the UI/API sources that appear first in `code_under_test.files`; they were ordered from the
+  QA-owning units and their direct dependencies within the fixed code budget.
 - Do not modify production files, package manifests, configs, lockfiles, or scripts.
 - Use repo-relative imports and the current code shown in the packet; do not invent APIs.
 - Every scenario.test_file must exactly reference one generated test_files.path.
@@ -237,6 +269,11 @@ QA Generation Packet:
 
 
 def _profiled_repair_rule(qa_policy: QaTestPolicy) -> str:
+    if qa_policy.browser_test_root:
+        return (
+            "\nKeep every test file inside the supplied Playwright browser policy, import from "
+            "`@playwright/test`, use only planned QA intent paths, and do not return commands."
+        )
     return (
         "\nKeep every test file inside the supplied Vitest QA Test Policy, use TypeScript "
         "Vitest source, and do not return commands or Playwright specs."
@@ -275,6 +312,7 @@ Previous response:
 def _parse_generated_tests_payload(
     raw: str,
     *,
+    context: dict[str, object],
     qa_policy: QaTestPolicy,
 ) -> dict[str, object]:
     try:
@@ -288,6 +326,7 @@ def _parse_generated_tests_payload(
         parsed.get("test_files"),
         raw_response=raw,
         qa_policy=qa_policy,
+        planned_paths=_planned_qa_test_paths(context, qa_policy=qa_policy),
     )
     scenarios = [
         {**item, "requirement_ids": _string_items(item.get("requirement_ids"))}
@@ -319,6 +358,7 @@ def _normalized_test_files(
     *,
     raw_response: str,
     qa_policy: QaTestPolicy,
+    planned_paths: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
     files = _dict_items(value)
     if not files:
@@ -346,12 +386,10 @@ def _normalized_test_files(
                 f"QA/Tester LLM returned empty content for test file: {path}",
                 raw_response=raw_response,
             )
-        if not re.search(
-            r"\bfrom\s+['\"]vitest['\"]",
-            content,
-        ):
+        framework_import = "@playwright/test" if qa_policy.browser_test_root else "vitest"
+        if not re.search(rf"\bfrom\s+['\"]{re.escape(framework_import)}['\"]", content):
             raise QaTesterLlmError(
-                f"Profiled QA test must import its API from vitest: {path}",
+                f"Profiled QA test must import its API from {framework_import}: {path}",
                 raw_response=raw_response,
             )
         normalized.append(
@@ -360,6 +398,12 @@ def _normalized_test_files(
                 "content": content,
                 "scenarios": _string_items(item.get("scenarios")),
             }
+        )
+    if planned_paths and set(seen) != set(planned_paths):
+        raise QaTesterLlmError(
+            "QA/Tester test files do not match the exact planned QA intent paths: "
+            f"planned={list(planned_paths)}, generated={sorted(seen)}.",
+            raw_response=raw_response,
         )
     return normalized
 
@@ -370,13 +414,32 @@ def _normalize_test_path(
     raw_response: str,
     qa_policy: QaTestPolicy,
 ) -> str:
-    path = qa_policy.normalize_test_path(raw_path)
+    path = (
+        qa_policy.normalize_browser_test_path(raw_path)
+        if qa_policy.browser_test_root
+        else qa_policy.normalize_test_path(raw_path)
+    )
     if not path:
         raise QaTesterLlmError(
-            f"QA/Tester LLM returned a path outside the profiled Vitest policy: {raw_path}",
+            f"QA/Tester LLM returned a path outside the profiled QA policy: {raw_path}",
             raw_response=raw_response,
         )
     return path
+
+
+def _planned_qa_test_paths(
+    context: dict[str, object],
+    *,
+    qa_policy: QaTestPolicy,
+) -> tuple[str, ...]:
+    summary = _dict_value(context.get("work_packet_summary"))
+    paths: list[str] = []
+    for intent in _dict_items(summary.get("qa_test_intents")):
+        for raw_path in _string_items(intent.get("target_paths")):
+            path = qa_policy.normalize_browser_test_path(raw_path)
+            if path and path not in paths:
+                paths.append(path)
+    return tuple(paths)
 
 
 def _deterministic_generated_tests(
@@ -387,6 +450,53 @@ def _deterministic_generated_tests(
     return _deterministic_profiled_tests(context=context, qa_policy=qa_policy)
 
 
+def _deterministic_browser_tests(
+    *,
+    context: dict[str, object],
+    qa_policy: QaTestPolicy,
+) -> QaGeneratedTestSuite:
+    planned_paths = _planned_qa_test_paths(context, qa_policy=qa_policy)
+    paths = planned_paths or (f"{qa_policy.browser_test_root}/GeneratedQaAcceptance.spec.ts",)
+    requirement_ids = [
+        str(item.get("id") or "").strip()
+        for item in _dict_items(context.get("canonical_requirements"))
+        if str(item.get("id") or "").strip()
+    ]
+    encoded_ids = json.dumps(requirement_ids, ensure_ascii=False)
+    files: list[dict[str, object]] = []
+    scenarios: list[dict[str, object]] = []
+    for index, path in enumerate(paths, start=1):
+        name = f"Open the approved application flow {index}"
+        content = f'''import {{ expect, test }} from "@playwright/test";
+
+test("approved browser acceptance flow {index}", async ({{ page }}) => {{
+  const requirementIds = {encoded_ids};
+  await page.goto("/");
+  await expect(page.locator("body")).toBeVisible();
+  expect(requirementIds).toEqual({encoded_ids});
+}});
+'''
+        files.append({"path": path, "content": content.strip(), "scenarios": [name]})
+        scenarios.append(
+            {
+                "name": name,
+                "expected_result": "The real application loads in Chromium.",
+                "test_file": path,
+                "risk": "Deterministic fallback proves runtime availability only; use the QA LLM for contract-specific assertions.",
+                "requirement_ids": requirement_ids,
+            }
+        )
+    return QaGeneratedTestSuite(
+        summary="Fake QA generated policy-owned Playwright acceptance tests.",
+        test_files=files,
+        scenarios=scenarios,
+        risks=["Deterministic browser fallback has only a runtime smoke assertion."],
+        generation_context=_dict_value(context.get("context_budget")),
+        requirement_contract=_dict_value(context.get("requirement_contract")),
+        generation_profile=qa_policy.metadata(),
+    )
+
+
 def _deterministic_profiled_tests(
     *,
     context: dict[str, object],
@@ -394,6 +504,8 @@ def _deterministic_profiled_tests(
 ) -> QaGeneratedTestSuite:
     run_id = str(context.get("run_id") or "")
     issue_key = str(context.get("issue_key") or "")
+    if qa_policy.browser_test_root:
+        return _deterministic_browser_tests(context=context, qa_policy=qa_policy)
     source_path = ""
     code_under_test = _dict_value(context.get("code_under_test"))
     for item in _dict_items(code_under_test.get("files")):

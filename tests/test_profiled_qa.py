@@ -18,6 +18,7 @@ from sdlc_harness.artifacts.writers import (
 )
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    QA_TEST_POLICY_VERSION,
     build_planning_path_policy,
     build_qa_test_policy,
     get_language_profile,
@@ -27,6 +28,7 @@ from sdlc_harness.verification import VerificationResult
 from sdlc_harness.workflows.phase4 import (
     _apply_qa_generated_tests,
     _code_review_publication_paths,
+    _qa_contract_slices,
     _qa_code_paths,
     _qa_result_from_generated_execution,
 )
@@ -164,6 +166,31 @@ class ProfiledQaTest(unittest.TestCase):
         self.assertIn('from "vitest"', generated.test_files[0]["content"])
         self.assertEqual(generated.scenarios[0]["requirement_ids"], ["REQ-1"])
 
+    def test_browser_policy_generates_exact_planned_playwright_paths(self) -> None:
+        policy = build_qa_test_policy(
+            planning_policy=self.planning_policy,
+            policy_version=QA_TEST_POLICY_VERSION,
+        )
+        path = "tests/e2e/delete-cultural-heritage.spec.ts"
+        context = {
+            **self.context,
+            "work_packet_summary": {
+                "qa_test_intents": [
+                    {
+                        "stage_id": "browser_e2e",
+                        "target_paths": [path],
+                        "acceptance_refs": ["AC-1"],
+                    }
+                ]
+            },
+        }
+
+        generated = QaTesterAgent().generate_tests(context=context, qa_policy=policy)
+
+        self.assertEqual([item["path"] for item in generated.test_files], [path])
+        self.assertIn('from "@playwright/test"', generated.test_files[0]["content"])
+        self.assertEqual(generated.to_dict()["version"], "qa_generated_tests_v2")
+
     def test_profiled_prompt_uses_vitest_and_rejects_java_shape(self) -> None:
         path = "apps/api/src/FeatureAcceptance.test.ts"
         llm = RecordingQaLlm(
@@ -238,6 +265,93 @@ class ProfiledQaTest(unittest.TestCase):
                     context=self.context,
                     qa_policy=self.qa_policy,
                 )
+
+    def test_browser_qa_uses_exact_contract_slice_and_prioritizes_ui_api_code(self) -> None:
+        qa_intent = {
+            "stage_id": "browser_e2e",
+            "target_paths": ["tests/e2e/heritage.spec.ts"],
+            "obligation_refs": ["UIO-1"],
+        }
+        packet = {
+            "qa_test_intents": [qa_intent],
+            "approved_runtime_decisions": [
+                {"id": "D-1", "status": "accepted", "text": "Use fixture records."}
+            ],
+            "output_contract": {
+                "allowed_paths": [
+                    "packages/db/src/heritage.ts",
+                    "apps/api/src/heritage.ts",
+                    "apps/web/src/HeritageView.tsx",
+                ]
+            },
+            "execution_units": [
+                {
+                    "unit_id": "WU-API",
+                    "order": 1,
+                    "component_id": "api",
+                    "planned_code_targets": [{"path": "apps/api/src/heritage.ts"}],
+                    "runtime_bindings": [
+                        {"target": {"path": "apps/api/src/heritage.ts", "symbol": "route"}}
+                    ],
+                },
+                {
+                    "unit_id": "WU-UI",
+                    "order": 2,
+                    "scenario_id": "SC-1",
+                    "component_id": "web",
+                    "surfaces": ["ui"],
+                    "depends_on": ["WU-API"],
+                    "requirement_refs": ["AC-1"],
+                    "acceptance_refs": ["AC-1"],
+                    "qa_test_intents": [qa_intent],
+                    "ui_obligations": [{"id": "UIO-1", "kind": "focus"}],
+                    "planned_code_targets": [{"path": "apps/web/src/HeritageView.tsx"}],
+                    "runtime_bindings": [
+                        {"target": {"path": "apps/web/src/HeritageView.tsx", "symbol": "HeritageView"}}
+                    ],
+                    "surface_contracts": [
+                        {
+                            "surface": "ui",
+                            "surface_contract": {
+                                "runtime_surface": {
+                                    "screen_id": "heritage-list",
+                                    "required_inputs": [
+                                        {
+                                            "name": "records",
+                                            "source": "demo_fixture",
+                                            "binding": "D-1",
+                                            "requirement_refs": ["D-1"],
+                                        }
+                                    ],
+                                }
+                            },
+                        }
+                    ],
+                    "boundary_contracts": [{"design_edge_id": "VDE-1"}],
+                },
+            ],
+        }
+
+        slices = _qa_contract_slices(work_packet=packet, run_id="run-qa-slice")
+        self.assertEqual(slices[0]["unit_id"], "WU-UI")
+        self.assertEqual(slices[0]["accepted_fixture_decisions"][0]["id"], "D-1")
+        self.assertEqual(
+            _qa_code_paths(
+                work_packet=packet,
+                run_id="run-qa-slice",
+                planning_policy=self.planning_policy,
+            ),
+            [
+                "apps/web/src/HeritageView.tsx",
+                "apps/api/src/heritage.ts",
+                "packages/db/src/heritage.ts",
+            ],
+        )
+
+        packet["approved_runtime_decisions"] = []
+        with self.assertRaises(HarnessError) as caught:
+            _qa_contract_slices(work_packet=packet, run_id="run-qa-slice")
+        self.assertEqual(caught.exception.error_code, "qa_context_incomplete")
 
     def test_profiled_apply_prevents_overwrite_but_allows_same_run_retry(self) -> None:
         path = "apps/api/src/GeneratedQaAcceptance.test.ts"

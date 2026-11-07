@@ -273,7 +273,12 @@ class _PhaseFourCore:
             version=1,
         )
 
-        canonical_requirements, requirement_contract, requirement_coverage = self._require_v2_phase4_input(
+        (
+            canonical_requirements,
+            requirement_contract,
+            requirement_coverage,
+            approved_runtime_decisions,
+        ) = self._require_v2_phase4_input(
             state=state,
             artifact_paths=artifact_paths,
             structured_plan=structured_plan,
@@ -307,6 +312,7 @@ class _PhaseFourCore:
                 canonical_requirements=canonical_requirements,
                 requirement_contract=requirement_contract,
                 requirement_coverage=requirement_coverage,
+                approved_runtime_decisions=approved_runtime_decisions,
                 effective_design_contract={
                     **effective_design_contract,
                     "artifact_path": effective_design_contract_path,
@@ -379,7 +385,12 @@ class _PhaseFourCore:
         structured_plan: dict[str, object],
         review: dict[str, object],
         run_id: str,
-    ) -> tuple[list[dict[str, object]], dict[str, object], list[dict[str, object]]]:
+    ) -> tuple[
+        list[dict[str, object]],
+        dict[str, object],
+        list[dict[str, object]],
+        list[dict[str, object]],
+    ]:
         """Validate the frozen V2 contract and Phase 3 coverage before any Phase 4 mutation."""
 
         try:
@@ -437,7 +448,14 @@ class _PhaseFourCore:
                 trace=trace,
                 run_id=run_id,
             )
-            return canonical, contract, coverage
+            approved_runtime_decisions = [
+                dict(item)
+                for item in frozen.canonical_model.to_dict().get("decisions", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "").startswith("D-")
+                and str(item.get("status") or "").strip().lower() == "accepted"
+            ]
+            return canonical, contract, coverage, approved_runtime_decisions
         except HarnessError as exc:
             raise HarnessError(
                 "requirement_v2_phase4_input_invalid",
@@ -856,6 +874,7 @@ def _qa_review_context(
         run_id=run_id,
         planning_policy=planning_policy,
     )
+    qa_contract_slices = _qa_contract_slices(work_packet=work_packet, run_id=run_id)
     traceability = _qa_traceability_summary(trace_report=trace_report, trace_path=trace_path)
     requirement_contract = _dict_value(work_packet.get("requirement_contract"))
     v2 = requirement_contract.get("version") == "v2"
@@ -891,11 +910,14 @@ def _qa_review_context(
             "implementation_steps": work_packet.get("implementation_steps"),
             "proposed_files": work_packet.get("proposed_files"),
             "test_intents": work_packet.get("test_intents"),
+            "qa_test_intents": work_packet.get("qa_test_intents"),
         },
         "accepted_requirement": accepted_requirement,
         "requirement_contract": requirement_contract,
         "canonical_requirements": canonical_requirements,
         "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")) if v2 else [],
+        "qa_contract_slices": qa_contract_slices,
+        "approved_runtime_decisions": _dict_items(work_packet.get("approved_runtime_decisions")),
         "code_under_test": code_under_test,
         "verification": verification,
         "traceability": traceability,
@@ -906,7 +928,7 @@ def _qa_review_context(
         },
         "context_budget": {
             "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
-            "section_count": 3,
+            "section_count": 4,
             "code_file_count": len(_dict_items(code_under_test.get("files"))),
             "chars_sent": chars_sent,
             "chars_total": chars_total,
@@ -923,6 +945,8 @@ def _qa_review_context(
         },
         "guardrails": [
             "QA/Tester generates acceptance/system tests from current code and test evidence.",
+            "qa_contract_slices are the exact approved per-unit UI/runtime/obligation/boundary authority.",
+            "Only accepted D-* decisions in approved_runtime_decisions may authorize demo fixtures.",
             "Full design, implementation plan, and trace report are references only; use summaries unless a future slice fetches them.",
             "QA/Tester must not request requirement/design edits in this slice.",
             "QA-generated test fail/skipped enters the bounded Developer QA repair loop.",
@@ -1027,16 +1051,55 @@ def _qa_code_paths(
     run_id: str,
     planning_policy: PlanningPathPolicy,
 ) -> list[str]:
-    paths: list[str] = []
-    seen: set[str] = set()
-    for rel_path in _allowed_paths(
+    allowed_paths = _allowed_paths(
         work_packet,
         run_id=run_id,
         planning_policy=planning_policy,
-    ):
-        if rel_path not in seen:
-            paths.append(rel_path)
-            seen.add(rel_path)
+    )
+    allowed = set(allowed_paths)
+    paths: list[str] = []
+    seen: set[str] = set()
+
+    def add(raw_paths: list[str]) -> None:
+        for raw_path in raw_paths:
+            if raw_path not in allowed or raw_path in seen:
+                continue
+            paths.append(raw_path)
+            seen.add(raw_path)
+
+    units = _dict_items(work_packet.get("execution_units"))
+    by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
+    qa_units = [unit for unit in units if _dict_items(unit.get("qa_test_intents"))]
+    for unit in sorted(qa_units, key=lambda row: int(row.get("order") or 0)):
+        add(_qa_unit_runtime_paths(unit))
+        add(
+            [
+                str(target.get("path") or "")
+                for target in _dict_items(unit.get("planned_code_targets"))
+            ]
+        )
+    dependency_units = [
+        by_id[dependency_id]
+        for unit in qa_units
+        for dependency_id in _string_items(unit.get("depends_on"))
+        if dependency_id in by_id
+    ]
+    dependency_units = sorted(
+        {str(unit.get("unit_id") or ""): unit for unit in dependency_units}.values(),
+        key=lambda row: (
+            0 if str(row.get("component_id") or "") in {"api", "contracts"} else 1,
+            int(row.get("order") or 0),
+        ),
+    )
+    for unit in dependency_units:
+        add(_qa_unit_runtime_paths(unit))
+        add(
+            [
+                str(target.get("path") or "")
+                for target in _dict_items(unit.get("planned_code_targets"))
+            ]
+        )
+    add(allowed_paths)
     if paths:
         return paths
     for item in _dict_items(work_packet.get("proposed_files")) + _dict_items(work_packet.get("current_files")):
@@ -1049,6 +1112,96 @@ def _qa_code_paths(
             paths.append(rel_path)
             seen.add(rel_path)
     return paths
+
+
+def _qa_unit_runtime_paths(unit: dict[str, object]) -> list[str]:
+    return list(
+        dict.fromkeys(
+            path
+            for binding in _dict_items(unit.get("runtime_bindings"))
+            for path in (
+                str(_dict_value(binding.get("target")).get("path") or ""),
+                str(_dict_value(binding.get("attachment")).get("owner_path") or ""),
+            )
+            if path
+        )
+    )
+
+
+def _qa_contract_slices(
+    *,
+    work_packet: dict[str, object],
+    run_id: str,
+) -> list[dict[str, object]]:
+    units = _dict_items(work_packet.get("execution_units"))
+    qa_units = [unit for unit in units if _dict_items(unit.get("qa_test_intents"))]
+    if _dict_items(work_packet.get("qa_test_intents")) and not qa_units:
+        raise HarnessError(
+            "qa_context_incomplete",
+            "QA intents exist but no execution-unit contract slice owns them.",
+            run_id=run_id,
+        )
+    accepted = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(work_packet.get("approved_runtime_decisions"))
+        if str(item.get("id") or "").startswith("D-")
+        and str(item.get("status") or "").strip().lower() == "accepted"
+    }
+    slices: list[dict[str, object]] = []
+    for unit in qa_units:
+        unit_id = str(unit.get("unit_id") or "").strip()
+        runtime_bindings = _dict_items(unit.get("runtime_bindings"))
+        surface_contracts = _dict_items(unit.get("surface_contracts"))
+        ui_contracts = [
+            item for item in surface_contracts
+            if str(item.get("surface") or "").strip().lower() == "ui"
+        ]
+        if not unit_id or not runtime_bindings or (
+            "ui" in {value.strip().lower() for value in _string_items(unit.get("surfaces"))}
+            and not ui_contracts
+        ):
+            raise HarnessError(
+                "qa_context_incomplete",
+                f"QA execution-unit slice is missing exact UI/runtime contracts: {unit_id or '<missing>'}",
+                run_id=run_id,
+            )
+        cited_decisions = {
+            ref
+            for binding in ui_contracts
+            for runtime in [
+                _dict_value(_dict_value(binding.get("surface_contract")).get("runtime_surface"))
+            ]
+            for required_input in _dict_items(runtime.get("required_inputs"))
+            if str(required_input.get("source") or "") == "demo_fixture"
+            for ref in [
+                str(required_input.get("binding") or ""),
+                *_string_items(required_input.get("requirement_refs")),
+            ]
+            if ref.startswith("D-")
+        }
+        missing_decisions = cited_decisions - set(accepted)
+        if missing_decisions:
+            raise HarnessError(
+                "qa_context_incomplete",
+                f"QA runtime slice cites unaccepted fixture decisions: {sorted(missing_decisions)}",
+                run_id=run_id,
+            )
+        slices.append(
+            {
+                "unit_id": unit_id,
+                "scenario_id": unit.get("scenario_id"),
+                "component_id": unit.get("component_id"),
+                "requirement_refs": _string_items(unit.get("requirement_refs")),
+                "acceptance_refs": _string_items(unit.get("acceptance_refs")),
+                "qa_test_intents": _dict_items(unit.get("qa_test_intents")),
+                "ui_obligations": _dict_items(unit.get("ui_obligations")),
+                "ui_surface_contracts": ui_contracts,
+                "runtime_bindings": runtime_bindings,
+                "boundary_contracts": _dict_items(unit.get("boundary_contracts")),
+                "accepted_fixture_decisions": [accepted[ref] for ref in sorted(cited_decisions)],
+            }
+        )
+    return slices
 
 
 def _qa_code_role(rel_path: str) -> str:
@@ -1152,7 +1305,7 @@ def _normalize_qa_test_path(
     run_id: str,
     qa_policy: QaTestPolicy,
 ) -> str:
-    rel_path = qa_policy.normalize_test_path(raw_path)
+    rel_path = qa_policy.normalize_test_path(raw_path) or qa_policy.normalize_browser_test_path(raw_path)
     if not rel_path:
         raise HarnessError(
             "qa_test_out_of_scope",
@@ -1204,7 +1357,9 @@ def _previous_qa_owned_paths(
         )
     owned: set[str] = set()
     for item in _dict_items(payload.get("test_files")):
-        path = qa_policy.normalize_test_path(item.get("path"))
+        path = qa_policy.normalize_test_path(item.get("path")) or qa_policy.normalize_browser_test_path(
+            item.get("path")
+        )
         if not path:
             raise HarnessError(
                 "qa_test_policy_invalid",
@@ -1235,7 +1390,7 @@ def _qa_result_from_generated_execution(
     ):
         status = "fail"
         reason = (
-            "QA execution evidence does not prove every generated Vitest file ran; "
+            "QA execution evidence does not prove every generated test file ran; "
             f"expected={list(expected_test_files)}, selected={list(selected_test_files)}, "
             f"verified={list(verified_test_files)}."
         )

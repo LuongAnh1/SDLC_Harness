@@ -184,6 +184,26 @@ class VerificationRunner:
                 f"Developer unit requested an unapproved verification stage: {stage_id}",
                 run_id=run_id,
             )
+        if verification_policy.owner_for_stage(stage_id) != "developer_intent":
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Developer unit may not run stage owned by {verification_policy.owner_for_stage(stage_id)}: {stage_id}",
+                run_id=run_id,
+            )
+        selected_spec = next(
+            (
+                spec
+                for spec in resolve_verification_stage_specs(verification_policy, run_id=run_id)
+                if spec.stage_id == stage_id
+            ),
+            None,
+        )
+        if selected_spec is None or not selected_spec.developer_selectable:
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Developer unit may not run outer verification stage: {stage_id}",
+                run_id=run_id,
+            )
         result = self._run_profiled_stages(
             target_path=target_path,
             work_packet=work_packet,
@@ -310,11 +330,17 @@ class VerificationRunner:
 
         prepared: list[tuple[VerificationStageSpec, Path, str, dict[str, str]]] = []
         for spec in specs:
-            if spec.required_package_script not in scripts:
+            required_scripts = {
+                value
+                for value in (spec.required_package_script, *spec.required_package_scripts)
+                if value
+            }
+            missing_scripts = sorted(required_scripts - scripts)
+            if missing_scripts:
                 return _profiled_preflight_failure(
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
-                    reason=f"package.json is missing required script: {spec.required_package_script}",
+                    reason=f"package.json is missing required scripts: {missing_scripts}",
                     selected_test_files=selected_test_files,
                     failure_kind="policy",
                 )
@@ -335,7 +361,7 @@ class VerificationRunner:
                     selected_test_files=selected_test_files,
                     failure_kind="policy",
                 )
-            env = _profiled_verification_env(spec)
+            env = _profiled_verification_env(spec, run_id=run_id)
             executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
             if not executable:
                 return _profiled_preflight_failure(
@@ -348,13 +374,29 @@ class VerificationRunner:
             prepared.append((spec, stage_cwd, executable, env))
 
         stage_results: list[VerificationStageResult] = []
+        first_failure: VerificationStageResult | None = None
         for spec, stage_cwd, executable, env in prepared:
-            stage_selected_files = selected_test_files if spec.stage_id == "unit" else ()
+            if first_failure is not None and not spec.always_run:
+                continue
+            if spec.stage_id == "unit":
+                stage_selected_files = tuple(
+                    path
+                    for path in selected_test_files
+                    if qa_policy is None or qa_policy.normalize_test_path(path)
+                )
+            elif spec.stage_id == "browser_e2e":
+                stage_selected_files = tuple(
+                    path
+                    for path in selected_test_files
+                    if qa_policy is not None and qa_policy.normalize_browser_test_path(path)
+                )
+            else:
+                stage_selected_files = ()
             logical_argv = spec.argv
             executable_argv = [executable, *spec.argv[1:]]
             report_directory: tempfile.TemporaryDirectory[str] | None = None
             report_path: Path | None = None
-            if stage_selected_files:
+            if stage_selected_files and spec.stage_id == "unit":
                 if (
                     not developer_unit_scope
                     and (qa_policy is None or qa_policy.framework != spec.required_test_framework)
@@ -393,19 +435,41 @@ class VerificationRunner:
                     *executable_reporter_args,
                     *stage_selected_files,
                 ]
+            elif stage_selected_files and spec.stage_id == "browser_e2e":
+                logical_argv = (*spec.argv, "--", *stage_selected_files)
+                executable_argv = [executable, *spec.argv[1:], "--", *stage_selected_files]
             start = time.monotonic()
             try:
-                completed = subprocess.run(
-                    executable_argv,
-                    cwd=str(stage_cwd),
-                    env=env,
-                    shell=False,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    timeout=spec.timeout_seconds,
-                )
+                command_steps = [
+                    (logical_argv, executable_argv),
+                    *[
+                        (argv, [executable, *argv[1:]])
+                        for argv in spec.additional_argv
+                    ],
+                ]
+                completed_steps: list[subprocess.CompletedProcess[str]] = []
+                for _, step_argv in command_steps:
+                    completed_step = subprocess.run(
+                        step_argv,
+                        cwd=str(stage_cwd),
+                        env=env,
+                        shell=False,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        timeout=spec.timeout_seconds,
+                    )
+                    completed_steps.append(completed_step)
+                    if completed_step.returncode != 0:
+                        break
+                completed = completed_steps[-1]
+                logical_parts: list[str] = []
+                for index, (step, _) in enumerate(command_steps[: len(completed_steps)]):
+                    if index:
+                        logical_parts.append("&&")
+                    logical_parts.extend(step)
+                logical_argv = tuple(logical_parts)
             except subprocess.TimeoutExpired as exc:
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
@@ -438,6 +502,12 @@ class VerificationRunner:
                     selected_test_files=stage_selected_files,
                 )
             else:
+                combined_stdout = "\n".join(
+                    item.stdout for item in completed_steps if item.stdout
+                )
+                combined_stderr = "\n".join(
+                    item.stderr for item in completed_steps if item.stderr
+                )
                 verified_test_files: tuple[str, ...] = ()
                 report_error = ""
                 report_failure_kind = ""
@@ -447,13 +517,19 @@ class VerificationRunner:
                         target_root=target_root,
                         selected_test_files=stage_selected_files,
                     )
+                elif spec.report_kind == "playwright" and stage_selected_files:
+                    verified_test_files, report_error, report_failure_kind = _playwright_verified_test_files(
+                        report_path=target_root / spec.report_path,
+                        target_root=target_root,
+                        selected_test_files=stage_selected_files,
+                    )
                 stage_passed = completed.returncode == 0 and not report_error
                 failure_kind = ""
                 if not stage_passed:
                     failure_kind = (
                         report_failure_kind
                         if report_error and report_failure_kind
-                        else _command_failure_kind(stdout=completed.stdout, stderr=completed.stderr)
+                        else _command_failure_kind(stdout=combined_stdout, stderr=combined_stderr)
                     )
                 stage_result = VerificationStageResult(
                     stage_id=spec.stage_id,
@@ -463,8 +539,8 @@ class VerificationRunner:
                     timeout_seconds=spec.timeout_seconds,
                     exit_code=completed.returncode,
                     duration_seconds=time.monotonic() - start,
-                    stdout=_truncate_output(completed.stdout),
-                    stderr=_truncate_output(completed.stderr),
+                    stdout=_truncate_output(combined_stdout),
+                    stderr=_truncate_output(combined_stderr),
                     reason=(
                         f"Verification stage completed successfully: {spec.stage_id}"
                         if stage_passed
@@ -480,23 +556,20 @@ class VerificationRunner:
                     report_directory.cleanup()
             stage_results.append(stage_result)
             if stage_result.status != "passed":
-                return _profiled_result(
-                    target_path=target_root,
-                    planned_stage_ids=planned_stage_ids,
-                    stage_results=stage_results,
-                    preparation_results=preparation_results,
-                    terminal=stage_result,
-                    selected_test_files=selected_test_files,
-                )
+                first_failure = first_failure or stage_result
 
-        terminal = stage_results[-1]
+        terminal = first_failure or stage_results[-1]
         return _profiled_result(
             target_path=target_root,
             planned_stage_ids=planned_stage_ids,
             stage_results=stage_results,
             preparation_results=preparation_results,
             terminal=terminal,
-            reason="All profile-owned verification stages completed successfully.",
+            reason=(
+                first_failure.reason
+                if first_failure is not None
+                else "All profile-owned verification stages completed successfully."
+            ),
             selected_test_files=selected_test_files,
         )
 
@@ -546,6 +619,46 @@ def _validate_profiled_work_packet(
             raise HarnessError(
                 "verification_stage_policy_invalid",
                 f"Profiled test intent references an unsupported verification stage: {stage_id}",
+                run_id=run_id,
+            )
+        if verification_policy.owner_for_stage(stage_id) != "developer_intent":
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Developer test intent references a non-Developer stage: {stage_id}",
+                run_id=run_id,
+            )
+    qa_test_intents = work_packet.get("qa_test_intents", [])
+    if not isinstance(qa_test_intents, list):
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Profiled Developer Work Packet has an invalid QA intent block.",
+            run_id=run_id,
+        )
+    prohibited = profiled_execution_field_paths(qa_test_intents, path="$.qa_test_intents")
+    if prohibited:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Profiled Developer Work Packet QA intents contain prohibited execution fields: "
+            + ", ".join(prohibited),
+            run_id=run_id,
+        )
+    for item in qa_test_intents:
+        if not isinstance(item, dict) or str(item.get("stage_id") or "").strip() != "browser_e2e":
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                "Profiled QA intents may reference only the browser_e2e stage.",
+                run_id=run_id,
+            )
+        if "browser_e2e" not in allowed_stage_ids:
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                "Profiled QA intent references browser_e2e outside the immutable run policy.",
+                run_id=run_id,
+            )
+        if verification_policy.owner_for_stage("browser_e2e") != "qa_intent":
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                "Profiled browser_e2e intent is not owned by QA in the immutable run policy.",
                 run_id=run_id,
             )
 
@@ -602,7 +715,12 @@ def _profiled_required_test_files(
         path = (
             str(raw_path).strip().replace("\\", "/")
             if developer_unit_scope
-            else qa_policy.normalize_test_path(raw_path) if qa_policy is not None else ""
+            else (
+                qa_policy.normalize_test_path(raw_path)
+                or qa_policy.normalize_browser_test_path(raw_path)
+                if qa_policy is not None
+                else ""
+            )
         )
         if developer_unit_scope and (
             not path
@@ -620,7 +738,7 @@ def _profiled_required_test_files(
         if not path:
             raise HarnessError(
                 "qa_test_out_of_scope",
-                f"Required QA test path is outside the profiled Vitest policy: {raw_path}",
+                f"Required QA test path is outside the profiled QA policy: {raw_path}",
                 run_id=run_id,
             )
         if path in selected:
@@ -735,10 +853,130 @@ def _vitest_assertion_diagnostic(assertion: dict[str, object]) -> str:
     return f"{title}: {message}" if message else title
 
 
-def _profiled_verification_env(spec: VerificationStageSpec | VerificationPreparationSpec) -> dict[str, str]:
+def _playwright_verified_test_files(
+    *,
+    report_path: Path,
+    target_root: Path,
+    selected_test_files: tuple[str, ...],
+) -> tuple[tuple[str, ...], str, str]:
+    """Read Playwright JSON and prove the exact reviewed browser files ran."""
+
+    if not report_path.is_file():
+        return (), "Playwright did not produce the required JSON report.", "policy"
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return (), "Playwright JSON report is missing or invalid.", "policy"
+    suites = payload.get("suites") if isinstance(payload, dict) else None
+    if not isinstance(suites, list):
+        return (), "Playwright JSON report does not contain a suites array.", "policy"
+
+    reported: list[str] = []
+    assertion_failures: list[str] = []
+    executed_count: dict[str, int] = {}
+
+    def visit_suite(suite: object, inherited_file: str = "") -> str:
+        if not isinstance(suite, dict):
+            return "Playwright JSON report contains an invalid suite entry."
+        raw_file = str(suite.get("file") or inherited_file).strip()
+        relative_file = ""
+        if raw_file:
+            candidate = Path(raw_file)
+            if not candidate.is_absolute():
+                candidate = target_root / candidate
+            try:
+                relative_file = candidate.resolve().relative_to(target_root).as_posix()
+            except (OSError, ValueError):
+                return "Playwright JSON report references a test file outside the target repository."
+            if relative_file not in reported:
+                reported.append(relative_file)
+
+        specs = suite.get("specs", [])
+        if not isinstance(specs, list):
+            return "Playwright JSON report contains an invalid specs entry."
+        for spec in specs:
+            if not isinstance(spec, dict):
+                return "Playwright JSON report contains an invalid spec entry."
+            tests = spec.get("tests")
+            if not isinstance(tests, list) or not tests:
+                return "Playwright JSON report does not prove that each selected file executed a test."
+            for test in tests:
+                if not isinstance(test, dict):
+                    return "Playwright JSON report contains an invalid test entry."
+                results = test.get("results")
+                if not isinstance(results, list) or not results:
+                    return "Playwright JSON report contains a test without an execution result."
+                if relative_file:
+                    executed_count[relative_file] = executed_count.get(relative_file, 0) + 1
+                for result in results:
+                    if not isinstance(result, dict):
+                        return "Playwright JSON report contains an invalid execution result."
+                    status = str(result.get("status") or "").strip().lower()
+                    if not status:
+                        return "Playwright JSON report contains a result without status."
+                    if status != "passed":
+                        title = str(spec.get("title") or "unnamed browser assertion").strip()
+                        assertion_failures.append(f"{title}: {status}")
+
+        children = suite.get("suites", [])
+        if not isinstance(children, list):
+            return "Playwright JSON report contains an invalid nested suites entry."
+        for child in children:
+            error = visit_suite(child, relative_file or raw_file)
+            if error:
+                return error
+        return ""
+
+    for suite in suites:
+        error = visit_suite(suite)
+        if error:
+            return tuple(reported), error, "policy"
+
+    selected_set = set(selected_test_files)
+    relevant_reported = [path for path in reported if path in selected_set]
+    if set(relevant_reported) != selected_set or any(
+        executed_count.get(path, 0) == 0 for path in selected_test_files
+    ):
+        return (
+            tuple(relevant_reported),
+            "Playwright JSON report does not prove the exact selected QA browser files: "
+            f"selected={list(selected_test_files)}, reported={relevant_reported}.",
+            "policy",
+        )
+    ordered_reported = tuple(path for path in selected_test_files if path in relevant_reported)
+    stats = payload.get("stats") if isinstance(payload, dict) else None
+    unexpected = stats.get("unexpected") if isinstance(stats, dict) else None
+    if assertion_failures or (isinstance(unexpected, int) and unexpected > 0):
+        detail = " | ".join(assertion_failures[:3]) or f"{unexpected} unexpected result(s)"
+        return ordered_reported, f"Playwright test failure: {detail}", "implementation"
+    return ordered_reported, "", ""
+
+
+def _profiled_verification_env(
+    spec: VerificationStageSpec | VerificationPreparationSpec,
+    *,
+    run_id: str | None = None,
+) -> dict[str, str]:
     allowed = {key.casefold() for key in spec.inherited_env_keys}
     env = {key: value for key, value in os.environ.items() if key.casefold() in allowed}
     env.update(dict(spec.fixed_env))
+    if run_id and getattr(spec, "stage_id", "") in {
+        "database_ready",
+        "migrate_and_seed",
+        "api_database_integration",
+        "service_health",
+        "browser_e2e",
+        "cleanup",
+    }:
+        digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+        port = 50000 + (int(digest[:8], 16) % 10000)
+        env.update(
+            {
+                "COMPOSE_PROJECT_NAME": f"sdlc_{digest[:10]}",
+                "SDLC_POSTGRES_PORT": str(port),
+                "DATABASE_URL": f"postgresql://postgres:postgres@127.0.0.1:{port}/sdlc_app",
+            }
+        )
     return env
 
 

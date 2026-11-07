@@ -16,6 +16,9 @@ from sdlc_harness.agents.developer.execution import (
     DeveloperExecutionError,
     DeveloperToolLoopExecutor,
     _developer_action_limit,
+    _developer_uiux_available,
+    _developer_uiux_guidance,
+    _developer_uiux_success_count,
     _action_memory,
     _action_prompt,
     _build_manifest,
@@ -28,6 +31,7 @@ from sdlc_harness.agents.developer.execution import (
     _merge_context_only_manifest,
     _merge_database_entrypoint_scope_manifest,
     _merge_dependency_manifest_scope_manifest,
+    _remember_developer_uiux_guidance,
     _new_journal,
     _new_test_context_policy_error,
     _parse_action,
@@ -851,6 +855,90 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("never expands execution_unit_contract.write_paths", prompt)
         available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
         self.assertNotIn("package.ensure_workspace_dependency", available)
+
+    def test_uiux_capability_is_optional_screen_sticky_and_qa_is_read_only(self) -> None:
+        item = {
+            "id": "WU-UI",
+            "paths": ["src/View.tsx"],
+            "required_stage_ids": [],
+            "surfaces": ["ui"],
+            "surface_contracts": [
+                {
+                    "surface": "ui",
+                    "surface_contract": {
+                        "runtime_surface": {"screen_id": "heritage-list"}
+                    },
+                }
+            ],
+            "ui_obligations": [{"id": "UIO-1", "kind": "focus"}],
+            "qa_test_intents": [
+                {"stage_id": "browser_e2e", "target_paths": ["tests/e2e/list.spec.ts"]}
+            ],
+        }
+        manifest = {
+            "version": "developer_execution_manifest_v8",
+            "mode": "act",
+            "base_sha": "base",
+            "uiux_capability": {"status": "available", "optional": True},
+            "approved_runtime_decisions": [
+                {"id": "D-1", "status": "accepted", "text": "Use a demo fixture."}
+            ],
+        }
+        journal: dict[str, object] = {}
+        self.assertTrue(_developer_uiux_available(manifest=manifest, journal=journal, item=item))
+        _remember_developer_uiux_guidance(
+            journal=journal,
+            item=item,
+            result={
+                "ok": True,
+                "schema_version": "uiux_pro_max_search_v1",
+                "mode": "domain",
+                "selector": "ux",
+                "query": "loading feedback",
+                "results": [{"Do": "Keep feedback visible."}],
+            },
+        )
+        self.assertEqual(_developer_uiux_success_count(journal=journal, item=item), 1)
+        guidance = _developer_uiux_guidance(journal=journal, item=item)
+        self.assertEqual(guidance[0]["screen_id"], "heritage-list")
+
+        prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            uiux_available=True,
+            uiux_guidance=guidance,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertIn("uiux.search_guidance", prompt.split("Available actions:\n", 1)[1])
+        self.assertEqual(context["working_memory"]["uiux_guidance"], guidance)
+        self.assertIn("ui_obligations", context["active_focus"]["mandatory_obligations"])
+        self.assertNotIn("qa_test_intents", context["active_focus"]["mandatory_obligations"])
+        self.assertIn("qa_test_intents", context["read_only_qa_acceptance"])
+        self.assertIn("accepted_runtime_decisions", context["read_only_qa_acceptance"])
+
+        journal["uiux_disabled"] = {"reason": "designer_uiux_failed"}
+        self.assertFalse(_developer_uiux_available(manifest=manifest, journal=journal, item=item))
+        no_skill_prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        self.assertNotIn("uiux.search_guidance", no_skill_prompt)
 
     def test_repair_episode_survives_mutations_until_the_failed_stage_passes(self) -> None:
         failed = {

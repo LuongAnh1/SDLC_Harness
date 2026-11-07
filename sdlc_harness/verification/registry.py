@@ -11,7 +11,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..core.errors import HarnessError
-from ..profiles import VERIFICATION_STAGE_POLICY_VERSION, VerificationStagePolicy
+from ..profiles import (
+    DEVELOPER_INTENT_STAGE_OWNER,
+    LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
+    VerificationStagePolicy,
+)
 
 
 DEFAULT_STAGE_TIMEOUT_SECONDS = 120
@@ -50,6 +55,12 @@ class VerificationStageSpec:
     required_package_script: str
     required_test_framework: str
     machine_reporter_args: tuple[str, ...]
+    additional_argv: tuple[tuple[str, ...], ...] = ()
+    required_package_scripts: tuple[str, ...] = ()
+    always_run: bool = False
+    developer_selectable: bool = True
+    report_kind: str = ""
+    report_path: str = ""
 
     def evidence(self) -> dict[str, object]:
         return {
@@ -59,6 +70,10 @@ class VerificationStageSpec:
             "timeout_seconds": self.timeout_seconds,
             "required_test_framework": self.required_test_framework,
             "machine_reporter_args": list(self.machine_reporter_args),
+            "additional_argv": [list(item) for item in self.additional_argv],
+            "always_run": self.always_run,
+            "developer_selectable": self.developer_selectable,
+            "report_kind": self.report_kind,
         }
 
 
@@ -144,8 +159,106 @@ _TYPESCRIPT_FULLSTACK_V1_SPECS = (
     ),
 )
 
-_STAGE_SPECS_BY_PROJECT = {
-    "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
+_TYPESCRIPT_FULLSTACK_V2_SPECS = (
+    VerificationStageSpec(
+        stage_id="database_ready",
+        argv=("npm", "run", "db:up"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=300,
+        required_package_script="db:up",
+        required_test_framework="",
+        machine_reporter_args=(),
+        developer_selectable=False,
+    ),
+    VerificationStageSpec(
+        stage_id="migrate_and_seed",
+        argv=("npm", "run", "db:migrate"),
+        additional_argv=(("npm", "run", "db:seed"), ("npm", "run", "db:seed")),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=300,
+        required_package_script="db:migrate",
+        required_package_scripts=("db:seed",),
+        required_test_framework="",
+        machine_reporter_args=(),
+        developer_selectable=False,
+    ),
+    *_TYPESCRIPT_FULLSTACK_V1_SPECS,
+    VerificationStageSpec(
+        stage_id="api_database_integration",
+        argv=("npm", "run", "db:smoke"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=180,
+        required_package_script="db:smoke",
+        required_test_framework="",
+        machine_reporter_args=(),
+        developer_selectable=False,
+    ),
+    VerificationStageSpec(
+        stage_id="frontend_build",
+        argv=("npm", "run", "build:web"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=180,
+        required_package_script="build:web",
+        required_test_framework="",
+        machine_reporter_args=(),
+        developer_selectable=False,
+    ),
+    VerificationStageSpec(
+        stage_id="service_health",
+        argv=("npm", "run", "verify:bootstrap"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=120,
+        required_package_script="verify:bootstrap",
+        required_test_framework="",
+        machine_reporter_args=(),
+        developer_selectable=False,
+    ),
+    VerificationStageSpec(
+        stage_id="browser_e2e",
+        argv=("npm", "run", "test:e2e"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=300,
+        required_package_script="test:e2e",
+        required_test_framework="playwright",
+        machine_reporter_args=(),
+        developer_selectable=False,
+        report_kind="playwright",
+        report_path="playwright-report/results.json",
+    ),
+    VerificationStageSpec(
+        stage_id="cleanup",
+        argv=("npm", "run", "db:down"),
+        cwd=".",
+        inherited_env_keys=PROFILED_ENV_ALLOWLIST,
+        fixed_env=PROFILED_FIXED_ENV,
+        timeout_seconds=180,
+        required_package_script="db:down",
+        required_test_framework="",
+        machine_reporter_args=(),
+        always_run=True,
+        developer_selectable=False,
+    ),
+)
+
+_STAGE_SPECS_BY_POLICY = {
+    LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
+    },
+    VERIFICATION_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V2_SPECS,
+    },
 }
 
 _PREPARATION_SPECS_BY_PROJECT = {
@@ -160,7 +273,10 @@ def resolve_verification_preparation_specs(
 ) -> tuple[VerificationPreparationSpec, ...]:
     """Resolve ordered preparation đã review, không nhận argv từ LLM hay work packet."""
 
-    if policy.policy_version != VERIFICATION_STAGE_POLICY_VERSION:
+    if policy.policy_version not in {
+        LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+        VERIFICATION_STAGE_POLICY_VERSION,
+    }:
         raise HarnessError(
             "verification_stage_policy_invalid",
             f"Unsupported verification stage policy version: {policy.policy_version}",
@@ -187,13 +303,16 @@ def resolve_verification_stage_specs(
 ) -> tuple[VerificationStageSpec, ...]:
     """Resolve exact ordered specs và chặn policy bị đổi sau khi snapshot."""
 
-    if policy.policy_version != VERIFICATION_STAGE_POLICY_VERSION:
+    if policy.policy_version not in {
+        LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+        VERIFICATION_STAGE_POLICY_VERSION,
+    }:
         raise HarnessError(
             "verification_stage_policy_invalid",
             f"Unsupported verification stage policy version: {policy.policy_version}",
             run_id=run_id,
         )
-    specs = _STAGE_SPECS_BY_PROJECT.get(policy.project_profile_id)
+    specs = _STAGE_SPECS_BY_POLICY.get(policy.policy_version, {}).get(policy.project_profile_id)
     if not specs:
         raise HarnessError(
             "verification_stage_policy_invalid",
@@ -205,6 +324,19 @@ def resolve_verification_stage_specs(
         raise HarnessError(
             "verification_stage_policy_invalid",
             "Verification stage order does not match the reviewed executable registry.",
+            run_id=run_id,
+        )
+    ownership_mismatches = [
+        spec.stage_id
+        for spec in specs
+        if spec.developer_selectable
+        != (policy.owner_for_stage(spec.stage_id) == DEVELOPER_INTENT_STAGE_OWNER)
+    ]
+    if ownership_mismatches:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "Verification stage ownership disagrees with the executable registry: "
+            + ", ".join(ownership_mismatches),
             run_id=run_id,
         )
     return specs

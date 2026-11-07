@@ -14,10 +14,14 @@ from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.artifacts.writers import _test_report_markdown
 from sdlc_harness.profiles import (
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    QA_TEST_POLICY_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
     VerificationStagePolicy,
     build_planning_path_policy,
     build_qa_test_policy,
     build_verification_stage_policy,
+    build_verification_stage_policy_version,
     get_language_profile,
     get_project_profile,
 )
@@ -114,6 +118,104 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         with self.assertRaises(HarnessError):
             resolve_verification_stage_specs(wrong_version)
+
+    def test_full_stack_policy_runs_real_stage_order_and_proves_playwright_file(self) -> None:
+        project = get_project_profile("typescript_fullstack_v1")
+        policy = build_verification_stage_policy_version(
+            project=project,
+            policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+        )
+        self.assertEqual(
+            policy.metadata()["stage_ownership"],
+            {
+                "database_ready": "harness_global",
+                "migrate_and_seed": "harness_global",
+                "typecheck": "developer_intent",
+                "unit": "developer_intent",
+                "api_database_integration": "harness_global",
+                "frontend_build": "harness_global",
+                "service_health": "harness_global",
+                "browser_e2e": "qa_intent",
+                "cleanup": "harness_global",
+            },
+        )
+        qa_policy = build_qa_test_policy(
+            planning_policy=self.qa_policy.planning_policy,
+            policy_version=QA_TEST_POLICY_VERSION,
+        )
+        scripts = {
+            "db:up": "db up",
+            "db:migrate": "db migrate",
+            "db:seed": "db seed",
+            "typecheck": "tsc",
+            "test:unit": "vitest run",
+            "db:smoke": "db smoke",
+            "build:web": "vite build",
+            "verify:bootstrap": "verify bootstrap",
+            "test:e2e": "playwright test",
+            "db:down": "db down",
+        }
+        (self.target / "package.json").write_text(json.dumps({"scripts": scripts}), encoding="utf-8")
+        qa_path = "tests/e2e/approved-flow.spec.ts"
+        qa_file = self.target / qa_path
+        qa_file.parent.mkdir(parents=True)
+        qa_file.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        packet = {
+            "run_id": "run_full_stack_browser",
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "verification_stage_ids": list(policy.stage_ids),
+            "test_intents": [{"stage_id": "typecheck", "purpose": "Compile."}],
+            "qa_test_intents": [{"stage_id": "browser_e2e", "target_paths": [qa_path]}],
+        }
+
+        def run_with_playwright_report(argv, **kwargs):
+            del kwargs
+            if "test:e2e" in argv:
+                report = self.target / "playwright-report/results.json"
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(
+                    json.dumps(
+                        {
+                            "suites": [
+                                {
+                                    "file": qa_path,
+                                    "specs": [
+                                        {
+                                            "title": "approved flow",
+                                            "tests": [{"results": [{"status": "passed"}]}],
+                                        }
+                                    ],
+                                }
+                            ],
+                            "stats": {"unexpected": 0},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="passed", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner.subprocess.run",
+                side_effect=run_with_playwright_report,
+            ) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=packet,
+                required_test_files=[qa_path],
+                verification_policy=policy,
+                qa_policy=qa_policy,
+            )
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(result.executed_stage_ids, policy.stage_ids)
+        self.assertEqual(result.selected_test_files, (qa_path,))
+        self.assertEqual(result.verified_test_files, (qa_path,))
+        self.assertIn(["npm", "run", "db:seed"], [call.args[0] for call in run.call_args_list])
+        self.assertEqual(run.call_args_list[-1].args[0], ["npm", "run", "db:down"])
+        self.assertTrue(run.call_args_list[0].kwargs["env"]["COMPOSE_PROJECT_NAME"].startswith("sdlc_"))
 
     def test_runner_prepares_dependencies_once_per_lockfile(self) -> None:
         (self.target / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")

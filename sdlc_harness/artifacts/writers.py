@@ -931,6 +931,9 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
     ] if isinstance(report.get("requirement_ids"), list) else []
     generation_profile = report.get("generation_profile")
     generation_profile = generation_profile if isinstance(generation_profile, dict) else {}
+    browser_profile = generation_profile.get("browser")
+    browser_profile = browser_profile if isinstance(browser_profile, dict) else {}
+    test_framework = browser_profile.get("framework") or generation_profile.get("framework", "legacy")
     lines = [
         f"# QA Test Report {report.get('artifact_version', 'V1')}",
         "",
@@ -943,7 +946,7 @@ def _qa_test_report_markdown(report: dict[str, object]) -> str:
         f"- Branch: `{report.get('branch', '')}`",
         f"- Requirement contract: `{requirement_contract.get('version', 'v2')}` revision `{requirement_contract.get('revision', 0)}`",
         f"- Stable requirements covered: `{len(requirement_ids)}`",
-        f"- Test framework: `{generation_profile.get('framework', 'legacy')}`",
+        f"- Test framework: `{test_framework}`",
         "",
         "## Generated Test Execution",
         "",

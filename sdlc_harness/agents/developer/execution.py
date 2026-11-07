@@ -29,6 +29,7 @@ from ...storage.runtime import RuntimeStore, utc_now_iso
 from ...verification import VerificationRunner
 from ..validator.code_contract import deterministic_typescript_contract_findings
 from ..validator.typescript_ast import TypeScriptAstExtractor
+from ..designer.uiux import UiUxGuidanceProvider
 from .fake_generation import fake_developer_files
 from .package_dependency import ensure_workspace_dependency, workspace_dependency_status
 from .profile_context import (
@@ -55,6 +56,7 @@ _UNIT_ACTION_NAMES = {
     "repo.read_diff",
     "codegraph.query",
     "codegraph.query_readonly",
+    "uiux.search_guidance",
     "repo.write_file",
     "repo.apply_patch",
     "repo.replace_text",
@@ -77,6 +79,7 @@ _OBSERVATION_ACTIONS = {
     "list_files", "read_file", "search_code", "read_diff",
     "repo.list", "repo.read", "repo.search", "repo.read_diff",
     "codegraph.query", "codegraph.query_readonly", "codegraph.seed_context",
+    "uiux.search_guidance",
 }
 _MUTATION_ACTIONS = {
     "write_file",
@@ -174,6 +177,15 @@ class DeveloperToolLoopExecutor:
         )
         self.verification_runner = verification_runner or VerificationRunner()
         self.step_review = dict(step_review or {})
+        self.uiux_provider = (
+            UiUxGuidanceProvider(
+                skill_root=getattr(settings, "uiux_skill_root", None),
+                timeout_seconds=int(getattr(settings, "uiux_skill_timeout_seconds", 30)),
+                fake_mode=getattr(settings, "llm_mode", "") == "fake",
+            )
+            if getattr(settings, "uiux_skill_mode", "off") == "enforce"
+            else None
+        )
 
     def execute(
         self,
@@ -225,6 +237,20 @@ class DeveloperToolLoopExecutor:
             expected_dirty_paths=expected_dirty_paths,
         )
         manifest["llm_call_profiles"] = _developer_llm_call_profiles(self.settings)
+        if not manifest_file.exists() and self.uiux_provider is not None and any(
+            "ui" in {value.strip().lower() for value in _string_items(item.get("surfaces"))}
+            for item in _dict_items(manifest.get("items"))
+        ):
+            try:
+                capability = self.uiux_provider.preflight()
+            except HarnessError:
+                capability = {}
+            if capability.get("status") == "available":
+                manifest["uiux_capability"] = {
+                    **capability,
+                    "optional": True,
+                    "max_successful_searches_per_screen": 2,
+                }
         if manifest_file.exists():
             existing = _read_json(manifest_file, run_id=run_id)
             if (
@@ -709,6 +735,7 @@ class DeveloperToolLoopExecutor:
                     repo_context_provider=self.repo_context_provider,
                     verification_runner=self.verification_runner,
                     verification_policy=None,
+                    uiux_provider=self.uiux_provider,
                 )
                 if replayed.get("ok") is not True or str(replayed.get("sha256") or "") != expected_after:
                     raise HarnessError(
@@ -1075,6 +1102,15 @@ class DeveloperToolLoopExecutor:
                 )
                 if action_index > max_actions:
                     break
+                uiux_available = _developer_uiux_available(
+                    manifest=manifest,
+                    journal=journal,
+                    item=item,
+                )
+                uiux_guidance = _developer_uiux_guidance(
+                    journal=journal,
+                    item=item,
+                )
                 prompt = _action_prompt(
                     item=item,
                     manifest=manifest,
@@ -1087,6 +1123,8 @@ class DeveloperToolLoopExecutor:
                     mutated=bool(mutated_paths),
                     context_window_tokens=context_window_tokens,
                     working_memory_evidence_chars=working_memory_evidence_chars,
+                    uiux_available=uiux_available,
+                    uiux_guidance=uiux_guidance,
                 )
                 active_options = (
                     repair_options
@@ -1260,6 +1298,8 @@ class DeveloperToolLoopExecutor:
                     handled_paths=set(),
                     unresolved_paths=set(),
                     pending_package_dependency_ids=pending_dependency_ids,
+                    uiux_available=uiux_available,
+                    uiux_success_count=_developer_uiux_success_count(journal=journal, item=item),
                 )
                 if policy_error:
                     result = {"ok": False, **policy_error}
@@ -1277,6 +1317,7 @@ class DeveloperToolLoopExecutor:
                             repo_context_provider=self.repo_context_provider,
                             verification_runner=self.verification_runner,
                             verification_policy=verification_policy,
+                            uiux_provider=self.uiux_provider,
                             package_tool_timeout_seconds=int(
                                 getattr(self.settings, "developer_package_tool_timeout_seconds", 120)
                             ),
@@ -1323,6 +1364,22 @@ class DeveloperToolLoopExecutor:
                         history,
                         fingerprint=diagnostic_fingerprint,
                     )
+                if action["action"] == "uiux.search_guidance":
+                    if result.get("ok") is True:
+                        _remember_developer_uiux_guidance(
+                            journal=journal,
+                            item=item,
+                            result=result,
+                        )
+                    elif str(result.get("error") or "") in {
+                        "developer_uiux_unavailable",
+                        "designer_uiux_unavailable",
+                        "designer_uiux_failed",
+                    }:
+                        journal["uiux_disabled"] = {
+                            "reason": str(result.get("error") or "developer_uiux_unavailable"),
+                            "disabled_at": utc_now_iso(),
+                        }
                 timeout_diagnostic = _timeout_diagnostic_state(history)
                 if (
                     result.get("ok") is True
@@ -2417,6 +2474,7 @@ def _build_manifest(
                     "runtime_bindings": _dict_items(unit.get("runtime_bindings")),
                     "boundary_contracts": _dict_items(unit.get("boundary_contracts")),
                     "surface_contracts": _dict_items(unit.get("surface_contracts")),
+                    "ui_obligations": _dict_items(unit.get("ui_obligations")),
                     "required_stage_ids": _string_items(unit.get("required_stage_ids")),
                     "test_target_paths": _string_items(unit.get("test_target_paths")),
                     "package_dependencies": _dict_items(unit.get("package_dependencies")),
@@ -2427,6 +2485,7 @@ def _build_manifest(
                         for value in _string_items(unit.get("requirement_refs"))
                     ],
                     "test_intents": _dict_items(unit.get("test_intents")),
+                    "qa_test_intents": _dict_items(unit.get("qa_test_intents")),
                     "repair_closure": {
                         **closure,
                         "context_paths": unit_context,
@@ -2481,6 +2540,7 @@ def _build_manifest(
         "approved_plan": work_packet.get("approved_plan"),
         "effective_design_contract": work_packet.get("effective_design_contract"),
         "requirement_contract": work_packet.get("requirement_contract"),
+        "approved_runtime_decisions": _dict_items(work_packet.get("approved_runtime_decisions")),
         "developer_generation_context": generation_context,
         "base_sha": _dict_value(work_packet.get("run_workspace")).get("base_sha"),
         "workspace_allowed_paths": workspace_allowed_paths,
@@ -2509,6 +2569,7 @@ def _build_manifest(
         "expected_dirty_files": expected_dirty_files,
         "repair_feedback": repair_feedback or {},
         "developer_generation_context": generation_context,
+        "approved_runtime_decisions": _dict_items(work_packet.get("approved_runtime_decisions")),
         "items": items,
     }
 
@@ -2610,6 +2671,8 @@ def _action_prompt(
     mutated: bool,
     context_window_tokens: int,
     working_memory_evidence_chars: int | None = None,
+    uiux_available: bool = False,
+    uiux_guidance: list[dict[str, object]] | None = None,
 ) -> str:
     unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
@@ -2687,6 +2750,8 @@ def _action_prompt(
         max_evidence_chars=evidence_budget,
     )
     action_memory["authoritative_sources"] = authoritative_sources
+    if uiux_guidance:
+        action_memory["uiux_guidance"] = uiux_guidance
     fully_current_paths = {
         str(source.get("path") or "")
         for source in authoritative_sources
@@ -2736,10 +2801,15 @@ def _action_prompt(
         "repository_evidence_required": bool(new_test_targets),
         "repository_evidence_satisfied": test_context_ready,
     }
+    unit_action_names = (
+        "repo.list|repo.read|repo.search|repo.read_diff|codegraph.query|codegraph.query_readonly|"
+        + ("uiux.search_guidance|" if uiux_available else "")
+        + "repo.write_file|repo.apply_patch|repo.replace_text|package.ensure_workspace_dependency|"
+        "verification.run_stage|execution.complete_unit"
+    )
     action_schema = {
         "action": (
-            "repo.list|repo.read|repo.search|repo.read_diff|codegraph.query|codegraph.query_readonly|"
-            "repo.write_file|repo.apply_patch|repo.replace_text|verification.run_stage|execution.complete_unit"
+            unit_action_names
             if unit_aware
             else "list_files|read_file|search_code|read_diff|write_file|apply_patch|complete"
         ),
@@ -2838,6 +2908,9 @@ def _action_prompt(
         "test_authoring_policy": test_authoring_policy,
         "working_memory": action_memory,
     }
+    qa_acceptance = _developer_read_only_qa_acceptance(item=item, manifest=manifest)
+    if qa_acceptance:
+        context["read_only_qa_acceptance"] = qa_acceptance
     if not unit_aware:
         context["approved_signatures"] = _item_approved_signatures(item)
     if timeout_diagnostic or timeout_cleanup_paths:
@@ -2959,6 +3032,13 @@ def _action_prompt(
             )
             .replace("call complete", "run required verification stages, then call execution.complete_unit")
         )
+        uiux_action_help = (
+            "- uiux.search_guidance: optional UI implementation guidance, at most two successful calls per "
+            "screen; arguments {query, mode: domain|stack, domain?: ux|icons|react, stack?: react}. Use generic "
+            "ASCII technical terms only. Guidance may help implement the approved contract but may never redesign it\n"
+            if uiux_available
+            else ""
+        )
         available_actions = (
             "- repo.list: arguments {prefix?, limit?}\n"
             "- repo.read: arguments {path, start_line?, end_line?}\n"
@@ -2969,6 +3049,7 @@ def _action_prompt(
             "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
             "capability. node requires symbol or file; explore requires query.\n"
             "- codegraph.query_readonly: legacy alias with arguments {query}; use codegraph.query for new work\n"
+            f"{uiux_action_help}"
             "- repo.write_file: arguments {path, expected_sha256, content}; approved unit write path only\n"
             "- repo.replace_text: arguments {path, expected_sha256, old_text, new_text}; replace one exact unique "
             "block in an existing approved unit path\n"
@@ -3185,6 +3266,8 @@ def _action_policy_error(
     handled_paths: set[str] | None = None,
     unresolved_paths: set[str] | None = None,
     pending_package_dependency_ids: list[str] | None = None,
+    uiux_available: bool = False,
+    uiux_success_count: int = 0,
 ) -> dict[str, object] | None:
     name = str(action.get("action") or "")
     phase = _execution_phase(
@@ -3202,6 +3285,17 @@ def _action_policy_error(
     repair_verification_forced_stage_ids = repair_verification_forced_stage_ids or []
     pending_package_dependency_ids = pending_package_dependency_ids or []
     action_path = str(_dict_value(action.get("arguments")).get("path") or "").replace("\\", "/")
+    if name == "uiux.search_guidance":
+        if not uiux_available:
+            return {
+                "error": "developer_uiux_unavailable",
+                "instruction": "Continue implementing the approved UI contract without optional UI/UX guidance.",
+            }
+        if uiux_success_count >= 2:
+            return {
+                "error": "developer_uiux_budget_exhausted",
+                "instruction": "Reuse the two durable guidance results already attached to this screen.",
+            }
     if pending_package_dependency_ids:
         dependency_id = str(_dict_value(action.get("arguments")).get("dependency_id") or "")
         if name == "package.ensure_workspace_dependency" and dependency_id in pending_package_dependency_ids:
@@ -4459,11 +4553,27 @@ def _execute_action(
     repo_context_provider: CodeGraphContextProvider,
     verification_runner: VerificationRunner,
     verification_policy: VerificationStagePolicy | None,
+    uiux_provider: UiUxGuidanceProvider | None = None,
     package_tool_timeout_seconds: int = 120,
 ) -> dict[str, object]:
     raw_name = str(action["action"])
     name = _ACTION_TO_LEGACY.get(raw_name, raw_name)
     args = _dict_value(action.get("arguments"))
+    if raw_name == "uiux.search_guidance":
+        if "ui" not in {value.strip().lower() for value in _string_items(item.get("surfaces"))}:
+            return {"ok": False, "error": "developer_uiux_not_ui_unit"}
+        if uiux_provider is None:
+            return {"ok": False, "error": "developer_uiux_unavailable"}
+        try:
+            guidance = uiux_provider.search(args)
+        except HarnessError as exc:
+            return {"ok": False, "error": exc.error_code, "reason": exc.message}
+        return {
+            "ok": True,
+            "purpose": "technical_implementation_guidance_only",
+            "design_authority": False,
+            **guidance,
+        }
     if raw_name == "package.ensure_workspace_dependency":
         dependency_id = str(args.get("dependency_id") or "").strip()
         requirement = next(
@@ -5260,17 +5370,129 @@ def _item_required_paths(item: dict[str, object]) -> list[str]:
     return _item_context_paths(item)
 
 
+def _item_ui_screen_ids(item: dict[str, object]) -> list[str]:
+    screens = [
+        str(runtime.get("screen_id") or "").strip()
+        for binding in _dict_items(item.get("surface_contracts"))
+        if str(binding.get("surface") or "").strip().lower() == "ui"
+        for runtime in [
+            _dict_value(_dict_value(binding.get("surface_contract")).get("runtime_surface"))
+        ]
+        if str(runtime.get("screen_id") or "").strip()
+    ]
+    if screens:
+        return list(dict.fromkeys(screens))
+    if "ui" in {value.strip().lower() for value in _string_items(item.get("surfaces"))}:
+        return [f"unit:{str(item.get('id') or 'unknown')}"]
+    return []
+
+
+def _developer_uiux_available(
+    *,
+    manifest: dict[str, object],
+    journal: dict[str, object],
+    item: dict[str, object],
+) -> bool:
+    capability = _dict_value(manifest.get("uiux_capability"))
+    return bool(
+        _item_ui_screen_ids(item)
+        and capability.get("status") == "available"
+        and capability.get("optional") is True
+        and not journal.get("uiux_disabled")
+    )
+
+
+def _developer_uiux_success_count(
+    *,
+    journal: dict[str, object],
+    item: dict[str, object],
+) -> int:
+    cache = _dict_value(journal.get("uiux_guidance_by_screen"))
+    return max(
+        (len(_dict_items(cache.get(screen_id))) for screen_id in _item_ui_screen_ids(item)),
+        default=0,
+    )
+
+
+def _developer_uiux_guidance(
+    *,
+    journal: dict[str, object],
+    item: dict[str, object],
+) -> list[dict[str, object]]:
+    cache = _dict_value(journal.get("uiux_guidance_by_screen"))
+    return [
+        {"screen_id": screen_id, "results": _dict_items(cache.get(screen_id))}
+        for screen_id in _item_ui_screen_ids(item)
+        if _dict_items(cache.get(screen_id))
+    ]
+
+
+def _remember_developer_uiux_guidance(
+    *,
+    journal: dict[str, object],
+    item: dict[str, object],
+    result: dict[str, object],
+) -> None:
+    cache = journal.setdefault("uiux_guidance_by_screen", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        journal["uiux_guidance_by_screen"] = cache
+    durable = {
+        key: result.get(key)
+        for key in ("schema_version", "mode", "selector", "query", "count", "no_match", "results")
+        if key in result
+    }
+    for screen_id in _item_ui_screen_ids(item):
+        rows = _dict_items(cache.get(screen_id))
+        if len(rows) < 2:
+            cache[screen_id] = [*rows, durable]
+
+
+def _developer_read_only_qa_acceptance(
+    *,
+    item: dict[str, object],
+    manifest: dict[str, object],
+) -> dict[str, object]:
+    intents = _dedupe_prompt_rows(_dict_items(item.get("qa_test_intents")))
+    decisions = _dedupe_prompt_rows(_dict_items(manifest.get("approved_runtime_decisions")))
+    if not intents and not decisions:
+        return {}
+    return {
+        "authority": (
+            "Read-only QA expectations and accepted runtime-fixture decisions. They clarify downstream browser "
+            "acceptance but never add Developer write paths, required stages, mutations, or completion obligations."
+        ),
+        **({"qa_test_intents": intents} if intents else {}),
+        **({"accepted_runtime_decisions": decisions} if decisions else {}),
+    }
+
+
 def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
     """Promote approved behavior that a short work-unit objective can hide."""
 
     requirements = _dedupe_prompt_rows(_dict_items(item.get("requirements")))
     test_intents = _dedupe_prompt_rows(_dict_items(item.get("test_intents")))
+    ui_obligations = _dedupe_prompt_rows(_dict_items(item.get("ui_obligations")))
     ui: dict[str, object] = {}
+    ui_contracts: list[dict[str, object]] = []
     for binding in _dict_items(item.get("surface_contracts")):
         if str(binding.get("surface") or "").strip().lower() != "ui":
             continue
         contract = _dict_value(binding.get("surface_contract"))
         experience = _dict_value(contract.get("experience_contract"))
+        exact_contract = (
+            str(experience.get("schema_version") or "") == "ui_experience_contract_v2"
+            or bool(contract.get("runtime_surface"))
+            or bool(experience.get("focus_policies"))
+        )
+        if exact_contract:
+            ui_contracts.append(
+                {
+                    "design_node_id": binding.get("design_node_id"),
+                    "surface_contract": contract,
+                }
+            )
+            continue
         for field in ("component_structure", "accessibility", "responsive", "focus_flow"):
             values = _string_items(experience.get(field))
             if values:
@@ -5317,7 +5539,9 @@ def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
     return {
         **({"requirements": requirements} if requirements else {}),
         **({"test_intents": test_intents} if test_intents else {}),
+        **({"ui_obligations": ui_obligations} if ui_obligations else {}),
         **({"ui": ui} if ui else {}),
+        **({"approved_ui_contracts": ui_contracts} if ui_contracts else {}),
         **({"boundaries": boundaries} if boundaries else {}),
         **({"runtime_wiring": wiring} if wiring else {}),
     }
