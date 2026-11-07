@@ -73,8 +73,9 @@ def build_semantic_review_plan(
                     *[f"boundary:{item}" for item in sorted(global_edge_ids)],
                 ],
                 focus=(
-                    "Review preconditions, postconditions, authentication versus authorization, quality and negative "
-                    "constraints, and any promised consistency boundary across scenarios."
+                    "Review only the primary global preconditions, postconditions, authentication versus "
+                    "authorization, quality and negative constraints, and any promised consistency boundary across "
+                    "scenarios. Scenario-local claims are evidence only and remain owned by their scenario calls."
                     + (
                         " Also review the global boundary contracts listed in coverage_keys for transport, response "
                         "and error feasibility, decision inputs, rollback, unchanged-state, atomicity and retry "

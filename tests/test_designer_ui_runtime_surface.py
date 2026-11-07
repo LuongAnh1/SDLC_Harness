@@ -301,7 +301,8 @@ class _UiGraphFixture(unittest.TestCase):
                 "requirement_digest": "sha256:req",
                 "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
                 "ui_repo_context": self.context,
-                "requirement_reference_ids": ["AC-1", "DEC-1", "MF-1", "PRE-1"],
+                "requirement_reference_ids": ["AC-1", "D-1", "D-2", "MF-1", "PRE-1"],
+                "approved_decision_ids": ["D-1"],
                 **({UI_LAYOUT_CONTRACT_KEY: UI_LAYERED_LAYOUT_V1} if layered else {}),
             },
             "partitions": [
@@ -463,6 +464,29 @@ class UiRuntimeSurfaceFindingsTest(_UiGraphFixture):
     def test_external_input_may_cite_the_flow_step_that_states_the_dependency(self) -> None:
         view = self._view(inputs=[self._items_input(binding="MF-1", requirement_refs=["MF-1"])])
         self.assertNotIn("ui_required_input_unbound", self._categories([*self._wiring_nodes(), view]))
+
+    def test_demo_fixture_requires_an_accepted_d_decision(self) -> None:
+        accepted = self._items_input(
+            source="demo_fixture",
+            binding="D-1",
+            requirement_refs=["D-1"],
+        )
+        accepted_view = self._view(inputs=[accepted], status="fixture_required")
+        self.assertNotIn(
+            "ui_required_input_unbound",
+            self._categories([*self._wiring_nodes(), accepted_view]),
+        )
+
+        rejected = self._items_input(
+            source="demo_fixture",
+            binding="D-2",
+            requirement_refs=["D-2"],
+        )
+        rejected_view = self._view(inputs=[rejected], status="fixture_required")
+        self.assertIn(
+            "ui_required_input_unbound",
+            self._categories([*self._wiring_nodes(), rejected_view]),
+        )
 
     def test_runnable_status_must_follow_inputs(self) -> None:
         categories = self._categories([*self._wiring_nodes(), self._view(status="bound")])

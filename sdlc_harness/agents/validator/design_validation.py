@@ -32,6 +32,7 @@ from .traceability import TraceabilityResult
 
 
 FINDING_IDENTITY_VERSION = "design_finding_identity_v2"
+REMEDIATION_MODES = frozenset({"local_patch", "partition_rebuild", "inconclusive"})
 
 
 @dataclass(frozen=True)
@@ -53,12 +54,15 @@ class DesignFinding:
     origin: str = "semantic"
     repair_owner: str = "designer"
     repairability: str = "repairable"
+    remediation_mode: str = "local_patch"
+    remediation_reason: str = ""
+    repair_steps: list[dict[str, object]] = field(default_factory=list)
     confidence: float = 1.0
     snapshot_fingerprint: str = ""
     review_task_ids: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "id": self.finding_id,
             "identity_version": FINDING_IDENTITY_VERSION,
             "canonical_key": self.canonical_key,
@@ -81,6 +85,13 @@ class DesignFinding:
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "review_task_ids": self.review_task_ids,
         }
+        if self.remediation_mode:
+            payload["remediation_mode"] = self.remediation_mode
+        if self.remediation_reason:
+            payload["remediation_reason"] = self.remediation_reason
+        if self.repair_steps:
+            payload["repair_steps"] = self.repair_steps
+        return payload
 
     @property
     def canonical_key(self) -> str:
@@ -106,6 +117,13 @@ class DesignValidationResult:
     disputed_findings: list[DesignFinding] = field(default_factory=list)
     inconclusive: bool = False
     semantic_review_plan: dict[str, object] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(
+            item.severity == "blocking" and item.remediation_mode == "inconclusive"
+            for item in self.blocking_findings
+        ):
+            object.__setattr__(self, "inconclusive", True)
 
     @property
     def ok(self) -> bool:
@@ -547,6 +565,7 @@ class DesignValidator:
                         valid_claim_ids=primary_ids | context_ids,
                         valid_requirement_ids=valid_requirement_ids,
                         valid_subject_refs=valid_subject_refs,
+                        require_remediation_mode=False,
                     )
 
                 (payload, normalized), retries = _with_contract_retry(review_task)
@@ -606,12 +625,20 @@ class DesignValidator:
                     shared_surface_nodes=shared_surface_nodes,
                     correction=correction,
                 )
-                return coherence_payload, _normalize_llm_findings(
+                normalized = _normalize_llm_findings(
                     coherence_payload,
                     valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
                     valid_requirement_ids=valid_requirement_ids,
                     valid_subject_refs=valid_subject_refs,
+                    require_remediation_mode=False,
                 )
+                _validate_coherence_conflicts(
+                    coherence_payload,
+                    valid_finding_ids={finding.finding_id for finding in semantic_findings},
+                    valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
+                    valid_design_refs=valid_subject_refs,
+                )
+                return coherence_payload, normalized
 
             (coherence, coherence_findings), retries = _with_contract_retry(review_coherence)
             retry_calls += retries
@@ -627,33 +654,171 @@ class DesignValidator:
             conflicts = _dict_items(coherence.get("conflicts"))
             adjudication: dict[str, object] = {}
             actual_calls = len(tasks) - skipped_calls + 1 + retry_calls
-            if conflicts:
-                existing_ids = {finding.finding_id for finding in semantic_findings}
+            blocking_finding_ids = {
+                finding.finding_id for finding in semantic_findings if finding.severity == "blocking"
+            }
+            if conflicts or blocking_finding_ids:
+                conflict_finding_ids = {
+                    finding_id
+                    for conflict in conflicts
+                    for finding_id in _string_items(conflict.get("finding_ids"))
+                }
+                adjudication_finding_ids = conflict_finding_ids | blocking_finding_ids
+                adjudication_claim_ids = {
+                    claim_id
+                    for conflict in conflicts
+                    for claim_id in _string_items(conflict.get("claim_ids"))
+                }
+                adjudication_design_refs = {
+                    design_ref
+                    for conflict in conflicts
+                    for design_ref in _string_items(conflict.get("design_refs"))
+                }
+                adjudication_findings = [
+                    finding.to_dict()
+                    for finding in semantic_findings
+                    if finding.finding_id in adjudication_finding_ids
+                ]
+                adjudication_claim_ids.update(
+                    claim_id
+                    for finding in adjudication_findings
+                    for claim_id in _string_items(finding.get("claim_ids"))
+                )
+                adjudication_design_refs.update(
+                    design_ref
+                    for finding in adjudication_findings
+                    for design_ref in [
+                        *_string_items(finding.get("diagram_ids")),
+                        str(finding.get("subject_ref") or ""),
+                        *[
+                            str(item.get("ref") or "")
+                            for item in _dict_items(finding.get("evidence"))
+                            if str(item.get("source") or "") in {"design", "design_graph"}
+                        ],
+                        *re.findall(
+                            r"\bVD[NE]-[A-Za-z0-9_-]+\b",
+                            f"{finding.get('message') or ''} {finding.get('expected_change') or ''}",
+                        ),
+                    ]
+                    if design_ref
+                )
+                adjudication_design_refs.intersection_update(valid_subject_refs)
+                adjudication_claims = [
+                    claim for claim in claims if str(claim.get("claim_id") or "") in adjudication_claim_ids
+                ]
+                graph = _dict_value(vertical_design_graph)
+                adjudication_edges = [
+                    edge
+                    for edge in _dict_items(graph.get("edges"))
+                    if str(edge.get("id") or "") in adjudication_design_refs
+                ]
+                adjudication_endpoint_refs = {
+                    str(edge.get(endpoint) or "")
+                    for edge in adjudication_edges
+                    for endpoint in ("from", "to")
+                    if str(edge.get(endpoint) or "")
+                }
+                adjudication_design_evidence = {
+                    "nodes": [
+                        review_node_view(node, task_type="coherence")
+                        for node in _dict_items(graph.get("nodes"))
+                        if str(node.get("id") or "")
+                        in (adjudication_design_refs | adjudication_endpoint_refs)
+                    ],
+                    "edges": adjudication_edges,
+                }
+                adjudication_requirement_ids = {
+                    requirement_id
+                    for claim in adjudication_claims
+                    for requirement_id in _string_items(claim.get("requirement_ids"))
+                }
+                adjudication_requirement_ids.update(
+                    str(claim.get("scenario_id") or "")
+                    for claim in adjudication_claims
+                    if str(claim.get("scenario_id") or "")
+                )
 
-                def review_adjudication(correction: str) -> tuple[dict[str, object], list[DesignFinding]]:
+                def review_adjudication(
+                    correction: str,
+                ) -> tuple[dict[str, object], tuple[list[DesignFinding], dict[str, dict[str, str]]]]:
                     adjudication_payload = self._semantic_adjudication_review(
                         conflicts=conflicts,
-                        findings=[finding.to_dict() for finding in semantic_findings],
-                        claims=claims,
+                        findings=adjudication_findings,
+                        claims=adjudication_claims,
+                        design_evidence=adjudication_design_evidence,
                         correction=correction,
                     )
-                    unknown_drops = set(_string_items(adjudication_payload.get("drop_finding_ids"))) - existing_ids
+                    unknown_drops = (
+                        set(_string_items(adjudication_payload.get("drop_finding_ids"))) - conflict_finding_ids
+                    )
                     if unknown_drops:
                         raise HarnessError(
                             "design_semantic_review_failed",
-                            f"Design semantic adjudication tried to drop unknown findings {sorted(unknown_drops)}.",
+                            "Design semantic adjudication tried to drop findings outside the supplied conflicts "
+                            f"{sorted(unknown_drops)}.",
                         )
-                    return adjudication_payload, _normalize_llm_findings(
-                        adjudication_payload,
-                        valid_claim_ids={str(claim.get("claim_id") or "") for claim in claims},
-                        valid_requirement_ids=valid_requirement_ids,
-                        valid_subject_refs=valid_subject_refs,
+                    retained_blocking_ids = blocking_finding_ids - set(
+                        _string_items(adjudication_payload.get("drop_finding_ids"))
                     )
+                    routes = _dict_items(adjudication_payload.get("remediation_modes"))
+                    route_ids = [str(item.get("finding_id") or "") for item in routes]
+                    if len(route_ids) != len(set(route_ids)) or set(route_ids) != retained_blocking_ids:
+                        raise HarnessError(
+                            "design_semantic_review_failed",
+                            "Design semantic adjudication must classify every retained existing blocking finding "
+                            "exactly once.",
+                        )
+                    findings_by_id = {
+                        str(item.get("id") or ""): item
+                        for item in adjudication_findings
+                        if str(item.get("id") or "")
+                    }
+                    route_map: dict[str, dict[str, object]] = {}
+                    for route in routes:
+                        finding_id = str(route.get("finding_id") or "")
+                        remediation_mode = str(route.get("remediation_mode") or "").strip().lower()
+                        remediation_reason = str(route.get("reason") or "").strip()
+                        if remediation_mode not in REMEDIATION_MODES or not remediation_reason:
+                            raise HarnessError(
+                                "design_semantic_review_failed",
+                                f"Design semantic adjudication route {finding_id!r} requires a valid "
+                                "remediation_mode and reason.",
+                            )
+                        repair_steps = _normalize_adjudication_repair_steps(
+                            route=route,
+                            finding=findings_by_id[finding_id],
+                            remediation_mode=remediation_mode,
+                            vertical_design_graph=vertical_design_graph,
+                        )
+                        route_map[finding_id] = {
+                            "mode": remediation_mode,
+                            "reason": remediation_reason,
+                            "repair_steps": repair_steps,
+                        }
+                    new_findings = _normalize_llm_findings(
+                        adjudication_payload,
+                        valid_claim_ids=adjudication_claim_ids,
+                        valid_requirement_ids=adjudication_requirement_ids,
+                        valid_subject_refs=adjudication_design_refs,
+                    )
+                    return adjudication_payload, (new_findings, route_map)
 
-                (adjudication, adjudicated), retries = _with_contract_retry(review_adjudication)
+                (adjudication, adjudication_result), retries = _with_contract_retry(review_adjudication)
                 actual_calls += retries
+                adjudicated, route_map = adjudication_result
                 drop_ids = set(_string_items(adjudication.get("drop_finding_ids")))
-                semantic_findings = [finding for finding in semantic_findings if finding.finding_id not in drop_ids]
+                semantic_findings = [
+                    replace(
+                        finding,
+                        remediation_mode=str(route_map[finding.finding_id]["mode"]),
+                        remediation_reason=str(route_map[finding.finding_id]["reason"]),
+                        repair_steps=list(route_map[finding.finding_id]["repair_steps"]),
+                    )
+                    if finding.finding_id in route_map
+                    else finding
+                    for finding in semantic_findings
+                    if finding.finding_id not in drop_ids
+                ]
                 semantic_findings.extend(
                     replace(
                         finding,
@@ -759,13 +924,14 @@ class DesignValidator:
         header, scope, task_rules = _SEMANTIC_TASK_PROMPTS.get(task_type, _SEMANTIC_TASK_PROMPTS["cross_cutting"])
         return f"""{header}
 
-Review only the assigned task. Primary claims require exactly one assessment each. Context claims may be cited by
-findings but must not be assessed. Review obligations are validation coverage, not new Requirements.
+Review only the assigned task. Primary claims require exactly one assessment each. Context claims are evidence only
+and may be cited only where the task-specific scope below permits it. Review obligations are validation coverage, not
+new Requirements.
 
 {scope}
 
 Return one JSON object only:
-{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract","severity":"blocking|warning","message":"specific issue","expected_change":"what must become true, stated on existing node/edge ids","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":[],"subject_ref":"exact VDN-* or VDE-* id","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
+{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract","severity":"blocking|warning","message":"specific issue","expected_change":"what must become true, stated on existing node/edge ids","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["exact existing VDN-* or VDE-* id whose contract may need mutation"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
 
 {_PACKET_FIELD_GUIDE}
 
@@ -776,6 +942,9 @@ Rules:
 - A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence.
 - expected_change states what must become true, in terms of existing node and edge ids. Do not prescribe a design,
   and do not introduce a system, service or dependency that neither the approved Requirement nor the packet contains.
+- subject_ref is the exact node or edge where the defect is observed. diagram_ids is the non-empty mutation scope:
+  list only the exact existing node/edge ids whose contracts may need to change to make expected_change true. Include
+  every allowed repair target, omit evidence-only ids, and do not include subject_ref when it should remain read-only.
 {task_rules}
 
 Task focus:
@@ -802,15 +971,29 @@ Assigned review packet:
 
 Review the specialist summaries and compact relationship index for contradictions across tasks. Do not reassess every
 claim and do not invent missing graph detail. Return one JSON object only:
-{{"ok":true,"summary":"short summary","findings":[],"conflicts":[{{"finding_ids":["exact existing finding id"],"claim_ids":["exact claim id"],"reason":"why adjudication is needed"}}]}}
+{{"ok":true,"summary":"short summary","findings":[],"conflicts":[{{"finding_ids":["exact existing finding id"],"claim_ids":["exact claim id"],"design_refs":["exact VDN-* or VDE-* id"],"reason":"why adjudication is needed"}}]}}
 
 Emit a new finding only for a cross-task defect with exact Requirement and Design evidence. Use the same finding schema
 as the specialists; its expected_change states what must become true on existing node and edge ids, without
 prescribing a design or introducing a system the Requirement and graph do not contain. Put genuine disagreement or blocking uncertainty in conflicts; cosmetic wording differences are not
 conflicts. Pay special attention to a state or event being treated incompatibly across runtime, UI and data tasks.
-Review each shared surface across its scenarios as one coherent contract for state, actions, feedback, layout, focus,
-inputs and availability; visual taste alone is only a warning. Never assess or raise a finding on a claim listed as
-deferred in a specialist result, and do not re-report a runtime blocker already present.
+Review whether each shared surface's scenario-owned projections can coexist in one implementation across state,
+actions, responses, feedback, layout, focus, inputs and availability; visual taste alone is only a warning. A shared
+screen or runtime target does not make each projection a complete global contract. Additive slices are expected: for
+example, a main scenario may declare only its 200 response while an exception scenario declares an additional 503.
+Never require one projection to copy a sibling's responses, actions, outcomes or Requirement refs. Emit a finding only
+when overlapping conditions give the same event, status or input incompatible meanings, ownership conflicts, or
+mutually exclusive obligations. UI experience_contract.runtime_states keys
+(loading, ready, empty, error and success) are fixed scenario-local presentation categories, not globally named
+workflow states. Different presentation or trigger variants for the same key on one screen are expected and are
+merged with scenario_ids; key reuse alone is not a contradiction. Compare the scenario-owned states, transitions
+and event meanings for an actual behavioral conflict. If evidence from a sibling scenario makes an existing
+specialist finding questionable or inapplicable, emit a conflict with that exact finding id, all of that finding's
+claim ids, every additional exact claim id needed to understand the counter-evidence, and every exact Design node/edge
+ref needed to decide it; do not silently retain or dismiss it. Every conflict must have
+non-empty finding_ids, claim_ids, design_refs and reason. Never assess or raise a finding on a claim listed as
+deferred in a specialist result. Do not use a deferred claim's behavior or Requirement ids to support a new finding
+by attaching it to a non-deferred claim. Do not re-report a runtime blocker already present.
 
 Claims:
 {json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -842,14 +1025,35 @@ Full shared surface node contracts:
         conflicts: list[dict[str, object]],
         findings: list[dict[str, object]],
         claims: list[dict[str, object]],
+        design_evidence: dict[str, object],
     ) -> dict[str, object]:
-        prompt = f"""Design Semantic Adjudication v1
+        prompt = f"""Design Semantic Adjudication v2
 
-Resolve only the supplied conflicts. Return one JSON object only:
-{{"ok":true,"summary":"short resolution","drop_finding_ids":["exact existing finding id"],"findings":[]}}
+Resolve the supplied conflicts, then classify every retained existing blocking finding. Return one JSON object only:
+{{"ok":true,"summary":"short resolution","drop_finding_ids":["exact conflicting finding id"],"remediation_modes":[{{"finding_id":"exact retained existing blocking finding id","remediation_mode":"local_patch|partition_rebuild|inconclusive","reason":"evidence-backed routing reason","repair_steps":[{{"target_id":"SC-N@component","diagram_ids":["exact existing node/edge id"],"expected_change":"change owned by only this target","depends_on":["earlier SC-N@component target"]}}]}}],"findings":[]}}
 
-Keep an existing finding unless exact Requirement and Design evidence disproves it. New findings use the specialist
-finding schema and exact supplied references. Do not reassess unrelated claims.
+Adjudication contract:
+- Keep an existing finding unless exact supplied evidence disproves it. drop_finding_ids may name only findings in a
+  supplied conflict. Classify every retained existing blocker exactly once; do not classify warnings or reassess
+  unrelated claims. New findings may only replace findings in a supplied conflict. With no conflicts,
+  drop_finding_ids and findings must both be empty.
+- reason is forwarded unchanged to the Designer. State the exact contract limitation, the responsible existing or new
+  provider, and the call/return order that makes every required value exist before its consumer decision. Treat the
+  finding's expected_change as a semantic postcondition, not a prescribed topology. Reuse an existing provider only
+  when that node already owns the operation and can keep one coherent typed input/outcome shape. Otherwise rebuild or
+  choose inconclusive; never invent an observation with no provider.
+- local_patch and partition_rebuild require one or more repair_steps; inconclusive requires none. Use one unique
+  target_id per affected component, formatted from an existing node as `scenario_id@component_id`. depends_on may name
+  only target_ids in the same route, must be acyclic, and is empty for an independent step.
+- A step's diagram_ids may contain only ids from that same finding's diagram_ids, plus subject_ref when it is an exact
+  graph id. Other Exact Design evidence is read-only context and may appear in reason only; it never expands mutation
+  scope. A node id must exactly match the step target's scenario and component. An edge id must match the target
+  scenario and have at least one endpoint in the target component; the other endpoint remains read-only.
+- expected_change states only what that target must make true. Scope ids are anchors, not an instruction to mutate every
+  cited edge. For an added or split provider, describe the new owner-to-provider call, provider-to-consumer return, and
+  the later decision that consumes it. Never place a provider result on an earlier edge whose source did not observe it.
+
+{_REMEDIATION_GUIDE}
 
 Conflicts:
 {json.dumps(conflicts, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -859,6 +1063,9 @@ Existing findings:
 
 Claims:
 {json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+
+Exact Design evidence:
+{json.dumps(design_evidence, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 """.strip()
         payload = _semantic_json_completion(self.llm_client, prompt=_with_contract_correction(prompt, correction))
         if not isinstance(payload.get("drop_finding_ids", []), list):
@@ -910,12 +1117,13 @@ Return one JSON object only:
       "id": "SEM-001",
       "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract",
       "severity": "blocking|warning",
+      "remediation_mode": "local_patch|partition_rebuild|inconclusive",
       "message": "specific contradiction or ambiguity",
       "expected_change": "specific UML correction",
       "claim_ids": ["SC-1:MF-1"],
       "requirement_ids": ["MAIN-1"],
-      "diagram_ids": ["sequence_diagram_1"],
-      "subject_ref": "exact VDN-* or VDE-* id",
+      "diagram_ids": ["exact existing VDN-* or VDE-* id whose contract may need mutation"],
+      "subject_ref": "exact VDN-* or VDE-* id where the defect is observed",
       "evidence": [{{"source": "requirement|design", "ref": "stable id", "excerpt": "short exact evidence"}}]
     }}
   ]
@@ -926,9 +1134,14 @@ Assessment contract:
 - satisfied assessments require at least one exact Design node/edge ID in design_refs.
 - missing, contradicted, and uncertain assessments require a finding bound through claim_ids.
 - Finding requirement_ids and subject_ref must use exact IDs supplied below.
+- Finding diagram_ids is the non-empty mutation scope. It must contain only exact supplied VDN/VDE ids whose
+  contracts may need to change; include every allowed repair target and omit evidence-only ids.
+- Every finding must select exactly one remediation_mode from the guide below.
 - For finding evidence with source "requirement", ref must be an exact Requirement ID from requirement_ids
   (for example "MF-1" or "AC-3"), never a composite claim_id such as "SC-1:MF-1".
 - For finding evidence with source "design" or "design_graph", ref must be an exact VDN-* or VDE-* ID supplied below.
+
+{_REMEDIATION_GUIDE}
 
 Blocking policy:
 - Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
@@ -1336,6 +1549,47 @@ def _vertical_design_subject_refs(value: dict[str, object] | None) -> set[str]:
     }
 
 
+def _validate_coherence_conflicts(
+    payload: dict[str, object],
+    *,
+    valid_finding_ids: set[str],
+    valid_claim_ids: set[str],
+    valid_design_refs: set[str],
+) -> None:
+    conflicts = payload.get("conflicts", [])
+    if not isinstance(conflicts, list):
+        raise HarnessError(
+            "design_semantic_review_failed",
+            "Design semantic coherence response must contain a conflicts array.",
+        )
+    for index, conflict in enumerate(conflicts, start=1):
+        if not isinstance(conflict, dict):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} must be an object.",
+            )
+        finding_ids = _string_items(conflict.get("finding_ids"))
+        claim_ids = _string_items(conflict.get("claim_ids"))
+        design_refs = _string_items(conflict.get("design_refs"))
+        reason = str(conflict.get("reason") or "").strip()
+        if not finding_ids or not claim_ids or not design_refs or not reason:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} requires non-empty finding_ids, claim_ids, "
+                "design_refs and reason.",
+            )
+        unknown_findings = sorted(set(finding_ids) - valid_finding_ids)
+        unknown_claims = sorted(set(claim_ids) - valid_claim_ids)
+        unknown_design_refs = sorted(set(design_refs) - valid_design_refs)
+        if unknown_findings or unknown_claims or unknown_design_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic coherence conflict {index} cites unknown ids: "
+                f"finding_ids={unknown_findings}, claim_ids={unknown_claims}, "
+                f"design_refs={unknown_design_refs}.",
+            )
+
+
 def _validate_semantic_assessments(
     payload: dict[str, object],
     *,
@@ -1388,6 +1642,7 @@ def _normalize_llm_findings(
     valid_claim_ids: set[str] | None = None,
     valid_requirement_ids: set[str] | None = None,
     valid_subject_refs: set[str] | None = None,
+    require_remediation_mode: bool = True,
 ) -> list[DesignFinding]:
     strict_claim_ids = {item for item in (valid_claim_ids or set()) if item}
     strict_requirement_ids = {item for item in (valid_requirement_ids or set()) if item}
@@ -1397,6 +1652,15 @@ def _normalize_llm_findings(
         severity = str(raw.get("severity") or "warning").strip().lower()
         if severity not in {"blocking", "warning"}:
             severity = "warning"
+        remediation_mode = str(raw.get("remediation_mode") or "").strip().lower()
+        if require_remediation_mode and remediation_mode not in REMEDIATION_MODES:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic finding {raw.get('id')} must select remediation_mode from "
+                f"{sorted(REMEDIATION_MODES)}.",
+            )
+        if not require_remediation_mode:
+            remediation_mode = ""
         claim_ids = _string_items(raw.get("claim_ids"))
         requirement_ids = _string_items(raw.get("requirement_ids"))
         if strict_claim_ids and (not claim_ids or any(item not in strict_claim_ids for item in claim_ids)):
@@ -1431,6 +1695,15 @@ def _normalize_llm_findings(
                 f"Design semantic finding {raw.get('id')} subject_ref {subject_ref!r} is not an exact Vertical Design "
                 "node or edge ID.",
             )
+        if strict_subject_refs and (
+            not diagram_ids or any(item not in strict_subject_refs for item in diagram_ids)
+        ):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic finding {raw.get('id')} diagram_ids must be a non-empty list of exact Vertical "
+                f"Design node or edge IDs; invalid refs: "
+                f"{[item for item in diagram_ids if item not in strict_subject_refs]}.",
+            )
         if strict_requirement_ids or strict_subject_refs:
             for item in evidence:
                 source = item["source"]
@@ -1462,6 +1735,8 @@ def _normalize_llm_findings(
                 diagram_ids=diagram_ids,
                 evidence=evidence,
                 subject_ref=subject_ref,
+                remediation_mode=remediation_mode,
+                remediation_reason=str(raw.get("remediation_reason") or "").strip(),
             )
         )
     if not bool(payload.get("ok")) and not findings:
@@ -1470,6 +1745,142 @@ def _normalize_llm_findings(
             "Design semantic validator rejected the design without actionable findings.",
         )
     return findings
+
+
+def _normalize_adjudication_repair_steps(
+    *,
+    route: dict[str, object],
+    finding: dict[str, object],
+    remediation_mode: str,
+    vertical_design_graph: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    raw_steps = route.get("repair_steps")
+    if remediation_mode == "inconclusive":
+        if raw_steps not in (None, []):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication inconclusive route {route.get('finding_id')!r} must not contain "
+                "repair_steps.",
+            )
+        return []
+    if not isinstance(raw_steps, list) or not raw_steps:
+        raise HarnessError(
+            "design_semantic_review_failed",
+            f"Design semantic adjudication {remediation_mode} route {route.get('finding_id')!r} requires repair_steps.",
+        )
+
+    graph = _dict_value(vertical_design_graph)
+    nodes_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("nodes"))
+        if str(item.get("id") or "")
+    }
+    edges_by_id = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(graph.get("edges"))
+        if str(item.get("id") or "")
+    }
+    graph_refs = set(nodes_by_id) | set(edges_by_id)
+    allowed_refs = set(_string_items(finding.get("diagram_ids")))
+    subject_ref = str(finding.get("subject_ref") or "")
+    if subject_ref in graph_refs:
+        allowed_refs.add(subject_ref)
+
+    def ref_targets(ref: str) -> set[str]:
+        node = nodes_by_id.get(ref)
+        if node is not None:
+            scenario_id = str(node.get("scenario_id") or "")
+            component_id = str(node.get("component_id") or "")
+            return {f"{scenario_id}@{component_id}"} if scenario_id and component_id else set()
+        edge = edges_by_id.get(ref)
+        if edge is None:
+            return set()
+        edge_scenario_id = str(edge.get("scenario_id") or "")
+        targets: set[str] = set()
+        for endpoint_key in ("from", "to"):
+            endpoint = nodes_by_id.get(str(edge.get(endpoint_key) or ""))
+            if endpoint is None:
+                continue
+            scenario_id = str(endpoint.get("scenario_id") or "")
+            component_id = str(endpoint.get("component_id") or "")
+            if scenario_id and component_id and (not edge_scenario_id or scenario_id == edge_scenario_id):
+                targets.add(f"{scenario_id}@{component_id}")
+        return targets
+
+    normalized: list[dict[str, object]] = []
+    seen_targets: set[str] = set()
+    for raw_step in raw_steps:
+        if not isinstance(raw_step, dict):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} contains a non-object repair step.",
+            )
+        target_id = str(raw_step.get("target_id") or "").strip()
+        diagram_ids = _string_items(raw_step.get("diagram_ids"))
+        expected_change = str(raw_step.get("expected_change") or "").strip()
+        depends_on = _string_items(raw_step.get("depends_on"))
+        if (
+            not target_id
+            or target_id in seen_targets
+            or not diagram_ids
+            or not expected_change
+            or len(depends_on) != len(set(depends_on))
+            or target_id in depends_on
+        ):
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} has an invalid or duplicate "
+                f"repair step for target {target_id!r}.",
+            )
+        invalid_refs = [ref for ref in diagram_ids if ref not in allowed_refs or target_id not in ref_targets(ref)]
+        if invalid_refs:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication repair target {target_id!r} contains out-of-scope Design refs "
+                f"{invalid_refs}.",
+            )
+        seen_targets.add(target_id)
+        normalized.append(
+            {
+                "target_id": target_id,
+                "diagram_ids": diagram_ids,
+                "expected_change": expected_change,
+                "depends_on": depends_on,
+            }
+        )
+
+    target_ids = {str(item["target_id"]) for item in normalized}
+    unknown_dependencies = sorted(
+        {
+            dependency
+            for item in normalized
+            for dependency in _string_items(item.get("depends_on"))
+            if dependency not in target_ids
+        }
+    )
+    if unknown_dependencies:
+        raise HarnessError(
+            "design_semantic_review_failed",
+            f"Design semantic adjudication route {route.get('finding_id')!r} has unknown repair dependencies "
+            f"{unknown_dependencies}.",
+        )
+    completed: set[str] = set()
+    remaining = {str(item["target_id"]): item for item in normalized}
+    while remaining:
+        ready = [
+            target_id
+            for target_id, item in remaining.items()
+            if set(_string_items(item.get("depends_on"))) <= completed
+        ]
+        if not ready:
+            raise HarnessError(
+                "design_semantic_review_failed",
+                f"Design semantic adjudication route {route.get('finding_id')!r} repair_steps contain a cycle.",
+            )
+        for target_id in ready:
+            completed.add(target_id)
+            remaining.pop(target_id)
+    return normalized
 
 
 def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) -> list[DesignFinding]:
@@ -1500,6 +1911,8 @@ def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) ->
                 support_count=1,
                 trial_ids=[trial_id],
                 origin="semantic",
+                remediation_mode=finding.remediation_mode,
+                remediation_reason=finding.remediation_reason,
             )
         )
     unique: dict[str, DesignFinding] = {}
@@ -1541,6 +1954,10 @@ def _aggregate_semantic_trials(
         else:
             severity = representative.severity
             target = disputed
+        remediation_modes = {item.remediation_mode for _trial_id, item in votes}
+        remediation_mode = (
+            next(iter(remediation_modes)) if len(remediation_modes) == 1 else "inconclusive"
+        )
         target.append(
             DesignFinding(
                 finding_id=f"CONS-{ordinal:03d}",
@@ -1556,6 +1973,9 @@ def _aggregate_semantic_trials(
                 support_count=len({trial_id for trial_id, _item in votes}),
                 trial_ids=sorted({trial_id for trial_id, _item in votes}),
                 origin="semantic",
+                remediation_mode=remediation_mode,
+                remediation_reason=representative.remediation_reason,
+                repair_steps=representative.repair_steps,
             )
         )
 
@@ -1818,7 +2238,7 @@ def _summarize_call_metrics(metrics: list[dict[str, object]]) -> dict[str, objec
 
 _PACKET_FIELD_GUIDE = """
 Packet field guide (Harness-owned meanings; do not reinterpret them):
-- task.primary_claim_ids are assessed once each; context claims are background that findings may cite.
+- task.primary_claim_ids are assessed once each; context claims are evidence governed by the task-specific scope.
 - task.coverage_keys list what this call answers for: claim:<id> and boundary:<edge id>.
 - surface_contract.runtime_surface.required_inputs are values a surface consumes. source=external_use_case or
   external_dependency means the approved Requirement supplies the value from outside this use case (see
@@ -1853,6 +2273,20 @@ Severity:
 - Decide from the packet alone. An invented blocker and a missed blocker each cost a full repair cycle.
 """.strip()
 
+_REMEDIATION_GUIDE = """
+Remediation mode for every finding:
+- local_patch: the Designer may update contracts on existing writable nodes and remove, add or reorder scenario edges
+  between existing nodes. It may not add, split, remove or replace a node. Choose this only when those permissions are
+  enough to produce a complete causal path and every reused node can keep one coherent typed input/operation shape.
+- partition_rebuild: the affected scenario/component partition needs a node added, split, removed or replaced, or no
+  coherent repair exists under the local_patch permissions. A missing field or outcome alone does not require rebuild
+  when an existing node already owns the responsibility and can coherently declare it.
+- inconclusive: the supplied Requirement or Design evidence is insufficient to choose either safe route. Fail closed;
+  do not guess a repair.
+Classify the smallest complete repair, not the smallest textual delta. Choose the mode semantically. The Harness
+validates exact ids and performs the route mechanically.
+""".strip()
+
 _DETERMINISTIC_REVIEW_NOTE = """
 Deterministic review: before this call the Harness already enforced graph schema and stable IDs, edge endpoints,
 partition coverage, boundary_contract shape, composition forwarded-input propagation, branch parent wiring and
@@ -1869,6 +2303,14 @@ _RUNTIME_RULES = """
 - Every value a decision tests must exist on this path when the decision runs (see input_mapping in the field guide).
   A tested value that no modeled surface, declared state or declared external input produces is a
   decision_input_sufficiency defect even when an input_mapping names it.
+- Do not infer that a provider re-tests an upstream guard merely because its decision prose states the guarded
+  operation. When a modeled UI or interaction transition enforces the guard before the outbound call, the downstream
+  provider needs the resulting operation inputs, not a duplicate guard flag, unless its typed inputs or branches
+  explicitly declare that it tests the guard itself.
+- migration_intent describes implementation work, not runtime contents. add does not prove a new store is empty or
+  disconnected from records supplied by an approved upstream/external use case. Do not require this use case to model
+  record creation, ingestion, seeding or an extra write unless the Requirement or Design explicitly assigns that
+  lifecycle to this path or declares a distinct incompatible store.
 - Transitions that leave the same `from` state are alternative branches unless an edge or transition orders them;
   taking one branch does not mean a sibling branch's request, write or response has happened. A branch that starts
   before an external action (per branch_entries) needs no mechanism to undo or cancel that action.
@@ -1887,8 +2329,8 @@ _BEHAVIOR_RULES = """
 """.strip()
 
 _GLOBAL_RULES = """
-- Judge preconditions, postconditions, quality requirements and negative constraints across every scenario they govern,
-  including the scenarios where they must not apply.
+- Judge only primary global preconditions, postconditions, quality requirements and negative constraints across the
+  scenarios they govern. Scenario-local constraints remain owned by their scenario calls.
 - Authentication and authorization are separate decisions; an uncertainty without evidence is a warning.
 - A surface reused by several scenarios must tell one consistent story about actions, state, feedback and inputs when
   a global claim depends on it. Visual taste alone is a warning.

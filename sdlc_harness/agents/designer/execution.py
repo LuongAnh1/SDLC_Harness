@@ -2750,6 +2750,67 @@ def _prompt_review_feedback(
     return feedback
 
 
+def _repair_source_paths(repair_task: dict[str, object]) -> list[str]:
+    paths: list[str] = []
+    graph_context = _dict(repair_task.get("graph_context"))
+    nodes = _dicts(graph_context.get("writable_nodes")) or _dicts(repair_task.get("nodes"))
+    for node in nodes:
+        binding = _dict(node.get("runtime_binding"))
+        target_path = str(_dict(binding.get("target")).get("path") or "").strip()
+        owner_path = str(_dict(binding.get("attachment")).get("owner_path") or "").strip()
+        candidates = (
+            [owner_path]
+            if str(node.get("disposition") or "") == "add"
+            else [target_path, owner_path]
+        )
+        for path in candidates:
+            if path and path not in paths:
+                paths.append(path)
+    return paths
+
+
+def _repair_source_inspection_prompt(
+    *,
+    repair_task: dict[str, object],
+    observation_limit: int,
+    actions_remaining: int | None,
+    last_invalid_action: str,
+    last_review_feedback: str,
+) -> str:
+    payload = {
+        "mode": "repair_source_inspection_only",
+        "repair_target": {
+            "target_id": repair_task.get("target_id"),
+            "partition": repair_task.get("partition"),
+            "remediation_mode": repair_task.get("remediation_mode") or "local_patch",
+            "suggested_source_paths": _repair_source_paths(repair_task),
+            "read_scope": repair_task.get("read_scope") or {},
+        },
+        "observation_policy": {
+            "limit_before_delta": observation_limit,
+            "used_since_delta": 0,
+            "must_propose_delta_now": False,
+            "source_inspected": False,
+            **({"actions_remaining_including_delta": actions_remaining} if actions_remaining is not None else {}),
+        },
+        "next_context_after_source": "full_exact_repair_feedback",
+        "last_invalid_action": last_invalid_action,
+        "last_review_feedback": last_review_feedback,
+    }
+    return (
+        "SOURCE INSPECTION ONLY. Do not analyze the finding and do not propose a delta yet. Return exactly one "
+        "repo.read action for one existing suggested_source_path. If no suggested path exists, return one "
+        "codegraph.query action scoped to the supplied component/profile roots. After a successful source inspection, "
+        "the Harness will provide the complete unsummarized Validator findings, exact graph context and write scope.\n\n"
+        "Allowed actions now: repo.read(path,start_line?,end_line?); "
+        "codegraph.query(operation=explore|symbols|callers|callees|files,query?,symbol?,limit?,depth?,filter?,pattern?).\n"
+        "Return exactly one of these JSON shapes, with no type/json_object wrapper and no extra text:\n"
+        '{"action":"repo.read","arguments":{"path":"<exact existing suggested_source_path>"}}\n'
+        '{"action":"codegraph.query","arguments":{"operation":"explore","query":"<component-scoped query>"}}\n\n'
+        + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    )
+
+
 def _designer_prompt(
     *,
     requirement_model: dict[str, object],
@@ -2769,6 +2830,14 @@ def _designer_prompt(
     source_inspected: bool = False,
     actions_remaining: int | None = None,
 ) -> str:
+    if repair_task is not None and not source_inspected:
+        return _repair_source_inspection_prompt(
+            repair_task=repair_task,
+            observation_limit=observation_limit,
+            actions_remaining=actions_remaining,
+            last_invalid_action=last_invalid_action,
+            last_review_feedback=last_review_feedback,
+        )
     graph_contract = str(graph.get("schema_version") or GRAPH_VERSION)
     delta_contract = delta_version_for(graph_contract)
     repair_partition = _dict((repair_task or {}).get("partition"))
@@ -2811,6 +2880,7 @@ def _designer_prompt(
         "graph": prompt_graph,
         "active_partition": active_partition,
         "active_repair_task": repair_task,
+        "repair_feedback_delivery": "full_exact" if repair_task is not None else "none",
         "observation_policy": {
             "limit_before_delta": observation_limit,
             "used_since_delta": observations_since_delta,
@@ -2821,7 +2891,9 @@ def _designer_prompt(
         "recent_observations": observations,
         "active_uiux_guidance": active_guidance or [],
         "uiux_mode": uiux_mode,
-        "repair_feedback": repair_feedback,
+        "repair_feedback": (
+            [] if active_partition is not None or repair_task is not None else repair_feedback
+        ),
         "last_invalid_action": last_invalid_action,
         "last_review_feedback": prompt_review_feedback,
     }
@@ -2883,7 +2955,7 @@ def _designer_prompt(
         "ui_runtime_context.dependency_refs whose text states that dependency, and then runnable_status=externally_blocked; "
         "never declare such data as provided by this screen. An input guaranteed by a precondition (for example an "
         "authenticated session) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
-        "has its provider; demo_fixture only with an approved DEC-* decision and "
+        "has its provider; demo_fixture only with an accepted D-* decision listed in dependency_refs and "
         "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
         "that supplies the input. When a new input must flow down to the screen, declare it only on the screen node "
         "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta every "
@@ -2974,10 +3046,13 @@ def _designer_prompt(
         "when the counterpart surface (for example the API a UI calls) is not designed yet, leave that edge to its later "
         "partition instead of inventing an endpoint. "
         "For an alternative or exception scenario, inspect "
-        "surface_work.planned_reuse_candidates before inventing a new runtime target. Graph projection identity and "
+        "surface_work.shared_target_candidates before inventing a new runtime target. Graph projection identity and "
         "runtime target identity are separate: when the branch starts from or returns to the same interaction owner or "
         "entrypoint as a candidate (for example confirm and cancel in one dialog), add the required branch projection "
-        "node and reuse that candidate's exact runtime target even when its contract only describes the main outcome. "
+        "node and share that candidate's exact runtime target even when its contract only describes the main outcome. "
+        "Sharing a runtime target does not choose node.disposition. When target_origin=planned and "
+        "candidate_disposition=add, keep disposition=add, leave node.evidence_refs empty, and explain the GAP in "
+        "evidence_reason; use reuse, modify, or no_change only for a target grounded in frozen repository evidence. "
         "Write the branch projection's contract only from active_requirement_slice; sharing a runtime target never "
         "copies sibling requirement refs or sibling behavior into the branch contract. Only create a new runtime target "
         "when the branch needs an independently mounted owner/entrypoint or the candidate architecture cannot host it, "
@@ -2998,8 +3073,17 @@ def _designer_prompt(
         "active_repair_task.write_scope.allow_add_node is false, never use add_node; update a listed writable_node or "
         "repair its edges instead. Never update or remove a read_only_node, and preserve every scenario/partition "
         "outside write_scope. active_repair_task.graph_context.preserved_edges are structural cross-scenario edges: "
-        "never remove or re-add them; only edges_in_current_order participate in a repair reorder. Do not rewrite an "
-        "entire scenario edge chain when one named edge or node can satisfy the finding. When every active repair "
+        "never remove or re-add them; only edges_in_current_order participate in a repair reorder. "
+        "Each finding.remediation_reason is the Validator's exact routing witness. Preserve its causal constraints and "
+        "use its named existing nodes and edges to guide the repair, but never treat it as authority to change the "
+        "approved Requirement or invent evidence. "
+        + (
+            "For remediation_mode=partition_rebuild, reconstruct the typed nodes and ordered interactions inside the "
+            "exact partition; adding or replacing nodes is allowed by write_scope. "
+            if str((repair_task or {}).get("remediation_mode") or "") == "partition_rebuild"
+            else "Do not rewrite an entire scenario edge chain when one named edge or node can satisfy the finding. "
+        )
+        + "When every active repair "
         "finding is boundary_contract_mismatch, submit exactly the delta_scaffold operations: keep each replacement "
         "edge's from, to, kind, and label unchanged, and do not add or reorder unrelated edges. When every active "
         "repair finding is runtime_operation_binding_mismatch, submit exactly the delta_scaffold update_node operation "
@@ -3171,6 +3255,7 @@ def _ui_runtime_prompt_context(
     binding = _dict(graph.get("snapshot_binding"))
     context = _dict(binding.get("ui_repo_context"))
     known = set(_strings(binding.get("requirement_reference_ids")))
+    approved_decisions = set(_strings(binding.get("approved_decision_ids")))
     allowed = set(allowed_refs or [])
     cited = {
         ref
@@ -3207,7 +3292,8 @@ def _ui_runtime_prompt_context(
         "dependency_refs": [
             {"id": ref, **({"text": texts[ref]} if texts.get(ref) else {})}
             for ref in sorted(known)
-            if ref.startswith(("PRE-", "DEC-"))
+            if ref.startswith("PRE-")
+            or (ref.startswith("D-") and ref in approved_decisions)
             or (ref.startswith(("MF-", "AF-", "EF-")) and (ref in allowed or ref in cited))
         ],
     }
@@ -3322,7 +3408,7 @@ def _wiring_operation_templates(
                         "schema_version": SURFACE_CONTRACT_VERSION,
                         "surface": "ui",
                         "entrypoint": hop,
-                        "states": ["forwarding"],
+                        "states": ["mounted", "forwarding"],
                         "transitions": [
                             {
                                 "from": "mounted",
@@ -3381,7 +3467,7 @@ def _runtime_surface_scaffold(
             {
                 "name": "<input the screen needs at runtime; remove this item when none>",
                 "source": "<existing_runtime|external_use_case|new_boundary|demo_fixture>",
-                "binding": "<provider path#symbol | VDN-* | PRE-*/MF-*/AF-*/EF-* from dependency_refs | DEC-*>",
+                "binding": "<provider path#symbol | VDN-* | PRE-*/MF-*/AF-*/EF-* from dependency_refs | accepted D-*>",
                 "provided_by": (
                     f"<hop before the target on composition_path that supplies it; {entry} for external_use_case; "
                     "never the target itself>"
@@ -4000,7 +4086,7 @@ def _active_partition(
                     "contract": surface_contract,
                     "candidate_anchors": candidate_anchors[:3],
                     "composition_owner_candidates": owner_anchors[:3],
-                    "planned_reuse_candidates": _planned_reuse_candidates(
+                    "shared_target_candidates": _shared_target_candidates(
                         scenario=scenario,
                         requirement_model=requirement_model,
                         graph=graph,
@@ -4104,7 +4190,7 @@ def _active_partition(
     return None
 
 
-def _planned_reuse_candidates(
+def _shared_target_candidates(
     *,
     scenario: dict[str, object],
     requirement_model: dict[str, object],
@@ -4112,7 +4198,7 @@ def _planned_reuse_candidates(
     component_id: str,
     surface: str,
 ) -> list[dict[str, object]]:
-    """Expose main-scenario targets that a branch can project without duplicating runtime work."""
+    """Expose main-scenario targets that a branch can share without changing target origin."""
 
     if str(scenario.get("kind") or "") not in {"alternative", "exception"}:
         return []
@@ -4134,6 +4220,8 @@ def _planned_reuse_candidates(
             "node_id": item.get("id"),
             "scenario_id": item.get("scenario_id"),
             "name": item.get("name"),
+            "candidate_disposition": item.get("disposition"),
+            "target_origin": "planned" if str(item.get("disposition") or "") == "add" else "repository",
             "contract": item.get("contract"),
             "surface_contract": item.get("surface_contract"),
             "runtime_binding": item.get("runtime_binding"),
@@ -4280,8 +4368,22 @@ def _active_repair_task(
         return None
     edges_by_id = {str(item.get("id") or ""): item for item in _dicts(graph.get("edges"))}
     targets = _repair_work_targets(repair_feedback, nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
-    target = next((item for item in targets if str(item.get("target_id") or "") not in set(completed_targets)), None)
+    completed_target_ids = set(completed_targets)
+    target = next(
+        (
+            item
+            for item in targets
+            if str(item.get("target_id") or "") not in completed_target_ids
+            and set(_strings(item.get("depends_on"))) <= completed_target_ids
+        ),
+        None,
+    )
     if not isinstance(target, dict):
+        if any(str(item.get("target_id") or "") not in completed_target_ids for item in targets):
+            raise HarnessError(
+                "designer_repair_scope_invalid",
+                "No structured repair target is ready; a required dependency has not completed.",
+            )
         return None
     target_id = str(target.get("target_id") or "")
     scenario_id = str(target.get("scenario_id") or "")
@@ -4296,14 +4398,33 @@ def _active_repair_task(
         target_nodes = nodes
         findings = repair_feedback
     else:
-        findings = [
-            item
-            for item in repair_feedback
+        findings = []
+        for item in repair_feedback:
+            repair_step = next(
+                (
+                    step
+                    for step in _dicts(item.get("repair_steps"))
+                    if str(step.get("target_id") or "") == target_id
+                ),
+                None,
+            )
+            if repair_step is not None:
+                findings.append(
+                    {
+                        **item,
+                        "diagram_ids": _strings(repair_step.get("diagram_ids")),
+                        "expected_change": str(repair_step.get("expected_change") or ""),
+                        "repair_step": repair_step,
+                    }
+                )
+                continue
+            if item.get("repair_steps"):
+                continue
             if target_id in {
                 str(candidate.get("target_id") or "")
                 for candidate in _repair_work_targets([item], nodes_by_id=nodes_by_id, edges_by_id=edges_by_id)
-            }
-        ]
+            }:
+                findings.append(item)
         target_edges = [item for item in edges if str(item.get("scenario_id") or "") == scenario_id]
         scenario_node_ids = {str(item.get("id") or "") for item in scenario_nodes}
         repairable_parent_edges = _ambiguous_branch_parent_excess_edge_ids(findings)
@@ -4354,10 +4475,15 @@ def _active_repair_task(
         if str(item.get("subject_ref") or "").startswith("VDE-")
     }
     finding_codes = {str(item.get("code") or item.get("category") or "") for item in findings}
+    remediation_mode = (
+        "partition_rebuild"
+        if any(str(item.get("remediation_mode") or "") == "partition_rebuild" for item in findings)
+        else "local_patch"
+    )
     scenario_edge_ids = [str(item.get("id") or "") for item in target_edges if str(item.get("id") or "")]
     removable_edge_ids = (
         [edge_id for edge_id in scenario_edge_ids if edge_id in subject_edge_ids]
-        if finding_codes and finding_codes <= {"boundary_contract_mismatch"}
+        if remediation_mode == "local_patch" and finding_codes and finding_codes <= {"boundary_contract_mismatch"}
         else (
             [edge_id for edge_id in scenario_edge_ids if edge_id in repairable_parent_edges]
             if finding_codes and finding_codes <= {"branch_parent_ambiguous"}
@@ -4399,9 +4525,9 @@ def _active_repair_task(
             for item in target_edges
             if str(item.get("id") or "") in subject_edge_ids
         ]
-        if finding_codes and finding_codes <= {"boundary_contract_mismatch"}
+        if remediation_mode == "local_patch" and finding_codes and finding_codes <= {"boundary_contract_mismatch"}
         else [],
-        "allow_add_node": bool(component_id and not target_nodes),
+        "allow_add_node": remediation_mode == "partition_rebuild" or bool(component_id and not target_nodes),
     }
     graph_context = {
         "writable_nodes": target_nodes,
@@ -4410,7 +4536,8 @@ def _active_repair_task(
         "preserved_edges": preserved_edges,
     }
     shared_edge_only = (
-        source != "inline_composition"
+        remediation_mode == "local_patch"
+        and source != "inline_composition"
         and target_id != "global"
         and bool(findings)
         and all(
@@ -4429,9 +4556,15 @@ def _active_repair_task(
     return {
         "source": source,
         "target_id": target_id,
+        "remediation_mode": remediation_mode,
         "shared_edge_only": shared_edge_only,
         "partition": task_partition,
         "findings": findings,
+        "repair_steps": [
+            _dict(item.get("repair_step"))
+            for item in findings
+            if _dict(item.get("repair_step"))
+        ],
         "graph_context": graph_context,
         "nodes": target_nodes,
         "edges_in_current_order": target_edges,
@@ -4467,10 +4600,22 @@ def _active_repair_task(
         "remaining_targets": [
             str(item.get("target_id") or "")
             for item in targets
-            if str(item.get("target_id") or "") not in set(completed_targets)
+            if str(item.get("target_id") or "") not in completed_target_ids
         ],
         "instruction": (
-            "Repair every listed finding for this exact target. Read related components when needed, but mutate only write_scope. "
+            (
+                "Rebuild this exact scenario/component partition because the Validator classified a local patch as "
+                "insufficient. You may add, replace or remove nodes and interactions only inside write_scope. "
+                if remediation_mode == "partition_rebuild"
+                else "Repair every listed finding for this exact target. "
+            )
+            + (
+                "The structured repair_steps below are authoritative for this turn; prerequisite targets are already "
+                "complete and later targets are deferred. "
+                if any(_dict(item.get("repair_step")) for item in findings)
+                else ""
+            )
+            + "Read related components when needed, but mutate only write_scope. "
             "Do not update read_only_nodes. Preserve unrelated partitions. "
             "Use remove_edge plus ordered add_edge operations when interaction order must change. "
             "A returns edge's boundary_contract.input_mapping repeats its paired calls/reads/writes edge exactly "
@@ -4736,55 +4881,103 @@ def _repair_work_targets(
     *,
     nodes_by_id: dict[str, dict[str, object]],
     edges_by_id: dict[str, dict[str, object]] | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, object]]:
     """Split node- and edge-scoped bundle repairs by the graph's mutation partition."""
 
-    targets: list[dict[str, str]] = []
+    targets: list[dict[str, object]] = []
     seen: set[str] = set()
+
+    def add_target(*, target_id: str, scenario_id: str, component_id: str, depends_on: list[str] | None = None) -> None:
+        dependencies = depends_on or []
+        if target_id in seen:
+            existing = next(item for item in targets if str(item.get("target_id") or "") == target_id)
+            existing["depends_on"] = list(
+                dict.fromkeys([*_strings(existing.get("depends_on")), *dependencies])
+            )
+            return
+        seen.add(target_id)
+        targets.append(
+            {
+                "target_id": target_id,
+                "scenario_id": scenario_id,
+                "component_id": component_id,
+                "depends_on": dependencies,
+            }
+        )
+
     for finding in repair_feedback:
+        repair_steps = _dicts(finding.get("repair_steps"))
+        if repair_steps:
+            for step in repair_steps:
+                target_id = str(step.get("target_id") or "")
+                if "@" not in target_id:
+                    raise HarnessError(
+                        "designer_repair_scope_invalid",
+                        f"Structured repair target {target_id!r} is not scenario@component.",
+                    )
+                scenario_id, component_id = target_id.split("@", 1)
+                add_target(
+                    target_id=target_id,
+                    scenario_id=scenario_id,
+                    component_id=component_id,
+                    depends_on=_strings(step.get("depends_on")),
+                )
+            continue
         partition = _dict(finding.get("partition"))
         scenario_id = str(partition.get("scenario_id") or "")
         component_id = str(partition.get("component_id") or "")
         if scenario_id and component_id:
             target_id = f"{scenario_id}@{component_id}"
-            if target_id not in seen:
-                seen.add(target_id)
-                targets.append(
-                    {
-                        "target_id": target_id,
-                        "scenario_id": scenario_id,
-                        "component_id": component_id,
-                    }
-                )
+            add_target(target_id=target_id, scenario_id=scenario_id, component_id=component_id)
             continue
         subject_ref = str(finding.get("subject_ref") or "")
-        node = next((item for node_id, item in nodes_by_id.items() if node_id and node_id in subject_ref), None)
-        edge = (edges_by_id or {}).get(subject_ref) if node is None else None
-        # An edge finding may need a change on either end, so each same-scenario endpoint partition gets a turn.
-        endpoint_nodes = _shared_edge_endpoints(edge, nodes_by_id=nodes_by_id) if edge is not None else []
-        for endpoint in endpoint_nodes or ([node] if node is not None else []):
-            scenario_id = str(endpoint.get("scenario_id") or "")
-            component_id = str(endpoint.get("component_id") or "")
+        mutation_refs = [
+            item
+            for item in _strings(finding.get("diagram_ids"))
+            if item in nodes_by_id or item in (edges_by_id or {})
+        ]
+        # Semantic findings declare their typed mutation scope in diagram_ids. Older deterministic findings fall back
+        # to subject_ref, which is already mechanically scoped by the Harness.
+        semantic_scope = mutation_refs if str(finding.get("origin") or "") == "semantic" else []
+        scoped_refs = semantic_scope or [subject_ref]
+        scoped_nodes: list[dict[str, object]] = []
+        for ref in scoped_refs:
+            node = nodes_by_id.get(ref)
+            if node is None and not semantic_scope:
+                node = next((item for node_id, item in nodes_by_id.items() if node_id and node_id in ref), None)
+            edge = (edges_by_id or {}).get(ref) if node is None else None
+            endpoints = _shared_edge_endpoints(edge, nodes_by_id=nodes_by_id) if edge is not None else []
+            for endpoint in endpoints or ([node] if node is not None else []):
+                if endpoint not in scoped_nodes:
+                    scoped_nodes.append(endpoint)
+        for scoped_node in scoped_nodes:
+            scenario_id = str(scoped_node.get("scenario_id") or "")
+            component_id = str(scoped_node.get("component_id") or "")
             target_id = f"{scenario_id}@{component_id}"
-            if target_id not in seen:
-                seen.add(target_id)
-                targets.append(
-                    {
-                        "target_id": target_id,
-                        "scenario_id": scenario_id,
-                        "component_id": component_id,
-                    }
-                )
-        if endpoint_nodes or node is not None:
+            add_target(target_id=target_id, scenario_id=scenario_id, component_id=component_id)
+        if scoped_nodes:
             continue
         finding_targets = _finding_repair_targets(finding)
         for scenario_id in finding_targets:
-            if scenario_id not in seen:
-                seen.add(scenario_id)
-                targets.append({"target_id": scenario_id, "scenario_id": scenario_id, "component_id": ""})
+            add_target(target_id=scenario_id, scenario_id=scenario_id, component_id="")
     if not targets:
-        return [{"target_id": "global", "scenario_id": "", "component_id": ""}]
-    return targets
+        return [{"target_id": "global", "scenario_id": "", "component_id": "", "depends_on": []}]
+
+    ordered: list[dict[str, object]] = []
+    completed: set[str] = set()
+    remaining = {str(item.get("target_id") or ""): item for item in targets}
+    while remaining:
+        ready = [
+            target_id
+            for target_id, item in remaining.items()
+            if set(_strings(item.get("depends_on"))) <= completed
+        ]
+        if not ready:
+            raise HarnessError("designer_repair_scope_invalid", "Structured repair target dependencies contain a cycle.")
+        for target_id in ready:
+            ordered.append(remaining.pop(target_id))
+            completed.add(target_id)
+    return ordered
 
 
 def _repair_finding_still_applies(

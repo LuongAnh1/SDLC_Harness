@@ -1555,6 +1555,13 @@ def _vertical_snapshot_binding(
                 for item in value
                 if isinstance(item, dict) and str(item.get("id") or "")
             ),
+            "approved_decision_ids": sorted(
+                str(item.get("id"))
+                for item in requirement_payload.get("decisions", [])
+                if isinstance(item, dict)
+                and str(item.get("id") or "").startswith("D-")
+                and str(item.get("status") or "").strip().lower() == "accepted"
+            ),
         }
         # Pinned per run, so runs started before the layered layout contract keep their frozen binding.
         if state.get(UI_LAYOUT_CONTRACT_KEY):

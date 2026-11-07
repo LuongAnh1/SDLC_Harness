@@ -118,6 +118,26 @@ class VerticalDesignGraphTest(unittest.TestCase):
             run_id="run-test",
         )
 
+    def test_ui_transitions_must_reference_declared_states(self) -> None:
+        contract = {
+            "schema_version": SURFACE_CONTRACT_VERSION,
+            "surface": "ui",
+            "entrypoint": "DeletePanel",
+            "states": ["deleting", "retrying"],
+            "transitions": [
+                {"from": "deleting", "action": "retry", "to": "retrying", "outcome": "retried"},
+                {"from": "retrying", "action": "finish", "to": "success", "outcome": "deleted"},
+            ],
+            "validations": [],
+            "outcomes": ["deleted"],
+        }
+
+        with self.assertRaisesRegex(
+            HarnessError,
+            "UI transitions reference undeclared states: success.*Declare them in states or change",
+        ):
+            _validate_surface_contract(contract, surface="ui", node_id="VDN-ui", run_id="run-test")
+
     def test_delta_is_deterministic_and_allocates_stable_ids(self) -> None:
         graph = new_vertical_design_graph(run_id="run-1", snapshot_binding=self.binding)
         delta = {
@@ -154,6 +174,101 @@ class VerticalDesignGraphTest(unittest.TestCase):
         self.assertEqual(first["revision"], 1)
         self.assertEqual(first["nodes"][0]["id"], first_refs["tmp:api"])
         validate_vertical_design_graph(first, expected_run_id="run-1", expected_binding=self.binding)
+
+    def test_delta_rejects_repository_reuse_of_a_target_that_is_only_planned(self) -> None:
+        graph = new_vertical_design_graph(run_id="run-planned-target", snapshot_binding=self.binding)
+        shared_binding = {
+            "schema_version": RUNTIME_BINDING_VERSION,
+            "runtime_kind": "api_route",
+            "target": {
+                "component_id": "api",
+                "path": "apps/api/src/cultural-heritage.ts",
+                "symbol": "deleteCulturalHeritageRecord",
+            },
+            "attachment": {
+                "relation": "registered_by",
+                "owner_ref": "RLA-api-app",
+                "owner_path": "apps/api/src/app.ts",
+                "owner_symbol": "createApp",
+            },
+            "evidence_refs": ["RLA-api-app"],
+        }
+        graph, _ = apply_designer_delta(
+            graph,
+            {
+                "schema_version": DELTA_VERSION,
+                "base_graph_digest": graph["artifact_digest"],
+                "partition": {
+                    "use_case_id": "UC1",
+                    "scenario_id": "SC-1",
+                    "component_id": "api",
+                    "source_observation_refs": ["RLA-api-app"],
+                },
+                "operations": [
+                    {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                    {
+                        "op": "add_node",
+                        "node": {
+                            "temp_ref": "tmp:planned",
+                            "semantic_key": "SC-1:api",
+                            "name": "Planned delete route",
+                            "kind": "api_contract",
+                            "surface": "api",
+                            "disposition": "add",
+                            "requirement_refs": ["SC-1"],
+                            "evidence_refs": [],
+                            "evidence_reason": "The route does not exist in the frozen repository.",
+                            "contract": "Delete a cultural heritage record.",
+                            "runtime_binding": shared_binding,
+                        },
+                    },
+                ],
+                "completion_claims": [],
+                "unresolved_items": [],
+            },
+            valid_evidence_refs={"RLA-api-app"},
+        )
+
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(
+                graph,
+                {
+                    "schema_version": DELTA_VERSION,
+                    "base_graph_digest": graph["artifact_digest"],
+                    "partition": {
+                        "use_case_id": "UC1",
+                        "scenario_id": "SC-3",
+                        "component_id": "api",
+                        "source_observation_refs": ["RLA-api-app"],
+                    },
+                    "operations": [
+                        {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
+                        {
+                            "op": "add_node",
+                            "node": {
+                                "temp_ref": "tmp:reused",
+                                "semantic_key": "SC-3:api",
+                                "name": "Retry delete route",
+                                "kind": "api_contract",
+                                "surface": "api",
+                                "disposition": "reuse",
+                                "requirement_refs": ["SC-3"],
+                                "evidence_refs": ["RLA-api-app"],
+                                "evidence_reason": "",
+                                "contract": "Retry deletion through the shared route.",
+                                "runtime_binding": shared_binding,
+                            },
+                        },
+                    ],
+                    "completion_claims": [],
+                    "unresolved_items": [],
+                },
+                valid_evidence_refs={"RLA-api-app"},
+            )
+
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("only planned", caught.exception.message)
+        self.assertIn("keep disposition=add", caught.exception.message)
 
     def test_v2_delta_rejects_a_second_cross_scenario_parent(self) -> None:
         graph = new_vertical_design_graph(run_id="run-parent-duplicate", snapshot_binding=self.binding)
@@ -885,7 +1000,13 @@ class VerticalDesignGraphTest(unittest.TestCase):
                                 "consumer_operation": "deleteHeritage(id)",
                                 "provider_operation": "DELETE /cultural-heritage/{id}",
                                 "input_mapping": [{"from": "selectedId", "to": "id", "required": True}],
-                                "auth_mapping": [],
+                                "auth_mapping": [
+                                    {
+                                        "from": "The upstream gateway authenticates the operator.",
+                                        "to": "The upstream gateway authenticates the operator.",
+                                        "required": True,
+                                    }
+                                ],
                                 "response_mapping": [{"from": "204", "to": "deleted", "required": True}],
                                 "error_mapping": [{"from": "404", "to": "not_found", "required": True}],
                             },
@@ -914,7 +1035,10 @@ class VerticalDesignGraphTest(unittest.TestCase):
                 {"anchor_id": "RLA-api-app", "component_id": "api", "path": "apps/api/src/app.ts", "symbol": "createApp"},
             ],
         }
-        findings = design_bundle_findings(graph, landscape=landscape)
+        legacy_invalid_graph = json.loads(json.dumps(graph))
+        legacy_invalid_graph["edges"][0]["boundary_contract"]["auth_mapping"] = []
+        legacy_invalid_graph["artifact_digest"] = graph_digest(legacy_invalid_graph)
+        findings = design_bundle_findings(legacy_invalid_graph, landscape=landscape)
         categories = {str(item["category"]) for item in findings}
         self.assertIn("boundary_contract_mismatch", categories)
         self.assertNotIn("runtime_boundary_unreachable", categories)
@@ -930,7 +1054,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
 
         repair_task = _active_repair_task(
             repair_feedback=[boundary_finding],
-            graph=graph,
+            graph=legacy_invalid_graph,
             completed_targets=[],
             landscape=landscape,
             source="inline_composition",
@@ -942,7 +1066,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
         )
         self.assertEqual(
             {key: replacement[key] for key in ("from", "to", "kind", "label")},
-            {key: graph["edges"][0][key] for key in ("from", "to", "kind", "label")},
+            {key: legacy_invalid_graph["edges"][0][key] for key in ("from", "to", "kind", "label")},
         )
         repaired_contract = replacement["boundary_contract"]
         self.assertEqual(repaired_contract["provider_operation"], "DELETE /cultural-heritage/{id}")
@@ -2026,7 +2150,10 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("Graph projection identity and runtime target identity are separate", ui_prompt)
         self.assertIn("confirm and cancel in one dialog", ui_prompt)
         self.assertIn("even when its contract only describes the main outcome", ui_prompt)
+        self.assertIn("Sharing a runtime target does not choose node.disposition", ui_prompt)
+        self.assertIn("When target_origin=planned", ui_prompt)
         self.assertIn("sharing a runtime target never copies sibling requirement refs", ui_prompt)
+        self.assertNotIn("planned_reuse_candidates", ui_prompt)
         self.assertNotIn("already implements the branch outcome", ui_prompt)
 
     def test_uiux_guidance_status_requires_stack_after_domain_retry(self) -> None:
@@ -2087,9 +2214,16 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn('"mode":"stack","stack":"react"', prompt)
 
     def test_repair_prompt_uses_graph_summary_and_six_read_actions(self) -> None:
+        active_finding = {
+            "id": "SC-1:SEM-001",
+            "message": "Repair the active web partition.",
+            "remediation_reason": "VDN-web can receive the event through the existing VDE-web edge.",
+        }
+        unrelated_finding = {"id": "SC-2:SEM-001", "message": "Repair a later API partition."}
         repair_task = {
             "target_id": "SC-1@web",
             "partition": {"scenario_id": "SC-1", "component_id": "web"},
+            "findings": [active_finding],
             "read_scope": {"component_ids": ["web", "api"]},
             "write_scope": {"writable_node_ids": ["VDN-web"]},
             "graph_context": {
@@ -2111,19 +2245,25 @@ class DesignerResumeTest(unittest.TestCase):
                 "partitions": [{"scenario_id": "SC-1", "component_id": "web"}],
             },
             observations=[],
-            repair_feedback=[],
+            repair_feedback=[active_finding, unrelated_finding],
             active_partition=None,
             repair_task=repair_task,
             observations_since_delta=2,
             last_invalid_action="",
             observation_limit=REPAIR_OBSERVATION_ACTION_LIMIT,
+            source_inspected=True,
         )
 
         payload = json.loads(prompt.rsplit("\n\n", 1)[-1])
         self.assertEqual(payload["observation_policy"]["limit_before_delta"], 6)
         self.assertEqual(set(payload["graph"]), {"schema_version", "revision", "artifact_digest", "summary"})
         self.assertEqual(payload["scenario_matches"], [{"scenario_id": "SC-1"}])
+        self.assertEqual(payload["active_repair_task"]["findings"], [active_finding])
+        self.assertEqual(payload["repair_feedback_delivery"], "full_exact")
+        self.assertEqual(payload["repair_feedback"], [])
+        self.assertNotIn(unrelated_finding["id"], prompt)
         self.assertIn("read_scope is not", prompt)
+        self.assertIn("finding.remediation_reason is the Validator's exact routing witness", prompt)
 
     def test_repair_prompt_states_real_budget_and_source_first_order(self) -> None:
         prompt = _designer_prompt(
@@ -2133,7 +2273,23 @@ class DesignerResumeTest(unittest.TestCase):
             observations=[],
             repair_feedback=[],
             active_partition=None,
-            repair_task={"target_id": "SC-3@api", "partition": {"scenario_id": "SC-3", "component_id": "api"}},
+            repair_task={
+                "target_id": "SC-3@api",
+                "partition": {"scenario_id": "SC-3", "component_id": "api"},
+                "findings": [{"message": "full feedback must wait until after source inspection"}],
+                "graph_context": {
+                    "writable_nodes": [
+                        {
+                            "disposition": "add",
+                            "runtime_binding": {
+                                "target": {"path": "apps/api/src/new-route.ts"},
+                                "attachment": {"owner_path": "apps/api/src/app.ts"},
+                            },
+                        }
+                    ]
+                },
+                "read_scope": {"profile_roots": {"api": ["apps/api/src"]}},
+            },
             observations_since_delta=0,
             last_invalid_action="",
             observation_limit=_observation_allowance(REPAIR_OBSERVATION_ACTION_LIMIT, actions_remaining=4),
@@ -2142,6 +2298,10 @@ class DesignerResumeTest(unittest.TestCase):
         )
 
         payload = json.loads(prompt.rsplit("\n\n", 1)[-1])
+        self.assertEqual(payload["mode"], "repair_source_inspection_only")
+        self.assertEqual(payload["repair_target"]["suggested_source_paths"], ["apps/api/src/app.ts"])
+        self.assertEqual(payload["next_context_after_source"], "full_exact_repair_feedback")
+        self.assertNotIn("full feedback must wait", prompt)
         self.assertEqual(
             payload["observation_policy"],
             {
@@ -2152,8 +2312,13 @@ class DesignerResumeTest(unittest.TestCase):
                 "actions_remaining_including_delta": 4,
             },
         )
-        self.assertIn("While observation_policy.source_inspected is false, the next action must be repo.read", prompt)
-        self.assertIn("make at most 3 distinct observation actions", prompt)
+        self.assertIn("SOURCE INSPECTION ONLY", prompt)
+        self.assertIn("the Harness will provide the complete unsummarized Validator findings", prompt)
+        self.assertIn(
+            '{"action":"repo.read","arguments":{"path":"<exact existing suggested_source_path>"}}',
+            prompt,
+        )
+        self.assertIn("with no type/json_object wrapper", prompt)
 
     def test_repair_observations_remain_exact_and_invalid_budget_is_per_target(self) -> None:
         session = {
@@ -2782,6 +2947,132 @@ class DesignerResumeTest(unittest.TestCase):
                 run_id="run-scope",
             )
         self.assertIn("read-only node VDN-api", blocked.exception.message)
+
+    def test_semantic_mutation_scope_routes_repair_away_from_observation_node(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-web", "scenario_id": "SC-3", "component_id": "web"},
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+                {"id": "VDN-rule", "scenario_id": "SC-3", "component_id": "api"},
+            ],
+            "edges": [
+                {"id": "VDE-call", "scenario_id": "SC-3", "from": "VDN-web", "to": "VDN-api", "kind": "calls"},
+                {"id": "VDE-rule", "scenario_id": "SC-3", "from": "VDN-api", "to": "VDN-rule", "kind": "calls"},
+            ],
+            "partitions": [],
+        }
+        finding = {
+            "id": "runtime-sc-3:SEM-001",
+            "category": "runtime_boundary_feasibility",
+            "severity": "blocking",
+            "origin": "semantic",
+            "subject_ref": "VDN-web",
+            "diagram_ids": ["VDN-api", "VDN-rule"],
+        }
+
+        task = _active_repair_task(repair_feedback=[finding], graph=graph, completed_targets=[])
+
+        self.assertEqual(task["target_id"], "SC-3@api")
+        self.assertEqual(task["remaining_targets"], ["SC-3@api"])
+        self.assertEqual(task["write_scope"]["writable_node_ids"], ["VDN-api", "VDN-rule"])
+        self.assertEqual([item["id"] for item in task["graph_context"]["read_only_nodes"]], ["VDN-web"])
+
+    def test_structured_repair_steps_wait_for_dependency_and_scope_each_turn(self) -> None:
+        graph = {
+            "schema_version": GRAPH_VERSION,
+            "artifact_digest": "sha256:graph",
+            "nodes": [
+                {"id": "VDN-api", "scenario_id": "SC-3", "component_id": "api"},
+                {"id": "VDN-data", "scenario_id": "SC-3", "component_id": "database"},
+            ],
+            "edges": [
+                {
+                    "id": "VDE-call",
+                    "scenario_id": "SC-3",
+                    "from": "VDN-api",
+                    "to": "VDN-data",
+                    "kind": "calls",
+                },
+                {
+                    "id": "VDE-return",
+                    "scenario_id": "SC-3",
+                    "from": "VDN-data",
+                    "to": "VDN-api",
+                    "kind": "returns",
+                },
+            ],
+            "partitions": [],
+        }
+        finding = {
+            "id": "runtime-sc-3:SEM-001",
+            "category": "decision_input_sufficiency",
+            "severity": "blocking",
+            "origin": "semantic",
+            "subject_ref": "VDN-api",
+            "diagram_ids": ["VDN-api", "VDN-data", "VDE-call", "VDE-return"],
+            "expected_change": "Original cross-component repair request.",
+            "repair_steps": [
+                {
+                    "target_id": "SC-3@database",
+                    "diagram_ids": ["VDN-data", "VDE-return"],
+                    "expected_change": "Declare the interrupted outcome.",
+                    "depends_on": [],
+                },
+                {
+                    "target_id": "SC-3@api",
+                    "diagram_ids": ["VDN-api", "VDE-call", "VDE-return"],
+                    "expected_change": "Consume interrupted and retry once.",
+                    "depends_on": ["SC-3@database"],
+                },
+            ],
+        }
+
+        database_task = _active_repair_task(repair_feedback=[finding], graph=graph, completed_targets=[])
+        api_task = _active_repair_task(
+            repair_feedback=[finding],
+            graph=graph,
+            completed_targets=["SC-3@database"],
+        )
+
+        self.assertEqual(database_task["target_id"], "SC-3@database")
+        self.assertEqual(database_task["remaining_targets"], ["SC-3@database", "SC-3@api"])
+        self.assertEqual(database_task["findings"][0]["diagram_ids"], ["VDN-data", "VDE-return"])
+        self.assertEqual(database_task["expected_postconditions"][0], "Declare the interrupted outcome.")
+        self.assertEqual(database_task["write_scope"]["writable_node_ids"], ["VDN-data"])
+
+        self.assertEqual(api_task["target_id"], "SC-3@api")
+        self.assertEqual(api_task["remaining_targets"], ["SC-3@api"])
+        self.assertEqual(api_task["findings"][0]["diagram_ids"], ["VDN-api", "VDE-call", "VDE-return"])
+        self.assertEqual(api_task["expected_postconditions"][0], "Consume interrupted and retry once.")
+        self.assertEqual(api_task["write_scope"]["writable_node_ids"], ["VDN-api"])
+        self.assertIn("prerequisite targets are already complete", api_task["instruction"])
+
+        rebuild_finding = {
+            **finding,
+            "remediation_mode": "partition_rebuild",
+            "repair_steps": [
+                {
+                    "target_id": "SC-3@api",
+                    "diagram_ids": ["VDN-api", "VDE-call"],
+                    "expected_change": "Add the API-side attempt boundary that owns interruption outcomes.",
+                    "depends_on": [],
+                }
+            ],
+        }
+        rebuild_task = _active_repair_task(
+            repair_feedback=[rebuild_finding],
+            graph=graph,
+            completed_targets=[],
+        )
+        self.assertEqual(rebuild_task["target_id"], "SC-3@api")
+        self.assertEqual(rebuild_task["remaining_targets"], ["SC-3@api"])
+        self.assertTrue(rebuild_task["write_scope"]["allow_add_node"])
+        self.assertEqual(
+            rebuild_task["expected_postconditions"][0],
+            "Add the API-side attempt boundary that owns interruption outcomes.",
+        )
 
     def test_boundary_repair_scaffold_uses_api_source_for_returns_edge(self) -> None:
         graph = {
@@ -3495,6 +3786,7 @@ class DesignerResumeTest(unittest.TestCase):
                 "component_id": "web",
                 "surface": "ui",
                 "name": "Main form",
+                "disposition": "add",
                 "contract": "Render the main form and its branch outcomes.",
                 "surface_contract": {"surface": "ui"},
                 "runtime_binding": {
@@ -3509,12 +3801,14 @@ class DesignerResumeTest(unittest.TestCase):
         parent = active["branch_parent_requirement"]
         self.assertEqual(parent["parent_scenario_id"], "SC-1")
         self.assertEqual(
-            active["surface_work"][0]["planned_reuse_candidates"],
+            active["surface_work"][0]["shared_target_candidates"],
             [
                 {
                     "node_id": "VDN-main-ui",
                     "scenario_id": "SC-1",
                     "name": "Main form",
+                    "candidate_disposition": "add",
+                    "target_origin": "planned",
                     "contract": "Render the main form and its branch outcomes.",
                     "surface_contract": {"surface": "ui"},
                     "runtime_binding": {
@@ -3877,6 +4171,23 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(task["write_scope"]["writable_node_ids"], ["VDN-cancel"])
         self.assertFalse(task["write_scope"]["allow_add_node"])
         self.assertEqual([item["id"] for item in task["graph_context"]["preserved_edges"]], ["VDE-parent"])
+
+        rebuild_task = _active_repair_task(
+            repair_feedback=[
+                {
+                    "category": "decision_input_sufficiency",
+                    "origin": "semantic",
+                    "remediation_mode": "partition_rebuild",
+                    "subject_ref": "VDN-cancel",
+                    "diagram_ids": ["VDN-cancel"],
+                }
+            ],
+            graph=graph,
+            completed_targets=[],
+        )
+        self.assertEqual(rebuild_task["remediation_mode"], "partition_rebuild")
+        self.assertTrue(rebuild_task["write_scope"]["allow_add_node"])
+        self.assertIn("Rebuild this exact scenario/component partition", rebuild_task["instruction"])
 
     def test_composition_partition_uses_finding_owner_and_one_finding(self) -> None:
         requirement = {
@@ -4699,6 +5010,161 @@ class SameComponentBoundaryTest(unittest.TestCase):
 
 
 class BusinessRuleBoundaryInputsTest(unittest.TestCase):
+    def test_delta_rejects_new_business_rule_input_mismatch_before_commit(self) -> None:
+        binding = {
+            "requirement_digest": "sha256:req",
+            "repo_landscape_digest": "sha256:repo",
+            "workspace_ref": "run_workspace_v1",
+            "base_sha": "abc123",
+        }
+        graph = new_vertical_design_graph(run_id="run-business-rule-delta", snapshot_binding=binding)
+        graph["partitions"] = [
+            {
+                "use_case_id": "UC-1",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "coverage": {"ui": "covered", "business_rule": "covered"},
+                "source_observation_refs": ["RLA-web-app"],
+            }
+        ]
+        graph["nodes"] = [
+            {
+                "id": "VDN-ui",
+                "use_case_id": "UC-1",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "semantic_key": "SC-2:web:ui",
+                "name": "Cancellation screen",
+                "kind": "ui_interaction",
+                "surface": "ui",
+                "disposition": "add",
+                "requirement_refs": ["AC-4"],
+                "evidence_refs": [],
+                "evidence_reason": "The cancellation screen is new.",
+                "contract": "Block controls until cancellation completion is visible.",
+                "surface_contract": {
+                    "schema_version": SURFACE_CONTRACT_VERSION,
+                    "surface": "ui",
+                    "entrypoint": "DeleteCulturalHeritagePanel",
+                    "states": ["cancelling", "cancelled"],
+                    "transitions": [
+                        {
+                            "from": "cancelling",
+                            "action": "show cancellation completion",
+                            "to": "cancelled",
+                            "outcome": "controls are enabled",
+                        }
+                    ],
+                    "validations": [],
+                    "outcomes": ["controls are enabled"],
+                },
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION,
+                    "runtime_kind": "ui_component",
+                    "target": {
+                        "component_id": "web",
+                        "path": "apps/web/src/DeleteCulturalHeritagePanel.tsx",
+                        "symbol": "DeleteCulturalHeritagePanel",
+                    },
+                    "attachment": {
+                        "relation": "rendered_by",
+                        "owner_ref": "RLA-web-app",
+                        "owner_path": "apps/web/src/AppShell.tsx",
+                        "owner_symbol": "AppShell",
+                    },
+                    "evidence_refs": ["RLA-web-app"],
+                },
+            },
+            {
+                "id": "VDN-rule",
+                "use_case_id": "UC-1",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "semantic_key": "SC-2:web:business_rule",
+                "name": "Cancellation control rule",
+                "kind": "business_rule",
+                "surface": "business_rule",
+                "disposition": "add",
+                "requirement_refs": ["AC-4"],
+                "evidence_refs": [],
+                "evidence_reason": "The cancellation rule is new.",
+                "contract": "Resolve whether cancellation controls are blocked or enabled.",
+                "surface_contract": {
+                    "schema_version": SURFACE_CONTRACT_VERSION,
+                    "surface": "business_rule",
+                    "inputs": ["cancellationConfirmed", "cancellationCompletedVisible"],
+                    "decision": "Block after confirmation and enable after completion is visible.",
+                    "outcomes": ["controls_blocked", "controls_enabled"],
+                },
+                "runtime_binding": {
+                    "schema_version": RUNTIME_BINDING_VERSION,
+                    "runtime_kind": "service",
+                    "target": {
+                        "component_id": "web",
+                        "path": "apps/web/src/cancellation-control-rule.ts",
+                        "symbol": "resolveCancellationControlState",
+                    },
+                    "attachment": {
+                        "relation": "called_by",
+                        "owner_ref": "RLA-web-app",
+                        "owner_path": "apps/web/src/AppShell.tsx",
+                        "owner_symbol": "AppShell",
+                    },
+                    "evidence_refs": ["RLA-web-app"],
+                },
+            },
+        ]
+        graph["artifact_digest"] = graph_digest(graph)
+        delta = {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": graph["artifact_digest"],
+            "partition": {
+                "use_case_id": "UC-1",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+            },
+            "operations": [
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "from": "VDN-ui",
+                        "to": "VDN-rule",
+                        "kind": "calls",
+                        "label": "resolve cancellation controls",
+                        "scenario_id": "SC-2",
+                        "terminal": True,
+                        "boundary_contract": {
+                            "schema_version": BOUNDARY_CONTRACT_VERSION,
+                            "consumer_operation": "DeleteCulturalHeritagePanel handles cancellation",
+                            "provider_operation": "resolveCancellationControlState",
+                            "input_mapping": [
+                                {
+                                    "from": "cancellationConfirmed",
+                                    "to": "cancellationConfirmed",
+                                    "required": True,
+                                }
+                            ],
+                            "auth_mapping": [],
+                            "response_mapping": [
+                                {"from": "controls_blocked", "to": "controls blocked", "required": True}
+                            ],
+                            "error_mapping": [],
+                        },
+                    },
+                }
+            ],
+            "completion_claims": [],
+            "unresolved_items": [],
+        }
+
+        with self.assertRaises(HarnessError) as caught:
+            apply_designer_delta(graph, delta, valid_evidence_refs={"RLA-web-app"})
+
+        self.assertEqual(caught.exception.error_code, "designer_delta_invalid")
+        self.assertIn("map required input targets ['cancellationCompletedVisible']", caught.exception.message)
+        self.assertEqual(graph["revision"], 0)
+        self.assertEqual(graph["edges"], [])
+
     def test_every_declared_business_rule_input_must_be_mapped(self) -> None:
         # Mirrors run_20261102_061023: the rule declared a confirmation input that no caller supplies.
         provider = {
@@ -4711,6 +5177,15 @@ class BusinessRuleBoundaryInputsTest(unittest.TestCase):
         self.assertEqual(diagnostics["mismatches"], ["map required input targets ['confirmation']"])
         contract["input_mapping"].append({"from": "confirmed", "to": "confirmation", "required": True})
         self.assertEqual(_boundary_contract_diagnostics(contract, provider)["mismatches"], [])
+        contract["input_mapping"].append(
+            {"from": "completionVisible", "to": "cancellationCompletedVisible", "required": True}
+        )
+        diagnostics = _boundary_contract_diagnostics(contract, provider)
+        self.assertEqual(diagnostics["undeclared_input_targets"], ["cancellationCompletedVisible"])
+        self.assertEqual(
+            diagnostics["mismatches"],
+            ["remove undeclared input targets ['cancellationCompletedVisible']"],
+        )
         self.assertEqual(_boundary_contract_diagnostics({}, provider)["mismatches"], ["add boundary_contract"])
 
 

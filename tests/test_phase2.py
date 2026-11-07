@@ -613,6 +613,7 @@ class PhaseTwoTest(unittest.TestCase):
                         "id": "SEM-001",
                         "category": "transaction_boundary",
                         "severity": "blocking",
+                        "remediation_mode": "local_patch",
                         "message": "Consider a transaction.",
                         "expected_change": "Document transaction behavior.",
                         "requirement_ids": [],

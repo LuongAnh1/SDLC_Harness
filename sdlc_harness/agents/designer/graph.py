@@ -137,6 +137,9 @@ def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
             if node.get("contract") != desired_contract:
                 node["contract"] = desired_contract
                 changed = True
+            if contract.get("states") != ["mounted", "forwarding"]:
+                contract["states"] = ["mounted", "forwarding"]
+                changed = True
             if contract.get("transitions") != [desired_transition]:
                 contract["transitions"] = [desired_transition]
                 changed = True
@@ -593,6 +596,29 @@ def _validate_surface_contract(
         require_text("entrypoint")
         require_strings("states")
         require_objects("transitions", {"from", "action", "to", "outcome"})
+        declared_states = set(value["states"])
+        undeclared_states = list(
+            dict.fromkeys(
+                str(transition[endpoint])
+                for transition in value["transitions"]
+                for endpoint in ("from", "to")
+                if str(transition[endpoint]) not in declared_states
+            )
+        )
+        # Keep pre-gate Harness wiring resumable; new templates declare both states.
+        legacy_harness_wiring = (
+            str(_dict_value(value.get("runtime_surface")).get("role") or "") == "composition_wiring"
+            and declared_states == {"forwarding"}
+            and undeclared_states == ["mounted"]
+        )
+        if undeclared_states and not legacy_harness_wiring:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Node {node_id} UI transitions reference undeclared states: "
+                f"{', '.join(undeclared_states)}. Declare them in states or change the transition endpoints "
+                "to declared states.",
+                run_id=run_id,
+            )
         require_strings("validations", allow_empty=True)
         require_strings("outcomes")
         experience = value.get("experience_contract")
@@ -1078,7 +1104,53 @@ def apply_designer_delta(
         )
     candidate["artifact_digest"] = graph_digest(candidate)
     validate_vertical_design_graph(candidate, expected_run_id=run_id)
+    contract_findings = _new_boundary_contract_findings(graph, candidate)
+    if contract_findings:
+        details = "; ".join(
+            f"{item.get('subject_ref')}: {item.get('message')}"
+            for item in contract_findings
+        )
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Designer delta failed boundary contract validation: {details}",
+            run_id=run_id,
+        )
     return candidate, temp_refs
+
+
+def _new_boundary_contract_findings(
+    current: dict[str, object],
+    candidate: dict[str, object],
+) -> list[dict[str, object]]:
+    def boundary_findings(graph: dict[str, object]) -> list[dict[str, object]]:
+        return [
+            item
+            for item in _runtime_composition_findings(
+                graph,
+                required_surfaces=None,
+                landscape=None,
+            )
+            if str(item.get("category") or "") == "boundary_contract_mismatch"
+        ]
+
+    existing = {
+        (
+            str(item.get("id") or ""),
+            str(item.get("message") or ""),
+            str(item.get("expected_change") or ""),
+        )
+        for item in boundary_findings(current)
+    }
+    return [
+        item
+        for item in boundary_findings(candidate)
+        if (
+            str(item.get("id") or ""),
+            str(item.get("message") or ""),
+            str(item.get("expected_change") or ""),
+        )
+        not in existing
+    ]
 
 
 def _validate_unique_cross_scenario_parent(graph: dict[str, object], *, run_id: str) -> None:
@@ -1563,6 +1635,7 @@ def _ui_runtime_surface_findings(
     binding = _dict_value(graph.get("snapshot_binding"))
     context = _dict_value(binding.get("ui_repo_context"))
     requirement_ids = set(_strings(binding.get("requirement_reference_ids")))
+    approved_decision_ids = set(_strings(binding.get("approved_decision_ids")))
     entry = str(_dict_value(context.get("entrypoint")).get("ref") or "")
     chain = {
         str(hop.get("ref") or ""): hop
@@ -1694,9 +1767,9 @@ def _ui_runtime_surface_findings(
                     "(MF-*/AF-*/EF-*) that states the dependency on the other use case"
                 )
             elif source == "demo_fixture" and not any(
-                ref.startswith("DEC-") and ref in requirement_ids for ref in refs
+                ref.startswith("D-") and ref in requirement_ids and ref in approved_decision_ids for ref in refs
             ):
-                problem = "demo_fixture must cite an approved Requirement decision (DEC-*)"
+                problem = "demo_fixture must cite an accepted Requirement decision (D-*)"
             elif path and provided_by == path[-1]:
                 problem = (
                     "it is state owned by the target component itself, not a runtime input; remove it from "
@@ -1710,7 +1783,7 @@ def _ui_runtime_surface_findings(
                         "ui_required_input_unbound",
                         f"{node_id}:{name}",
                         f"Required input {name}: {problem}.",
-                        "Bind the input to an existing provider, a Design node, an approved Requirement PRE-*/DEC-* reference, and a provided_by hop on composition_path.",
+                        "Bind the input to an existing provider, a Design node, an approved Requirement PRE-*/D-* reference, and a provided_by hop on composition_path.",
                         node=node,
                     )
                 )
@@ -1887,20 +1960,29 @@ def _boundary_contract_diagnostics(
     if not contract:
         mismatches.append("add boundary_contract")
     if str(provider.get("surface") or "") == "business_rule" and contract:
-        mapped = {
+        mapped_all = {
+            str(item.get("to") or "")
+            for item in contract.get("input_mapping", [])
+            if isinstance(item, dict) and str(item.get("to") or "")
+        }
+        mapped_required = {
             str(item.get("to") or "")
             for item in contract.get("input_mapping", [])
             if isinstance(item, dict) and bool(item.get("required"))
         }
         declared = [name for name in _strings(surface.get("inputs")) if name]
-        missing = [name for name in declared if name not in mapped]
+        missing = [name for name in declared if name not in mapped_required]
+        undeclared = sorted(mapped_all - set(declared))
         if missing:
             mismatches.append(f"map required input targets {missing}")
+        if undeclared:
+            mismatches.append(f"remove undeclared input targets {undeclared}")
         return {
             "provider_surface": "business_rule",
             "required_input_targets": declared,
-            "mapped_input_targets": sorted(mapped),
+            "mapped_input_targets": sorted(mapped_all),
             "missing_input_targets": missing,
+            "undeclared_input_targets": undeclared,
             "mismatches": mismatches,
         }
     if str(provider.get("surface") or "") != "api":
@@ -2112,6 +2194,26 @@ def _apply_operation(
         nodes = _dict_items(graph.get("nodes"), code="designer_delta_invalid", run_id=run_id)
         if any(str(item.get("id") or "") == node_id for item in nodes):
             raise HarnessError("designer_delta_invalid", f"Design node already exists: {node_id}", run_id=run_id)
+        target = _dict_value(_dict_value(node.get("runtime_binding")).get("target"))
+        planned_owner = next(
+            (
+                item
+                for item in nodes
+                if target
+                and str(item.get("disposition") or "") == "add"
+                and _dict_value(_dict_value(item.get("runtime_binding")).get("target")) == target
+            ),
+            None,
+        )
+        if str(node.get("disposition") or "") in {"reuse", "modify", "no_change"} and planned_owner is not None:
+            raise HarnessError(
+                "designer_delta_invalid",
+                "Design node shares a runtime target that is only planned by "
+                f"{str(planned_owner.get('id') or 'another node')}. Sharing the target does not make it repository "
+                "reuse; keep disposition=add, leave node.evidence_refs empty, and explain the planned GAP in "
+                "evidence_reason.",
+                run_id=run_id,
+            )
         graph["nodes"] = [*nodes, node]
         return
     if op == "update_node":
