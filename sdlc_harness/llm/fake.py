@@ -33,17 +33,17 @@ def fake_completion(prompt: str) -> str:
         return fake_design_semantic_specialist_review(prompt)
     if "Design Semantic Coherence Review v2" in prompt:
         return fake_design_semantic_coherence_review()
-    if "Design Semantic Adjudication v1" in prompt:
-        return fake_design_semantic_adjudication()
+    if "Design Semantic Adjudication v2" in prompt:
+        return fake_design_semantic_adjudication(prompt)
     if "Progressive Semantic Claim Review" in prompt:
         return fake_progressive_semantic_review(prompt)
     if "Progressive Targeted Repair Verification" in prompt:
         return fake_progressive_targeted_review(prompt)
     if "Progressive Bounded Semantic Adjudication" in prompt:
         return fake_progressive_adjudication(prompt)
-    if "Component-aware Implementation Plan V4" in prompt:
+    if "Component-aware Implementation Plan V4" in prompt or "Component-aware Implementation Plan V5" in prompt:
         return fake_component_aware_implementation_plan(prompt)
-    if "Implementation Plan LLM Review v1" in prompt:
+    if "Implementation Plan LLM Review v1" in prompt or "Implementation Plan LLM Review V5" in prompt:
         return fake_implementation_plan_review(prompt)
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan(prompt)
@@ -52,6 +52,7 @@ def fake_completion(prompt: str) -> str:
     if (
         "QA Tester Generate Acceptance Tests v1" in prompt
         or "QA Tester Generate Profiled Acceptance Tests v1" in prompt
+        or "QA Tester Generate Profiled Acceptance Tests v2" in prompt
     ):
         return fake_qa_generated_tests(prompt)
     if "QA Tester Acceptance Review v1" in prompt:
@@ -645,22 +646,76 @@ def fake_design_semantic_coherence_review() -> str:
     )
 
 
-def fake_design_semantic_adjudication() -> str:
+def fake_design_semantic_adjudication(prompt: str) -> str:
+    findings = _json_value_after_marker(prompt, "Existing findings:")
+    evidence = _json_value_after_marker(prompt, "Exact Design evidence:")
+    nodes = {
+        str(item.get("id") or ""): item
+        for item in (evidence.get("nodes", []) if isinstance(evidence, dict) else [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    edges = {
+        str(item.get("id") or ""): item
+        for item in (evidence.get("edges", []) if isinstance(evidence, dict) else [])
+        if isinstance(item, dict) and str(item.get("id") or "")
+    }
+    routes = []
+    for finding in findings if isinstance(findings, list) else []:
+        if not isinstance(finding, dict) or str(finding.get("severity") or "") != "blocking":
+            continue
+        diagram_ids = [str(item) for item in finding.get("diagram_ids", []) if str(item)]
+        node = next((nodes.get(ref) for ref in diagram_ids if nodes.get(ref)), None)
+        if node is None:
+            edge = next((edges.get(ref) for ref in diagram_ids if edges.get(ref)), None)
+            node = nodes.get(str((edge or {}).get("from") or ""))
+        scenario_id = str((node or {}).get("scenario_id") or "")
+        component_id = str((node or {}).get("component_id") or "")
+        target_id = f"{scenario_id}@{component_id}" if scenario_id and component_id else ""
+        routes.append(
+            {
+                "finding_id": str(finding.get("id") or ""),
+                "remediation_mode": "local_patch" if target_id else "inconclusive",
+                "reason": "Fake adjudication selected the existing owning partition.",
+                "repair_steps": (
+                    [
+                        {
+                            "target_id": target_id,
+                            "diagram_ids": [str(node.get("id") or "")],
+                            "expected_change": str(finding.get("expected_change") or "Repair the existing node."),
+                            "depends_on": [],
+                        }
+                    ]
+                    if target_id
+                    else []
+                ),
+            }
+        )
     return json.dumps(
-        {"ok": True, "summary": "Fake conflict resolved.", "drop_finding_ids": [], "findings": []},
+        {
+            "ok": True,
+            "summary": "Fake conflict resolved.",
+            "drop_finding_ids": [],
+            "remediation_modes": routes,
+            "findings": [],
+        },
         ensure_ascii=False,
         indent=2,
     )
 
 
-def _json_object_after_marker(prompt: str, marker: str) -> dict[str, object]:
+def _json_value_after_marker(prompt: str, marker: str) -> object:
     if marker not in prompt:
-        return {}
+        return None
     text = prompt.split(marker, 1)[1].lstrip()
     try:
         value, _ = json.JSONDecoder().raw_decode(text)
     except json.JSONDecodeError:
-        return {}
+        return None
+    return value
+
+
+def _json_object_after_marker(prompt: str, marker: str) -> dict[str, object]:
+    value = _json_value_after_marker(prompt, marker)
     return value if isinstance(value, dict) else {}
 
 
@@ -819,6 +874,7 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
         "",
     )
     updates: list[dict[str, object]] = []
+    browser_qa_active = '"browser_e2e"' in prompt
     for unit in unit_items:
         if not isinstance(unit, dict):
             continue
@@ -861,6 +917,16 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
             ],
             "repo_evidence_refs": list(unit.get("repo_evidence_refs", [])),
         }
+        if browser_qa_active and obligation_ids:
+            update["qa_test_intents"] = [
+                {
+                    "stage_id": "browser_e2e",
+                    "intent": f"Verify the approved UI behavior for {unit_id} in Chromium.",
+                    "acceptance_refs": acceptance_refs,
+                    "target_paths": [f"tests/e2e/{unit_id.lower()}.spec.ts"],
+                    "obligation_refs": obligation_ids,
+                }
+            ]
         if "data" in unit.get("surfaces", []):
             update["migration_impact"] = {
                 "status": "not_required",
@@ -913,7 +979,10 @@ def _fake_typescript_implementation_signature_contract(
             end="Legacy Sequence graph (signature contract only):",
         )
     component_symbols = _fake_component_symbols(prompt, unit_updates=unit_updates)
-    component_aware = "Component-aware Implementation Plan V4" in prompt
+    component_aware = (
+        "Component-aware Implementation Plan V4" in prompt
+        or "Component-aware Implementation Plan V5" in prompt
+    )
     if component_aware:
         targets = _fake_json_prompt_value(
             prompt=prompt,
@@ -1391,6 +1460,56 @@ def fake_qa_generated_tests(prompt: str = "") -> str:
             ]
 
     if qa_policy.get("language_profile_id") == "typescript_v1":
+        browser = qa_policy.get("browser")
+        browser = browser if isinstance(browser, dict) else {}
+        if browser:
+            summary = packet.get("work_packet_summary") if isinstance(packet, dict) else {}
+            intents = summary.get("qa_test_intents") if isinstance(summary, dict) else []
+            paths = list(
+                dict.fromkeys(
+                    str(path)
+                    for intent in intents if isinstance(intent, dict)
+                    for path in intent.get("target_paths", []) if str(path).strip()
+                )
+            )
+            if not paths:
+                paths = ["tests/e2e/GeneratedQaAcceptance.spec.ts"]
+            test_files = []
+            scenarios = []
+            for index, test_path in enumerate(paths, start=1):
+                name = f"Profiled fake browser acceptance scenario {index}"
+                test_files.append(
+                    {
+                        "path": test_path,
+                        "content": (
+                            'import { expect, test } from "@playwright/test";\n\n'
+                            f'test("approved fake browser scenario {index}", async ({{ page }}) => {{\n'
+                            '  await page.goto("/");\n'
+                            '  await expect(page.locator("body")).toBeVisible();\n'
+                            '});\n'
+                        ),
+                        "scenarios": [name],
+                    }
+                )
+                scenarios.append(
+                    {
+                        "name": name,
+                        "expected_result": "The real application is visible in Chromium.",
+                        "test_file": test_path,
+                        "risk": "",
+                        "requirement_ids": requirement_ids,
+                    }
+                )
+            return json.dumps(
+                {
+                    "summary": "Fake QA generated profile-owned Playwright acceptance tests.",
+                    "test_files": test_files,
+                    "scenarios": scenarios,
+                    "risks": [],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         components = qa_policy.get("components")
         code_under_test = packet.get("code_under_test") if isinstance(packet, dict) else {}
         code_files = code_under_test.get("files") if isinstance(code_under_test, dict) else []
