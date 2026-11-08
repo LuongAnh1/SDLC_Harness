@@ -27,8 +27,12 @@ def _policy():
 
 def _repo(tmp_path: Path) -> dict[str, object]:
     (tmp_path / "apps/api/src").mkdir(parents=True)
-    (tmp_path / "package.json").write_text(json.dumps({"name": "root", "devDependencies": {"vitest": "1"}}))
-    (tmp_path / "apps/api/package.json").write_text(json.dumps({"name": "@t/api", "dependencies": {"fastify": "5"}}))
+    (tmp_path / "package.json").write_text(
+        json.dumps({"name": "root", "version": "0.1.0", "devDependencies": {"vitest": "1"}})
+    )
+    (tmp_path / "apps/api/package.json").write_text(
+        json.dumps({"name": "@t/api", "version": "0.2.0", "dependencies": {"fastify": "5"}})
+    )
     (tmp_path / "compose.yaml").write_text(
         "services:\n  postgres:\n    image: postgres:17\n    ports:\n      - '5432:5432'\nvolumes:\n  data:\n"
     )
@@ -68,6 +72,7 @@ def test_collects_manifests_services_env_reads_and_env_example(tmp_path: Path) -
     facts = _repo(tmp_path)
 
     assert [item["manifest"] for item in facts["workspaces"]] == ["package.json", "apps/api/package.json"]
+    assert [item["version"] for item in facts["workspaces"]] == ["0.1.0", "0.2.0"]
     assert facts["workspaces"][1]["dependencies"] == ["fastify"]
     assert facts["compose_services"] == [{"service": "postgres", "image": "postgres:17"}]
     assert [item["name"] for item in facts["env_reads"]] == ["API_PORT", "WEB_ORIGIN"]
@@ -190,6 +195,12 @@ def test_planner_prompt_carries_runtime_config_facts_and_rules() -> None:
     assert "UNIQUE_ENV_READ" in prompt
     assert "Runtime configuration rules:" in prompt
     assert '"runtime_config_impact"' in prompt
+    assert "includes sibling workspace packages" in prompt
+    assert "not listed in the importing" in prompt
+    assert "perform dependency closure" in prompt
+    assert "Optional or defaulted injection still needs" in prompt
+    assert "name every cross-workspace package check" in prompt
+    assert '"kind": "npm_package"' in prompt
 
 
 def test_repair_prompt_context_carries_the_current_decision() -> None:

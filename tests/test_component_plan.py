@@ -29,7 +29,11 @@ from sdlc_harness.agents.developer import (
     rebind_legacy_mappings_to_work_units,
     resolve_implementation_plan_contract,
 )
-from sdlc_harness.agents.developer.planner import _markdown_plan
+from sdlc_harness.agents.developer.planner import (
+    _markdown_plan,
+    _parse_component_plan_payload,
+    _scenario_plan_slices,
+)
 from sdlc_harness.agents.requirements import RequirementModelV2
 from sdlc_harness.agents.validator import build_requirement_graph_v2, build_vertical_trace_graph
 from sdlc_harness.profiles import (
@@ -220,6 +224,37 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         planning_policy=planning,
         verification_stage_ids=list(verification.stage_ids),
     ) == []
+
+    missing_qa_setup = deepcopy(structured)
+    qa_unit = next(
+        unit for unit in missing_qa_setup["work_units"] if unit["component_id"] == "web"
+    )
+    qa_unit["qa_test_intents"] = [
+        {
+            "stage_id": "browser_e2e",
+            "intent": "Verify the approved browser behavior.",
+            "acceptance_refs": qa_unit["acceptance_refs"],
+            "target_paths": ["tests/e2e/sc-1.spec.ts"],
+        }
+    ]
+    missing_qa_setup.update(
+        component_plan_projections(
+            units=missing_qa_setup["work_units"],
+            design_graph=design,
+            requirement_graph=requirement_graph,
+            legacy_mappings=[],
+            planning_policy=planning,
+        )
+    )
+    issues = component_plan_issues(
+        structured_plan=missing_qa_setup,
+        expected_units=first,
+        expected_inputs=inputs,
+        planning_policy=planning,
+        verification_stage_ids=list(verification.stage_ids),
+    )
+    assert any("QA intent has invalid data setup mode" in issue for issue in issues)
+    assert any("QA intent has no data setup reason" in issue for issue in issues)
 
     missing_test_source = deepcopy(structured)
     web_unit = next(
@@ -1318,6 +1353,275 @@ def test_r9_design_v2_units_depend_on_shared_code_entities() -> None:
     assert [name[unit_id] for unit_id in screen["unit_ids"]] == ["SC-1/web", "SC-2/web", "SC-3/web"]
     assert len(screen["design_node_ids"]) == 3
     assert canonicalize_work_unit_dependencies(units) == units
+
+
+def test_r9_planner_slices_follow_vertical_scenario_order() -> None:
+    units, name = _r9_units()
+
+    slices, fallback_reason = _scenario_plan_slices(units)
+
+    assert fallback_reason == ""
+    assert [scenario_id for scenario_id, _ in slices] == ["SC-1", "SC-2", "SC-3"]
+    assert [[name[unit["unit_id"]] for unit in group] for _, group in slices] == [
+        ["SC-1/database", "SC-1/api", "SC-1/web"],
+        ["SC-2/web"],
+        ["SC-3/database", "SC-3/api", "SC-3/web"],
+    ]
+
+
+def test_planner_falls_back_when_scenarios_must_interleave() -> None:
+    slices, fallback_reason = _scenario_plan_slices(
+        [
+            {"unit_id": "A-1", "scenario_id": "SC-A", "order": 1, "depends_on": []},
+            {"unit_id": "B-1", "scenario_id": "SC-B", "order": 2, "depends_on": ["A-1"]},
+            {"unit_id": "A-2", "scenario_id": "SC-A", "order": 3, "depends_on": ["B-1"]},
+        ]
+    )
+
+    assert slices == []
+    assert "requires interleaved planning" in fallback_reason
+
+
+def test_r9_planner_calls_one_construction_prompt_per_scenario() -> None:
+    from sdlc_harness.agents.developer import DeveloperPlanAgent
+    from sdlc_harness.llm.fake import fake_component_aware_implementation_plan
+
+    root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
+    load = lambda name: json.loads((root / f"{name}.json").read_text(encoding="utf-8"))  # noqa: E731
+    planning, verification = _policy()
+
+    class StubClient:
+        settings = None
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete(self, *, system: str, prompt: str, **_: object) -> str:
+            self.prompts.append(prompt)
+            return fake_component_aware_implementation_plan(prompt)
+
+    client = StubClient()
+    draft = DeveloperPlanAgent(client).plan(
+        run_id="run_20261102_100240_755e94d0",
+        source_ref="dataset_use_case:eTour:UC1",
+        issue_key="UC1",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        requirement_design_trace={},
+        class_graph=load("class_diagram_graph"),
+        sequence_graph=load("sequence_diagram_graph"),
+        target_repo_path="target",
+        target_repo_remote="origin",
+        target_base_branch="main",
+        planned_branch="feature/test",
+        target_files=[],
+        requirement_graph={},
+        planning_policy=planning,
+        verification_policy=verification,
+        contract_version=COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+        vertical_design_graph=load("vertical_design_graph"),
+        vertical_trace_graph=load("vertical_trace_graph"),
+        repo_landscape=load("repo_landscape"),
+        component_plan_inputs={},
+    )
+
+    assert len(client.prompts) == 3
+    assert [
+        next(
+            scenario
+            for scenario in ("SC-1", "SC-2", "SC-3")
+            if f"This call plans exactly scenario `{scenario}`" in prompt
+        )
+        for prompt in client.prompts
+    ] == ["SC-1", "SC-2", "SC-3"]
+    assert '"mode": "repository|synthetic|not_required"' in client.prompts[0]
+    assert "Synthetic data is created in the QA spec after code exists" in client.prompts[0]
+    assert draft.structured["planning_mode"] == "llm_component_aware_scenario_sliced_v1"
+    assert len(draft.structured["work_units"]) == 7
+
+
+def test_planner_payload_rejects_scalar_test_target_paths_before_canonicalization() -> None:
+    raw = json.dumps(
+        {
+            "scenario_id": "SC-2",
+            "summary": "Plan SC-2.",
+            "work_unit_updates": [
+                {
+                    "unit_id": "WU-2",
+                    "test_intents": [
+                        {
+                            "stage_id": "unit",
+                            "intent": "Verify cancellation.",
+                            "acceptance_refs": ["AC-2"],
+                            "target_paths": "apps/web/src/Screen.test.tsx",
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(HarnessError) as error:
+        _parse_component_plan_payload(
+            raw,
+            scenario_id="SC-2",
+            allowed_unit_ids={"WU-2"},
+            required_unit_ids={"WU-2"},
+        )
+
+    assert error.value.error_code == "implementation_plan_developer_contract_invalid"
+    assert "$.work_unit_updates[0].test_intents[0].target_paths" in error.value.message
+
+
+def test_planner_payload_requires_structured_qa_data_setup() -> None:
+    payload = {
+        "scenario_id": "SC-1",
+        "summary": "Plan SC-1.",
+        "work_unit_updates": [
+            {
+                "unit_id": "WU-1",
+                "qa_test_intents": [
+                    {
+                        "stage_id": "browser_e2e",
+                        "intent": "Verify the approved browser flow.",
+                        "acceptance_refs": ["AC-1"],
+                        "target_paths": ["tests/e2e/sc-1.spec.ts"],
+                    }
+                ],
+            }
+        ],
+    }
+
+    with pytest.raises(HarnessError) as error:
+        _parse_component_plan_payload(
+            json.dumps(payload),
+            scenario_id="SC-1",
+            allowed_unit_ids={"WU-1"},
+            required_unit_ids={"WU-1"},
+        )
+
+    assert error.value.error_code == "implementation_plan_developer_contract_invalid"
+    assert "qa_test_intents[0].data_setup must be an object" in error.value.message
+
+    payload["work_unit_updates"][0]["qa_test_intents"][0]["data_setup"] = {
+        "mode": "synthetic",
+        "reason": "The repository has no browser data seed.",
+        "requirements": ["An authenticated session and one deletable record."],
+    }
+    parsed = _parse_component_plan_payload(
+        json.dumps(payload),
+        scenario_id="SC-1",
+        allowed_unit_ids={"WU-1"},
+        required_unit_ids={"WU-1"},
+    )
+    assert parsed["work_unit_updates"][0]["qa_test_intents"][0]["data_setup"]["mode"] == "synthetic"
+
+
+def test_planner_retries_one_contract_invalid_scenario_output_with_exact_error() -> None:
+    from sdlc_harness.agents.developer import DeveloperPlanAgent
+
+    planning, verification = _policy()
+
+    class StubClient:
+        settings = None
+
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        def complete(self, *, system: str, prompt: str, **_: object) -> str:
+            self.prompts.append(prompt)
+            target_paths: object = (
+                "apps/web/src/Screen.test.tsx"
+                if len(self.prompts) == 1
+                else ["apps/web/src/Screen.test.tsx"]
+            )
+            return json.dumps(
+                {
+                    "scenario_id": "SC-2",
+                    "summary": "Plan SC-2.",
+                    "work_unit_updates": [
+                        {
+                            "unit_id": "WU-2",
+                            "test_intents": [
+                                {
+                                    "stage_id": "unit",
+                                    "intent": "Verify cancellation.",
+                                    "acceptance_refs": ["AC-2"],
+                                    "target_paths": target_paths,
+                                }
+                            ],
+                        }
+                    ],
+                }
+            )
+
+    client = StubClient()
+    payload = DeveloperPlanAgent(client)._component_plan_llm(
+        run_id="run-test",
+        requirement_packet="requirement",
+        design_artifact="design",
+        units=[
+            {
+                "unit_id": "WU-2",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "design_node_ids": [],
+                "requirement_refs": [],
+                "acceptance_refs": [],
+                "planned_code_targets": [],
+                "runtime_bindings": [],
+            }
+        ],
+        vertical_design_graph={},
+        vertical_trace_graph={},
+        repo_context={},
+        planning_policy=planning,
+        prompt_directive=None,
+        verification_policy=verification,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+        scenario_id="SC-2",
+        allowed_unit_ids={"WU-2"},
+        required_unit_ids={"WU-2"},
+    )
+
+    assert payload["scenario_id"] == "SC-2"
+    assert len(client.prompts) == 2
+    assert "$.work_unit_updates[0].test_intents[0].target_paths" in client.prompts[1]
+
+
+def test_qa_test_path_serializes_scenario_units_that_share_browser_spec() -> None:
+    units = [
+        {
+            "unit_id": "WU-1",
+            "order": 1,
+            "scenario_id": "SC-1",
+            "component_id": "web",
+            "depends_on": [],
+            "planned_code_targets": [],
+            "test_intents": [],
+            "qa_test_intents": [
+                {"target_paths": ["tests/e2e/cultural-heritage.spec.ts"]}
+            ],
+        },
+        {
+            "unit_id": "WU-2",
+            "order": 2,
+            "scenario_id": "SC-2",
+            "component_id": "web",
+            "depends_on": [],
+            "planned_code_targets": [],
+            "test_intents": [],
+            "qa_test_intents": [
+                {"target_paths": ["tests/e2e/cultural-heritage.spec.ts"]}
+            ],
+        },
+    ]
+
+    ordered = canonicalize_work_unit_dependencies(units)
+
+    assert ordered[1]["depends_on"] == ["WU-1"]
 
 
 def test_r9_code_entities_and_dependencies_are_immutable_for_the_planner() -> None:

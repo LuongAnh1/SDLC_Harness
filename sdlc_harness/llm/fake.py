@@ -834,7 +834,7 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
     units = _fake_json_prompt_value(
         prompt=prompt,
         start="Harness-owned work units:",
-        end="Vertical Design slice:",
+        end="Prior scenario plan context",
     )
     policy = _fake_json_prompt_value(
         prompt=prompt,
@@ -925,6 +925,13 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
                     "acceptance_refs": acceptance_refs,
                     "target_paths": [f"tests/e2e/{unit_id.lower()}.spec.ts"],
                     "obligation_refs": obligation_ids,
+                    "data_setup": {
+                        "mode": "synthetic",
+                        "reason": "Fake mode has no repository-backed browser data source.",
+                        "requirements": [
+                            "Create deterministic values for the UI runtime inputs and states covered by this intent."
+                        ],
+                    },
                 }
             ]
         if "data" in unit.get("surfaces", []):
@@ -934,8 +941,12 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
                 "targets": [],
             }
         updates.append(update)
+    scenario_match = re.search(
+        r"This call plans exactly scenario `([^`]+)`", prompt
+    )
     return json.dumps(
         {
+            **({"scenario_id": scenario_match.group(1)} if scenario_match else {}),
             "summary": "Fake component-aware plan enriched every Harness-owned work unit.",
             "repo_evidence": ["Fake mode uses the frozen planning policy and approved graph bindings."],
             "work_unit_updates": updates,

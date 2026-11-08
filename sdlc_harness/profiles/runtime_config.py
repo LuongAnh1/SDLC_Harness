@@ -36,8 +36,9 @@ _POLICY_BY_PROJECT = {
                 "non-secret default so the product and its tests run without it set."
             ),
             "npm_package": (
-                "One external dependency for one workspace manifest, with an exact version. Harness "
-                "updates the manifest and lockfile; the Planner never edits them."
+                "One dependency declaration for one consuming workspace manifest, including a "
+                "sibling workspace package, with an exact version. Harness updates the manifest "
+                "and lockfile; the Planner never edits them."
             ),
             "compose_service": (
                 "One new service in compose.yaml with a pinned image tag and a healthcheck command. "

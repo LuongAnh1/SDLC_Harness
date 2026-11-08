@@ -732,7 +732,14 @@ class PhaseThreeTest(unittest.TestCase):
         structured_path = self.repo_root / str(response["latest_artifacts"]["implementation_plan_structured"])
         structured = json.loads(structured_path.read_text(encoding="utf-8"))
         self.assertEqual(structured["version"], "implementation_plan_structured_v5")
-        self.assertEqual(structured["planning_mode"], "llm_component_aware_plan_v1")
+        self.assertEqual(
+            structured["planning_mode"],
+            "llm_component_aware_scenario_sliced_v1",
+        )
+        self.assertEqual(
+            structured["developer_llm"]["planning_scenarios"],
+            ["SC-1"],
+        )
         self.assertEqual(structured["inputs"]["repo_runtime_config"]["schema_version"], "repo_runtime_config_v1")
         self.assertEqual(structured["runtime_config_impact"]["status"], "not_required")
         self.assertIn("## Runtime Configuration", content)

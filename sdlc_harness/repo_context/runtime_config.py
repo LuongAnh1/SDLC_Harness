@@ -48,6 +48,7 @@ def _workspaces(root: Path) -> list[dict[str, object]]:
             {
                 "manifest": path.relative_to(root).as_posix(),
                 "name": str(payload.get("name") or ""),
+                "version": str(payload.get("version") or ""),
                 "dependencies": sorted(dict(payload.get("dependencies") or {})),
                 "dev_dependencies": sorted(dict(payload.get("devDependencies") or {})),
             }

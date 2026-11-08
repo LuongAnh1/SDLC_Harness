@@ -667,6 +667,11 @@ def canonicalize_work_unit_dependencies(
             for item in _dicts(unit.get("test_intents"))
             for path in _strings(item.get("target_paths"))
         )
+        paths.update(
+            path
+            for item in _dicts(unit.get("qa_test_intents"))
+            for path in _strings(item.get("target_paths"))
+        )
         for path in paths:
             owners.setdefault(path, []).append(unit_id)
 
@@ -1240,6 +1245,20 @@ def component_plan_issues(
                     or planning_policy.component_for_path(path) != "e2e"
                 ):
                     issues.append(f"Work unit {unit_id} has invalid QA browser target path `{path}`.")
+            data_setup = _dict(item.get("data_setup"))
+            mode = str(data_setup.get("mode") or "")
+            reason = str(data_setup.get("reason") or "").strip()
+            requirements = _strings(data_setup.get("requirements"))
+            if mode not in {"repository", "synthetic", "not_required"}:
+                issues.append(
+                    f"Work unit {unit_id} QA intent has invalid data setup mode `{mode}`."
+                )
+            if not reason:
+                issues.append(f"Work unit {unit_id} QA intent has no data setup reason.")
+            if mode in {"repository", "synthetic"} and not requirements:
+                issues.append(
+                    f"Work unit {unit_id} QA intent data setup `{mode}` has no requirements."
+                )
         if "data" in _strings(unit.get("surfaces")):
             migration = _dict(unit.get("migration_impact"))
             status = str(migration.get("status") or "")
@@ -1716,14 +1735,27 @@ def _target_allowed_for_unit(
 
 def _canonical_test_intents(value: object) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
-    seen: set[tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
+    seen: set[
+        tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...], str]
+    ] = set()
     for item in _dicts(value):
         stage_id = str(item.get("stage_id") or "").strip()
         intent = str(item.get("intent") or "").strip()
         acceptance_refs = tuple(sorted(set(_strings(item.get("acceptance_refs")))))
         target_paths = tuple(sorted(set(_safe_relative_paths(item.get("target_paths")))))
         obligation_refs = tuple(sorted(set(_strings(item.get("obligation_refs")))))
-        key = (stage_id, intent, acceptance_refs, target_paths, obligation_refs)
+        raw_setup = _dict(item.get("data_setup"))
+        data_setup = (
+            {
+                "mode": str(raw_setup.get("mode") or "").strip(),
+                "reason": str(raw_setup.get("reason") or "").strip(),
+                "requirements": sorted(set(_strings(raw_setup.get("requirements")))),
+            }
+            if raw_setup
+            else {}
+        )
+        setup_key = json.dumps(data_setup, ensure_ascii=False, sort_keys=True)
+        key = (stage_id, intent, acceptance_refs, target_paths, obligation_refs, setup_key)
         if stage_id and intent and key not in seen:
             seen.add(key)
             result.append(
@@ -1733,6 +1765,7 @@ def _canonical_test_intents(value: object) -> list[dict[str, object]]:
                     "acceptance_refs": list(acceptance_refs),
                     "target_paths": list(target_paths),
                     **({"obligation_refs": list(obligation_refs)} if obligation_refs else {}),
+                    **({"data_setup": data_setup} if data_setup else {}),
                 }
             )
     return result

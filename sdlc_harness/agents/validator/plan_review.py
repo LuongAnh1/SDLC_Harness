@@ -1219,11 +1219,14 @@ Component-aware V5 boundaries:
   Block an `unverified_obligations` entry only when its reason is false because an active
   stage could observe it.
 - For each approved Design `runtime_surface.required_inputs` item whose source is
-  `external_use_case`, verify that the owning QA intent gives Browser QA a concrete,
-  repo-grounded test-only setup (such as an established seed, route interception, or
-  entrypoint injection) and an exact browser test target while preserving the production
-  dependency as external. Missing, empty/default, or invented setup is a blocker; do not
-  require the product Design to add a provider merely so Browser QA can run.
+  `external_use_case`, verify that the owning QA intent preserves the production dependency
+  as external and declares a sufficient `data_setup`. `repository` must cite actual repository
+  evidence; when none exists, `synthetic` is the correct test-only fallback and its requirements
+  must name the deterministic values/states QA needs. Synthetic data is created by QA inside the
+  browser spec after Developer execution. It must not introduce or alter a production provider,
+  endpoint, entrypoint, global, history-state contract, runtime config, or Design seam. Missing,
+  empty/default, or semantically insufficient setup is a blocker; do not require the product
+  Design to add a provider merely so Browser QA can run.
 - Compatibility projections (steps, proposed files, design mappings, top-level test
   intents) are rendered from work_units and checked by the rule review, so they are omitted
   below. Each unit's `approved_design_contracts` contains only the exact Vertical Design

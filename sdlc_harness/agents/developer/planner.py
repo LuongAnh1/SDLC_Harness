@@ -643,27 +643,86 @@ class DeveloperPlanAgent:
             mappings=legacy_mappings,
             class_graph=class_graph,
         )
-        llm_payload = self._component_plan_llm(
-            run_id=run_id,
-            requirement_packet=requirement_packet,
-            design_artifact=design_artifact,
-            units=skeleton,
-            vertical_design_graph=vertical_design_graph,
-            vertical_trace_graph=vertical_trace_graph,
-            repo_context=repo_context,
-            planning_policy=planning_policy,
-            prompt_directive=prompt_directive,
-            verification_policy=verification_policy,
-            signature_targets=signature_targets,
-            repair_feedback="",
-            previous_review={},
-            component_plan_inputs=component_plan_inputs,
-        )
-        units = merge_work_unit_updates(
-            units=skeleton,
-            updates=llm_payload.get("work_unit_updates"),
-            planning_policy=planning_policy,
-        )
+        slices, fallback_reason = _scenario_plan_slices(skeleton)
+        sliced = bool(slices) and not fallback_reason
+        if not sliced:
+            slices = [("", skeleton)]
+
+        units = skeleton
+        completed_unit_ids: set[str] = set()
+        summaries: list[str] = []
+        repo_evidence: list[str] = []
+        signature_entries: dict[tuple[str, str], dict[str, object]] = {}
+        runtime_config_decision: object = None
+        for scenario_id, base_slice_units in slices:
+            slice_ids = {str(unit.get("unit_id") or "") for unit in base_slice_units}
+            current_slice = [
+                unit for unit in units if str(unit.get("unit_id") or "") in slice_ids
+            ]
+            slice_signature_targets = _signature_targets_for_units(
+                signature_targets=signature_targets,
+                units=current_slice,
+                planning_policy=planning_policy,
+            )
+            llm_payload = self._component_plan_llm(
+                run_id=run_id,
+                requirement_packet=requirement_packet,
+                design_artifact=design_artifact,
+                units=current_slice,
+                vertical_design_graph=vertical_design_graph,
+                vertical_trace_graph=vertical_trace_graph,
+                repo_context=repo_context,
+                planning_policy=planning_policy,
+                prompt_directive=prompt_directive,
+                verification_policy=verification_policy,
+                signature_targets=slice_signature_targets,
+                repair_feedback="",
+                previous_review={},
+                component_plan_inputs=component_plan_inputs,
+                runtime_config_decision=runtime_config_decision,
+                scenario_id=scenario_id,
+                prior_plan_context=_prior_scenario_plan_context(
+                    units=units,
+                    current_units=current_slice,
+                    completed_unit_ids=completed_unit_ids,
+                    signature_entries=list(signature_entries.values()),
+                ),
+                allowed_unit_ids=slice_ids,
+                required_unit_ids=slice_ids,
+            )
+            units = merge_work_unit_updates(
+                units=units,
+                updates=llm_payload.get("work_unit_updates"),
+                planning_policy=planning_policy,
+            )
+            units = canonicalize_work_unit_dependencies(units)
+            completed_unit_ids.update(slice_ids)
+            summary = str(llm_payload.get("summary") or "").strip()
+            if summary:
+                summaries.append(f"{scenario_id}: {summary}" if scenario_id else summary)
+            for item in _string_items(llm_payload.get("repo_evidence")):
+                if item not in repo_evidence:
+                    repo_evidence.append(item)
+            for entry in _dict_items(
+                _object_dict(llm_payload.get("implementation_signature_contract")).get("entries")
+            ):
+                key = (
+                    str(entry.get("target_path") or "").strip().replace("\\", "/"),
+                    str(entry.get("target_symbol") or "").strip(),
+                )
+                if key[0]:
+                    signature_entries[key] = entry
+            if isinstance(component_plan_inputs.get("repo_runtime_config"), dict):
+                runtime_config_decision = llm_payload.get("runtime_config_impact")
+
+        llm_payload = {
+            "summary": "; ".join(summaries),
+            "repo_evidence": repo_evidence,
+            "implementation_signature_contract": {
+                "entries": list(signature_entries.values())
+            },
+            "runtime_config_impact": runtime_config_decision,
+        }
         units = canonicalize_work_unit_dependencies(units)
         projections = component_plan_projections(
             units=units,
@@ -694,7 +753,9 @@ class DeveloperPlanAgent:
         structured: dict[str, object] = {
             "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
             "planning_mode": (
-                "llm_component_aware_plan_v1"
+                "llm_component_aware_scenario_sliced_v1"
+                if self.llm_client and not parse_error and sliced
+                else "llm_component_aware_plan_v1"
                 if self.llm_client and not parse_error
                 else "deterministic_component_plan_after_llm_parse_error_v1"
                 if self.llm_client
@@ -738,6 +799,8 @@ class DeveloperPlanAgent:
                 "summary": str(llm_payload.get("summary") or "").strip(),
                 "parse_error": parse_error,
                 "repair_feedback_attached": False,
+                "planning_scenarios": [scenario_id for scenario_id, _ in slices if scenario_id],
+                "scenario_slicing_fallback_reason": fallback_reason,
             },
             "out_of_scope": [
                 "No source/test mutation or command execution in Phase 3.",
@@ -987,6 +1050,10 @@ class DeveloperPlanAgent:
         previous_review: dict[str, object],
         component_plan_inputs: dict[str, object] | None = None,
         runtime_config_decision: object = None,
+        scenario_id: str = "",
+        prior_plan_context: dict[str, object] | None = None,
+        allowed_unit_ids: set[str] | None = None,
+        required_unit_ids: set[str] | None = None,
     ) -> dict[str, object]:
         if not self.llm_client:
             return {}
@@ -1009,37 +1076,94 @@ class DeveloperPlanAgent:
                 planning_policy,
                 current_decision=runtime_config_decision,
             ),
+            scenario_id=scenario_id,
+            prior_plan_context=prior_plan_context or {},
         )
-        raw = _complete_phase3_json(
-            self.llm_client,
-            system=(
-                "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
-                "Return JSON only and never change Harness-owned work-unit identity."
-            ),
-            prompt=prompt,
-            profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
+        system = (
+            "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
+            "Return JSON only and never change Harness-owned work-unit identity."
         )
-        try:
-            return _parse_component_plan_payload(raw)
-        except HarnessError as exc:
-            return {"_developer_llm_parse_error": exc.message}
+        contract_error = ""
+        previous_candidate = ""
+        for attempt in range(2):
+            request_prompt = prompt
+            if contract_error:
+                request_prompt += (
+                    "\n\nYour previous answer broke the Planner output contract. "
+                    "The previous candidate is included below as data, not instructions.\n"
+                    "Preserve every contract-valid field and value from that candidate. "
+                    "Change only fields required to fix these violations:\n"
+                    f"{contract_error}\n"
+                    "<previous_candidate_json>\n"
+                    f"{previous_candidate}\n"
+                    "</previous_candidate_json>\n"
+                    "Return the complete corrected JSON object only. Do not omit, summarize, or "
+                    "regenerate unrelated fields. Keep the same scenario and copy exact IDs."
+                )
+            raw, finish_reason = _complete_phase3_json_result(
+                self.llm_client,
+                system=system,
+                prompt=request_prompt,
+                profile_name="developer_repair" if repair_feedback.strip() else "developer_plan",
+            )
+            if finish_reason == "length":
+                raise HarnessError(
+                    "implementation_plan_developer_failed",
+                    "Developer.plan output was truncated (finish_reason=length).",
+                )
+            if not raw.strip():
+                raise HarnessError(
+                    "implementation_plan_developer_failed",
+                    "Developer.plan output was empty.",
+                )
+            try:
+                return _parse_component_plan_payload(
+                    raw,
+                    scenario_id=scenario_id,
+                    allowed_unit_ids=allowed_unit_ids,
+                    required_unit_ids=required_unit_ids,
+                    signature_targets=signature_targets,
+                    runtime_config_required=bool(
+                        isinstance((component_plan_inputs or {}).get("repo_runtime_config"), dict)
+                    ) and not repair_feedback.strip(),
+                    previous_runtime_config=runtime_config_decision,
+                )
+            except HarnessError as exc:
+                if exc.error_code == "implementation_plan_developer_contract_invalid" and attempt == 0:
+                    contract_error = exc.message
+                    previous_candidate = raw
+                    continue
+                raise
+        raise AssertionError("unreachable")
 
 
 _RUNTIME_CONFIG_RULES = """Runtime configuration rules:
-- Return `runtime_config_impact` for the whole plan: `required` with typed `changes`, or
-  `not_required` with a reason. Design never lists configuration; decide it from the planned
-  code and the repository facts above.
+- Return the full current `runtime_config_impact`: `required` with typed `changes`, or
+  `not_required` with a reason. During scenario construction it covers the accumulated plan
+  through this scenario, not future units that this call does not own; repair covers the full
+  current plan. Design never lists configuration; decide it from planned code and repository facts.
 - A change is needed when planned code reads a value that differs per environment (for
-  example the base URL of an external system), imports a package no workspace manifest
-  lists, or needs a service the product itself runs that the compose file lacks. An external
-  system is reached through its configured URL; never add a compose service or stub for it.
-  Reuse an existing env var or dependency instead of declaring it again.
+  example the base URL of an external system), imports a package not listed in the importing
+  workspace's manifest, or needs a service the product itself runs that compose lacks. This
+  includes sibling workspace packages: use their repository `version` in an `npm_package`
+  change for the consuming manifest. Reuse a dependency only when that consuming manifest
+  already lists it. An external system is reached through its configured URL; never add a
+  compose service or stub for it.
+- Before deciding the status, perform dependency closure for every planned call, adapter or
+  injected dependency whose provider target is in another workspace. Identify the source
+  target that owns production wiring, its consuming manifest, the provider workspace package,
+  and whether that manifest declares the package. Optional or defaulted injection still needs
+  the provider package wherever its production default is wired; package existence elsewhere
+  in the monorepo is not a declaration in the consuming manifest. A `not_required` reason must
+  name every cross-workspace package check and its consuming manifest; a generic claim that all
+  imports already exist is insufficient.
 - Each change names its owning `unit_id` and only the fields listed for its kind. `read_by`
   and `used_by` must be planned source targets of that unit. Defaults are non-secret and
   keep the product and its tests runnable without the variable set.
 - Never edit locked configuration; Harness materializes manifests, lockfiles and compose.
-- In a repair, `current_decision` is the plan's present decision. Return the full updated
-  decision whenever a file or unit it names changes; otherwise it is kept as is.
+- In a later scenario or repair, `current_decision` is the plan's present decision. Return
+  the full updated decision and preserve changes owned by earlier scenarios exactly; only
+  the current scenario may add or update its own changes.
 """
 
 
@@ -1072,6 +1196,149 @@ def _runtime_config_slot(
     if not decision["status"] and previous is not None:
         decision = canonical_runtime_config_impact(previous)
     return {"runtime_config_impact": decision}
+
+
+def _scenario_plan_slices(
+    units: list[dict[str, object]],
+) -> tuple[list[tuple[str, list[dict[str, object]]]], str]:
+    """Group a topological plan by scenario when every cross-scenario edge stays forward."""
+
+    ordered = sorted(units, key=lambda item: int(item.get("order") or 0))
+    scenario_order: list[str] = []
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for unit in ordered:
+        scenario_id = str(unit.get("scenario_id") or "").strip()
+        if not scenario_id:
+            return [], "work unit has no scenario_id"
+        if scenario_id not in grouped:
+            grouped[scenario_id] = []
+            scenario_order.append(scenario_id)
+        grouped[scenario_id].append(unit)
+    rank = {scenario_id: index for index, scenario_id in enumerate(scenario_order)}
+    scenario_by_unit = {
+        str(unit.get("unit_id") or ""): str(unit.get("scenario_id") or "")
+        for unit in ordered
+    }
+    for unit in ordered:
+        current = str(unit.get("scenario_id") or "")
+        for dependency in _string_items(unit.get("depends_on")):
+            dependency_scenario = scenario_by_unit.get(dependency, current)
+            if dependency_scenario != current and rank[dependency_scenario] >= rank[current]:
+                return [], (
+                    f"cross-scenario dependency {dependency}->{unit.get('unit_id')} "
+                    "requires interleaved planning"
+                )
+    return [(scenario_id, grouped[scenario_id]) for scenario_id in scenario_order], ""
+
+
+def _signature_targets_for_units(
+    *,
+    signature_targets: list[dict[str, object]],
+    units: list[dict[str, object]],
+    planning_policy: PlanningPathPolicy,
+) -> list[dict[str, object]]:
+    allowed_paths = {
+        str(target.get("path") or "")
+        for unit in units
+        for target in _dict_items(unit.get("planned_code_targets"))
+    }
+    for unit in units:
+        allowed_paths.update(_string_items(unit_write_scope(unit, planning_policy).get("files")))
+    return [
+        target
+        for target in signature_targets
+        if str(target.get("target_path") or "") in allowed_paths
+    ]
+
+
+def _prior_scenario_plan_context(
+    *,
+    units: list[dict[str, object]],
+    current_units: list[dict[str, object]],
+    completed_unit_ids: set[str],
+    signature_entries: list[dict[str, object]],
+) -> dict[str, object]:
+    if not completed_unit_ids:
+        return {}
+    current_dependencies = {
+        dependency
+        for unit in current_units
+        for dependency in _string_items(unit.get("depends_on"))
+    }
+    current_entities = {
+        str(entity.get("entity") or "")
+        for unit in current_units
+        for entity in _dict_items(unit.get("code_entities"))
+        if str(entity.get("entity") or "")
+    }
+    current_paths = {
+        str(target.get("path") or "")
+        for unit in current_units
+        for target in _dict_items(unit.get("planned_code_targets"))
+        if str(target.get("path") or "")
+    }
+    relevant: list[dict[str, object]] = []
+    relevant_paths: set[str] = set()
+    for unit in units:
+        unit_id = str(unit.get("unit_id") or "")
+        if unit_id not in completed_unit_ids:
+            continue
+        unit_entities = {
+            str(entity.get("entity") or "")
+            for entity in _dict_items(unit.get("code_entities"))
+            if str(entity.get("entity") or "")
+        }
+        unit_paths = {
+            str(target.get("path") or "")
+            for target in _dict_items(unit.get("planned_code_targets"))
+            if str(target.get("path") or "")
+        }
+        if (
+            unit_id not in current_dependencies
+            and not (unit_entities & current_entities)
+            and not (unit_paths & current_paths)
+        ):
+            continue
+        relevant_paths.update(unit_paths)
+        verification_targets: list[dict[str, object]] = []
+        seen_verification_targets: set[tuple[str, tuple[str, ...]]] = set()
+        for intent in [
+            *_dict_items(unit.get("test_intents")),
+            *_dict_items(unit.get("qa_test_intents")),
+        ]:
+            stage_id = str(intent.get("stage_id") or "").strip()
+            target_paths = tuple(_string_items(intent.get("target_paths")))
+            key = (stage_id, target_paths)
+            if not stage_id or not target_paths or key in seen_verification_targets:
+                continue
+            seen_verification_targets.add(key)
+            verification_targets.append(
+                {"stage_id": stage_id, "target_paths": list(target_paths)}
+            )
+        relevant.append(
+            {
+                key: unit.get(key)
+                for key in (
+                    "unit_id",
+                    "scenario_id",
+                    "component_id",
+                    "objective",
+                    "planned_code_targets",
+                    "migration_impact",
+                )
+                if key in unit
+            }
+            | ({"verification_targets": verification_targets} if verification_targets else {})
+        )
+    signatures = [
+        entry
+        for entry in signature_entries
+        if str(entry.get("target_path") or "") in relevant_paths | current_paths
+    ]
+    return {
+        "completed_units": relevant,
+        "implementation_signature_entries": signatures,
+    }
 
 
 def _units_for_prompt(
@@ -1107,6 +1374,22 @@ def _complete_phase3_json(
     prompt: str,
     profile_name: str,
 ) -> str:
+    content, _ = _complete_phase3_json_result(
+        llm_client,
+        system=system,
+        prompt=prompt,
+        profile_name=profile_name,
+    )
+    return content
+
+
+def _complete_phase3_json_result(
+    llm_client: Any,
+    *,
+    system: str,
+    prompt: str,
+    profile_name: str,
+) -> tuple[str, str]:
     complete_with_metadata = getattr(llm_client, "complete_with_metadata", None)
     if callable(complete_with_metadata):
         settings = getattr(llm_client, "settings", None)
@@ -1121,8 +1404,8 @@ def _complete_phase3_json(
                 fallback_max_tokens=fallback_max_tokens,
             ),
         )
-        return str(completion.content)
-    return str(llm_client.complete(system=system, prompt=prompt))
+        return str(completion.content), str(getattr(completion, "finish_reason", "") or "")
+    return str(llm_client.complete(system=system, prompt=prompt)), ""
 
 
 def _component_plan_prompt(
@@ -1141,8 +1424,40 @@ def _component_plan_prompt(
     repair_feedback: str,
     previous_review: dict[str, object],
     runtime_config: dict[str, object] | None = None,
+    scenario_id: str = "",
+    prior_plan_context: dict[str, object] | None = None,
 ) -> str:
-    node_ids = {node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))}
+    node_ids = {
+        node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))
+    }
+    shared_node_ids = {
+        design_node_id
+        for unit in units
+        for entity in _dict_items(unit.get("code_entities"))
+        for design_node_id in _string_items(entity.get("design_node_ids"))
+    } - node_ids
+    design_nodes = {
+        str(item.get("id") or ""): item
+        for item in _dict_items(vertical_design_graph.get("nodes"))
+    }
+    shared_code_entity_contracts = [
+        {
+            key: node.get(key)
+            for key in (
+                "id",
+                "scenario_id",
+                "component_id",
+                "kind",
+                "surface",
+                "contract",
+                "surface_contract",
+            )
+            if key in node
+        }
+        for node_id in sorted(shared_node_ids)
+        for node in [_object_dict(design_nodes.get(node_id))]
+        if node
+    ]
     design_slice = {
         "schema_version": vertical_design_graph.get("schema_version"),
         "artifact_digest": vertical_design_graph.get("artifact_digest"),
@@ -1213,22 +1528,33 @@ def _component_plan_prompt(
         "Browser QA is active. Put every UI obligation in at least one `qa_test_intents` "
         "entry and do not mark UI obligations unverified. For each `runtime_input` obligation "
         "whose approved Design source is `external_use_case`, keep the production dependency "
-        "external and make the QA intent name a concrete browser-only setup grounded in this "
-        "repo (seed, route interception, or entrypoint injection) plus its exact test path; do "
-        "not replace it with empty/default data or silently turn it into a production provider. "
-        "If no repo-grounded setup exists, state that unresolved gap in the owning objective "
-        "and QA intent so review can block it instead of inventing an API, fixture decision, "
-        "or production provider."
+        "external. Every QA intent must declare `data_setup`: use mode `repository` only when "
+        "repository evidence names an existing seed or fixture setup, mode `synthetic` when no "
+        "such source exists, and `not_required` only when the flow needs no data setup. For a "
+        "synthetic setup, list the exact input values and states QA must create deterministically "
+        "inside the browser spec. This authorizes test data only: do not add or alter a production "
+        "provider, endpoint, entrypoint, global, history state, runtime config, or Design seam to "
+        "deliver it. The QA agent will bind the fixture to the public boundary in the implemented "
+        "code after Developer execution."
         if browser_qa_active
         else "Browser QA is inactive. Record UI behavior that active stages cannot observe in "
         "`unverified_obligations`."
     )
+    scenario_contract = (
+        f"This call plans exactly scenario `{scenario_id}`. Return top-level "
+        f"`scenario_id: \"{scenario_id}\"` and exactly one update for every listed work unit. "
+        "Do not return a work unit from another scenario."
+        if scenario_id
+        else "This call plans the complete supplied work-unit set."
+    )
+    scenario_field = f'  "scenario_id": "{scenario_id}",\n' if scenario_id else ""
     return f"""Component-aware Implementation Plan V5
 
 Enrich the Harness-owned work units. Do not add, delete, merge, split or reorder units.
+{scenario_contract}
 Return JSON only:
 {{
-  "summary": "short human summary",
+{scenario_field}  "summary": "short human summary",
   "repo_evidence": ["bounded evidence"],
   "work_unit_updates": [
     {{
@@ -1244,7 +1570,7 @@ Return JSON only:
       "migration_impact": {{
         "status": "required|not_required",
         "reason": "decision grounded in the approved data contract",
-        "targets": ["packages/db/prisma/... only when required"]
+        "targets": ["packages/db/prisma/... when required; otherwise an empty array"]
       }},
       "test_intents": [
         {{
@@ -1261,7 +1587,12 @@ Return JSON only:
           "intent": "browser-observable acceptance intent for the independent QA agent",
           "acceptance_refs": ["AC-..."],
           "target_paths": ["tests/e2e/<scenario>.spec.ts"],
-          "obligation_refs": ["ui_obligations ids observed in the real browser"]
+          "obligation_refs": ["ui_obligations ids observed in the real browser"],
+          "data_setup": {{
+            "mode": "repository|synthetic|not_required",
+            "reason": "why this source mode applies",
+            "requirements": ["exact deterministic input or initial state QA needs"]
+          }}
         }}
       ],
       "unverified_obligations": [
@@ -1274,9 +1605,10 @@ Return JSON only:
   ],
   "runtime_config_impact": {{
     "status": "required|not_required",
-    "reason": "why the planned code does or does not need runtime configuration",
+    "reason": "why runtime configuration is or is not needed; include every cross-workspace package check",
     "changes": [
-      {{"kind": "env_var", "unit_id": "existing WU id", "name": "UPPER_SNAKE", "default": "non-secret default", "read_by": "planned source path", "purpose": "why"}}
+      {{"kind": "env_var", "unit_id": "existing WU id", "name": "UPPER_SNAKE", "default": "non-secret default", "read_by": "planned source path", "purpose": "why"}},
+      {{"kind": "npm_package", "unit_id": "existing WU id", "manifest": "consuming workspace package.json", "package": "npm or sibling workspace package", "version": "exact repository version", "dev": false, "used_by": "planned source path in that workspace", "purpose": "why"}}
     ]
   }},
   "implementation_signature_contract": {{
@@ -1303,6 +1635,9 @@ Rules:
   entry in its owning unit.
 - `qa_test_intents` belong to the independent QA agent and never expand Developer write scope.
   Use only the `browser_e2e` stage and exact `tests/e2e/*.spec.ts` paths.
+- `data_setup` belongs only to QA. It describes required test data, not how production obtains
+  runtime inputs. Synthetic data is created in the QA spec after code exists and must never add
+  a production code target, provider, API, global, history-state contract, or runtime setting.
 - Stage ownership is authoritative: `test_intents` may use only `developer_intent` stages,
   `qa_test_intents` may use only `qa_intent` stages, and `harness_global` stages must never
   appear in either list because the Harness runs them for the whole implementation.
@@ -1312,7 +1647,9 @@ Rules:
   planned_code_targets.
 - Add explicit test intent for every negative, exception, cancellation, duplicate,
   interruption, and confirmation gate stated by the owning unit's approved contract.
-- Data units must decide migration impact. Non-data units may omit migration_impact.
+- Data units must decide migration impact. Non-data units must omit `migration_impact`.
+- When `migration_impact` is present, `targets` is always an array: use `[]` for
+  `not_required` and one or more exact migration paths for `required`.
 - When migration is `required`, include a concrete
   `packages/db/prisma/migrations/<id>_<name>/migration.sql` target. Include
   `packages/db/prisma/schema.prisma` in planned_code_targets when the model changes.
@@ -1357,7 +1694,7 @@ Rules:
 - `code_entities` lists, in implementation order, every unit whose Design nodes bind to the
   same code symbol. A later unit extends the code an earlier unit creates: its objective and
   tests add only its own scenario's behavior and must stay compatible with the contracts of
-  the other listed design_node_ids, which appear in the Vertical Design slice. When the
+  the other listed design_node_ids, which appear in Shared code-entity contracts. When the
   extension changes how earlier code is called (a new parameter, dependency or response),
   keep the earlier call working (optional parameter, injected dependency with a default) or
   add a test intent here that updates the earlier unit's test file, named by exact path.
@@ -1407,6 +1744,10 @@ Harness-owned signature targets:
 )}
 Harness-owned work units:
 {json.dumps(_units_for_prompt(units, planning_policy), ensure_ascii=False, indent=2)}
+Prior scenario plan context (read-only; preserve compatible shared decisions):
+{json.dumps(prior_plan_context or {}, ensure_ascii=False, separators=(",", ":"))}
+Shared code-entity contracts (read-only compatibility context, not units to plan):
+{json.dumps(shared_code_entity_contracts, ensure_ascii=False, separators=(",", ":"))}
 Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:
@@ -1416,10 +1757,6 @@ Repository context:
 {json.dumps(_repo_context_summary(repo_context), ensure_ascii=False, indent=2)}
 Repository evidence:
 {_excerpt(str(repo_context.get("evidence") or ""), limit=6000)}
-Approved Requirement summary:
-{_excerpt(requirement_packet, limit=3000)}
-Approved Design human context:
-{_excerpt(design_artifact, limit=2000)}
 {repair}
 """.strip()
 
@@ -1722,7 +2059,16 @@ def _parse_developer_plan_payload(raw: str) -> dict[str, object]:
     }
 
 
-def _parse_component_plan_payload(raw: str) -> dict[str, object]:
+def _parse_component_plan_payload(
+    raw: str,
+    *,
+    scenario_id: str = "",
+    allowed_unit_ids: set[str] | None = None,
+    required_unit_ids: set[str] | None = None,
+    signature_targets: list[dict[str, object]] | None = None,
+    runtime_config_required: bool = False,
+    previous_runtime_config: object = None,
+) -> dict[str, object]:
     try:
         parsed = _parse_first_json_object(
             raw,
@@ -1733,7 +2079,22 @@ def _parse_component_plan_payload(raw: str) -> dict[str, object]:
             "implementation_plan_developer_failed",
             "Developer.plan V5 LLM did not return valid component-plan JSON.",
         ) from exc
+    issues = _component_plan_payload_issues(
+        parsed,
+        scenario_id=scenario_id,
+        allowed_unit_ids=allowed_unit_ids,
+        required_unit_ids=required_unit_ids,
+        signature_targets=signature_targets or [],
+        runtime_config_required=runtime_config_required,
+        previous_runtime_config=previous_runtime_config,
+    )
+    if issues:
+        raise HarnessError(
+            "implementation_plan_developer_contract_invalid",
+            "Developer.plan V5 output contract invalid: " + "; ".join(issues[:12]),
+        )
     return {
+        **({"scenario_id": scenario_id} if scenario_id else {}),
         "summary": str(parsed.get("summary") or "").strip(),
         "repo_evidence": _string_items(parsed.get("repo_evidence")),
         "work_unit_updates": _dict_items(parsed.get("work_unit_updates")),
@@ -1742,6 +2103,349 @@ def _parse_component_plan_payload(raw: str) -> dict[str, object]:
         ),
         "runtime_config_impact": _object_dict(parsed.get("runtime_config_impact")),
     }
+
+
+def _component_plan_payload_issues(
+    payload: dict[str, object],
+    *,
+    scenario_id: str,
+    allowed_unit_ids: set[str] | None,
+    required_unit_ids: set[str] | None,
+    signature_targets: list[dict[str, object]],
+    runtime_config_required: bool,
+    previous_runtime_config: object,
+) -> list[str]:
+    issues: list[str] = []
+    if not isinstance(payload.get("summary"), str):
+        issues.append("$.summary must be a string")
+    if "repo_evidence" in payload:
+        _require_string_list(payload.get("repo_evidence"), "$.repo_evidence", issues)
+    if scenario_id and payload.get("scenario_id") != scenario_id:
+        issues.append(f"$.scenario_id must equal `{scenario_id}`")
+    updates = payload.get("work_unit_updates")
+    if not isinstance(updates, list):
+        issues.append("$.work_unit_updates must be an array")
+        updates = []
+    seen: set[str] = set()
+    for index, raw_update in enumerate(updates):
+        path = f"$.work_unit_updates[{index}]"
+        if not isinstance(raw_update, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        unit_id = raw_update.get("unit_id")
+        if not isinstance(unit_id, str) or not unit_id.strip():
+            issues.append(f"{path}.unit_id must be a non-empty string")
+            continue
+        unit_id = unit_id.strip()
+        if unit_id in seen:
+            issues.append(f"{path}.unit_id duplicates `{unit_id}`")
+        seen.add(unit_id)
+        if allowed_unit_ids is not None and unit_id not in allowed_unit_ids:
+            issues.append(f"{path}.unit_id `{unit_id}` is outside this planning slice")
+        for field in ("title", "objective"):
+            if field in raw_update and not isinstance(raw_update.get(field), str):
+                issues.append(f"{path}.{field} must be a string")
+        for field in ("planned_code_targets", "remove_planned_code_targets"):
+            _require_target_list(raw_update.get(field), f"{path}.{field}", issues, optional=True)
+        for field in ("test_intents", "qa_test_intents"):
+            _require_test_intent_list(
+                raw_update.get(field),
+                f"{path}.{field}",
+                issues,
+                optional=True,
+                require_data_setup=field == "qa_test_intents",
+            )
+        for field in ("remove_test_intents", "remove_qa_test_intents", "repo_evidence_refs"):
+            if field in raw_update:
+                _require_string_list(raw_update.get(field), f"{path}.{field}", issues)
+        if "unverified_obligations" in raw_update:
+            rows = raw_update.get("unverified_obligations")
+            if not isinstance(rows, list):
+                issues.append(f"{path}.unverified_obligations must be an array")
+            else:
+                for row_index, row in enumerate(rows):
+                    row_path = f"{path}.unverified_obligations[{row_index}]"
+                    if not isinstance(row, dict):
+                        issues.append(f"{row_path} must be an object")
+                        continue
+                    for field in ("id", "reason"):
+                        if not isinstance(row.get(field), str) or not str(row.get(field)).strip():
+                            issues.append(f"{row_path}.{field} must be a non-empty string")
+        if "migration_impact" in raw_update:
+            migration = raw_update.get("migration_impact")
+            if not isinstance(migration, dict):
+                issues.append(f"{path}.migration_impact must be an object")
+            else:
+                for field in ("status", "reason"):
+                    if not isinstance(migration.get(field), str):
+                        issues.append(f"{path}.migration_impact.{field} must be a string")
+                _require_string_list(
+                    migration.get("targets"), f"{path}.migration_impact.targets", issues
+                )
+    if required_unit_ids is not None and seen != required_unit_ids:
+        missing = sorted(required_unit_ids - seen)
+        extra = sorted(seen - required_unit_ids)
+        issues.append(
+            "$.work_unit_updates must contain the exact slice unit set "
+            f"(missing={missing}, extra={extra})"
+        )
+    _require_signature_contract(
+        payload.get("implementation_signature_contract"),
+        signature_targets=signature_targets,
+        required=required_unit_ids is not None,
+        issues=issues,
+    )
+    _require_runtime_config(
+        payload.get("runtime_config_impact"),
+        required=runtime_config_required,
+        allowed_unit_ids=allowed_unit_ids,
+        previous=previous_runtime_config,
+        issues=issues,
+    )
+    return issues
+
+
+def _require_string_list(value: object, path: str, issues: list[str]) -> None:
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array of strings")
+        return
+    if any(not isinstance(item, str) for item in value):
+        issues.append(f"{path} must contain only strings")
+
+
+def _require_target_list(
+    value: object,
+    path: str,
+    issues: list[str],
+    *,
+    optional: bool,
+) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array")
+        return
+    for index, target in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(target, dict):
+            issues.append(f"{item_path} must be an object")
+            continue
+        if not isinstance(target.get("path"), str) or not str(target.get("path")).strip():
+            issues.append(f"{item_path}.path must be a non-empty string")
+        if "symbol" in target and not isinstance(target.get("symbol"), str):
+            issues.append(f"{item_path}.symbol must be a string")
+
+
+def _require_test_intent_list(
+    value: object,
+    path: str,
+    issues: list[str],
+    *,
+    optional: bool,
+    require_data_setup: bool = False,
+) -> None:
+    if value is None and optional:
+        return
+    if not isinstance(value, list):
+        issues.append(f"{path} must be an array")
+        return
+    for index, intent in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(intent, dict):
+            issues.append(f"{item_path} must be an object")
+            continue
+        for field in ("stage_id", "intent"):
+            if not isinstance(intent.get(field), str) or not str(intent.get(field)).strip():
+                issues.append(f"{item_path}.{field} must be a non-empty string")
+        for field in ("acceptance_refs", "target_paths", "obligation_refs"):
+            if field in intent:
+                _require_string_list(intent.get(field), f"{item_path}.{field}", issues)
+        if "target_paths" not in intent:
+            issues.append(f"{item_path}.target_paths must be an array of strings")
+        if require_data_setup:
+            setup = intent.get("data_setup")
+            if not isinstance(setup, dict):
+                issues.append(f"{item_path}.data_setup must be an object")
+                continue
+            mode = setup.get("mode")
+            if mode not in {"repository", "synthetic", "not_required"}:
+                issues.append(
+                    f"{item_path}.data_setup.mode must be repository, synthetic, or not_required"
+                )
+            if not isinstance(setup.get("reason"), str) or not str(setup.get("reason")).strip():
+                issues.append(f"{item_path}.data_setup.reason must be a non-empty string")
+            requirements = setup.get("requirements")
+            _require_string_list(requirements, f"{item_path}.data_setup.requirements", issues)
+            if mode in {"repository", "synthetic"} and (
+                not isinstance(requirements, list)
+                or not any(isinstance(item, str) and item.strip() for item in requirements)
+            ):
+                issues.append(
+                    f"{item_path}.data_setup.requirements must be non-empty for mode `{mode}`"
+                )
+
+
+def _require_signature_contract(
+    value: object,
+    *,
+    signature_targets: list[dict[str, object]],
+    required: bool,
+    issues: list[str],
+) -> None:
+    if value is None:
+        if required and signature_targets:
+            issues.append("$.implementation_signature_contract must be an object")
+        return
+    if not isinstance(value, dict):
+        issues.append("$.implementation_signature_contract must be an object")
+        return
+    entries = value.get("entries")
+    if not isinstance(entries, list):
+        issues.append("$.implementation_signature_contract.entries must be an array")
+        return
+    allowed = {
+        (str(item.get("target_path") or ""), str(item.get("target_symbol") or ""))
+        for item in signature_targets
+    }
+    seen: set[tuple[str, str]] = set()
+    for index, entry in enumerate(entries):
+        path = f"$.implementation_signature_contract.entries[{index}]"
+        if not isinstance(entry, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        raw_key = (entry.get("target_path"), entry.get("target_symbol"))
+        key = tuple(str(item) if isinstance(item, str) else "" for item in raw_key)
+        seen.add(key)
+        if not all(isinstance(item, str) for item in raw_key):
+            issues.append(f"{path} target_path and target_symbol must be strings")
+        elif allowed and key not in allowed:
+            issues.append(f"{path} names a signature target outside this planning slice")
+        parameters = entry.get("parameters")
+        if not isinstance(parameters, list):
+            issues.append(f"{path}.parameters must be an array")
+        else:
+            for parameter_index, parameter in enumerate(parameters):
+                parameter_path = f"{path}.parameters[{parameter_index}]"
+                if not isinstance(parameter, dict):
+                    issues.append(f"{parameter_path} must be an object")
+                    continue
+                for field in ("name", "type"):
+                    if not isinstance(parameter.get(field), str):
+                        issues.append(f"{parameter_path}.{field} must be a string")
+                for field in ("optional", "rest"):
+                    if not isinstance(parameter.get(field), bool):
+                        issues.append(f"{parameter_path}.{field} must be a boolean")
+        if not isinstance(entry.get("return_type"), str):
+            issues.append(f"{path}.return_type must be a string")
+        _require_string_list(entry.get("type_parameters"), f"{path}.type_parameters", issues)
+        if "async" in entry and not isinstance(entry.get("async"), bool):
+            issues.append(f"{path}.async must be a boolean")
+    if required and allowed and seen != allowed:
+        issues.append(
+            "$.implementation_signature_contract.entries must contain the exact slice target set "
+            f"(missing={sorted(allowed - seen)}, extra={sorted(seen - allowed)})"
+        )
+
+
+def _require_runtime_config(
+    value: object,
+    *,
+    required: bool,
+    allowed_unit_ids: set[str] | None,
+    previous: object,
+    issues: list[str],
+) -> None:
+    if value is None and not required:
+        return
+    if not isinstance(value, dict):
+        issues.append("$.runtime_config_impact must be an object")
+        return
+    status = value.get("status")
+    if status not in {"required", "not_required"}:
+        issues.append("$.runtime_config_impact.status must be `required` or `not_required`")
+    elif not isinstance(status, str):
+        issues.append("$.runtime_config_impact.status must be a string")
+    if not isinstance(value.get("reason"), str) or not str(value.get("reason")).strip():
+        issues.append("$.runtime_config_impact.reason must be a non-empty string")
+    changes = value.get("changes")
+    if not isinstance(changes, list):
+        issues.append("$.runtime_config_impact.changes must be an array")
+        return
+    if status == "not_required" and changes:
+        issues.append("$.runtime_config_impact.changes must be empty when status is `not_required`")
+    if status == "required" and not changes:
+        issues.append("$.runtime_config_impact.changes must not be empty when status is `required`")
+    for index, change in enumerate(changes):
+        path = f"$.runtime_config_impact.changes[{index}]"
+        if not isinstance(change, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        if not isinstance(change.get("kind"), str):
+            issues.append(f"{path}.kind must be a string")
+        if not isinstance(change.get("unit_id"), str):
+            issues.append(f"{path}.unit_id must be a string")
+        for field, field_value in change.items():
+            if field in {"kind", "unit_id"}:
+                continue
+            if not isinstance(field_value, (str, bool)):
+                issues.append(f"{path}.{field} must be a string or boolean")
+    if previous is None:
+        if allowed_unit_ids is not None:
+            foreign = {
+                str(change.get("unit_id") or "")
+                for change in changes
+                if isinstance(change, dict)
+            } - allowed_unit_ids
+            if foreign:
+                issues.append(
+                    "$.runtime_config_impact contains changes outside this planning slice: "
+                    f"{sorted(foreign)}"
+                )
+        return
+    previous_impact = canonical_runtime_config_impact(previous)
+    current_impact = canonical_runtime_config_impact(value)
+    previous_identities = {
+        _runtime_change_identity(change)
+        for change in _dict_items(previous_impact.get("changes"))
+    }
+    current_changes = {
+        _runtime_change_identity(change): change
+        for change in _dict_items(current_impact.get("changes"))
+    }
+    if allowed_unit_ids is not None:
+        foreign_new = sorted(
+            {
+                str(change.get("unit_id") or "")
+                for identity, change in current_changes.items()
+                if identity not in previous_identities
+                and str(change.get("unit_id") or "") not in allowed_unit_ids
+            }
+        )
+        if foreign_new:
+            issues.append(
+                "$.runtime_config_impact adds changes outside this planning slice: "
+                f"{foreign_new}"
+            )
+    for change in _dict_items(previous_impact.get("changes")):
+        unit_id = str(change.get("unit_id") or "")
+        if allowed_unit_ids is not None and unit_id in allowed_unit_ids:
+            continue
+        if current_changes.get(_runtime_change_identity(change)) != change:
+            issues.append(
+                "$.runtime_config_impact must preserve prior change owned by "
+                f"unit `{unit_id}` byte-for-byte"
+            )
+
+
+def _runtime_change_identity(change: dict[str, object]) -> tuple[str, str, str]:
+    kind = str(change.get("kind") or "")
+    identity = str(
+        change.get("name")
+        or change.get("package")
+        or change.get("service")
+        or ""
+    )
+    return kind, str(change.get("unit_id") or ""), identity
 
 
 def _merge_implementation_signature_contract(

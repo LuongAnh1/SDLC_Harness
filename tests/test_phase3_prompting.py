@@ -8,8 +8,10 @@ import json
 import pytest
 
 from sdlc_harness.agents.developer.planner import (
+    DeveloperPlanAgent,
     _component_plan_prompt,
     _developer_plan_prompt,
+    _prior_scenario_plan_context,
 )
 from sdlc_harness.agents.validator.plan_review import (
     ImplementationPlanReview,
@@ -212,6 +214,168 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     assert "This is a repair patch" in repair_prompt
 
 
+def test_sliced_planner_prior_context_keeps_only_compatibility_targets() -> None:
+    context = _prior_scenario_plan_context(
+        units=[
+            {
+                "unit_id": "WU-OLD",
+                "scenario_id": "SC-1",
+                "component_id": "web",
+                "objective": "Keep the existing screen contract.",
+                "depends_on": [],
+                "planned_code_targets": [{"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}],
+                "code_entities": [{"entity": "apps/web/src/Screen.tsx#Screen"}],
+                "test_intents": [
+                    {
+                        "stage_id": "unit",
+                        "intent": "UNIQUE_VERBOSE_UNIT_INTENT",
+                        "target_paths": ["apps/web/src/Screen.test.tsx"],
+                        "obligation_refs": ["VDN-OLD:state.ready"],
+                    }
+                ],
+                "qa_test_intents": [
+                    {
+                        "stage_id": "browser_e2e",
+                        "intent": "UNIQUE_VERBOSE_QA_INTENT",
+                        "target_paths": ["tests/e2e/sc-1.spec.ts"],
+                        "data_setup": {
+                            "mode": "synthetic",
+                            "reason": "UNIQUE_VERBOSE_FIXTURE_REASON",
+                            "requirements": ["large fixture payload"],
+                        },
+                    }
+                ],
+            },
+            {
+                "unit_id": "WU-CURRENT",
+                "scenario_id": "SC-2",
+                "component_id": "web",
+                "depends_on": ["WU-OLD"],
+                "planned_code_targets": [{"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}],
+                "code_entities": [{"entity": "apps/web/src/Screen.tsx#Screen"}],
+            },
+        ],
+        current_units=[
+            {
+                "unit_id": "WU-CURRENT",
+                "depends_on": ["WU-OLD"],
+                "planned_code_targets": [{"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}],
+                "code_entities": [{"entity": "apps/web/src/Screen.tsx#Screen"}],
+            }
+        ],
+        completed_unit_ids={"WU-OLD"},
+        signature_entries=[
+            {"target_path": "apps/web/src/Screen.tsx", "target_symbol": "Screen"}
+        ],
+    )
+
+    encoded = json.dumps(context, ensure_ascii=False)
+    assert "apps/web/src/Screen.test.tsx" in encoded
+    assert "tests/e2e/sc-1.spec.ts" in encoded
+    assert "implementation_signature_entries" in context
+    assert "UNIQUE_VERBOSE_UNIT_INTENT" not in encoded
+    assert "UNIQUE_VERBOSE_QA_INTENT" not in encoded
+    assert "UNIQUE_VERBOSE_FIXTURE_REASON" not in encoded
+    assert "test_intents" not in context["completed_units"][0]
+    assert "qa_test_intents" not in context["completed_units"][0]
+
+
+def test_component_plan_prompt_uses_structured_slices_instead_of_human_summaries() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    prompt = _component_plan_prompt(
+        run_id="run_compact_prompt",
+        requirement_packet="UNIQUE_REDUNDANT_REQUIREMENT_SUMMARY",
+        design_artifact="UNIQUE_REDUNDANT_DESIGN_SUMMARY",
+        units=[],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+    )
+
+    assert "UNIQUE_REDUNDANT_REQUIREMENT_SUMMARY" not in prompt
+    assert "UNIQUE_REDUNDANT_DESIGN_SUMMARY" not in prompt
+    assert "Non-data units must omit `migration_impact`" in prompt
+    assert "use `[]` for" in prompt
+
+
+def test_component_plan_contract_retry_includes_previous_candidate() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    invalid_candidate = json.dumps(
+        {
+            "scenario_id": "SC-1",
+            "summary": "UNIQUE_PREVIOUS_CANDIDATE",
+            "repo_evidence": [],
+            "work_unit_updates": [
+                {
+                    "unit_id": "WU-1",
+                    "qa_test_intents": [
+                        {
+                            "stage_id": "browser_e2e",
+                            "intent": "Verify the browser flow.",
+                            "acceptance_refs": ["AC-1"],
+                            "target_paths": "tests/e2e/sc-1.spec.ts",
+                            "obligation_refs": [],
+                            "data_setup": {
+                                "mode": "not_required",
+                                "reason": "No setup is needed.",
+                                "requirements": [],
+                            },
+                        }
+                    ],
+                }
+            ],
+            "implementation_signature_contract": {"entries": []},
+        }
+    )
+    corrected_candidate = invalid_candidate.replace(
+        '"target_paths": "tests/e2e/sc-1.spec.ts"',
+        '"target_paths": ["tests/e2e/sc-1.spec.ts"]',
+    )
+
+    class RetryLlm:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+            self.outputs = [invalid_candidate, corrected_candidate]
+
+        def complete(self, *, system: str, prompt: str) -> str:
+            del system
+            self.prompts.append(prompt)
+            return self.outputs.pop(0)
+
+    llm = RetryLlm()
+    payload = DeveloperPlanAgent(llm_client=llm)._component_plan_llm(
+        run_id="run_retry_candidate",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[{"unit_id": "WU-1", "scenario_id": "SC-1"}],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+        scenario_id="SC-1",
+        allowed_unit_ids={"WU-1"},
+        required_unit_ids={"WU-1"},
+    )
+
+    assert payload["summary"] == "UNIQUE_PREVIOUS_CANDIDATE"
+    assert len(llm.prompts) == 2
+    assert invalid_candidate in llm.prompts[1]
+    assert "target_paths must be an array of strings" in llm.prompts[1]
+    assert "Preserve every contract-valid field" in llm.prompts[1]
+    assert "Do not omit, summarize, or regenerate unrelated fields" in llm.prompts[1]
+
+
 def test_fake_developer_plan_follows_language_directive() -> None:
     payload = json.loads(fake_completion(_developer_prompt()))
     encoded = json.dumps(payload, ensure_ascii=False).lower()
@@ -301,7 +465,8 @@ def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice()
     assert "stage_capabilities" in prompt
     assert "stays unverified until such a stage" in prompt
     assert "`runtime_input` obligation" in prompt
-    assert "route interception" in prompt
+    assert "mode `synthetic` when no such source exists" in prompt
+    assert "do not add or alter a production provider" in prompt
 
 
 def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> None:
@@ -337,5 +502,6 @@ def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> Non
     assert "UNIQUE-SIGNATURE" in prompt
     assert "apps/web/src/Screen.tsx" in prompt
     assert "stage_capabilities" in prompt
-    assert "preserving the production" in prompt
-    assert "Missing, empty/default, or invented setup is a blocker" in prompt
+    assert "preserves the production dependency" in prompt
+    assert "`synthetic` is the correct test-only fallback" in prompt
+    assert "semantically insufficient setup is a blocker" in prompt
