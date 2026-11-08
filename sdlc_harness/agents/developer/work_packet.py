@@ -28,6 +28,7 @@ from ...profiles import (
     profiled_plan_contract_issues,
 )
 from ...storage.runtime import utc_now_iso
+from ...profiles.runtime_config import canonical_runtime_config_impact
 
 MAX_FILE_CONTENT_CHARS = 40000
 PROFILED_EDITABLE_PATH_POLICY_VERSION = "editable_path_policy_v1"
@@ -109,6 +110,9 @@ def build_developer_work_packet(
     requirement_coverage = requirement_coverage or []
     approved_runtime_decisions = approved_runtime_decisions or []
     required_fields = ["path", "content"]
+    runtime_config_impact = canonical_runtime_config_impact(
+        structured_plan.get("runtime_config_impact")
+    )
     current_component_aware_contract = (
         structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
     )
@@ -169,6 +173,7 @@ def build_developer_work_packet(
             planning_policy=planning_policy,
         ),
         "implementation_steps": implementation_steps,
+        "runtime_config_impact": runtime_config_impact,
         **(
             {
                 "execution_units": _build_execution_units(
@@ -265,6 +270,11 @@ def _build_execution_units(
     paths_by_unit: dict[str, set[str]] = {}
     dependencies: dict[str, set[str]] = {}
     dependency_rows = package_dependencies or []
+    runtime_changes_by_unit: dict[str, list[dict[str, object]]] = {}
+    for change in canonical_runtime_config_impact(
+        structured_plan.get("runtime_config_impact")
+    )["changes"]:
+        runtime_changes_by_unit.setdefault(str(change.get("unit_id") or ""), []).append(change)
     for item in sorted(work_units, key=lambda row: (int(row.get("order") or 0), str(row.get("unit_id") or ""))):
         unit_id = str(item.get("unit_id") or "").strip()
         depends_on = _string_items(item.get("depends_on"))
@@ -308,6 +318,22 @@ def _build_execution_units(
             raise HarnessError(
                 "developer_execution_unit_path_invalid",
                 f"Execution unit has no approved write path: {unit_id}",
+                run_id=run_id,
+            )
+        runtime_config_changes = runtime_changes_by_unit.get(unit_id, [])
+        invalid_runtime_paths = [
+            str(change.get("read_by") or "")
+            for change in runtime_config_changes
+            if change.get("kind") == "env_var"
+            and str(change.get("read_by") or "") not in write_paths
+        ]
+        if invalid_runtime_paths:
+            raise HarnessError(
+                "developer_runtime_config_scope_invalid",
+                (
+                    f"Execution unit {unit_id} has runtime configuration outside its write scope: "
+                    f"{sorted(invalid_runtime_paths)}"
+                ),
                 run_id=run_id,
             )
         stage_ids = list(dict.fromkeys(str(row.get("stage_id") or "").strip() for row in test_intents))
@@ -372,6 +398,7 @@ def _build_execution_units(
             "qa_test_intents": qa_test_intents,
             "repo_evidence_refs": _string_items(item.get("repo_evidence_refs")),
             "package_dependencies": unit_package_dependencies,
+            "runtime_config_changes": runtime_config_changes,
         }
         projected.append(canonical)
         paths_by_unit[unit_id] = set(write_paths)
@@ -471,7 +498,7 @@ def upgrade_developer_dependency_scope(
         for item in existing
         if str(item.get("consumer_manifest_path") or item.get("manifest_path") or "")
     }
-    if existing == derived and all(
+    if _same_dependency_contracts(existing, derived) and all(
         str(item.get("dependency_id") or "") for item in existing
     ):
         return packet, False
@@ -701,10 +728,6 @@ def _derive_cross_package_dependencies(
                             "provider_workspace_path": Path(provider_manifest_path).parent.as_posix(),
                             "provider_package_name": dependency_name,
                             "provider_symbols": [],
-                            "already_declared": _manifest_declares_dependency(
-                                consumer_manifest,
-                                dependency_name,
-                            ),
                         }
                         requirements_by_identity[identity] = dependency
                     required_by = dependency["required_by_unit_ids"]
@@ -757,11 +780,19 @@ def _read_package_manifest(
     return value
 
 
-def _manifest_declares_dependency(manifest: dict[str, object], dependency_name: str) -> bool:
-    return any(
-        dependency_name in _dict_value(manifest.get(field))
-        for field in ("dependencies", "devDependencies", "peerDependencies", "optionalDependencies")
-    )
+def _same_dependency_contracts(
+    existing: list[dict[str, object]],
+    derived: list[dict[str, object]],
+) -> bool:
+    """Ignore legacy repository-observation fields when comparing frozen contracts."""
+
+    def contract_rows(rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [
+            {key: value for key, value in row.items() if key != "already_declared"}
+            for row in rows
+        ]
+
+    return contract_rows(existing) == contract_rows(derived)
 
 
 def refresh_developer_work_packet(

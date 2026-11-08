@@ -1432,6 +1432,67 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(response["status"], "implementation_written")
         self.assertEqual(execute.call_args.kwargs["session_iteration"], 2)
 
+    def test_runtime_config_recovery_reopens_only_the_owner_unit(self) -> None:
+        ready = self._create_phase4_ready_run()
+        run_id = str(ready["run_id"])
+        plan_path = self.repo_root / str(
+            ready["latest_artifacts"]["implementation_plan_structured"]
+        )
+        plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        owner = plan["work_units"][0]
+        owner_id = str(owner["unit_id"])
+        read_by = str(owner["planned_code_targets"][0]["path"])
+        plan["runtime_config_impact"] = {
+            "status": "required",
+            "reason": "The approved external endpoint must be configurable.",
+            "changes": [
+                {
+                    "kind": "env_var",
+                    "unit_id": owner_id,
+                    "name": "ETOUR_BASE_URL",
+                    "default": "http://127.0.0.1:8090",
+                    "read_by": read_by,
+                    "purpose": "Configure the external ETOUR endpoint.",
+                }
+            ],
+        }
+        plan_path.write_text(
+            json.dumps(plan, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (self._workspace_path(ready) / "legacy-generated.txt").write_text(
+            "preserve me\n",
+            encoding="utf-8",
+        )
+
+        recovered = PhaseFourWorkflow(self._settings()).recover_runtime_config(
+            run_id=run_id
+        )
+
+        self.assertEqual(recovered["status"], "implementation_ready")
+        self.assertEqual(recovered["developer_execution"]["pending_unit_ids"], [owner_id])
+        self.assertIn("runtime_config_recovery", recovered["latest_artifacts"])
+        self.assertEqual(
+            PhaseOneWorkflow(self.settings)
+            .store.read_state(run_id)["developer_expected_dirty_paths"],
+            ["legacy-generated.txt"],
+        )
+        packet_path = self.repo_root / str(
+            recovered["latest_artifacts"]["developer_work_packet"]
+        )
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [unit["unit_id"] for unit in packet["execution_units"]],
+            [owner_id],
+        )
+        self.assertEqual(
+            packet["execution_units"][0]["runtime_config_changes"],
+            plan["runtime_config_impact"]["changes"],
+        )
+        self.assertFalse(
+            packet["execution_units"][0]["test_intent_mutation_required"]
+        )
+
     def test_paused_repair_resume_reuses_frozen_packet_and_artifact_version(self) -> None:
         tested = self._create_phase4_tested_run()
         test_file = (

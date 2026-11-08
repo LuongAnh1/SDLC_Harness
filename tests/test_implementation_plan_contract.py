@@ -186,6 +186,108 @@ def test_execution_unit_adds_shared_boundary_dependency_targets_as_read_context(
     assert consumer["contract_anchor_paths"] == [provider_path, contract_path]
 
 
+def test_execution_unit_projects_runtime_config_only_to_its_owner() -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    api_path = "apps/api/src/cultural-heritage-routes.ts"
+    web_path = "apps/web/src/CulturalHeritageInsertionForm.tsx"
+    change = {
+        "kind": "env_var",
+        "unit_id": "WU-API",
+        "name": "ETOUR_BASE_URL",
+        "default": "http://127.0.0.1:8090",
+        "read_by": api_path,
+        "purpose": "Configure the external ETOUR endpoint.",
+    }
+
+    units = _build_execution_units(
+        structured_plan={
+            "implementation_signature_contract": {"entries": []},
+            "runtime_config_impact": {
+                "status": "required",
+                "reason": "The external endpoint is configurable.",
+                "changes": [change],
+            },
+            "work_units": [
+                {
+                    "unit_id": "WU-API",
+                    "order": 1,
+                    "depends_on": [],
+                    "planned_code_targets": [{"path": api_path, "symbol": "route"}],
+                    "test_intents": [],
+                },
+                {
+                    "unit_id": "WU-WEB",
+                    "order": 2,
+                    "depends_on": ["WU-API"],
+                    "planned_code_targets": [{"path": web_path, "symbol": "Form"}],
+                    "test_intents": [],
+                },
+            ],
+        },
+        allowed_paths=[api_path, web_path],
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+        run_id="run_runtime_projection",
+    )
+
+    assert units[0]["runtime_config_changes"] == [change]
+    assert units[1]["runtime_config_changes"] == []
+
+
+def test_execution_unit_rejects_runtime_config_outside_owner_write_scope() -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    api_path = "apps/api/src/cultural-heritage-routes.ts"
+    other_path = "apps/api/src/other.ts"
+
+    with pytest.raises(HarnessError) as context:
+        _build_execution_units(
+            structured_plan={
+                "implementation_signature_contract": {"entries": []},
+                "runtime_config_impact": {
+                    "status": "required",
+                    "reason": "The external endpoint is configurable.",
+                    "changes": [
+                        {
+                            "kind": "env_var",
+                            "unit_id": "WU-API",
+                            "name": "ETOUR_BASE_URL",
+                            "default": "http://127.0.0.1:8090",
+                            "read_by": other_path,
+                            "purpose": "Configure the external endpoint.",
+                        }
+                    ],
+                },
+                "work_units": [
+                    {
+                        "unit_id": "WU-API",
+                        "order": 1,
+                        "depends_on": [],
+                        "planned_code_targets": [
+                            {"path": api_path, "symbol": "route"}
+                        ],
+                        "test_intents": [],
+                    }
+                ],
+            },
+            allowed_paths=[api_path, other_path],
+            planning_policy=planning_policy,
+            verification_policy=verification_policy,
+            run_id="run_runtime_projection",
+        )
+
+    assert context.value.error_code == "developer_runtime_config_scope_invalid"
+
+
 def test_cross_package_symbol_dependency_emits_tool_owned_contract(tmp_path: Path) -> None:
     project = get_project_profile("typescript_fullstack_v1")
     planning_policy = build_planning_path_policy(
@@ -304,6 +406,93 @@ def test_dependency_scope_upgrade_does_not_open_manifest_for_http_boundary(tmp_p
 
     assert changed is False
     assert upgraded is packet
+
+
+def test_dependency_scope_upgrade_ignores_satisfied_dependency_observation(tmp_path: Path) -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    api_manifest = tmp_path / "apps/api/package.json"
+    db_manifest = tmp_path / "packages/db/package.json"
+    api_manifest.parent.mkdir(parents=True)
+    db_manifest.parent.mkdir(parents=True)
+    api_manifest.write_text(
+        json.dumps({"name": "@example/api", "version": "1.0.0", "dependencies": {}}),
+        encoding="utf-8",
+    )
+    db_manifest.write_text(
+        json.dumps({"name": "@example/db", "version": "1.0.0"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "package.json").write_text(
+        json.dumps({"private": True, "packageManager": "npm@10.9.0"}),
+        encoding="utf-8",
+    )
+    packet = {
+        "execution_units": [
+            {
+                "unit_id": "WU-DB",
+                "component_id": "database",
+                "depends_on": [],
+                "design_edge_ids": ["EDGE-DIRECT"],
+                "planned_code_targets": [
+                    {"path": "packages/db/src/widget.ts", "symbol": "deleteWidget"}
+                ],
+                "write_paths": ["packages/db/src/widget.ts"],
+            },
+            {
+                "unit_id": "WU-API",
+                "component_id": "api",
+                "depends_on": ["WU-DB"],
+                "design_edge_ids": ["EDGE-DIRECT"],
+                "planned_code_targets": [
+                    {"path": "apps/api/src/widget.ts", "symbol": "deleteWidgetRoute"}
+                ],
+                "boundary_contracts": [{"provider_operation": "deleteWidget"}],
+                "write_paths": ["apps/api/src/widget.ts"],
+            },
+        ],
+        "proposed_files": [],
+        "current_files": [],
+        "output_contract": {
+            "allowed_paths": ["packages/db/src/widget.ts", "apps/api/src/widget.ts"]
+        },
+    }
+    upgraded, changed = upgrade_developer_dependency_scope(
+        packet=packet,
+        target_repo_path=tmp_path,
+        planning_policy=planning_policy,
+        run_id="run_dependency_observation",
+    )
+    assert changed is True
+    requirement = upgraded["package_dependency_requirements"][0]
+    assert "already_declared" not in requirement
+
+    api_manifest.write_text(
+        json.dumps(
+            {
+                "name": "@example/api",
+                "version": "1.0.0",
+                "dependencies": {"@example/db": "1.0.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    legacy_packet = json.loads(json.dumps(upgraded))
+    legacy_packet["package_dependency_requirements"][0]["already_declared"] = False
+    legacy_packet["execution_units"][1]["package_dependencies"][0]["already_declared"] = False
+
+    unchanged, changed = upgrade_developer_dependency_scope(
+        packet=legacy_packet,
+        target_repo_path=tmp_path,
+        planning_policy=planning_policy,
+        run_id="run_dependency_observation",
+    )
+
+    assert changed is False
+    assert unchanged is legacy_packet
 
 
 def test_execution_unit_preserves_approved_ui_experience_contract() -> None:

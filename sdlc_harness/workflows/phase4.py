@@ -100,6 +100,7 @@ IMPLEMENTATION_AUTOMATION_STATUSES = {
 }
 
 REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
+    "code_trace_test_out_of_scope",
     "implementation_repair_limit_exceeded",
     "verification_environment_failed",
     "test_failed",

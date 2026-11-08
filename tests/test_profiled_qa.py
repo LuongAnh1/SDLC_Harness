@@ -79,6 +79,7 @@ class ProfiledQaTest(unittest.TestCase):
     def test_policy_accepts_only_profiled_colocated_vitest_paths(self) -> None:
         accepted = (
             "apps/web/src/Feature.test.tsx",
+            "apps/web/src/cancel-deletion.test.ts",
             "apps/api/src/Feature.test.ts",
             "packages/contracts/src/Feature.test.ts",
             "packages/db/src/Feature.test.ts",
@@ -86,6 +87,13 @@ class ProfiledQaTest(unittest.TestCase):
         for path in accepted:
             with self.subTest(path=path):
                 self.assertEqual(self.qa_policy.normalize_test_path(path), path)
+
+        web_rule = next(
+            item
+            for item in self.qa_policy.metadata()["components"]
+            if item["component_id"] == "web"
+        )
+        self.assertEqual(web_rule["test_suffixes"], [".test.tsx", ".test.ts"])
 
         rejected = (
             "src/test/java/FeatureTest.java",

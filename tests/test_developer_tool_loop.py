@@ -28,12 +28,14 @@ from sdlc_harness.agents.developer.execution import (
     _diagnostic_repeat_count,
     _execute_action,
     _execution_phase,
+    _has_successful_target_inspection,
     _merge_context_only_manifest,
     _merge_database_entrypoint_scope_manifest,
     _merge_dependency_manifest_scope_manifest,
     _remember_developer_uiux_guidance,
     _new_journal,
     _new_test_context_policy_error,
+    _observation_signatures,
     _parse_action,
     _prior_attempt_feedback,
     _prepare_patch_text,
@@ -196,6 +198,142 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertTrue(result["truncated"])
         self.assertEqual(result["truncation_reason"], "file_limit")
         self.assertEqual(result["hits"], [])
+
+    def test_read_and_search_batches_are_bounded_and_keep_independent_results(self) -> None:
+        source_dir = self.repo / "src"
+        source_dir.mkdir()
+        (source_dir / "app.ts").write_text(
+            "const authorization = 'Bearer token';\nconst status = 401;\n",
+            encoding="utf-8",
+        )
+        (source_dir / "styles.css").write_text(
+            ".notice { color: green; }\n",
+            encoding="utf-8",
+        )
+        common = {
+            "run_id": "run-batch-read",
+            "work_packet": {},
+            "repo_root": self.repo,
+            "item_paths": ["src/app.ts", "src/styles.css"],
+            "item": {"required_stage_ids": []},
+            "session_dir": self.runtime,
+            "max_write_chars": 18_000,
+            "repo_context_provider": CodeGraphContextProvider(fake_mode=True),
+            "verification_runner": SimpleNamespace(),
+            "verification_policy": None,
+        }
+
+        css_read_result = _execute_action(
+            action={"action": "repo.read", "arguments": {"path": "src/styles.css"}},
+            **common,
+        )
+        read_result = _execute_action(
+            action={
+                "action": "repo.read_batch",
+                "arguments": {
+                    "requests": [
+                        {"path": "src/app.ts"},
+                        {"path": "src/styles.css"},
+                        {"path": "src/missing.ts"},
+                    ]
+                },
+            },
+            **common,
+        )
+        search_result = _execute_action(
+            action={
+                "action": "repo.search_batch",
+                "arguments": {
+                    "queries": ["authorization", "401"],
+                    "prefix": "src",
+                    "limit_per_query": 5,
+                },
+            },
+            **common,
+        )
+        over_limit = _execute_action(
+            action={
+                "action": "repo.search_batch",
+                "arguments": {"queries": ["one", "two", "three", "four", "five"]},
+            },
+            **common,
+        )
+
+        self.assertTrue(read_result["ok"])
+        self.assertTrue(css_read_result["ok"])
+        self.assertIn(".notice { color: green; }", css_read_result["content"])
+        self.assertTrue(read_result["partial"])
+        self.assertEqual(read_result["succeeded"], 2)
+        self.assertEqual(read_result["results"][0]["path"], "src/app.ts")
+        self.assertEqual(read_result["results"][1]["path"], "src/styles.css")
+        self.assertIn(".notice { color: green; }", read_result["results"][1]["content"])
+        self.assertEqual(read_result["results"][2]["error"], "file_not_readable")
+        self.assertTrue(search_result["ok"])
+        self.assertEqual(
+            [[hit["line"] for hit in row["hits"]] for row in search_result["results"]],
+            [[1], [2]],
+        )
+        self.assertEqual(over_limit["error"], "invalid_search_batch")
+
+    def test_batch_reads_feed_authoritative_memory_and_completion_inspection(self) -> None:
+        result = {
+            "ok": True,
+            "batch_kind": "read",
+            "results": [
+                {
+                    "request_index": 0,
+                    "ok": True,
+                    "path": "src/app.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "content": "1: export const app = true;",
+                },
+                {
+                    "request_index": 1,
+                    "ok": True,
+                    "path": "src/app.test.ts",
+                    "start_line": 1,
+                    "end_line": 1,
+                    "total_lines": 1,
+                    "content": "1: test('app', () => {});",
+                },
+            ],
+        }
+        action_row = {
+            "action": "repo.read_batch",
+            "arguments": {
+                "requests": [
+                    {"path": "src/app.ts"},
+                    {"path": "src/app.test.ts"},
+                ]
+            },
+            "result": result,
+            "summary": "Inspected production and test conventions.",
+        }
+
+        memory = _action_memory(
+            [action_row],
+            target_item_paths=["src/app.ts", "src/app.test.ts"],
+            max_evidence_chars=20_000,
+        )
+        batch_signatures = _observation_signatures(
+            {"action": action_row["action"], "arguments": action_row["arguments"]},
+            result=result,
+        )
+        single_signature = _observation_signatures(
+            {"action": "repo.read", "arguments": {"path": "src/app.ts"}},
+            result=result["results"][0],
+        )
+
+        self.assertEqual(
+            {row["path"] for row in memory["inspected_sources"]},
+            {"src/app.ts", "src/app.test.ts"},
+        )
+        self.assertTrue(batch_signatures & single_signature)
+        self.assertTrue(
+            _has_successful_target_inspection([action_row], item_path="src/app.test.ts")
+        )
 
     def test_codegraph_symbols_accepts_file_scope(self) -> None:
         (self.repo / ".codegraph").mkdir()
@@ -851,6 +989,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("rules", context["test_authoring_policy"])
         self.assertIn("shape-only fake", prompt)
         self.assertIn("codegraph.query", prompt)
+        self.assertIn("repo.read_batch", prompt)
+        self.assertIn("repo.search_batch", prompt)
+        self.assertIn("not regex or Boolean syntax", prompt)
         self.assertIn("affected_tests", prompt)
         self.assertIn("never expands execution_unit_contract.write_paths", prompt)
         available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
@@ -1462,6 +1603,83 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("Do not design, serialize, or validate the whole unit", prompt)
         self.assertIn("CSS class names alone do not prove responsive behavior", prompt)
         self.assertIn("Never add production props", prompt)
+
+    def test_non_ui_surface_contract_is_promoted_without_invented_fields(self) -> None:
+        data_contract = {
+            "schema_version": "design_surface_contract_v1",
+            "surface": "data",
+            "entity": "CulturalHeritage",
+            "fields": [{"name": "culturalHeritageId", "type": "string"}],
+            "relations": [],
+            "constraints": ["culturalHeritageId identifies exactly one record"],
+            "operation": "delete the record selected by culturalHeritageId",
+            "migration_intent": "add the CulturalHeritage model",
+        }
+        item = {
+            "id": "WU-DATA",
+            "title": "Add persistence",
+            "objective": "Add the approved persistence model.",
+            "paths": ["packages/db/prisma/schema.prisma"],
+            "context_paths": ["packages/db/prisma/schema.prisma"],
+            "files": [{"path": "packages/db/prisma/schema.prisma"}],
+            "surfaces": ["data"],
+            "required_stage_ids": [],
+            "surface_contracts": [
+                {
+                    "design_node_id": "VDN-DATA",
+                    "surface": "data",
+                    "surface_contract": data_contract,
+                }
+            ],
+        }
+        prompt = _action_prompt(
+            item=item,
+            manifest={
+                "version": "developer_execution_manifest_v8",
+                "mode": "act",
+                "base_sha": "base",
+                "run_id": "run-data-contract",
+                "items": [item],
+            },
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        approved = context["active_focus"]["mandatory_obligations"]["approved_non_ui_contracts"]
+        self.assertEqual(
+            approved,
+            [
+                {
+                    "design_node_id": "VDN-DATA",
+                    "surface": "data",
+                    "surface_contract": data_contract,
+                }
+            ],
+        )
+        self.assertEqual(prompt.count("culturalHeritageId identifies exactly one record"), 1)
+        self.assertIn("never invent convenience fields", prompt)
+        self.assertIn("immutable API-shape constraints, not behavior authorization", prompt)
+        self.assertIn("signature-only parameter or result reserves compatibility", prompt)
+        hard_constraints = context["execution_unit_contract"]["hard_constraints"]
+        self.assertTrue(
+            any(
+                "must not by itself create a branch" in constraint
+                for constraint in hard_constraints
+            )
+        )
+        self.assertTrue(
+            any(
+                "only when the current unit's mandatory obligations explicitly require" in constraint
+                for constraint in hard_constraints
+            )
+        )
 
     def test_action_prompt_promotes_requirements_and_test_intents_once(self) -> None:
         requirement = {"id": "AC-1", "content": "The operator can cancel the pending operation."}

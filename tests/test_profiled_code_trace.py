@@ -152,6 +152,9 @@ def test_code_trace_policy_accepts_only_profiled_source_and_colocated_tests(
     assert code_trace_policy.normalize_test_path("apps/web/src/DeletePage.test.tsx") == (
         "apps/web/src/DeletePage.test.tsx"
     )
+    assert code_trace_policy.normalize_test_path("apps/web/src/cancel-deletion.test.ts") == (
+        "apps/web/src/cancel-deletion.test.ts"
+    )
     assert code_trace_policy.normalize_source_path("src/main/java/DeleteService.java") == ""
     assert code_trace_policy.normalize_test_path("tests/e2e/delete.spec.ts") == ""
     assert code_trace_policy.normalize_source_path("../apps/api/src/DeleteService.ts") == ""

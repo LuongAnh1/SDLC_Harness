@@ -50,10 +50,11 @@ class CodeTracePolicy:
             return ""
         component_id = self.planning_policy.component_for_path(path)
         for rule in self.planning_policy.component_rules:
+            test_suffixes = tuple(test_suffix for _, test_suffix in rule.suffix_pairs)
             if (
                 rule.component_id == component_id
                 and path.startswith(f"{rule.source_root}/")
-                and path.endswith(rule.test_suffix)
+                and path.endswith(test_suffixes)
             ):
                 return path
         return ""

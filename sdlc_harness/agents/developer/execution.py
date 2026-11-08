@@ -38,6 +38,13 @@ from .profile_context import (
     developer_prompt_context,
 )
 from .repair_context import build_repair_closure
+from .runtime_config import runtime_config_source_issues
+from .visual_profile import (
+    app_visual_scope_id,
+    normalize_visual_candidate,
+    read_visual_profiles,
+    visual_profile_required,
+)
 
 
 _LEGACY_ACTION_NAMES = {
@@ -52,11 +59,15 @@ _LEGACY_ACTION_NAMES = {
 _UNIT_ACTION_NAMES = {
     "repo.list",
     "repo.read",
+    "repo.read_batch",
     "repo.search",
+    "repo.search_batch",
     "repo.read_diff",
     "codegraph.query",
     "codegraph.query_readonly",
     "uiux.search_guidance",
+    "uiux.search_visual_profile",
+    "uiux.commit_visual_profile",
     "repo.write_file",
     "repo.apply_patch",
     "repo.replace_text",
@@ -77,9 +88,11 @@ _ACTION_TO_LEGACY = {
 }
 _OBSERVATION_ACTIONS = {
     "list_files", "read_file", "search_code", "read_diff",
-    "repo.list", "repo.read", "repo.search", "repo.read_diff",
+    "repo.list", "repo.read", "repo.read_batch", "repo.search", "repo.search_batch", "repo.read_diff",
     "codegraph.query", "codegraph.query_readonly", "codegraph.seed_context",
     "uiux.search_guidance",
+    "uiux.search_visual_profile",
+    "uiux.commit_visual_profile",
 }
 _MUTATION_ACTIONS = {
     "write_file",
@@ -106,10 +119,12 @@ _SEARCH_PRUNED_DIR_NAMES = {"node_modules", ".codegraph", "dist", "build", "cove
 _SEARCH_MAX_SCANNED_FILES = 5000
 _SEARCH_MAX_FILE_BYTES = 2 * 1024 * 1024
 _SEARCH_TIMEOUT_SECONDS = 5.0
+_MAX_BATCH_OBSERVATIONS = 4
+_BATCH_READ_CHARS_PER_ITEM = 6000
 _TEXT_SUFFIXES = {
     ".java", ".kt", ".py", ".js", ".ts", ".tsx", ".jsx", ".xml", ".json",
     ".yaml", ".yml", ".toml", ".gradle", ".properties", ".md", ".txt", ".sh", ".ps1",
-    ".prisma", ".sql",
+    ".prisma", ".sql", ".css",
 }
 
 
@@ -243,13 +258,26 @@ class DeveloperToolLoopExecutor:
         ):
             try:
                 capability = self.uiux_provider.preflight()
-            except HarnessError:
-                capability = {}
+            except HarnessError as exc:
+                capability = {
+                    "status": "unavailable",
+                    "error": exc.error_code,
+                    "reason": exc.message,
+                }
             if capability.get("status") == "available":
                 manifest["uiux_capability"] = {
                     **capability,
                     "optional": True,
                     "max_successful_searches_per_screen": 2,
+                    "visual_profile_mode": "enforce",
+                    "max_visual_profile_candidates_per_app": 2,
+                }
+            else:
+                manifest["uiux_capability"] = {
+                    **capability,
+                    "optional": False,
+                    "visual_profile_mode": "enforce",
+                    "max_visual_profile_candidates_per_app": 2,
                 }
         if manifest_file.exists():
             existing = _read_json(manifest_file, run_id=run_id)
@@ -332,6 +360,25 @@ class DeveloperToolLoopExecutor:
                 persisted_required_paths_for_migration = persisted_paths
                 _write_json_atomic(manifest_file, existing)
             manifest = existing
+            persisted_capability = _dict_value(manifest.get("uiux_capability"))
+            if (
+                self.uiux_provider is not None
+                and persisted_capability.get("visual_profile_mode") == "enforce"
+                and persisted_capability.get("status") != "available"
+            ):
+                try:
+                    refreshed_capability = self.uiux_provider.preflight()
+                except HarnessError:
+                    refreshed_capability = {}
+                if refreshed_capability.get("status") == "available":
+                    manifest["uiux_capability"] = {
+                        **refreshed_capability,
+                        "optional": True,
+                        "max_successful_searches_per_screen": 2,
+                        "visual_profile_mode": "enforce",
+                        "max_visual_profile_candidates_per_app": 2,
+                    }
+                    _write_json_atomic(manifest_file, manifest)
         else:
             _write_json_atomic(manifest_file, manifest)
 
@@ -485,6 +532,18 @@ class DeveloperToolLoopExecutor:
                     entry = _journal_item(journal, item_id)
                     if entry.get("status") == "completed":
                         continue
+                    capability = _dict_value(manifest.get("uiux_capability"))
+                    if visual_profile_required(item, capability) and capability.get("status") != "available":
+                        raise DeveloperExecutionError(
+                            "developer_visual_profile_unavailable",
+                            str(capability.get("reason") or "Required UI/UX visual-profile skill is unavailable."),
+                            run_id=run_id,
+                            retriable=True,
+                            manifest_path=manifest_path,
+                            journal_path=journal_path,
+                            session_path=session_path,
+                            progress=_progress(journal),
+                        )
                     incomplete_dependencies = [
                         dependency
                         for dependency in _string_items(item.get("depends_on"))
@@ -1022,6 +1081,30 @@ class DeveloperToolLoopExecutor:
             + timeout_action_reserve
             + verification_repair_action_reserve
         )
+        visual_profile_file = session_dir.parent / "ui_visual_profiles_v1.json"
+        visual_app_scope_id = app_visual_scope_id(item)
+        visual_required = visual_profile_required(item, manifest.get("uiux_capability"))
+        try:
+            visual_store = read_visual_profiles(visual_profile_file)
+        except HarnessError as exc:
+            raise DeveloperExecutionError(
+                exc.error_code,
+                exc.message,
+                run_id=run_id,
+                retriable=True,
+                manifest_path=manifest_path,
+                journal_path=journal_path,
+                progress=_progress(journal),
+            ) from exc
+        app_visual_profile = _dict_value(_dict_value(visual_store.get("profiles")).get(visual_app_scope_id))
+        visual_profile_action_reserve = _pinned_visual_profile_action_reserve(
+            working_state=working_state,
+            history=history,
+            visual_required=visual_required,
+            app_visual_profile=app_visual_profile,
+        )
+        configured_max_actions += visual_profile_action_reserve
+        maximum_action_limit += visual_profile_action_reserve
         max_retries = int(getattr(self.settings, "developer_max_action_retries", 2))
         fallback_max_tokens = int(getattr(self.settings, "llm_structured_max_tokens", 8192))
         pinned_profiles = _dict_value(manifest.get("llm_call_profiles"))
@@ -1076,6 +1159,7 @@ class DeveloperToolLoopExecutor:
                 "next_action_index": next_index,
                 "review_cursor": max(0, current_cursor),
                 "refreshed_dependency_ids": sorted(refreshed_dependency_ids),
+                "visual_profile_action_reserve": visual_profile_action_reserve,
                 "updated_at": utc_now_iso(),
             }
             _write_json_atomic(working_state_file, payload)
@@ -1111,6 +1195,14 @@ class DeveloperToolLoopExecutor:
                     journal=journal,
                     item=item,
                 )
+                visual_store = read_visual_profiles(visual_profile_file)
+                app_visual_profile = _dict_value(
+                    _dict_value(visual_store.get("profiles")).get(visual_app_scope_id)
+                )
+                visual_candidates = _developer_visual_candidates(
+                    journal=journal,
+                    app_scope_id=visual_app_scope_id,
+                )
                 prompt = _action_prompt(
                     item=item,
                     manifest=manifest,
@@ -1125,6 +1217,10 @@ class DeveloperToolLoopExecutor:
                     working_memory_evidence_chars=working_memory_evidence_chars,
                     uiux_available=uiux_available,
                     uiux_guidance=uiux_guidance,
+                    visual_profile_required=visual_required,
+                    app_visual_profile=app_visual_profile,
+                    visual_profile_candidates=visual_candidates,
+                    visual_app_scope_id=visual_app_scope_id,
                 )
                 active_options = (
                     repair_options
@@ -1300,6 +1396,9 @@ class DeveloperToolLoopExecutor:
                     pending_package_dependency_ids=pending_dependency_ids,
                     uiux_available=uiux_available,
                     uiux_success_count=_developer_uiux_success_count(journal=journal, item=item),
+                    visual_profile_required=visual_required,
+                    visual_profile_committed=bool(app_visual_profile),
+                    visual_profile_candidate_count=len(visual_candidates),
                 )
                 if policy_error:
                     result = {"ok": False, **policy_error}
@@ -1318,6 +1417,9 @@ class DeveloperToolLoopExecutor:
                             verification_runner=self.verification_runner,
                             verification_policy=verification_policy,
                             uiux_provider=self.uiux_provider,
+                            journal=journal,
+                            visual_profile_file=visual_profile_file,
+                            visual_app_scope_id=visual_app_scope_id,
                             package_tool_timeout_seconds=int(
                                 getattr(self.settings, "developer_package_tool_timeout_seconds", 120)
                             ),
@@ -1380,6 +1482,56 @@ class DeveloperToolLoopExecutor:
                             "reason": str(result.get("error") or "developer_uiux_unavailable"),
                             "disabled_at": utc_now_iso(),
                         }
+                if action["action"] == "uiux.search_visual_profile" and result.get("candidate"):
+                    _remember_developer_visual_candidate(
+                        journal=journal,
+                        app_scope_id=visual_app_scope_id,
+                        candidate=_dict_value(result.get("candidate")),
+                    )
+                    current_candidates = _developer_visual_candidates(
+                        journal=journal,
+                        app_scope_id=visual_app_scope_id,
+                    )
+                    if len(current_candidates) >= 2 and not any(
+                        row.get("valid") is True for row in current_candidates
+                    ):
+                        invalid_attempts = journal.setdefault("uiux_visual_candidate_failures", [])
+                        if isinstance(invalid_attempts, list):
+                            invalid_attempts.append(
+                                {
+                                    "app_scope_id": visual_app_scope_id,
+                                    "candidate_ids": [
+                                        str(row.get("candidate_id") or "") for row in current_candidates
+                                    ],
+                                    "failed_at": utc_now_iso(),
+                                }
+                            )
+                        candidate_cache = _dict_value(journal.get("uiux_visual_candidates_by_app"))
+                        candidate_cache[visual_app_scope_id] = []
+                        journal["uiux_visual_candidates_by_app"] = candidate_cache
+                        persist_working_state(action_index + 1)
+                        _write_json_atomic(journal_file, journal)
+                        raise DeveloperExecutionError(
+                            "developer_visual_profile_invalid",
+                            "Two UI/UX visual-profile candidates failed deterministic validation.",
+                            run_id=run_id,
+                            retriable=True,
+                            manifest_path=manifest_path,
+                            journal_path=journal_path,
+                            progress=_progress(journal),
+                        )
+                if str(result.get("error") or "") == "developer_visual_profile_unavailable":
+                    persist_working_state(action_index + 1)
+                    _write_json_atomic(journal_file, journal)
+                    raise DeveloperExecutionError(
+                        "developer_visual_profile_unavailable",
+                        str(result.get("reason") or "Required UI/UX visual-profile skill is unavailable."),
+                        run_id=run_id,
+                        retriable=True,
+                        manifest_path=manifest_path,
+                        journal_path=journal_path,
+                        progress=_progress(journal),
+                    )
                 timeout_diagnostic = _timeout_diagnostic_state(history)
                 if (
                     result.get("ok") is True
@@ -1594,6 +1746,7 @@ class DeveloperToolLoopExecutor:
                 required_test_mutations = (
                     set(_string_items(item.get("test_target_paths"))) - set(mutated_paths)
                     if _dict_items(item.get("test_intents"))
+                    and item.get("test_intent_mutation_required") is not False
                     else set()
                 )
                 if required_test_mutations:
@@ -1660,6 +1813,30 @@ class DeveloperToolLoopExecutor:
                             "action": "rejected",
                             "error": "developer_unit_verification_missing",
                             "instruction": f"Run required verification stages on current hashes: {missing_stages}",
+                        }
+                    )
+                    _write_json_atomic(journal_file, journal)
+                    continue
+                runtime_config_issues = runtime_config_source_issues(
+                    repo_root=target_path,
+                    changes=_dict_items(item.get("runtime_config_changes")),
+                )
+                if runtime_config_issues:
+                    entry["actions"][-1]["completion_gate"] = {
+                        "status": "rejected",
+                        "reason": "runtime_config_contract_mismatch",
+                        "findings": _clip_json_value(runtime_config_issues, 4000),
+                    }
+                    history.append(
+                        {
+                            "action": "rejected",
+                            "error": "developer_runtime_config_contract_mismatch",
+                            "instruction": (
+                                "Read the approved runtime configuration from mandatory_obligations, "
+                                "then make the declared source read the exact environment variable "
+                                "and use its approved default before completing this unit."
+                            ),
+                            "findings": runtime_config_issues,
                         }
                     )
                     _write_json_atomic(journal_file, journal)
@@ -2188,6 +2365,9 @@ def developer_execution_retry_allowed(state: dict[str, object]) -> bool:
         "developer_action_limit_exceeded",
         "developer_repair_budget_exhausted",
         "developer_repair_stalled",
+        "developer_visual_profile_unavailable",
+        "developer_visual_profile_invalid",
+        "developer_visual_profile_required",
     }:
         return False
     execution = _dict_value(state.get("developer_execution"))
@@ -2477,7 +2657,13 @@ def _build_manifest(
                     "ui_obligations": _dict_items(unit.get("ui_obligations")),
                     "required_stage_ids": _string_items(unit.get("required_stage_ids")),
                     "test_target_paths": _string_items(unit.get("test_target_paths")),
+                    "test_intent_mutation_required": unit.get(
+                        "test_intent_mutation_required", True
+                    ),
                     "package_dependencies": _dict_items(unit.get("package_dependencies")),
+                    "runtime_config_changes": _dict_items(
+                        unit.get("runtime_config_changes")
+                    ),
                     "signature_entry_ids": unit_signature_ids,
                     "input_digest": str(unit.get("input_digest") or ""),
                     "requirements": [
@@ -2673,6 +2859,10 @@ def _action_prompt(
     working_memory_evidence_chars: int | None = None,
     uiux_available: bool = False,
     uiux_guidance: list[dict[str, object]] | None = None,
+    visual_profile_required: bool = False,
+    app_visual_profile: dict[str, object] | None = None,
+    visual_profile_candidates: list[dict[str, object]] | None = None,
+    visual_app_scope_id: str = "",
 ) -> str:
     unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
@@ -2800,10 +2990,22 @@ def _action_prompt(
         "new_test_targets": new_test_targets,
         "repository_evidence_required": bool(new_test_targets),
         "repository_evidence_satisfied": test_context_ready,
+        "test_intent_mutation_required": item.get(
+            "test_intent_mutation_required", True
+        ),
     }
+    app_visual_profile = dict(app_visual_profile or {})
+    visual_profile_candidates = list(visual_profile_candidates or [])
+    visual_profile_pending = visual_profile_required and not app_visual_profile
     unit_action_names = (
-        "repo.list|repo.read|repo.search|repo.read_diff|codegraph.query|codegraph.query_readonly|"
+        "repo.list|repo.read|repo.read_batch|repo.search|repo.search_batch|repo.read_diff|"
+        "codegraph.query|codegraph.query_readonly|"
         + ("uiux.search_guidance|" if uiux_available else "")
+        + (
+            "uiux.search_visual_profile|uiux.commit_visual_profile|"
+            if visual_profile_pending
+            else ""
+        )
         + "repo.write_file|repo.apply_patch|repo.replace_text|package.ensure_workspace_dependency|"
         "verification.run_stage|execution.complete_unit"
     )
@@ -2820,6 +3022,12 @@ def _action_prompt(
         action_schema["action"] = "verification.run_stage"
     if unit_aware and pending_package_dependency_ids:
         action_schema["action"] = "package.ensure_workspace_dependency"
+    if unit_aware and visual_profile_pending:
+        action_schema["action"] = (
+            "uiux.search_visual_profile|uiux.commit_visual_profile"
+            if visual_profile_candidates
+            else "uiux.search_visual_profile"
+        )
     active_failures = [
         _compact_repair_episode(repair_state[stage_id]) for stage_id in failed_stage_ids
     ]
@@ -2908,6 +3116,17 @@ def _action_prompt(
         "test_authoring_policy": test_authoring_policy,
         "working_memory": action_memory,
     }
+    if visual_profile_required or app_visual_profile:
+        context["app_visual_profile"] = {
+            "app_scope_id": visual_app_scope_id,
+            "status": "committed" if app_visual_profile else "required",
+            "authority": (
+                "Presentation details only. Exact approved Design contracts always win; this profile cannot add "
+                "flows, components, dependencies, runtime behavior, or write paths."
+            ),
+            **({"profile": app_visual_profile} if app_visual_profile else {}),
+            **({"candidates": visual_profile_candidates} if visual_profile_candidates else {}),
+        }
     qa_acceptance = _developer_read_only_qa_acceptance(item=item, manifest=manifest)
     if qa_acceptance:
         context["read_only_qa_acceptance"] = qa_acceptance
@@ -3039,16 +3258,31 @@ def _action_prompt(
             if uiux_available
             else ""
         )
+        visual_profile_action_help = (
+            "- uiux.search_visual_profile: required app-level presentation candidate for a new stylesheet; arguments "
+            "{query, variance?: 1-10, motion?: 1-10, density?: 1-10}. Query uses 3-8 generic ASCII product/style "
+            "terms and no private names or paths; defaults are variance=3, motion=3, density=6\n"
+            "- uiux.commit_visual_profile: commit one validated candidate app-wide; arguments {candidate_id, rationale}. "
+            "Commit does not change Design authority or repository files\n"
+            if visual_profile_pending
+            else ""
+        )
         available_actions = (
             "- repo.list: arguments {prefix?, limit?}\n"
             "- repo.read: arguments {path, start_line?, end_line?}\n"
-            "- repo.search: arguments {query, prefix?, limit?}\n"
+            f"- repo.read_batch: arguments {{requests: [{{path, start_line?, end_line?}}]}}; 1-{_MAX_BATCH_OBSERVATIONS} "
+            "read-only requests, each result is independent\n"
+            "- repo.search: arguments {query, prefix?, limit?}; query is one case-insensitive literal substring, "
+            "not regex or Boolean syntax\n"
+            f"- repo.search_batch: arguments {{queries: [string], prefix?, limit_per_query?}}; 1-{_MAX_BATCH_OBSERVATIONS} "
+            "case-insensitive literal substrings, use this instead of OR syntax\n"
             "- repo.read_diff: arguments {path}\n"
             "- codegraph.query: arguments {operation, query?, symbol?, file?, files?, kind?, limit?, depth?, "
             "file_filter?, pattern?}; operation is symbols|node|callers|callees|impact|affected_tests|files|explore\n"
             "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
             "capability. node requires symbol or file; explore requires query.\n"
             "- codegraph.query_readonly: legacy alias with arguments {query}; use codegraph.query for new work\n"
+            f"{visual_profile_action_help}"
             f"{uiux_action_help}"
             "- repo.write_file: arguments {path, expected_sha256, content}; approved unit write path only\n"
             "- repo.replace_text: arguments {path, expected_sha256, old_text, new_text}; replace one exact unique "
@@ -3058,8 +3292,13 @@ def _action_prompt(
             "- execution.complete_unit: arguments {summary, path_dispositions: [{path, status, reason}]}; status is "
             "mutated|verified_unchanged|not_required. Every unit path needs a disposition, non-mutated paths need "
             "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes. "
-            "When test_intents are present, every listed test_target_path must be mutated in this unit; a passing "
-            "pre-existing test file is not coverage evidence for a new intent\n"
+            + (
+                "When test_intents are present, every listed test_target_path must be mutated in this unit; a passing "
+                "pre-existing test file is not coverage evidence for a new intent\n"
+                if item.get("test_intent_mutation_required") is not False
+                else "This recovery reuses previously authored test intents. Do not mutate tests merely to recreate "
+                "coverage evidence; run the required stages against the current tests instead.\n"
+            )
         )
         context["execution_unit_contract"] = {
             "unit_id": item.get("id"),
@@ -3075,20 +3314,25 @@ def _action_prompt(
             "behavior_contract_source": "active_focus.mandatory_obligations",
             "required_stage_ids": item.get("required_stage_ids", []),
             "test_target_paths": item.get("test_target_paths", []),
+            "test_intent_mutation_required": item.get(
+                "test_intent_mutation_required", True
+            ),
             "package_dependencies": _dict_items(item.get("package_dependencies")),
             "package_dependency_statuses": package_dependency_statuses,
             "package_tool_owned_paths": _item_dependency_paths(item),
             "approved_signatures": _item_approved_signatures(item),
             "hard_constraints": [
-                "Approved signatures are immutable and override conflicting prose objectives.",
+                "Approved signatures are immutable API-shape constraints, not authorization to implement behavior. They override conflicting prose only for qualified name, parameters, async shape, and return type.",
                 "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
                 "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+                "Implement behavior only when active_focus.mandatory_obligations for this unit requires it. A parameter or result type present only in an approved signature may reserve compatibility for another unit; it must not by itself create a branch, side effect, result value, or domain error.",
+                "For non-UI work, preserve every exact entity field, operation, relation, constraint, and migration intent in active_focus.mandatory_obligations.approved_non_ui_contracts; never invent convenience fields or sibling API behavior.",
                 "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
                 "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
                 "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
                 "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
                 "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
-                "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
+                "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
             ],
         }
         if verification_forced_stage_ids:
@@ -3110,6 +3354,16 @@ def _action_prompt(
                 "npm lockfile. Your next and only allowed action MUST be package.ensure_workspace_dependency for "
                 f"one of {pending_package_dependency_ids}. Do not inspect node_modules or edit package metadata "
                 "with repo.write_file."
+            )
+        if visual_profile_pending:
+            available_actions = visual_profile_action_help
+            work_instruction = (
+                "Establish one app-level presentation profile before reading or changing this new UI. The profile "
+                "fills only visual implementation details; it must not reinterpret the approved flow or Design contract."
+            )
+            phase_instruction = (
+                "Call uiux.search_visual_profile when no valid candidate exists. After reviewing a validated candidate, "
+                "call uiux.commit_visual_profile with its exact candidate_id. At most two candidates may be evaluated."
             )
     else:
         available_actions = (
@@ -3156,10 +3410,12 @@ def _action_prompt(
         "Available actions:\n"
         f"{available_actions}\n"
         f"A mutation's text payload must stay below {max_write_chars} characters. {extra}\n"
-        f"Treat {signature_contract_ref} as immutable hard constraints. They override conflicting "
-        "prose objectives; never change an approved qualified name, parameter type/order/optional/rest shape, async "
-        "flag, or return type. Parameter names are evidence rather than contract, so destructuring is allowed when "
-        "the approved shape is preserved. Treat active_focus.mandatory_obligations as the single canonical behavior "
+        f"Treat {signature_contract_ref} as immutable API-shape constraints, not behavior authorization. They override "
+        "conflicting prose only for qualified name, parameter type/order/optional/rest shape, async flag, and return "
+        "type. Parameter names are evidence rather than contract, so destructuring is allowed when the approved shape "
+        "is preserved. Implement behavior only from active_focus.mandatory_obligations for this unit; a signature-only "
+        "parameter or result reserves compatibility and must not create a branch, side effect, result, or domain error. "
+        "Treat active_focus.mandatory_obligations as the single canonical behavior "
         "checklist; execution_task and the short goal are navigation summaries, not competing contracts. "
         "Choose exactly one next action, emit its JSON object, and end the response immediately. Only Harness "
         "tool results in working_memory prove execution. Treat authoritative_sources as the single verified current "
@@ -3268,6 +3524,9 @@ def _action_policy_error(
     pending_package_dependency_ids: list[str] | None = None,
     uiux_available: bool = False,
     uiux_success_count: int = 0,
+    visual_profile_required: bool = False,
+    visual_profile_committed: bool = False,
+    visual_profile_candidate_count: int = 0,
 ) -> dict[str, object] | None:
     name = str(action.get("action") or "")
     phase = _execution_phase(
@@ -3285,6 +3544,29 @@ def _action_policy_error(
     repair_verification_forced_stage_ids = repair_verification_forced_stage_ids or []
     pending_package_dependency_ids = pending_package_dependency_ids or []
     action_path = str(_dict_value(action.get("arguments")).get("path") or "").replace("\\", "/")
+    if visual_profile_required and not visual_profile_committed:
+        if name == "uiux.search_visual_profile":
+            if not uiux_available:
+                return {
+                    "error": "developer_visual_profile_unavailable",
+                    "instruction": "Pause this UI unit because its required visual-profile skill is unavailable.",
+                }
+            if visual_profile_candidate_count >= 2:
+                return {
+                    "error": "developer_visual_profile_invalid",
+                    "instruction": "Two visual-profile candidates were already evaluated; pause instead of inventing another.",
+                }
+            return None
+        if name == "uiux.commit_visual_profile":
+            return None
+        return {
+            "error": "developer_visual_profile_required",
+            "instruction": (
+                "Before inspecting or mutating this new UI, call uiux.search_visual_profile, then commit one valid "
+                "candidate with uiux.commit_visual_profile. The approved Design contract remains authoritative."
+            ),
+            "candidate_count": visual_profile_candidate_count,
+        }
     if name == "uiux.search_guidance":
         if not uiux_available:
             return {
@@ -3327,7 +3609,12 @@ def _action_policy_error(
             ),
             "unresolved_paths": sorted(unresolved_paths),
         }
-    if name in _OBSERVATION_ACTIONS and _observation_signatures(action) & seen_observations:
+    observation_signatures = _observation_signatures(action)
+    if (
+        name in _OBSERVATION_ACTIONS
+        and observation_signatures
+        and observation_signatures <= seen_observations
+    ):
         repeat_count = 1 + _duplicate_observation_repeat_count(action, history)
         return {
             "error": "duplicate_observation",
@@ -3534,10 +3821,23 @@ def _has_test_authoring_context(
             observed = str(arguments.get("path") or "").replace("\\", "/")
             if observed.casefold() != target and _is_typescript_test_path(observed):
                 return True
+        if action_name == "repo.read_batch" and any(
+            child.get("ok") is True
+            and (observed := str(child.get("path") or "").replace("\\", "/")).casefold() != target
+            and _is_typescript_test_path(observed)
+            for child in _dict_items(result.get("results"))
+        ):
+            return True
         if action_name in {"search_code", "repo.search"}:
             query = str(arguments.get("query") or "").casefold()
             if _dict_items(result.get("hits")) and any(marker in query for marker in query_markers):
                 return True
+        if action_name == "repo.search_batch" and any(
+            _dict_items(child.get("hits"))
+            and any(marker in str(child.get("query") or "").casefold() for marker in query_markers)
+            for child in _dict_items(result.get("results"))
+        ):
+            return True
         if action_name in {"codegraph.query", "codegraph.query_readonly"}:
             query = str(arguments.get("query") or "").casefold()
             serialized = json.dumps(result, ensure_ascii=False).casefold()
@@ -3555,6 +3855,15 @@ def _is_typescript_test_path(path: str) -> bool:
 def _has_successful_target_inspection(history: list[dict[str, object]], *, item_path: str) -> bool:
     expected = item_path.strip().replace("\\", "/").lstrip("/").casefold()
     for row in history:
+        if row.get("action") == "repo.read_batch":
+            if any(
+                child.get("ok") is True
+                and str(child.get("path") or "").strip().replace("\\", "/").lstrip("/").casefold()
+                == expected
+                for child in _dict_items(_dict_value(row.get("result")).get("results"))
+            ):
+                return True
+            continue
         if row.get("action") not in {"read_file", "read_diff", "repo.read", "repo.read_diff"}:
             continue
         if not _dict_value(row.get("result")).get("ok"):
@@ -3586,6 +3895,43 @@ def _observation_signatures(
 
     name = str(action.get("action") or "")
     arguments = _dict_value(action.get("arguments"))
+    if name == "repo.read_batch":
+        results = _dict_items(_dict_value(result).get("results")) if result else []
+        signatures: set[str] = set()
+        for index, request in enumerate(_dict_items(arguments.get("requests"))):
+            child_result = next(
+                (row for row in results if int(row.get("request_index") or 0) == index),
+                None,
+            )
+            if result is not None and _dict_value(child_result).get("ok") is not True:
+                continue
+            signatures.update(
+                _observation_signatures(
+                    {"action": "repo.read", "arguments": request},
+                    result=child_result,
+                )
+            )
+        return signatures or {_action_signature(action)}
+    if name == "repo.search_batch":
+        results = _dict_items(_dict_value(result).get("results")) if result else []
+        return {
+            _action_signature(
+                {
+                    "action": "repo.search",
+                    "arguments": {
+                        "query": query,
+                        "prefix": arguments.get("prefix"),
+                        "limit": arguments.get("limit_per_query"),
+                    },
+                }
+            )
+            for index, query in enumerate(_string_items(arguments.get("queries")))
+            if result is None
+            or any(
+                int(row.get("request_index") or 0) == index and row.get("ok") is True
+                for row in results
+            )
+        } or {_action_signature(action)}
     if name not in {"read_file", "repo.read"}:
         return {_action_signature(action)}
     path = str(arguments.get("path") or "").replace("\\", "/")
@@ -3947,47 +4293,54 @@ def _action_memory(
     seen_ranges: set[tuple[str, object, object]] = set()
     for history_index in range(len(history) - 1, -1, -1):
         row = history[history_index]
-        if row.get("action") not in {"read_file", "repo.read"}:
+        action_name = str(row.get("action") or "")
+        if action_name not in {"read_file", "repo.read", "repo.read_batch"}:
             continue
-        result = _dict_value(row.get("result"))
-        if not result.get("ok") or not isinstance(result.get("content"), str):
-            continue
-        content = str(result.get("content") or "")
-        start_line = int(result.get("start_line") or 1)
-        end_line = int(result.get("end_line") or start_line)
-        total_lines = int(result.get("total_lines") or end_line)
-        truncated = result.get("truncated") is True
-        has_more = result.get("has_more") is True
-        next_start_line = int(result.get("next_start_line") or 0)
-        legacy_clipped = False
-        if "truncated" not in result and len(content) >= 12000:
-            final_line = content.splitlines()[-1] if content.splitlines() else ""
-            match = re.match(r"^(\d+):", final_line)
-            if match:
-                end_line = max(start_line - 1, int(match.group(1)) - 1)
-                total_lines = max(total_lines, int(result.get("end_line") or end_line))
-                truncated = True
-                has_more = True
-                next_start_line = end_line + 1
-                legacy_clipped = True
-        key = (str(result.get("path") or ""), start_line, end_line)
-        if key in seen_ranges:
-            continue
-        seen_ranges.add(key)
-        candidate = {
-            "path": key[0],
-            "start_line": key[1],
-            "end_line": key[2],
-            "content": content,
-            "verified_at_action": history_index + 1,
-            **({"total_lines": total_lines} if "total_lines" in result or legacy_clipped else {}),
-            **({"truncated": True} if truncated else {}),
-            **({"has_more": True} if has_more else {}),
-            **({"next_start_line": next_start_line} if next_start_line else {}),
-        }
-        if any(_read_source_covers(newer, candidate) for newer in latest_reads):
-            continue
-        latest_reads.append(candidate)
+        parent_result = _dict_value(row.get("result"))
+        read_results = (
+            _dict_items(parent_result.get("results"))
+            if action_name == "repo.read_batch"
+            else [parent_result]
+        )
+        for result in reversed(read_results):
+            if not result.get("ok") or not isinstance(result.get("content"), str):
+                continue
+            content = str(result.get("content") or "")
+            start_line = int(result.get("start_line") or 1)
+            end_line = int(result.get("end_line") or start_line)
+            total_lines = int(result.get("total_lines") or end_line)
+            truncated = result.get("truncated") is True
+            has_more = result.get("has_more") is True
+            next_start_line = int(result.get("next_start_line") or 0)
+            legacy_clipped = False
+            if "truncated" not in result and len(content) >= 12000:
+                final_line = content.splitlines()[-1] if content.splitlines() else ""
+                match = re.match(r"^(\d+):", final_line)
+                if match:
+                    end_line = max(start_line - 1, int(match.group(1)) - 1)
+                    total_lines = max(total_lines, int(result.get("end_line") or end_line))
+                    truncated = True
+                    has_more = True
+                    next_start_line = end_line + 1
+                    legacy_clipped = True
+            key = (str(result.get("path") or ""), start_line, end_line)
+            if key in seen_ranges:
+                continue
+            seen_ranges.add(key)
+            candidate = {
+                "path": key[0],
+                "start_line": key[1],
+                "end_line": key[2],
+                "content": content,
+                "verified_at_action": history_index + 1,
+                **({"total_lines": total_lines} if "total_lines" in result or legacy_clipped else {}),
+                **({"truncated": True} if truncated else {}),
+                **({"has_more": True} if has_more else {}),
+                **({"next_start_line": next_start_line} if next_start_line else {}),
+            }
+            if any(_read_source_covers(newer, candidate) for newer in latest_reads):
+                continue
+            latest_reads.append(candidate)
     target_order = {path: index for index, path in enumerate(target_item_paths)}
     latest_reads.sort(
         key=lambda row: (
@@ -4070,6 +4423,19 @@ def _action_memory(
         if isinstance(result.get("content"), str):
             result["content_chars"] = len(result["content"])
             result.pop("content", None)
+        if row.get("action") == "repo.read_batch":
+            result["results"] = [
+                {
+                    **child,
+                    **(
+                        {"content_chars": len(str(child.get("content") or ""))}
+                        if isinstance(child.get("content"), str)
+                        else {}
+                    ),
+                    "content": None,
+                }
+                for child in _dict_items(result.get("results"))
+            ]
         recent_results.append(
             {
                 "action": row.get("action"),
@@ -4131,7 +4497,9 @@ def _compact_working_result(result: dict[str, object]) -> dict[str, object]:
             }.items()
             if value not in {None, ""}
         }
-    return _dict_value(_clip_json_value(result, 2000))
+    return _dict_value(
+        _clip_json_value(result, 8000 if result.get("batch_kind") == "search" else 2000)
+    )
 
 
 def _failing_test_name(reason: str) -> str:
@@ -4554,11 +4922,103 @@ def _execute_action(
     verification_runner: VerificationRunner,
     verification_policy: VerificationStagePolicy | None,
     uiux_provider: UiUxGuidanceProvider | None = None,
+    journal: dict[str, object] | None = None,
+    visual_profile_file: Path | None = None,
+    visual_app_scope_id: str = "",
     package_tool_timeout_seconds: int = 120,
 ) -> dict[str, object]:
     raw_name = str(action["action"])
     name = _ACTION_TO_LEGACY.get(raw_name, raw_name)
     args = _dict_value(action.get("arguments"))
+    if raw_name == "uiux.search_visual_profile":
+        if "ui" not in {value.strip().lower() for value in _string_items(item.get("surfaces"))}:
+            return {"ok": False, "error": "developer_uiux_not_ui_unit"}
+        if uiux_provider is None:
+            return {"ok": False, "error": "developer_visual_profile_unavailable"}
+        query = str(args.get("query") or "").strip()
+        try:
+            source = uiux_provider.design_system(args)
+            capability = uiux_provider.preflight()
+            design_refs = list(
+                dict.fromkeys(
+                    [
+                        *_string_items(item.get("design_node_ids")),
+                        *[
+                            str(binding.get("design_node_id") or "")
+                            for binding in _dict_items(item.get("surface_contracts"))
+                            if str(binding.get("design_node_id") or "")
+                        ],
+                    ]
+                )
+            )
+            candidate = normalize_visual_candidate(
+                source,
+                app_scope_id=visual_app_scope_id or app_visual_scope_id(item),
+                skill_fingerprint=str(capability.get("fingerprint") or ""),
+                design_refs=design_refs,
+            )
+        except HarnessError as exc:
+            result: dict[str, object] = {"ok": False, "error": exc.error_code, "reason": exc.message}
+            if exc.error_code == "developer_visual_profile_invalid":
+                attempt_digest = hashlib.sha256(query.encode("utf-8")).hexdigest()[:12].upper()
+                result["candidate"] = {
+                    "candidate_id": f"VP-INVALID-{attempt_digest}",
+                    "query": query,
+                    "valid": False,
+                    "reason": exc.message,
+                }
+            return result
+        return {
+            "ok": True,
+            "purpose": "app_level_presentation_profile_candidate",
+            "design_authority": False,
+            "candidate": {**candidate, "valid": True},
+        }
+    if raw_name == "uiux.commit_visual_profile":
+        candidate_id = str(args.get("candidate_id") or "").strip()
+        rationale = str(args.get("rationale") or "").strip()
+        candidates = _developer_visual_candidates(
+            journal=journal or {},
+            app_scope_id=visual_app_scope_id or app_visual_scope_id(item),
+        )
+        candidate = next(
+            (
+                row
+                for row in candidates
+                if str(row.get("candidate_id") or "") == candidate_id and row.get("valid") is True
+            ),
+            None,
+        )
+        if candidate is None or not rationale:
+            return {
+                "ok": False,
+                "error": "developer_visual_profile_invalid",
+                "reason": "Commit requires one exact valid candidate_id and a non-empty rationale.",
+                "available_candidate_ids": [
+                    str(row.get("candidate_id") or "") for row in candidates if row.get("valid") is True
+                ],
+            }
+        if visual_profile_file is None:
+            return {"ok": False, "error": "developer_visual_profile_unavailable"}
+        store = read_visual_profiles(visual_profile_file)
+        profiles = _dict_value(store.get("profiles"))
+        committed = {
+            key: value
+            for key, value in candidate.items()
+            if key != "valid"
+        }
+        committed["commit_rationale"] = rationale[:500]
+        committed["committed_at"] = utc_now_iso()
+        profiles[str(committed.get("app_scope_id") or visual_app_scope_id)] = committed
+        store["profiles"] = profiles
+        _write_json_atomic(visual_profile_file, store)
+        return {
+            "ok": True,
+            "app_scope_id": committed.get("app_scope_id"),
+            "candidate_id": candidate_id,
+            "profile_digest": committed.get("digest"),
+            "artifact": visual_profile_file.name,
+        }
     if raw_name == "uiux.search_guidance":
         if "ui" not in {value.strip().lower() for value in _string_items(item.get("surfaces"))}:
             return {"ok": False, "error": "developer_uiux_not_ui_unit"}
@@ -4675,6 +5135,74 @@ def _execute_action(
             "evidence": evidence[:12000],
             "truncated": len(evidence) > 12000,
         }
+    if raw_name == "repo.read_batch":
+        requests = args.get("requests")
+        if (
+            not isinstance(requests, list)
+            or not 1 <= len(requests) <= _MAX_BATCH_OBSERVATIONS
+            or any(not isinstance(request, dict) for request in requests)
+        ):
+            return {
+                "ok": False,
+                "error": "invalid_read_batch",
+                "max_requests": _MAX_BATCH_OBSERVATIONS,
+            }
+        results: list[dict[str, object]] = []
+        for index, request in enumerate(requests):
+            try:
+                result = _read_file(
+                    repo_root,
+                    request,
+                    run_id=run_id,
+                    max_content_chars=_BATCH_READ_CHARS_PER_ITEM,
+                )
+            except HarnessError as exc:
+                result = {"ok": False, "error": exc.error_code, "reason": exc.message}
+            results.append({"request_index": index, **result})
+        succeeded = sum(result.get("ok") is True for result in results)
+        return {
+            "ok": succeeded > 0,
+            "batch_kind": "read",
+            "count": len(results),
+            "succeeded": succeeded,
+            "partial": succeeded != len(results),
+            "results": results,
+        }
+    if raw_name == "repo.search_batch":
+        raw_queries = args.get("queries")
+        if (
+            not isinstance(raw_queries, list)
+            or not 1 <= len(raw_queries) <= _MAX_BATCH_OBSERVATIONS
+            or any(not isinstance(query, str) or not query.strip() for query in raw_queries)
+        ):
+            return {
+                "ok": False,
+                "error": "invalid_search_batch",
+                "max_queries": _MAX_BATCH_OBSERVATIONS,
+            }
+        limit = max(1, min(int(args.get("limit_per_query") or 10), 10))
+        results = []
+        # shortcut: at most four sequential literal scans; share one scan if the batch limit grows.
+        for index, query in enumerate(raw_queries):
+            search_args = {
+                "query": query.strip(),
+                "prefix": args.get("prefix"),
+                "limit": limit,
+            }
+            try:
+                result = _search_code(repo_root, search_args, run_id=run_id)
+            except HarnessError as exc:
+                result = {"ok": False, "error": exc.error_code, "reason": exc.message}
+            results.append({"request_index": index, "query": query.strip(), **result})
+        succeeded = sum(result.get("ok") is True for result in results)
+        return {
+            "ok": succeeded > 0,
+            "batch_kind": "search",
+            "count": len(results),
+            "succeeded": succeeded,
+            "partial": succeeded != len(results),
+            "results": results,
+        }
     if raw_name == "verification.run_stage":
         stage_id = str(args.get("stage_id") or "").strip()
         required = set(_string_items(item.get("required_stage_ids")))
@@ -4741,40 +5269,7 @@ def _execute_action(
                         break
         return {"ok": True, "files": files, "truncated": len(files) >= limit}
     if name == "read_file":
-        path = _safe_read_path(repo_root, str(args.get("path") or ""), run_id=run_id)
-        if not path.is_file() or not _read_path_allowed(repo_root, path):
-            return {"ok": False, "error": "file_not_readable"}
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        start = max(1, int(args.get("start_line") or 1))
-        requested_end = min(len(lines), int(args.get("end_line") or min(len(lines), start + 300)))
-        rendered: list[str] = []
-        rendered_chars = 0
-        actual_end = start - 1
-        for index in range(start - 1, requested_end):
-            line = f"{index + 1}: {lines[index]}"
-            added_chars = len(line) + (1 if rendered else 0)
-            if rendered and rendered_chars + added_chars > 12000:
-                break
-            if not rendered and len(line) > 12000:
-                line = line[:12000]
-            rendered.append(line)
-            rendered_chars += len(line) + (1 if len(rendered) > 1 else 0)
-            actual_end = index + 1
-            if rendered_chars >= 12000:
-                break
-        has_more = actual_end < len(lines)
-        return {
-            "ok": True,
-            "path": str(args.get("path")),
-            "start_line": start,
-            "end_line": actual_end,
-            "requested_end_line": requested_end,
-            "total_lines": len(lines),
-            "content": "\n".join(rendered),
-            "truncated": actual_end < requested_end,
-            "has_more": has_more,
-            **({"next_start_line": actual_end + 1} if has_more else {}),
-        }
+        return _read_file(repo_root, args, run_id=run_id)
     if name == "search_code":
         return _search_code(repo_root, args, run_id=run_id)
     if name == "read_diff":
@@ -5045,6 +5540,49 @@ def _read_path_allowed(repo_root: Path, path: Path) -> bool:
     if any(part.casefold() in _READ_DENIED_NAMES for part in rel.parts):
         return False
     return path.suffix.lower() in _TEXT_SUFFIXES or path.name in {"pom.xml", "build.gradle", "settings.gradle", "gradlew"}
+
+
+def _read_file(
+    repo_root: Path,
+    args: dict[str, object],
+    *,
+    run_id: str,
+    max_content_chars: int = 12000,
+) -> dict[str, object]:
+    path = _safe_read_path(repo_root, str(args.get("path") or ""), run_id=run_id)
+    if not path.is_file() or not _read_path_allowed(repo_root, path):
+        return {"ok": False, "error": "file_not_readable", "path": str(args.get("path") or "")}
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = max(1, int(args.get("start_line") or 1))
+    requested_end = min(len(lines), int(args.get("end_line") or min(len(lines), start + 300)))
+    rendered: list[str] = []
+    rendered_chars = 0
+    actual_end = start - 1
+    for index in range(start - 1, requested_end):
+        line = f"{index + 1}: {lines[index]}"
+        added_chars = len(line) + (1 if rendered else 0)
+        if rendered and rendered_chars + added_chars > max_content_chars:
+            break
+        if not rendered and len(line) > max_content_chars:
+            line = line[:max_content_chars]
+        rendered.append(line)
+        rendered_chars += len(line) + (1 if len(rendered) > 1 else 0)
+        actual_end = index + 1
+        if rendered_chars >= max_content_chars:
+            break
+    has_more = actual_end < len(lines)
+    return {
+        "ok": True,
+        "path": str(args.get("path")),
+        "start_line": start,
+        "end_line": actual_end,
+        "requested_end_line": requested_end,
+        "total_lines": len(lines),
+        "content": "\n".join(rendered),
+        "truncated": actual_end < requested_end,
+        "has_more": has_more,
+        **({"next_start_line": actual_end + 1} if has_more else {}),
+    }
 
 
 def _search_code(repo_root: Path, args: dict[str, object], *, run_id: str) -> dict[str, object]:
@@ -5402,6 +5940,25 @@ def _developer_uiux_available(
     )
 
 
+def _pinned_visual_profile_action_reserve(
+    *,
+    working_state: dict[str, object],
+    history: list[dict[str, object]],
+    visual_required: bool,
+    app_visual_profile: dict[str, object],
+) -> int:
+    """Keep the profile setup reserve stable when a paused unit resumes after committing it."""
+
+    pinned = working_state.get("visual_profile_action_reserve")
+    if type(pinned) is int:
+        return max(0, pinned)
+    profile_setup_started = not app_visual_profile or any(
+        row.get("action") in {"uiux.search_visual_profile", "uiux.commit_visual_profile"}
+        for row in history
+    )
+    return 3 if visual_required and profile_setup_started else 0
+
+
 def _developer_uiux_success_count(
     *,
     journal: dict[str, object],
@@ -5448,6 +6005,31 @@ def _remember_developer_uiux_guidance(
             cache[screen_id] = [*rows, durable]
 
 
+def _developer_visual_candidates(
+    *,
+    journal: dict[str, object],
+    app_scope_id: str,
+) -> list[dict[str, object]]:
+    cache = _dict_value(journal.get("uiux_visual_candidates_by_app"))
+    return _dict_items(cache.get(app_scope_id))[:2]
+
+
+def _remember_developer_visual_candidate(
+    *,
+    journal: dict[str, object],
+    app_scope_id: str,
+    candidate: dict[str, object],
+) -> None:
+    cache = journal.setdefault("uiux_visual_candidates_by_app", {})
+    if not isinstance(cache, dict):
+        cache = {}
+        journal["uiux_visual_candidates_by_app"] = cache
+    rows = _dict_items(cache.get(app_scope_id))
+    candidate_id = str(candidate.get("candidate_id") or "")
+    if candidate_id and not any(str(row.get("candidate_id") or "") == candidate_id for row in rows):
+        cache[app_scope_id] = [*rows, candidate][:2]
+
+
 def _developer_read_only_qa_acceptance(
     *,
     item: dict[str, object],
@@ -5473,12 +6055,25 @@ def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
     requirements = _dedupe_prompt_rows(_dict_items(item.get("requirements")))
     test_intents = _dedupe_prompt_rows(_dict_items(item.get("test_intents")))
     ui_obligations = _dedupe_prompt_rows(_dict_items(item.get("ui_obligations")))
+    runtime_config_changes = _dedupe_prompt_rows(
+        _dict_items(item.get("runtime_config_changes"))
+    )
     ui: dict[str, object] = {}
     ui_contracts: list[dict[str, object]] = []
+    non_ui_contracts: list[dict[str, object]] = []
     for binding in _dict_items(item.get("surface_contracts")):
-        if str(binding.get("surface") or "").strip().lower() != "ui":
-            continue
+        surface = str(binding.get("surface") or "").strip().lower()
         contract = _dict_value(binding.get("surface_contract"))
+        if surface != "ui":
+            if surface and contract:
+                non_ui_contracts.append(
+                    {
+                        "design_node_id": binding.get("design_node_id"),
+                        "surface": surface,
+                        "surface_contract": contract,
+                    }
+                )
+            continue
         experience = _dict_value(contract.get("experience_contract"))
         exact_contract = (
             str(experience.get("schema_version") or "") == "ui_experience_contract_v2"
@@ -5542,8 +6137,18 @@ def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
         **({"ui_obligations": ui_obligations} if ui_obligations else {}),
         **({"ui": ui} if ui else {}),
         **({"approved_ui_contracts": ui_contracts} if ui_contracts else {}),
+        **(
+            {"approved_non_ui_contracts": _dedupe_prompt_rows(non_ui_contracts)}
+            if non_ui_contracts
+            else {}
+        ),
         **({"boundaries": boundaries} if boundaries else {}),
         **({"runtime_wiring": wiring} if wiring else {}),
+        **(
+            {"runtime_configuration": runtime_config_changes}
+            if runtime_config_changes
+            else {}
+        ),
     }
 
 
@@ -6596,6 +7201,12 @@ def _failure_classification(error_code: str, *, retriable: bool) -> dict[str, ob
         failure_class, owner, route = "operator_review", "harness_operator", "pause_and_resume"
     elif error_code in {"llm_transport_failed", "requirement_refiner_failed"}:
         failure_class, owner, route = "transport_failure", "llm_transport", "pause_and_resume"
+    elif error_code in {
+        "developer_visual_profile_unavailable",
+        "developer_visual_profile_invalid",
+        "developer_visual_profile_required",
+    }:
+        failure_class, owner, route = "developer_capability_failure", "developer_harness", "pause_and_resume"
     elif (
         "environment" in error_code
         or error_code.startswith("target_repo_codegraph")

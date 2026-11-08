@@ -16,6 +16,12 @@ from ..agents.developer import (
     refresh_developer_work_packet,
     upgrade_developer_dependency_scope,
 )
+from ..agents.developer.runtime_config import (
+    env_runtime_config_changes,
+    materialize_env_example,
+    runtime_config_execution_issues,
+    worktree_dirty_paths,
+)
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -64,6 +70,7 @@ _EXECUTION_UNIT_CONTRACT_FIELDS = {
     "migration_impact",
     "planned_code_targets",
     "runtime_bindings",
+    "runtime_config_changes",
     "write_paths",
 }
 
@@ -395,6 +402,240 @@ class PhaseFourImplementationCycle:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
 
+    def recover_runtime_config(self, *, run_id: str) -> dict[str, object]:
+        """Reopen only Plan-declared runtime-config owners before QA/publication."""
+
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            artifacts = _string_dict(state.get("latest_artifacts"))
+            if (
+                str(state.get("current_phase") or "").startswith("qa_")
+                or any(key.startswith("qa_") for key in artifacts)
+                or str(state.get("status") or "")
+                in {"qa_tested", "waiting_code_review_approval", "published", "completed"}
+            ):
+                raise HarnessError(
+                    "runtime_config_recovery_not_allowed",
+                    "Runtime-config recovery is only allowed before QA and publication.",
+                    run_id=run_id,
+                )
+
+            plan_path = _required_phase4_artifact(
+                artifacts,
+                "implementation_plan_structured",
+                run_id=run_id,
+            )
+            packet_path = _required_phase4_artifact(
+                artifacts,
+                "developer_work_packet",
+                run_id=run_id,
+            )
+            structured_plan = _read_json_artifact(
+                self._existing_artifact_path(plan_path, run_id=run_id),
+                run_id=run_id,
+            )
+            previous_packet = _read_json_artifact(
+                self._existing_artifact_path(packet_path, run_id=run_id),
+                run_id=run_id,
+            )
+            changes = env_runtime_config_changes(structured_plan.get("runtime_config_impact"))
+            owner_ids = sorted(
+                {str(change.get("unit_id") or "") for change in changes}
+            )
+            if not changes or not all(owner_ids):
+                raise HarnessError(
+                    "runtime_config_recovery_not_needed",
+                    "The approved Plan has no executable env-var change with an owner unit.",
+                    run_id=run_id,
+                )
+
+            packet_version = _next_phase4_artifact_version(self.store, run_id)
+            previous_revision = max(1, _int_value(state.get("developer_act_revision")))
+            revision = max(2, previous_revision + 1)
+            recovery_file = self.store.write_json_artifact(
+                run_id,
+                f"runtime_config_recovery_v{packet_version}.json",
+                {
+                    "schema_version": "runtime_config_recovery_v1",
+                    "run_id": run_id,
+                    "revision": revision,
+                    "source_plan": plan_path,
+                    "source_work_packet": packet_path,
+                    "owner_unit_ids": owner_ids,
+                    "changes": changes,
+                    "reason": (
+                        "Rebuild the approved runtime-config projection and rerun only its owner units."
+                    ),
+                    "created_at": utc_now_iso(),
+                },
+            )
+            recovery_path = self.store.relative(recovery_file)
+            target_info = self._workspace_target_info(run_id=run_id, allow_dirty=True)
+            workspace = self.workspace_manager.resolve(run_id)
+            packet = build_developer_work_packet(
+                run_id=run_id,
+                source_ref=str(state.get("source_ref") or ""),
+                issue_key=str(previous_packet.get("issue_key") or ""),
+                structured_plan=structured_plan,
+                target_repo_path=target_info.path,
+                run_workspace=workspace.to_dict(),
+                approved_plan_refs={
+                    **_dict_value(previous_packet.get("approved_plan")),
+                    "runtime_config_recovery": recovery_path,
+                },
+                canonical_requirements=[
+                    dict(item)
+                    for item in previous_packet.get("canonical_requirements", [])
+                    if isinstance(item, dict)
+                ],
+                requirement_contract=_dict_value(
+                    previous_packet.get("requirement_contract")
+                ),
+                requirement_coverage=[
+                    dict(item)
+                    for item in previous_packet.get("requirement_coverage", [])
+                    if isinstance(item, dict)
+                ],
+                approved_runtime_decisions=[
+                    dict(item)
+                    for item in previous_packet.get("approved_runtime_decisions", [])
+                    if isinstance(item, dict)
+                ],
+                effective_design_contract=_dict_value(
+                    previous_packet.get("effective_design_contract")
+                ),
+                planning_policy=_planning_policy_for_state(state, run_id=run_id),
+                verification_policy=_verification_policy_for_state(state, run_id=run_id),
+            )
+            selected_units = [
+                dict(unit)
+                for unit in packet.get("execution_units", [])
+                if isinstance(unit, dict) and str(unit.get("unit_id") or "") in owner_ids
+            ]
+            selected_ids = {str(unit.get("unit_id") or "") for unit in selected_units}
+            if selected_ids != set(owner_ids):
+                raise HarnessError(
+                    "runtime_config_owner_unit_missing",
+                    f"Runtime-config owner units are absent from the Developer packet: {owner_ids}",
+                    run_id=run_id,
+                )
+            for unit in selected_units:
+                unit["depends_on"] = [
+                    value
+                    for value in unit.get("depends_on", [])
+                    if isinstance(value, str) and value in selected_ids
+                ]
+                unit["test_intent_mutation_required"] = False
+            packet = {
+                **packet,
+                "version": f"developer_work_packet_v{packet_version}",
+                "mode": "runtime_config_recovery_v1",
+                "execution_units": selected_units,
+                "refreshed_at": utc_now_iso(),
+            }
+            allowed_paths = {
+                str(value).replace("\\", "/")
+                for value in _dict_value(packet.get("output_contract")).get(
+                    "allowed_paths", []
+                )
+                if isinstance(value, str) and value
+            }
+            expected_dirty_paths = [
+                path
+                for path in worktree_dirty_paths(target_info.path)
+                if path not in allowed_paths
+            ]
+            revised_packet_path = write_phase4_developer_work_packet(
+                store=self.store,
+                run_id=run_id,
+                packet=packet,
+                version=packet_version,
+            )
+
+            history = [
+                dict(item)
+                for item in state.get("developer_execution_history", [])
+                if isinstance(item, dict)
+            ]
+            history.append(
+                {
+                    "revision": previous_revision,
+                    "execution": _dict_value(state.get("developer_execution")),
+                    "manifest": artifacts.get("developer_execution_manifest", ""),
+                    "journal": artifacts.get("developer_execution_journal", ""),
+                    "session": artifacts.get("developer_execution_session", ""),
+                    "test_report": artifacts.get("test_report", ""),
+                    "code_trace": artifacts.get("requirement_design_code_trace", ""),
+                    "validation_ledger": artifacts.get(
+                        "implementation_validation_ledger", ""
+                    ),
+                    "superseded_at": utc_now_iso(),
+                    "reason": "runtime_config_recovery",
+                }
+            )
+            latest_artifacts = {
+                **artifacts,
+                "runtime_config_recovery": recovery_path,
+                "developer_work_packet": revised_packet_path,
+            }
+            for key in (
+                "developer_execution_manifest",
+                "developer_execution_journal",
+                "developer_execution_session",
+                "developer_failure_classification",
+                "code_change_report",
+                "test_report",
+                "requirement_design_code_trace",
+                "implementation_validation_ledger",
+                "implementation_repair_feedback",
+                "runtime_config_execution",
+                "runtime_config_validation",
+            ):
+                latest_artifacts.pop(key, None)
+            quality_reports = _dict_value(state.get("quality_reports"))
+            for key in (
+                "verification",
+                "implementation_traceability",
+                "implementation_repair",
+            ):
+                quality_reports.pop(key, None)
+            state.update(
+                {
+                    "updated_at": utc_now_iso(),
+                    "current_phase": "implementation_preparing",
+                    "status": "implementation_ready",
+                    "latest_artifacts": latest_artifacts,
+                    "quality_reports": quality_reports,
+                    "pending_checkpoint": None,
+                    "allowed_next_actions": ALLOWED_IMPLEMENTATION_READY_ACTIONS,
+                    "last_error": None,
+                    "developer_act_revision": revision,
+                    "developer_execution_contract_version": "developer_execution_units_v1",
+                    "developer_expected_dirty_paths": expected_dirty_paths,
+                    "developer_execution_history": history,
+                    "developer_execution": {
+                        "schema_version": "developer_execution_state_v2",
+                        "contract_version": "developer_execution_units_v1",
+                        "executor": "tool_loop",
+                        "mode": "developer_act",
+                        "session_id": f"developer_act-v{revision}",
+                        "repair_iteration": 0,
+                        "session_iteration": revision,
+                        "artifact_version": revision,
+                        "status": "pending",
+                        "total_units": len(selected_units),
+                        "remaining_units": len(selected_units),
+                        "pending_unit_ids": owner_ids,
+                    },
+                    "summary_for_user": (
+                        f"Runtime-config recovery V{revision} prepared for run {run_id}; "
+                        f"only owner units will rerun: {', '.join(owner_ids)}."
+                    ),
+                }
+            )
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
+
     def revalidate_implementation(self, *, run_id: str) -> dict[str, object]:
         """Re-run Verification and Validator for a blocked, pending-repair, or traced snapshot."""
 
@@ -484,6 +725,72 @@ class PhaseFourImplementationCycle:
         if progress is not None and "pending_step_review" not in progress:
             execution_state.pop("pending_step_review", None)
         return execution_state
+
+    def _materialize_runtime_config(
+        self,
+        *,
+        run_id: str,
+        work_packet: dict[str, object],
+        target_path: Path,
+        artifact_version: int,
+        latest_artifacts: dict[str, str],
+    ) -> list[dict[str, object]]:
+        """Materialize Harness-owned runtime config after Developer source changes."""
+
+        changes = env_runtime_config_changes(work_packet.get("runtime_config_impact"))
+        if not changes:
+            return []
+        receipt = {
+            **materialize_env_example(
+                repo_root=target_path,
+                changes=changes,
+                run_id=run_id,
+            ),
+            "run_id": run_id,
+            "created_at": utc_now_iso(),
+        }
+        receipt_file = self.store.write_json_artifact(
+            run_id,
+            f"runtime_config_execution_v{artifact_version}.json",
+            receipt,
+        )
+        issues = runtime_config_execution_issues(
+            repo_root=target_path,
+            changes=changes,
+        )
+        validation = {
+            "schema_version": "runtime_config_validation_v1",
+            "run_id": run_id,
+            "status": "passed" if not issues else "failed",
+            "changes": changes,
+            "issues": issues,
+            "execution_receipt": self.store.relative(receipt_file),
+            "created_at": utc_now_iso(),
+        }
+        validation_file = self.store.write_json_artifact(
+            run_id,
+            f"runtime_config_validation_v{artifact_version}.json",
+            validation,
+        )
+        latest_artifacts["runtime_config_execution"] = self.store.relative(receipt_file)
+        latest_artifacts["runtime_config_validation"] = self.store.relative(validation_file)
+        if issues:
+            raise HarnessError(
+                "runtime_config_execution_invalid",
+                f"Runtime configuration closure failed: {issues}",
+                run_id=run_id,
+            )
+        if not receipt.get("changed_paths"):
+            return []
+        return [
+            {
+                "path": ".env.example",
+                "operation": "harness_materialize_runtime_config",
+                "before_sha256": receipt.get("before_sha256"),
+                "after_sha256": receipt.get("after_sha256"),
+                "harness_owned": True,
+            }
+        ]
 
     def _execute_developer_tool_loop(
         self,
@@ -695,8 +1002,20 @@ class PhaseFourImplementationCycle:
                 artifact_version=act_revision,
                 manifest_key="developer_execution_manifest",
                 journal_key="developer_execution_journal",
+                expected_dirty_paths=[
+                    value
+                    for value in state.get("developer_expected_dirty_paths", [])
+                    if isinstance(value, str)
+                ],
             )
-            applied_files = result.files
+            runtime_config_files = self._materialize_runtime_config(
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                artifact_version=act_revision,
+                latest_artifacts=latest_artifacts,
+            )
+            applied_files = [*result.files, *runtime_config_files]
             report = {
                 "run_id": run_id,
                 "source_ref": state.get("source_ref"),
@@ -1706,7 +2025,14 @@ class PhaseFourImplementationCycle:
                 repair_feedback=repair_feedback,
                 repair_scope="implementation",
             )
-            applied_files = result.files
+            runtime_config_files = self._materialize_runtime_config(
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                artifact_version=artifact_version,
+                latest_artifacts=latest_artifacts,
+            )
+            applied_files = [*result.files, *runtime_config_files]
             developer_summary = result.summary
             change_report = {
                 "run_id": run_id,

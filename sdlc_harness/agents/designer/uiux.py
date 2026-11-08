@@ -161,6 +161,124 @@ class UiUxGuidanceProvider:
             raise HarnessError("designer_uiux_failed", "UI/UX guidance output exceeded the bounded result size.")
         return output
 
+    def design_system(self, arguments: object) -> dict[str, object]:
+        """Return bounded raw material for a Developer-owned visual profile."""
+
+        args = dict(arguments) if isinstance(arguments, dict) else {}
+        query = str(args.get("query") or "").strip()
+        words = query.split()
+        if not _SAFE_QUERY.fullmatch(query) or not 3 <= len(words) <= 8:
+            raise HarnessError(
+                "developer_visual_profile_invalid",
+                "uiux.search_visual_profile query must contain 3-8 generic ASCII terms without private names or paths.",
+            )
+        dials = {
+            "variance": _bounded_dial(args.get("variance"), default=3),
+            "motion": _bounded_dial(args.get("motion"), default=3),
+            "density": _bounded_dial(args.get("density"), default=6),
+        }
+        if self.fake_mode:
+            design_system: dict[str, object] = {
+                "style": {
+                    "id": "minimal-professional",
+                    "name": "Minimal Professional",
+                    "effects": "Subtle hover, visible focus, restrained shadows",
+                    "keywords": "clean, functional, high contrast, grid based",
+                    "accessibility": "contrast-text-4.5,keyboard,visible-focus,reduced-motion",
+                },
+                "colors": {
+                    "primary": "#1D4ED8", "on_primary": "#FFFFFF",
+                    "secondary": "#334155", "on_secondary": "#FFFFFF",
+                    "accent": "#0F766E", "on_accent": "#FFFFFF",
+                    "background": "#F8FAFC", "foreground": "#0F172A",
+                    "card": "#FFFFFF", "card_foreground": "#0F172A",
+                    "muted": "#E2E8F0", "muted_foreground": "#334155",
+                    "border": "#CBD5E1", "destructive": "#B91C1C",
+                    "on_destructive": "#FFFFFF", "ring": "#1D4ED8",
+                },
+                "typography": {"heading": "Inter", "body": "Inter", "mood": "professional, legible"},
+                "key_effects": "Subtle hover, visible focus, restrained shadows",
+                "anti_patterns": "Low contrast and decorative motion",
+                "spacing_scale": {"xs": "4px", "sm": "8px", "md": "16px", "lg": "24px", "xl": "32px"},
+                "dials": dials,
+            }
+            style_results: list[dict[str, str]] = [
+                {
+                    "Style Category": "Minimalism",
+                    "CSS Keywords": "border-radius: 8px; box-shadow: 0 1px 3px rgba(15,23,42,.12)",
+                }
+            ]
+        else:
+            design_payload = self._run_json(
+                [
+                    query,
+                    "--design-system",
+                    "--variance", str(dials["variance"]),
+                    "--motion", str(dials["motion"]),
+                    "--density", str(dials["density"]),
+                    "--json",
+                ],
+                failure_label="design-system search",
+            )
+            design_system = design_payload.get("design_system")
+            if not isinstance(design_system, dict):
+                raise HarnessError("developer_visual_profile_invalid", "UI/UX design-system result is missing.")
+            style_payload = self._run_json(
+                [query, "--domain", "style", "--max-results", "2", "--json"],
+                failure_label="style enrichment search",
+            )
+            style_results = _bounded_results(style_payload.get("results"))
+
+        output = {
+            "schema_version": "uiux_pro_max_design_system_v1",
+            "status": "available",
+            "query": query,
+            "dials": dials,
+            "design_system": design_system,
+            "style_results": style_results,
+        }
+        encoded = json.dumps(output, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if len(encoded) > UIUX_MAX_OUTPUT_CHARS:
+            raise HarnessError("developer_visual_profile_invalid", "UI/UX visual profile source exceeded the bounded size.")
+        return output
+
+    def _run_json(self, arguments: list[str], *, failure_label: str) -> dict[str, object]:
+        command = [sys.executable, str(self._script_path()), *arguments]
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=str(self.skill_root),
+                check=True,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=self.timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise HarnessError(
+                "developer_visual_profile_unavailable",
+                f"UI/UX {failure_label} timed out after {self.timeout_seconds}s.",
+            ) from exc
+        except (OSError, subprocess.CalledProcessError) as exc:
+            detail = str(getattr(exc, "stderr", "") or exc).strip()[:500]
+            raise HarnessError(
+                "developer_visual_profile_unavailable",
+                f"UI/UX {failure_label} failed: {detail}",
+            ) from exc
+        try:
+            payload = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise HarnessError(
+                "developer_visual_profile_invalid",
+                f"UI/UX {failure_label} returned invalid JSON.",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HarnessError(
+                "developer_visual_profile_invalid",
+                f"UI/UX {failure_label} returned an invalid object.",
+            )
+        return payload
+
     def _script_path(self) -> Path:
         if self.skill_root is None:
             raise HarnessError("designer_uiux_unavailable", "UI/UX skill root is not configured.")
@@ -193,6 +311,18 @@ def _bounded_results(value: object) -> list[dict[str, str]]:
             }
         )
     return results
+
+
+def _bounded_dial(value: object, *, default: int) -> int:
+    if value in (None, ""):
+        return default
+    try:
+        dial = int(value)
+    except (TypeError, ValueError) as exc:
+        raise HarnessError("developer_visual_profile_invalid", "UI/UX design dial must be an integer from 1 to 10.") from exc
+    if not 1 <= dial <= 10:
+        raise HarnessError("developer_visual_profile_invalid", "UI/UX design dial must be an integer from 1 to 10.")
+    return dial
 
 
 def _tree_fingerprint(paths: list[Path]) -> str:

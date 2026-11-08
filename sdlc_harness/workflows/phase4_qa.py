@@ -171,7 +171,14 @@ class PhaseFourQaCycle:
                 repair_scope="qa",
                 expected_dirty_paths=expected_dirty_paths,
             )
-            applied_files = result.files
+            runtime_config_files = self._materialize_runtime_config(
+                run_id=run_id,
+                work_packet=work_packet,
+                target_path=target_info.path,
+                artifact_version=artifact_version,
+                latest_artifacts=latest_artifacts,
+            )
+            applied_files = [*result.files, *runtime_config_files]
             developer_summary = result.summary
             change_report = {
                 "run_id": run_id,

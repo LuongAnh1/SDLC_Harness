@@ -63,6 +63,10 @@ class QaTestPolicy:
                     "component_id": rule.component_id,
                     "test_root": rule.test_root,
                     "test_suffix": rule.test_suffix,
+                    "test_suffixes": [
+                        test_suffix
+                        for _, test_suffix in self.planning_policy.rule(rule.component_id).suffix_pairs
+                    ],
                 }
                 for rule in self.component_rules
             ],
@@ -79,10 +83,14 @@ class QaTestPolicy:
             return ""
         component_id = self.planning_policy.component_for_path(path)
         for rule in self.component_rules:
+            test_suffixes = tuple(
+                test_suffix
+                for _, test_suffix in self.planning_policy.rule(rule.component_id).suffix_pairs
+            )
             if (
                 rule.component_id == component_id
                 and path.startswith(f"{rule.test_root}/")
-                and path.endswith(rule.test_suffix)
+                and path.endswith(test_suffixes)
             ):
                 return path
         return ""

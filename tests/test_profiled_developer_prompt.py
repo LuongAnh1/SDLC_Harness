@@ -153,7 +153,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     )
     assert "typescript_prompt_v1" in prompt
     assert "HealthService.check" in prompt
-    assert "immutable hard constraints" in prompt
+    assert "immutable API-shape constraints" in prompt
     unit_prompt = _action_prompt(
         item={
             **manifest["items"][0],
@@ -180,15 +180,17 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     assert unit_contract["approved_signatures"][0]["qualified_name"] == "HealthService.check"
     assert unit_contract["approved_signatures"][0]["return_type"] == "Promise<boolean>"
     assert unit_contract["hard_constraints"] == [
-        "Approved signatures are immutable and override conflicting prose objectives.",
+            "Approved signatures are immutable API-shape constraints, not authorization to implement behavior. They override conflicting prose only for qualified name, parameters, async shape, and return type.",
         "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
         "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+            "Implement behavior only when active_focus.mandatory_obligations for this unit requires it. A parameter or result type present only in an approved signature may reserve compatibility for another unit; it must not by itself create a branch, side effect, result value, or domain error.",
+            "For non-UI work, preserve every exact entity field, operation, relation, constraint, and migration intent in active_focus.mandatory_obligations.approved_non_ui_contracts; never invent convenience fields or sibling API behavior.",
         "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
         "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
         "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
         "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
         "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
-        "Represent conflicting behavior through compatible control flow or domain errors; do not change an approved contract.",
+            "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
     ]
 
 
