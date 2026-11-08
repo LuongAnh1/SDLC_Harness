@@ -226,6 +226,59 @@ class ProfiledQaTest(unittest.TestCase):
         self.assertNotIn("src/test/java", llm.prompts[0])
         self.assertNotIn("complete Java test source", llm.prompts[0])
         self.assertIn("An `external_use_case` input stays a production dependency", llm.prompts[0])
+        self.assertIn("For `synthetic`, define the requested deterministic", llm.prompts[0])
+        self.assertIn("production API, global, history-state contract", llm.prompts[0])
+
+    def test_browser_qa_receives_synthetic_data_setup_in_generation_packet(self) -> None:
+        policy = build_qa_test_policy(
+            planning_policy=self.planning_policy,
+            policy_version=QA_TEST_POLICY_VERSION,
+        )
+        path = "tests/e2e/synthetic-data.spec.ts"
+        context = {
+            **self.context,
+            "work_packet_summary": {
+                "qa_test_intents": [
+                    {
+                        "stage_id": "browser_e2e",
+                        "intent": "Verify the browser flow with deterministic test data.",
+                        "target_paths": [path],
+                        "data_setup": {
+                            "mode": "synthetic",
+                            "reason": "No repository data source exists.",
+                            "requirements": ["One authenticated session and one record."],
+                        },
+                    }
+                ]
+            },
+        }
+        llm = RecordingQaLlm(
+            {
+                "summary": "Browser acceptance",
+                "test_files": [
+                    {
+                        "path": path,
+                        "content": 'import { expect, test } from "@playwright/test"; test("works", async ({ page }) => { await page.goto("/"); await expect(page.locator("body")).toBeVisible(); });',
+                        "scenarios": ["works"],
+                    }
+                ],
+                "scenarios": [
+                    {
+                        "name": "works",
+                        "expected_result": "works",
+                        "test_file": path,
+                        "risk": "",
+                        "requirement_ids": ["REQ-1"],
+                    }
+                ],
+                "risks": [],
+            }
+        )
+
+        QaTesterAgent(llm).generate_tests(context=context, qa_policy=policy)
+
+        self.assertIn('"mode": "synthetic"', llm.prompts[0])
+        self.assertIn("One authenticated session and one record.", llm.prompts[0])
 
     def test_profiled_parser_rejects_out_of_policy_or_unbound_scenario_path(self) -> None:
         invalid_payloads = (

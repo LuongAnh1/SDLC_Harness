@@ -214,8 +214,11 @@ def _profiled_qa_generation_prompt(
     )
     ownership_rule = (
         "Use the exact browser paths declared by work_packet_summary.qa_test_intents. "
-        "Drive the real Web/API/PostgreSQL runtime; use only approved demo HTTP fixtures for "
-        "external list/session inputs, never replace the application API with mocks."
+        "Drive the real Web/API/PostgreSQL runtime and follow each intent's structured "
+        "data_setup. A repository setup reuses the named existing test data support. A "
+        "synthetic setup creates deterministic values inside the generated browser spec and "
+        "binds them only through a public boundary present in code_under_test; it never changes "
+        "production files or replaces the application API with a mock."
         if browser_mode
         else "Keep tests co-located with the component code under test. Do not create Playwright/E2E specs."
     )
@@ -250,11 +253,16 @@ Rules:
 - {ownership_rule}
 - Treat `qa_contract_slices` as the exact per-unit authority for UI states, runtime reachability,
   obligations, boundaries, and fixture use. Do not reconstruct these contracts from summaries.
-- A demo fixture is allowed only when its runtime input cites an accepted D-* decision included in
-  `approved_runtime_decisions`; otherwise fail closed instead of inventing data or mocks.
-- An `external_use_case` input stays a production dependency. A Plan-approved QA intent may supply
-  it only inside the browser test through the concrete seed, route-interception, or entrypoint-
-  injection setup named by that intent; do not change the production Design or invent an API.
+- Follow every QA intent's `data_setup` exactly. For `synthetic`, define the requested deterministic
+  records/session/state inside that intent's generated `.spec.ts`; for `repository`, reuse only the
+  setup supported by the packet evidence; for `not_required`, do not invent fixture data.
+- An `external_use_case` input stays a production dependency. Test data may satisfy it only at the
+  QA boundary through public behavior actually present in `code_under_test`. Never invent a
+  production API, global, history-state contract, provider, or runtime setting. If the implemented
+  code exposes no controllable public boundary, make the test expose that defect instead of silently
+  changing the product contract.
+- A Design-declared `demo_fixture` still requires its accepted D-* decision in
+  `approved_runtime_decisions`; Plan-level synthetic QA data does not create a Design decision.
 - Prefer the UI/API sources that appear first in `code_under_test.files`; they were ordered from the
   QA-owning units and their direct dependencies within the fixed code budget.
 - Do not modify production files, package manifests, configs, lockfiles, or scripts.
