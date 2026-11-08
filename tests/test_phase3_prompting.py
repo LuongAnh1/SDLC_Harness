@@ -9,7 +9,9 @@ import pytest
 
 from sdlc_harness.agents.developer.planner import (
     DeveloperPlanAgent,
+    _component_repair_slice,
     _component_plan_prompt,
+    _compact_review,
     _developer_plan_prompt,
     _prior_scenario_plan_context,
 )
@@ -213,6 +215,33 @@ def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
     )
     assert "This is a repair patch" in repair_prompt
 
+    structured_repair_prompt = _component_plan_prompt(
+        run_id="run_signature_targets",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="UNIQUE_FLATTENED_DUPLICATE",
+        previous_review={
+            "ok": False,
+            "findings": [
+                {
+                    "severity": "blocking",
+                    "issue": "UNIQUE_STRUCTURED_REPAIR_ISSUE",
+                }
+            ],
+        },
+    )
+    assert "Blocking review findings:" in structured_repair_prompt
+    assert structured_repair_prompt.count("UNIQUE_STRUCTURED_REPAIR_ISSUE") == 1
+    assert "UNIQUE_FLATTENED_DUPLICATE" not in structured_repair_prompt
+
 
 def test_sliced_planner_prior_context_keeps_only_compatibility_targets() -> None:
     context = _prior_scenario_plan_context(
@@ -278,6 +307,82 @@ def test_sliced_planner_prior_context_keeps_only_compatibility_targets() -> None
     assert "UNIQUE_VERBOSE_FIXTURE_REASON" not in encoded
     assert "test_intents" not in context["completed_units"][0]
     assert "qa_test_intents" not in context["completed_units"][0]
+
+
+def test_component_repair_slice_limits_mutation_and_keeps_related_context() -> None:
+    units = [
+        {
+            "unit_id": "WU-AAAAAAAAAAAA",
+            "scenario_id": "SC-1",
+            "depends_on": [],
+            "planned_code_targets": [{"path": "apps/web/src/Panel.tsx", "symbol": "Panel"}],
+            "code_entities": [{"entity": "apps/web/src/Panel.tsx#Panel"}],
+            "objective": "UNIQUE_RELATED_SC1_CONTEXT",
+        },
+        {
+            "unit_id": "WU-BBBBBBBBBBBB",
+            "scenario_id": "SC-2",
+            "depends_on": ["WU-AAAAAAAAAAAA"],
+            "planned_code_targets": [{"path": "apps/web/src/Panel.tsx", "symbol": "Panel"}],
+            "code_entities": [{"entity": "apps/web/src/Panel.tsx#Panel"}],
+            "objective": "UNIQUE_MUTABLE_SC2_UNIT",
+        },
+        {
+            "unit_id": "WU-CCCCCCCCCCCC",
+            "scenario_id": "SC-3",
+            "depends_on": [],
+            "planned_code_targets": [{"path": "apps/api/src/Retry.ts", "symbol": "retry"}],
+            "code_entities": [{"entity": "apps/api/src/Retry.ts#retry"}],
+            "objective": "UNIQUE_UNRELATED_SC3_UNIT",
+        },
+    ]
+
+    scoped, prior_context, allowed = _component_repair_slice(
+        units=units,
+        review_report={"affected_unit_ids": ["WU-BBBBBBBBBBBB"]},
+        signature_entries=[
+            {
+                "source_path": "apps/web/src/Panel.tsx",
+                "qualified_name": "Panel",
+            }
+        ],
+    )
+
+    assert [unit["unit_id"] for unit in scoped] == ["WU-BBBBBBBBBBBB"]
+    assert scoped[0]["scenario_id"] == "SC-2"
+    assert allowed == {"WU-BBBBBBBBBBBB"}
+    assert [unit["unit_id"] for unit in prior_context["completed_units"]] == [
+        "WU-AAAAAAAAAAAA"
+    ]
+    assert prior_context["implementation_signature_entries"][0]["source_path"] == (
+        "apps/web/src/Panel.tsx"
+    )
+    encoded = json.dumps({"scoped": scoped, "context": prior_context})
+    assert "UNIQUE_MUTABLE_SC2_UNIT" in encoded
+    assert "UNIQUE_RELATED_SC1_CONTEXT" in encoded
+    assert "UNIQUE_UNRELATED_SC3_UNIT" not in encoded
+
+
+def test_component_repair_keeps_structured_blockers_and_drops_warnings() -> None:
+    blocker = {
+        "category": "test",
+        "severity": "blocking",
+        "unit_ids": ["WU-BBBBBBBBBBBB"],
+        "refs": ["AC-6"],
+        "issue": "Cancellation completion is not deterministic.",
+        "expected_change": "Define the observable completion transition.",
+    }
+    warning = {**blocker, "severity": "warning", "issue": "Optional parameter."}
+
+    compact = _compact_review(
+        {
+            "ok": False,
+            "summary": "Contains a warning that repair must not see.",
+            "llm_review": {"findings": [blocker, warning]},
+        }
+    )
+
+    assert compact == {"ok": False, "findings": [blocker]}
 
 
 def test_component_plan_prompt_uses_structured_slices_instead_of_human_summaries() -> None:

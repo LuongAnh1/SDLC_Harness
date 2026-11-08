@@ -1695,10 +1695,15 @@ def test_repair_that_removes_a_target_rebinds_legacy_mappings_to_final_units() -
     class StubClient:
         settings = None
 
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
         def complete(self, *, system: str, prompt: str, **_: object) -> str:
+            self.prompts.append(prompt)
             return json.dumps(
                 {
                     "summary": "Remove the unapproved client file.",
+                    "repo_evidence": ["NEW_REPAIR_EVIDENCE"],
                     "work_unit_updates": [
                         {
                             "unit_id": sc3_api["unit_id"],
@@ -1710,10 +1715,15 @@ def test_repair_that_removes_a_target_rebinds_legacy_mappings_to_final_units() -
                 }
             )
 
-    draft = DeveloperPlanAgent(StubClient()).repair_plan(
+    client = StubClient()
+    draft = DeveloperPlanAgent(client).repair_plan(
         previous_draft=ImplementationPlanDraft(
             markdown="",
-            structured={"work_units": previous_units, "implementation_signature_contract": {}},
+            structured={
+                "work_units": previous_units,
+                "implementation_signature_contract": {},
+                "repo_evidence": ["PRESERVED_PLAN_EVIDENCE"],
+            },
         ),
         review_report={"ok": False, "affected_unit_ids": [sc3_api["unit_id"]]},
         developer_feedback="Remove the unapproved support target.",
@@ -1742,6 +1752,16 @@ def test_repair_that_removes_a_target_rebinds_legacy_mappings_to_final_units() -
     )
 
     repaired = next(u for u in draft.structured["work_units"] if u["unit_id"] == sc3_api["unit_id"])
+    prompt_units = json.loads(
+        client.prompts[0]
+        .split("Harness-owned work units:\n", 1)[1]
+        .split("\nPrior scenario plan context", 1)[0]
+    )
+    assert [unit["unit_id"] for unit in prompt_units] == [sc3_api["unit_id"]]
+    assert draft.structured["repo_evidence"] == [
+        "PRESERVED_PLAN_EVIDENCE",
+        "NEW_REPAIR_EVIDENCE",
+    ]
     assert extra["path"] not in {t["path"] for t in repaired["planned_code_targets"]}
     assert not any(
         extra["path"] in str(item.get("planned_code_target") or "")
@@ -1960,7 +1980,7 @@ def test_repair_re_signs_only_targets_of_the_cited_units() -> None:
             return json.dumps(
                 {
                     "summary": "Re-sign everything.",
-                    "work_unit_updates": [],
+                    "work_unit_updates": [{"unit_id": sc3_api["unit_id"]}],
                     "implementation_signature_contract": {"entries": entries},
                 }
             )

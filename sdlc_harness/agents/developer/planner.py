@@ -862,6 +862,17 @@ class DeveloperPlanAgent:
             planning_policy=planning_policy,
         )
         preserved = canonicalize_work_unit_dependencies(preserved)
+        (
+            repair_units,
+            repair_prior_context,
+            affected_unit_ids,
+        ) = _component_repair_slice(
+            units=preserved,
+            review_report=review_report,
+            signature_entries=_dict_items(
+                _object_dict(previous.get("implementation_signature_contract")).get("entries")
+            ),
+        )
         base_mappings = _design_mappings(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
@@ -880,18 +891,23 @@ class DeveloperPlanAgent:
             mappings=legacy_mappings,
             class_graph=class_graph,
         )
+        repair_signature_targets = _signature_targets_for_units(
+            signature_targets=signature_targets,
+            units=repair_units,
+            planning_policy=planning_policy,
+        )
         llm_payload = self._component_plan_llm(
             run_id=run_id,
             requirement_packet=requirement_packet,
             design_artifact=design_artifact,
-            units=preserved,
+            units=repair_units,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
             repo_context=repo_context,
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
-            signature_targets=signature_targets,
+            signature_targets=repair_signature_targets,
             repair_feedback=developer_feedback,
             # The review summary also describes warnings; repair sees the blocking issues only.
             previous_review={
@@ -899,8 +915,11 @@ class DeveloperPlanAgent:
             },
             component_plan_inputs=component_plan_inputs,
             runtime_config_decision=previous.get("runtime_config_impact"),
+            prior_plan_context=repair_prior_context,
+            allowed_unit_ids=affected_unit_ids or None,
+            required_unit_ids=affected_unit_ids or None,
+            signature_contract_required=False,
         )
-        affected_unit_ids = set(_affected_unit_ids(review_report))
         proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
         if affected_unit_ids:
             proposed_updates = [
@@ -999,7 +1018,14 @@ class DeveloperPlanAgent:
                 "artifact_refs": requirement_artifact_refs,
             },
             "repo_context": _repo_context_summary(repo_context),
-            "repo_evidence": _string_items(llm_payload.get("repo_evidence")) or list(previous.get("repo_evidence", [])),
+            "repo_evidence": list(
+                dict.fromkeys(
+                    [
+                        *_string_items(previous.get("repo_evidence")),
+                        *_string_items(llm_payload.get("repo_evidence")),
+                    ]
+                )
+            ),
             "work_units": units,
             **projections,
             "implementation_signature_contract": signature_contract,
@@ -1054,6 +1080,7 @@ class DeveloperPlanAgent:
         prior_plan_context: dict[str, object] | None = None,
         allowed_unit_ids: set[str] | None = None,
         required_unit_ids: set[str] | None = None,
+        signature_contract_required: bool | None = None,
     ) -> dict[str, object]:
         if not self.llm_client:
             return {}
@@ -1123,6 +1150,7 @@ class DeveloperPlanAgent:
                     allowed_unit_ids=allowed_unit_ids,
                     required_unit_ids=required_unit_ids,
                     signature_targets=signature_targets,
+                    signature_contract_required=signature_contract_required,
                     runtime_config_required=bool(
                         isinstance((component_plan_inputs or {}).get("repo_runtime_config"), dict)
                     ) and not repair_feedback.strip(),
@@ -1231,6 +1259,38 @@ def _scenario_plan_slices(
     return [(scenario_id, grouped[scenario_id]) for scenario_id in scenario_order], ""
 
 
+def _component_repair_slice(
+    *,
+    units: list[dict[str, object]],
+    review_report: dict[str, object],
+    signature_entries: list[dict[str, object]],
+) -> tuple[
+    list[dict[str, object]],
+    dict[str, object],
+    set[str],
+]:
+    """Limit a semantic repair to cited units; keep related units as read-only context."""
+
+    affected = set(_affected_unit_ids(review_report))
+    if not affected:
+        return units, {}, set()
+    units_by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
+    unknown = sorted(affected - set(units_by_id))
+    if unknown:
+        raise HarnessError(
+            "implementation_plan_repair_scope_invalid",
+            "Implementation plan repair cites unknown work units: " + ", ".join(unknown),
+        )
+    scoped = [unit for unit in units if str(unit.get("unit_id") or "") in affected]
+    prior_context = _prior_scenario_plan_context(
+        units=units,
+        current_units=scoped,
+        completed_unit_ids=set(units_by_id) - affected,
+        signature_entries=signature_entries,
+    )
+    return scoped, prior_context, affected
+
+
 def _signature_targets_for_units(
     *,
     signature_targets: list[dict[str, object]],
@@ -1333,7 +1393,8 @@ def _prior_scenario_plan_context(
     signatures = [
         entry
         for entry in signature_entries
-        if str(entry.get("target_path") or "") in relevant_paths | current_paths
+        if str(entry.get("target_path") or entry.get("source_path") or "")
+        in relevant_paths | current_paths
     ]
     return {
         "completed_units": relevant,
@@ -1497,14 +1558,19 @@ def _component_plan_prompt(
         if runtime_config
         else ""
     )
-    repair = (
-        "\nRepair feedback:\n"
-        + repair_feedback
-        + "\nPrevious review:\n"
-        + json.dumps(previous_review, ensure_ascii=False, indent=2)
-        if repair_feedback.strip()
-        else ""
-    )
+    if repair_feedback.strip():
+        structured_findings = _dict_items(previous_review.get("findings"))
+        repair = (
+            "\nBlocking review findings:\n"
+            + json.dumps(previous_review, ensure_ascii=False, indent=2)
+            if structured_findings
+            else "\nRepair feedback:\n"
+            + repair_feedback
+            + "\nPrevious review:\n"
+            + json.dumps(previous_review, ensure_ascii=False, indent=2)
+        )
+    else:
+        repair = ""
     repair_rules = (
         """
 - This is a repair patch. Return only the units named by the review, and in them only what changes:
@@ -2066,6 +2132,7 @@ def _parse_component_plan_payload(
     allowed_unit_ids: set[str] | None = None,
     required_unit_ids: set[str] | None = None,
     signature_targets: list[dict[str, object]] | None = None,
+    signature_contract_required: bool | None = None,
     runtime_config_required: bool = False,
     previous_runtime_config: object = None,
 ) -> dict[str, object]:
@@ -2085,6 +2152,7 @@ def _parse_component_plan_payload(
         allowed_unit_ids=allowed_unit_ids,
         required_unit_ids=required_unit_ids,
         signature_targets=signature_targets or [],
+        signature_contract_required=signature_contract_required,
         runtime_config_required=runtime_config_required,
         previous_runtime_config=previous_runtime_config,
     )
@@ -2112,6 +2180,7 @@ def _component_plan_payload_issues(
     allowed_unit_ids: set[str] | None,
     required_unit_ids: set[str] | None,
     signature_targets: list[dict[str, object]],
+    signature_contract_required: bool | None,
     runtime_config_required: bool,
     previous_runtime_config: object,
 ) -> list[str]:
@@ -2192,7 +2261,11 @@ def _component_plan_payload_issues(
     _require_signature_contract(
         payload.get("implementation_signature_contract"),
         signature_targets=signature_targets,
-        required=required_unit_ids is not None,
+        required=(
+            required_unit_ids is not None
+            if signature_contract_required is None
+            else signature_contract_required
+        ),
         issues=issues,
     )
     _require_runtime_config(
@@ -3042,6 +3115,17 @@ def _apply_design_adjustments_to_steps(
 
 
 def _compact_review(review: dict[str, object]) -> dict[str, object]:
+    llm_review = _object_dict(review.get("llm_review"))
+    blocking_findings = [
+        finding
+        for finding in _dict_items(llm_review.get("findings"))
+        if finding.get("severity") == "blocking"
+    ]
+    if blocking_findings:
+        return {
+            "ok": review.get("ok"),
+            "findings": blocking_findings,
+        }
     return {
         "ok": review.get("ok"),
         "summary": review.get("summary"),
