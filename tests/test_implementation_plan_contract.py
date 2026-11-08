@@ -1030,7 +1030,9 @@ def test_v4_review_prompt_carries_write_scope_and_only_later_rounds_carry_memory
     assert '"reviewed_design_ids": ["every exact VDN/VDE id from all work units"]' in first
     assert '"severity": "blocking|warning"' in first
     assert "never abbreviate or invent ids" in first
-    assert "Do not cap the number of findings" in first
+    assert "Review each listed contract once" in first
+    assert "do not keep exploring alternatives" in first
+    assert "Do not cap the number of findings" not in first
     assert "from a reducer transition or final-state assertion alone" in first
     assert "Do not return `ok` or `developer_feedback`" in first
     assert '"approved_design_contracts":{"nodes":[{"id":"VDN-1"' in first

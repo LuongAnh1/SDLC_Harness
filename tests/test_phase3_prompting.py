@@ -504,4 +504,11 @@ def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> Non
     assert "stage_capabilities" in prompt
     assert "preserves the production dependency" in prompt
     assert "`synthetic` is the correct test-only fallback" in prompt
-    assert "semantically insufficient setup is a blocker" in prompt
+    assert "Approved Requirement and Design are immutable inputs" in prompt
+    assert "Review the final merged repository state" in prompt
+    assert "Earlier test intents remain part of that final state" in prompt
+    assert "do not require Planner to invent the fixture-binding mechanism" in prompt
+    assert "Review each listed contract once" in prompt
+    assert "do not keep exploring alternatives" in prompt
+    assert "require upstream Design change" not in prompt
+    assert "Do not cap the number of findings" not in prompt

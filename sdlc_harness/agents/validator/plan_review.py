@@ -836,7 +836,8 @@ class ImplementationPlanValidator:
         )
         system = (
             "You are SDLC Harness Validator.review_plan. Return JSON only. "
-            "Be strict about requirement/design coverage, implementation clarity, and tests."
+            "Treat approved Requirement and Design as immutable, review the final merged Plan "
+            "state once, and be strict about implementation clarity and tests."
         )
         component_aware = structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
         contract_error = ""
@@ -1200,6 +1201,10 @@ def _llm_review_prompt(
     v5_boundaries = (
         """
 Component-aware V5 boundaries:
+- Approved Requirement and Design are immutable inputs for this review. Do not reopen,
+  reinterpret or request changes to them. Create a Plan finding only when Planner-owned
+  objectives, targets, migration decisions, tests, evidence, signatures or runtime
+  configuration can make the final implementation satisfy those approved inputs.
 - Vertical Design nodes define the complete approved work-unit/component scope.
   Do not invent a new business component or work unit. Each unit's `write_scope` lists the
   files it may target; supporting code belongs inside those files, plus shared contracts,
@@ -1209,10 +1214,14 @@ Component-aware V5 boundaries:
   acceptance_refs and code_entities are Harness-owned. Do not ask Developer.plan to change
   them; a wrong ref is a Design trace issue, not a plan repair. Review only Planner-owned objectives, targets,
   migration decisions, tests, evidence, and signature content.
-- `code_entities` marks units that edit the same code symbol in order. Block when a later
-  unit's objective or tests would break behavior an earlier listed unit's contract requires.
-  A runtime binding with `attachment_wired_by` is already attached by that earlier unit, so
-  the later unit needs its owner file only when its own change requires it there.
+- `code_entities` marks units that edit the same code symbol in implementation order.
+  Review the final merged repository state, not each unit as an isolated final version.
+  Earlier test intents remain part of that final state unless a later unit explicitly updates, replaces or
+  removes them. When a later unit changes a shared signature or behavior, require that later
+  unit's Planner-owned objective/tests to reconcile every affected earlier test; do not reopen
+  Design or debate alternative architectures. A runtime binding with `attachment_wired_by` is
+  already attached by that earlier unit, so the later unit needs its owner file only when its
+  own change requires it there.
 - The rule review checked that every UI contract item (state, validation, transition,
   feedback, accessibility, focus, responsive rule and external runtime input) is in a test intent's `obligation_refs`
   or in `unverified_obligations` with a reason. Do not re-audit that mapping item by item.
@@ -1225,8 +1234,10 @@ Component-aware V5 boundaries:
   must name the deterministic values/states QA needs. Synthetic data is created by QA inside the
   browser spec after Developer execution. It must not introduce or alter a production provider,
   endpoint, entrypoint, global, history-state contract, runtime config, or Design seam. Missing,
-  empty/default, or semantically insufficient setup is a blocker; do not require the product
-  Design to add a provider merely so Browser QA can run.
+  empty/default, or semantically insufficient values/states are a blocker. When the QA intent
+  names an approved public boundary plus exact deterministic values/states,
+  do not require Planner to invent the fixture-binding mechanism or a production seam; QA owns that binding
+  after Developer execution.
 - Compatibility projections (steps, proposed files, design mappings, top-level test
   intents) are rendered from work_units and checked by the rule review, so they are omitted
   below. Each unit's `approved_design_contracts` contains only the exact Vertical Design
@@ -1248,7 +1259,7 @@ Component-aware V5 boundaries:
 - When repo evidence shows an existing shared-contract, client-adapter, or migration
   convention, require the plan to use it if otherwise Web/API/data boundaries would
   have to invent incompatible shapes. Attach supporting code to an approved unit's files;
-  require upstream Design change only when no approved unit can own it.
+  never request an upstream Design change from this review.
 - For every UI surface, verify that the objective, exact code targets, and test intents
   cover every non-empty experience-contract category: component structure, feedback,
   accessibility, responsive behavior, and focus flow. CSS class names without owned or
@@ -1274,10 +1285,13 @@ Component-aware V5 boundaries:
 - A required migration needs a concrete migration artifact, not only a schema file.
   Only approved Requirement/Vertical Design behavior and established repo conventions
   may create a blocker.
-- Return one finding per distinct issue. Copy complete `WU-...` ids and stable Requirement
-  or Vertical Design ids exactly from the supplied artifacts; never abbreviate or invent ids.
-  Do not cap the number of findings. `reviewed_design_ids` must list every design node and edge
-  id from every work unit after checking its approved contract, including ids that have findings.
+- Return one finding per distinct confirmed issue. Copy complete `WU-...` ids and stable
+  Requirement or Vertical Design ids exactly from the supplied artifacts; never abbreviate or invent ids.
+  Review each listed contract once, record the decision, then output JSON immediately
+  after the complete pass. Do not reopen a recorded decision unless a later supplied contract
+  directly contradicts it, and do not keep exploring alternatives after identifying a repairable
+  `expected_change`. `reviewed_design_ids` must list every design node and edge id from every work
+  unit after checking its approved contract, including ids that have findings.
 - A blocking finding must cite at least one affected unit. `expected_change` states what must
   become true through Planner-owned objectives, targets, migration decisions, tests, evidence,
   signatures or runtime configuration. It must not prescribe changes to Harness-owned fields.
