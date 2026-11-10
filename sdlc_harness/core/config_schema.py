@@ -67,6 +67,13 @@ PHASE3_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     },
 }
 PHASE4_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
+    "code_validator": {
+        "label": "Code semantic validator",
+        "model": "deepseek-flash",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 600,
+    },
     "developer_action": {
         "label": "Developer action",
         "model": "deepseek-flash",
@@ -266,14 +273,14 @@ def _phase4_llm_fields() -> tuple[dict[str, object], ...]:
                     f"{label} model",
                     "string",
                     defaults["model"],
-                    "Model riêng cho call Developer Phase 4; có thể cấu hình lại ở runtime.",
+                    "Model riêng cho call Phase 4; có thể cấu hình lại ở runtime.",
                 ),
                 _field(
                     f"{prefix}_THINKING_EFFORT",
                     f"{label} thinking",
                     "enum",
                     defaults["effort"],
-                    "Mức reasoning riêng cho call Developer Phase 4.",
+                    "Mức reasoning riêng cho call Phase 4.",
                     options=("none", "low", "high", "max"),
                 ),
                 _field(
@@ -290,7 +297,7 @@ def _phase4_llm_fields() -> tuple[dict[str, object], ...]:
                     f"{label} timeout",
                     "integer",
                     defaults["timeout"],
-                    "Timeout riêng cho call Developer Phase 4, tính bằng giây.",
+                    "Timeout riêng cho call Phase 4, tính bằng giây.",
                     minimum=1,
                     maximum=1800,
                 ),
@@ -387,8 +394,10 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_INPUT_ENABLED", "Review implementation-plan LLM input", "boolean", True, "Dừng trước khi gửi từng input LLM của Phase 3."),
             _field("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_OUTPUT_ENABLED", "Review implementation-plan LLM output", "boolean", True, "Dừng sau khi nhận từng output LLM của Phase 3."),
             _field("SDLC_IMPLEMENTATION_REPAIR_LIMIT", "Implementation repair limit", "integer", 2, "Số vòng Developer, Verification và Validator.", minimum=0),
-            _field("SDLC_IMPLEMENTATION_VALIDATION_TRIALS", "Implementation validation trials", "integer", 3, "Số semantic trial của Code Validator.", minimum=2),
             _field("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET", "Implementation call budget", "integer", 6, "Ngân sách call cho Code Validator.", minimum=2),
+            _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED", "Pause Code Validator LLM steps", "boolean", False, "Dừng Phase 4 tại từng input/output Code Validator để người vận hành kiểm tra."),
+            _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_INPUT_ENABLED", "Review Code Validator input", "boolean", True, "Dừng trước khi gửi từng task Code Validator."),
+            _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED", "Review Code Validator output", "boolean", True, "Dừng sau khi nhận từng output Code Validator."),
             _field("SDLC_QA_REPAIR_LIMIT", "QA repair limit", "integer", 1, "Số vòng sửa code sau QA.", minimum=0),
         ),
     },

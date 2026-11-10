@@ -20,6 +20,7 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
+from ..llm.step_review import LlmStepReviewRequired
 from ..storage.runtime import utc_now_iso
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4 import (
@@ -343,6 +344,12 @@ class PhaseFourQaCycle:
                 run_id=run_id,
                 trace_result=trace_result,
                 version=artifact_version,
+            )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
             )
         except HarnessError as exc:
             state.update(

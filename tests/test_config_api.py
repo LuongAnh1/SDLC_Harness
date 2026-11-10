@@ -100,6 +100,9 @@ class ConfigApiTests(unittest.TestCase):
         self.assertEqual(profile_field["source"], "default")
         self.assertEqual(profile_field["options"], ["typescript_fullstack_v1"])
         validation_section = next(section for section in payload["sections"] if section["id"] == "validation")
+        validation_names = {field["name"] for field in validation_section["fields"]}
+        self.assertNotIn("SDLC_IMPLEMENTATION_VALIDATION_TRIALS", validation_names)
+        self.assertIn("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED", validation_names)
         self.assertNotIn(
             "SDLC_DESIGNER_LOOP_ENABLED",
             {field["name"] for field in validation_section["fields"]},

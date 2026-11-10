@@ -31,14 +31,17 @@ class AcceptingCodeTraceLlm:
 
     def complete(self, *, system: str, prompt: str) -> str:
         self.prompt = prompt
+        task = json.loads(prompt)["task_contract"]
         return json.dumps(
             {
+                "task_id": task["task_id"],
+                "reviewed_claim_ids": task["authority_claim_ids"],
+                "reviewed_design_ids": task["required_reviewed_design_ids"],
+                "reviewed_boundary_contract_ids": task["required_reviewed_boundary_contract_ids"],
                 "ok": True,
-                "confidence": 0.95,
                 "summary": "Profiled code trace accepted.",
-                "graph_edges": [],
-                "missing_links": [],
-                "risks": [],
+                "findings": [],
+                "observations": [],
             }
         )
 
@@ -105,6 +108,8 @@ def _symbol(name: str, *, qualified_name: str | None = None) -> dict[str, object
         "type_parameters": [],
         "async": False,
         "exported": True,
+        "start_line": 1,
+        "end_line": 1,
     }
 
 
@@ -224,6 +229,8 @@ def test_typescript_ast_bridge_uses_fixed_helper_and_validates_evidence(
                                 "type_parameters": ["T extends string"],
                                 "async": True,
                                 "exported": False,
+                                    "start_line": 1,
+                                    "end_line": 1,
                             },
                         ],
                     }
@@ -418,7 +425,7 @@ def test_profiled_code_trace_uses_exact_ast_symbol_evidence(
         "typescript_compiler_ast_v1"
     )
     assert exact.symbol_evidence["version"] == TYPESCRIPT_AST_EVIDENCE_VERSION
-    prompt = json.loads(llm.prompt.split("\n\n", 1)[1])
+    prompt = json.loads(llm.prompt)
     assert prompt["symbol_evidence"]["extractor_id"] == "typescript_compiler_ast_v1"
 
 

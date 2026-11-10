@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
 import hashlib
 import json
 from pathlib import Path
@@ -332,75 +331,6 @@ def prepare_semantic_trial(
         item["canonical_key"] = canonical_finding_key(item)
         accepted.append(item)
     return _dedupe_findings(accepted), normalized_observations, rejected
-
-
-def aggregate_semantic_trials(
-    *,
-    trials: list[dict[str, object]],
-) -> dict[str, object]:
-    """Aggregate adaptive trials by canonical finding key."""
-
-    quorum = len(trials) // 2 + 1
-    votes: dict[str, list[dict[str, object]]] = defaultdict(list)
-    key_sets: list[set[str]] = []
-    for trial in trials:
-        items = _dicts(trial.get("blocking_findings"))
-        key_set: set[str] = set()
-        for item in items:
-            key = str(item.get("canonical_key") or canonical_finding_key(item))
-            item = {**item, "canonical_key": key}
-            votes[key].append(item)
-            key_set.add(key)
-        key_sets.append(key_set)
-    stable: list[dict[str, object]] = []
-    disputed: list[dict[str, object]] = []
-    for key, items in votes.items():
-        representative = max(items, key=lambda item: len(str(item.get("evidence_quote") or "")))
-        payload = {
-            **representative,
-            "canonical_key": key,
-            "votes": len(items),
-            "quorum": quorum,
-            "trial_ids": sorted({str(item.get("trial_id") or "") for item in items}),
-        }
-        if len(items) >= quorum:
-            stable.append(payload)
-        else:
-            payload.update(
-                {
-                    "blocking": False,
-                    "owner": "validator",
-                    "recommended_action": "validator_mapping_fix",
-                    "normalization_reason": "semantic_minority_without_quorum",
-                }
-            )
-            disputed.append(payload)
-    pairwise = []
-    for left in range(len(key_sets)):
-        for right in range(left + 1, len(key_sets)):
-            union = key_sets[left] | key_sets[right]
-            score = 1.0 if not union else len(key_sets[left] & key_sets[right]) / len(union)
-            pairwise.append({"left": left + 1, "right": right + 1, "jaccard": round(score, 4)})
-    consistency = (
-        sum(float(item["jaccard"]) for item in pairwise) / len(pairwise)
-        if pairwise
-        else 1.0
-    )
-    return {
-        "stable_blockers": sorted(stable, key=lambda item: str(item.get("canonical_key"))),
-        "disputed_findings": sorted(disputed, key=lambda item: str(item.get("canonical_key"))),
-        "quorum": quorum,
-        "valid_trials": len(trials),
-        "pairwise_jaccard": pairwise,
-        "consistency_score": round(consistency, 4),
-    }
-
-
-def trial_blocker_keys(trial: dict[str, object]) -> set[str]:
-    return {
-        str(item.get("canonical_key") or canonical_finding_key(item))
-        for item in _dicts(trial.get("blocking_findings"))
-    }
 
 
 def snapshot_fingerprint(

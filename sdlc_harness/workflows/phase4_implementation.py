@@ -30,6 +30,7 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
+from ..llm.step_review import LlmStepReviewRequired
 from ..profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
@@ -813,6 +814,24 @@ class PhaseFourImplementationCycle:
     ) -> DeveloperExecutionResult:
         """Chạy một durable tool-loop session và phản chiếu tiến độ vào workflow state."""
 
+        runtime_config_ref = str(latest_artifacts.get("runtime_config_execution") or "")
+        if runtime_config_ref:
+            runtime_config_receipt = _read_json_artifact(
+                self._existing_artifact_path(runtime_config_ref, run_id=run_id),
+                run_id=run_id,
+            )
+            expected_dirty_paths = list(
+                dict.fromkeys(
+                    [
+                        *(expected_dirty_paths or []),
+                        *[
+                            path
+                            for path in runtime_config_receipt.get("changed_paths", [])
+                            if isinstance(path, str) and path
+                        ],
+                    ]
+                )
+            )
         unit_aware = bool(work_packet.get("execution_units"))
         session_key = manifest_key.replace("_manifest", "_session")
         state.update(
@@ -1498,6 +1517,12 @@ class PhaseFourImplementationCycle:
                 trace_result=trace_result,
                 version=1,
             )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+            )
         except HarnessError as exc:
             state.update(
                 {
@@ -1571,6 +1596,12 @@ class PhaseFourImplementationCycle:
                     "summary": trace_result.summary,
                 },
             }
+            _supersede_active_repair_execution(
+                state,
+                repair_objective_id=str(
+                    _dict_value(feedback.get("repair_objective")).get("objective_id") or ""
+                ),
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1771,6 +1802,12 @@ class PhaseFourImplementationCycle:
                 trace_result=trace_result,
                 version=artifact_version,
             )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+            )
         except HarnessError as exc:
             state.update(
                 {
@@ -1864,6 +1901,12 @@ class PhaseFourImplementationCycle:
                 "previous_repair_iterations": previous_iterations,
                 "summary": trace_result.summary,
             }
+            _supersede_active_repair_execution(
+                state,
+                repair_objective_id=str(
+                    _dict_value(feedback.get("repair_objective")).get("objective_id") or ""
+                ),
+            )
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1991,6 +2034,14 @@ class PhaseFourImplementationCycle:
             if resume_tool_loop:
                 refreshed_packet_path = packet_path
             else:
+                work_packet = self._restore_missing_repair_units(
+                    state=state,
+                    run_id=run_id,
+                    artifact_paths=artifact_paths,
+                    work_packet=work_packet,
+                    repair_feedback=repair_feedback,
+                    target_path=target_info.path,
+                )
                 work_packet = refresh_developer_work_packet(
                     packet=work_packet,
                     target_repo_path=target_info.path,
@@ -2226,6 +2277,12 @@ class PhaseFourImplementationCycle:
                 trace_result=trace_result,
                 version=artifact_version,
             )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_code_validation_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+            )
         except HarnessError as exc:
             state.update(
                 {
@@ -2365,6 +2422,86 @@ class PhaseFourImplementationCycle:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _restore_missing_repair_units(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        artifact_paths: dict[str, str],
+        work_packet: dict[str, object],
+        repair_feedback: dict[str, object],
+        target_path: Path,
+    ) -> dict[str, object]:
+        repair_unit_ids = {
+            unit_id
+            for finding in _dict_value(repair_feedback.get("repair_objective")).get("contract_findings", [])
+            if isinstance(finding, dict)
+            for unit_id in finding.get("unit_ids", [])
+            if isinstance(unit_id, str) and unit_id
+        }
+        packet_unit_ids = {
+            str(unit.get("unit_id") or "")
+            for unit in work_packet.get("execution_units", [])
+            if isinstance(unit, dict) and str(unit.get("unit_id") or "")
+        }
+        if repair_unit_ids <= packet_unit_ids:
+            return work_packet
+
+        structured_ref = _required_phase4_artifact(
+            artifact_paths,
+            "implementation_plan_structured",
+            run_id=run_id,
+        )
+        structured_plan = _read_json_artifact(
+            self._existing_artifact_path(structured_ref, run_id=run_id),
+            run_id=run_id,
+        )
+        approved_plan = {
+            **_string_dict(work_packet.get("approved_plan")),
+            "implementation_plan_structured": structured_ref,
+        }
+        restored = build_developer_work_packet(
+            run_id=run_id,
+            source_ref=str(work_packet.get("source_ref") or state.get("source_ref") or ""),
+            issue_key=str(work_packet.get("issue_key") or ""),
+            structured_plan=structured_plan,
+            target_repo_path=target_path,
+            run_workspace=self.workspace_manager.resolve(run_id).to_dict(),
+            approved_plan_refs=approved_plan,
+            canonical_requirements=[
+                dict(item)
+                for item in work_packet.get("canonical_requirements", [])
+                if isinstance(item, dict)
+            ],
+            requirement_contract=_dict_value(work_packet.get("requirement_contract")),
+            requirement_coverage=[
+                dict(item)
+                for item in work_packet.get("requirement_coverage", [])
+                if isinstance(item, dict)
+            ],
+            approved_runtime_decisions=[
+                dict(item)
+                for item in work_packet.get("approved_runtime_decisions", [])
+                if isinstance(item, dict)
+            ],
+            effective_design_contract=_dict_value(work_packet.get("effective_design_contract")),
+            planning_policy=_planning_policy_for_state(state, run_id=run_id),
+            verification_policy=_verification_policy_for_state(state, run_id=run_id),
+        )
+        restored_unit_ids = {
+            str(unit.get("unit_id") or "")
+            for unit in restored.get("execution_units", [])
+            if isinstance(unit, dict) and str(unit.get("unit_id") or "")
+        }
+        missing = sorted(repair_unit_ids - restored_unit_ids)
+        if missing:
+            raise HarnessError(
+                "developer_repair_unit_ids_invalid",
+                f"Validator repair findings reference unknown approved execution units: {missing}",
+                run_id=run_id,
+            )
+        return restored
+
     def _bound_repair_work_packet_path(
         self,
         *,
@@ -2414,4 +2551,26 @@ class PhaseFourImplementationCycle:
                 if match:
                     highest = max(highest, int(match.group("ordinal")))
         return max(1, minimum, highest + 1)
+
+
+def _supersede_active_repair_execution(
+    state: dict[str, object],
+    *,
+    repair_objective_id: str,
+) -> None:
+    """Do not resume an older repair session against newly generated Validator feedback."""
+
+    execution = _dict_value(state.get("developer_execution"))
+    if (
+        execution.get("mode") != "implementation_repair"
+        or execution.get("status") not in {"executing", "paused", "blocked"}
+    ):
+        return
+    state["developer_execution"] = {
+        **execution,
+        "status": "superseded",
+        "superseded_at": utc_now_iso(),
+        "superseded_reason": "new_validator_repair_objective",
+        "superseded_by_repair_objective_id": repair_objective_id,
+    }
 

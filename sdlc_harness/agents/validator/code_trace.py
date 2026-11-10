@@ -14,11 +14,13 @@ from dataclasses import dataclass, field
 import json
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Callable
 
+from ...core.config import phase4_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.client import LlmClient
 from ...llm.json_utils import parse_first_json_object
+from ...llm.step_review import LlmStepReviewRequired
 from ...profiles import (
     CodeTracePolicy,
     PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
@@ -26,18 +28,25 @@ from ...profiles import (
 )
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
-    aggregate_semantic_trials,
     build_finding_ledger,
     build_validation_claims,
     deterministic_typescript_contract_findings,
-    prepare_semantic_trial,
     snapshot_fingerprint,
-    trial_blocker_keys,
+)
+from .code_review_tasks import (
+    CODE_VALIDATION_MODE,
+    CodeValidationTaskCache,
+    build_code_validation_review_plan,
 )
 from .typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 
 MAX_SNIPPET_TOTAL_CHARS = 60000
 MAX_SNIPPET_FILE_CHARS = 20000
+MAX_TASK_SOURCE_SNIPPET_TOTAL_CHARS = 60000
+MAX_TASK_SOURCE_SNIPPET_FILE_CHARS = 26000
+MAX_TASK_TEST_SNIPPET_TOTAL_CHARS = 50000
+MAX_TASK_TEST_SNIPPET_FILE_CHARS = 24000
+TASK_SYMBOL_CONTEXT_LINES = 6
 NON_REPAIRABLE_LLM_LINK_TYPES = {"trace_mapping_issue", "evidence_incomplete"}
 NON_BLOCKING_MESSAGE_MARKERS = (
     "no code change required",
@@ -66,9 +75,11 @@ class CodeTraceResult:
     llm_review: dict[str, object]
     requirement_contract: dict[str, object] | None = None
     deterministic_findings: list[dict[str, object]] = field(default_factory=list)
-    disputed_findings: list[dict[str, object]] = field(default_factory=list)
     rejected_findings: list[dict[str, object]] = field(default_factory=list)
-    semantic_consensus: dict[str, object] = field(default_factory=dict)
+    review_plan: dict[str, object] = field(default_factory=dict)
+    task_results: list[dict[str, object]] = field(default_factory=list)
+    aggregation: dict[str, object] = field(default_factory=dict)
+    cache: dict[str, object] = field(default_factory=dict)
     verification_evidence: dict[str, object] = field(default_factory=dict)
     symbol_evidence: dict[str, object] = field(default_factory=dict)
     snapshot_fingerprint: str = ""
@@ -77,10 +88,9 @@ class CodeTraceResult:
 
     def to_dict(self) -> dict[str, object]:
         contract = self.requirement_contract or {"version": "v1", "revision": 0}
-        mode = "hybrid_rule_llm_code_trace_v3" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         return {
             "version": "requirement_design_code_trace_v1",
-            "mode": mode,
+            "mode": CODE_VALIDATION_MODE,
             "requirement_contract": contract,
             "created_at": utc_now_iso(),
             "ok": self.ok,
@@ -89,9 +99,11 @@ class CodeTraceResult:
             "mappings": self.mappings,
             "missing_links": self.missing_links,
             "deterministic_findings": self.deterministic_findings,
-            "disputed_findings": self.disputed_findings,
             "rejected_findings": self.rejected_findings,
-            "semantic_consensus": self.semantic_consensus,
+            "review_plan": self.review_plan,
+            "task_results": self.task_results,
+            "aggregation": self.aggregation,
+            "cache": self.cache,
             "verification_evidence": self.verification_evidence,
             "symbol_evidence": self.symbol_evidence,
             "snapshot_fingerprint": self.snapshot_fingerprint,
@@ -103,7 +115,6 @@ class CodeTraceResult:
 
     def to_quality_report(self) -> dict[str, object]:
         contract = self.requirement_contract or {"version": "v1", "revision": 0}
-        mode = "hybrid_rule_llm_code_trace_v3" if contract.get("version") == "v2" else "hybrid_rule_llm_code_trace_v1"
         symbol_files = self.symbol_evidence.get("files")
         symbol_evidence_summary = (
             {
@@ -117,7 +128,7 @@ class CodeTraceResult:
         )
         return {
             "ok": self.ok,
-            "mode": mode,
+            "mode": CODE_VALIDATION_MODE,
             "requirement_contract_version": contract.get("version", "v2"),
             "requirement_revision": contract.get("revision", 0),
             "summary": self.summary,
@@ -128,9 +139,10 @@ class CodeTraceResult:
             "llm_confidence": self.llm_review.get("confidence"),
             "snapshot_fingerprint": self.snapshot_fingerprint,
             "deterministic_blocking_count": len(self.deterministic_findings),
-            "consensus_blocking_count": len(self.semantic_consensus.get("stable_blockers", [])),
-            "disputed_count": len(self.disputed_findings),
-            "semantic_consensus": self.semantic_consensus,
+            "semantic_blocking_count": len(_dict_items(self.aggregation.get("blocking_findings"))),
+            "task_count": len(self.task_results),
+            "aggregation": self.aggregation,
+            "cache": self.cache,
             "symbol_evidence": symbol_evidence_summary,
             "inconclusive": self.inconclusive,
         }
@@ -143,14 +155,14 @@ class CodeTraceValidator:
         self,
         llm_client: LlmClient,
         *,
-        validation_trials: int = 1,
-        llm_call_budget: int = 2,
+        llm_call_budget: int = 6,
         symbol_extractor: TypeScriptAstExtractor | None = None,
+        reviewable_client_factory: Callable[[dict[str, object], str], object] | None = None,
     ):
         self.llm_client = llm_client
-        self.validation_trials = max(1, int(validation_trials))
         self.llm_call_budget = max(1, int(llm_call_budget))
         self.symbol_extractor = symbol_extractor or TypeScriptAstExtractor()
+        self.reviewable_client_factory = reviewable_client_factory
 
     def validate(
         self,
@@ -161,6 +173,7 @@ class CodeTraceValidator:
         verification_evidence: dict[str, object] | None = None,
         previous_ledger: dict[str, object] | None = None,
         code_trace_policy: CodeTracePolicy | None = None,
+        task_cache_path: Path | None = None,
     ) -> CodeTraceResult:
         if code_trace_policy is None:
             raise HarnessError(
@@ -310,106 +323,158 @@ class CodeTraceValidator:
             verification_evidence=verification_evidence,
             symbol_evidence=symbol_evidence,
         )
-        valid_trials: list[dict[str, object]] = []
-        invalid_trials: list[dict[str, object]] = []
-        rejected_findings: list[dict[str, object]] = []
+        try:
+            review_plan = build_code_validation_review_plan(
+                work_packet=work_packet,
+                approved_context=approved_context,
+                validation_claims=validation_claims,
+            )
+        except ValueError as exc:
+            raise HarnessError(
+                "implementation_validation_plan_invalid",
+                str(exc),
+                run_id=run_id,
+            ) from exc
+        tasks = _dict_items(review_plan.get("tasks"))
+        if not static_missing_links and self.llm_call_budget < len(tasks):
+            raise HarnessError(
+                "implementation_validation_call_budget_insufficient",
+                (
+                    f"Code validation requires {len(tasks)} task call(s), but the configured "
+                    f"budget is {self.llm_call_budget}."
+                ),
+                run_id=run_id,
+            )
+
+        task_cache = CodeValidationTaskCache(task_cache_path)
+        task_results: list[dict[str, object]] = []
+        semantic_blockers: list[dict[str, object]] = []
         observations: list[dict[str, object]] = []
+        rejected_findings: list[dict[str, object]] = []
         calls_used = 0
-        target_valid_trials = 1 if self.validation_trials == 1 else 2
-        while len(valid_trials) < target_valid_trials and calls_used < self.llm_call_budget:
-            trial_id = f"trial-{len(valid_trials) + 1}"
-            max_attempts = min(2, self.llm_call_budget - calls_used)
-            try:
-                review = self._review_with_llm(
+        cache_hits = 0
+        cache_misses = 0
+        inconclusive = False
+        inconclusive_task_id = ""
+        invalid_tasks: list[dict[str, object]] = []
+        if not static_missing_links:
+            for task in tasks:
+                task_id = str(task.get("task_id") or "").strip()
+                task_snippets = _task_code_snippets(
                     target_path=target_path,
-                    work_packet=work_packet,
+                    task=task,
+                    ast_evidence=ast_evidence,
+                    fallback_test_paths=existing_test_paths,
+                )
+                prompt = _code_validation_task_prompt(
+                    task=task,
+                    code_snippets=task_snippets,
                     trace_mappings=trace_mappings,
-                    static_missing_links=static_missing_links,
-                    test_paths=existing_test_paths,
-                    approved_context=approved_context,
-                    validation_claims=validation_claims,
                     verification_evidence=verification_evidence,
                     symbol_evidence=symbol_evidence,
-                    max_attempts=max_attempts,
+                    scenario_results=task_results,
                 )
-            except HarnessError as exc:
-                calls_used += max_attempts
-                invalid_trials.append({"attempt_id": f"attempt-{calls_used}", "message": exc.message})
-                continue
-            metadata = _dict_value(review.get("llm_metadata"))
-            calls_used += max(1, int(metadata.get("selected_attempt") or 1))
-            normalized, trial_observations = _normalize_llm_findings(
-                review,
-                approved_context=approved_context,
-            )
-            accepted, trial_observations, rejected = prepare_semantic_trial(
-                findings=normalized,
-                observations=trial_observations,
-                claims=validation_claims,
-                verification_evidence=verification_evidence,
-                trial_id=trial_id,
-            )
-            rejected_findings.extend(rejected)
-            observations.extend(trial_observations)
-            valid_trials.append(
-                {
-                    "trial_id": trial_id,
-                    "reported_ok": review.get("ok") is True,
-                    "confidence": review.get("confidence"),
-                    "summary": review.get("summary"),
-                    "blocking_findings": accepted,
-                    "observations": trial_observations,
-                    "review_context": review.get("review_context"),
-                    "llm_metadata": metadata,
-                }
-            )
-            if len(valid_trials) == 2 and self.validation_trials >= 3:
-                if trial_blocker_keys(valid_trials[0]) != trial_blocker_keys(valid_trials[1]):
-                    target_valid_trials = 3
+                cached = task_cache.get(prompt)
+                if cached is not None:
+                    try:
+                        _validate_code_validation_task_output(
+                            output=cached,
+                            task=task,
+                            prompt=prompt,
+                        )
+                    except ValueError:
+                        cached = None
+                if cached is not None:
+                    review = cached
+                    metadata = {
+                        "cache_hit": True,
+                        "prompt_chars": len(prompt),
+                        "attempts": [],
+                    }
+                    cache_hits += 1
+                else:
+                    cache_misses += 1
+                    max_attempts = min(2, self.llm_call_budget - calls_used)
+                    if max_attempts < 1:
+                        inconclusive = True
+                        inconclusive_task_id = task_id
+                        invalid_tasks.append(
+                            {"task_id": task_id, "message": "LLM call budget exhausted before this task."}
+                        )
+                        break
+                    try:
+                        review, metadata = self._complete_task_review_json(
+                            task=task,
+                            prompt=prompt,
+                            max_attempts=max_attempts,
+                        )
+                    except LlmStepReviewRequired:
+                        raise
+                    except HarnessError as exc:
+                        calls_used += max_attempts
+                        inconclusive = True
+                        inconclusive_task_id = task_id
+                        invalid_tasks.append({"task_id": task_id, "message": exc.message})
+                        break
+                    calls_used += max(1, int(metadata.get("selected_attempt") or 1))
+                    task_cache.put(prompt, review)
 
-        disagreement_needs_third = (
-            len(valid_trials) >= 2
-            and trial_blocker_keys(valid_trials[0]) != trial_blocker_keys(valid_trials[1])
-        )
-        required_valid_trials = 3 if disagreement_needs_third else target_valid_trials
-        inconclusive = len(valid_trials) < required_valid_trials
-        consensus = aggregate_semantic_trials(trials=valid_trials) if valid_trials else {
-            "stable_blockers": [],
-            "disputed_findings": [],
-            "quorum": 0,
-            "valid_trials": 0,
-            "pairwise_jaccard": [],
-            "consistency_score": 0.0,
-        }
-        consensus.update(
-            {
-                "policy": "adaptive_2_plus_1" if self.validation_trials >= 3 else "fixed",
-                "max_trials": self.validation_trials,
-                "llm_call_budget": self.llm_call_budget,
-                "llm_calls_used": calls_used,
-                "invalid_trial_count": len(invalid_trials),
-                "invalid_trials": invalid_trials,
-                "trials": valid_trials,
-                "inconclusive": inconclusive,
-            }
-        )
-        semantic_blockers = _dict_items(consensus.get("stable_blockers"))
-        disputed_findings = _dict_items(consensus.get("disputed_findings"))
+                findings, task_observations = _task_findings(review=review, task=task)
+                semantic_blockers.extend(findings)
+                observations.extend(task_observations)
+                task_results.append(
+                    {
+                        "task_id": task_id,
+                        "task_kind": task.get("task_kind"),
+                        "scenario_ids": task.get("scenario_ids"),
+                        "unit_ids": task.get("unit_ids"),
+                        "reviewed_claim_ids": review.get("reviewed_claim_ids"),
+                        "reviewed_design_ids": review.get("reviewed_design_ids"),
+                        "reviewed_boundary_contract_ids": review.get("reviewed_boundary_contract_ids"),
+                        "reported_ok": review.get("ok") is True,
+                        "summary": review.get("summary"),
+                        "blocking_findings": findings,
+                        "observations": task_observations,
+                        "llm_metadata": metadata,
+                    }
+                )
+
         missing_links = [*static_missing_links, *semantic_blockers]
         static_ok = bool(trace_mappings) and not static_missing_links
-        ok = static_ok and not semantic_blockers and not inconclusive
+        completed_task_ids = {str(item.get("task_id") or "") for item in task_results}
+        expected_task_ids = {str(item.get("task_id") or "") for item in tasks}
+        all_tasks_completed = static_missing_links or completed_task_ids == expected_task_ids
+        ok = static_ok and all_tasks_completed and not semantic_blockers and not inconclusive
+        aggregation = {
+            "policy": CODE_VALIDATION_MODE,
+            "task_count": len(tasks),
+            "completed_task_count": len(task_results),
+            "blocking_findings": semantic_blockers,
+            "observation_count": len(observations),
+            "llm_call_budget": self.llm_call_budget,
+            "llm_calls_used": calls_used,
+            "inconclusive": inconclusive,
+            "inconclusive_task_id": inconclusive_task_id,
+            "invalid_tasks": invalid_tasks,
+            "deterministic_preflight_blocked": bool(static_missing_links),
+        }
         llm_review = {
-            "ok": not semantic_blockers and not inconclusive,
-            "reported_ok": all(item.get("reported_ok") is True for item in valid_trials),
-            "confidence": _consensus_confidence(valid_trials),
-            "summary": _consensus_summary(valid_trials, semantic_blockers, disputed_findings, inconclusive),
+            "ok": not semantic_blockers and not inconclusive and all_tasks_completed,
+            "reported_ok": all(item.get("reported_ok") is True for item in task_results),
+            "summary": _task_review_summary(
+                task_results=task_results,
+                blockers=semantic_blockers,
+                inconclusive=inconclusive,
+                deterministic_blocked=bool(static_missing_links),
+            ),
             "missing_links": semantic_blockers,
             "observations": observations,
             "risks": [],
-            "review_context": (
-                valid_trials[0].get("review_context") if valid_trials else {"code_snippets_included": False}
-            ),
-            "semantic_consensus": consensus,
+            "review_context": {
+                "task_count": len(tasks),
+                "completed_task_count": len(task_results),
+                "code_snippets_included": bool(task_results),
+            },
             "normalization": {
                 "blocking_count": len(semantic_blockers),
                 "observation_count": len(observations),
@@ -421,7 +486,7 @@ class CodeTraceValidator:
             previous=previous_ledger,
             snapshot_id=fingerprint,
             active_findings=missing_links,
-            disputed_findings=disputed_findings,
+            disputed_findings=[],
             rejected_findings=rejected_findings,
         )
         stats = {
@@ -437,11 +502,12 @@ class CodeTraceValidator:
             summary = (
                 f"Validator code trace {trace_label} passed with static evidence, LLM graph review, "
                 f"{len(trace_mappings)} mapping(s), {len(existing_test_paths)} test file(s), "
-                f"and {len(observations)} non-blocking observation(s) after semantic consensus."
+                f"and {len(observations)} non-blocking observation(s) across {len(task_results)} semantic task(s)."
             )
         elif inconclusive:
             summary = (
-                f"Validator code trace {trace_label} was inconclusive after {calls_used} LLM call(s); "
+                f"Validator code trace {trace_label} task {inconclusive_task_id} was inconclusive "
+                f"after {calls_used} LLM call(s); "
                 "no Developer repair feedback was authorized."
             )
         else:
@@ -457,9 +523,15 @@ class CodeTraceValidator:
             llm_review=llm_review,
             requirement_contract=requirement_contract,
             deterministic_findings=deterministic_findings,
-            disputed_findings=disputed_findings,
             rejected_findings=rejected_findings,
-            semantic_consensus=consensus,
+            review_plan=review_plan,
+            task_results=task_results,
+            aggregation=aggregation,
+            cache={
+                "schema_version": "code_validation_task_cache_v1",
+                "hits": cache_hits,
+                "misses": cache_misses,
+            },
             verification_evidence=verification_evidence,
             symbol_evidence=symbol_evidence,
             snapshot_fingerprint=fingerprint,
@@ -467,80 +539,45 @@ class CodeTraceValidator:
             inconclusive=inconclusive,
         )
 
-    def _review_with_llm(
+    def _complete_task_review_json(
         self,
         *,
-        target_path: Path,
-        work_packet: dict[str, object],
-        trace_mappings: list[dict[str, object]],
-        static_missing_links: list[dict[str, object]],
-        test_paths: list[str],
-        approved_context: dict[str, object],
-        validation_claims: list[dict[str, object]],
-        verification_evidence: dict[str, object],
-        symbol_evidence: dict[str, object],
-        max_attempts: int = 2,
-    ) -> dict[str, object]:
-        """Bắt buộc gọi LLM để soi semantic gap mà rule-based có thể bỏ sót."""
-
-        code_snippets = _code_snippets(target_path=target_path, mappings=trace_mappings, test_paths=test_paths)
-        prompt = _code_trace_review_prompt(
-            work_packet=work_packet,
-            trace_mappings=trace_mappings,
-            static_missing_links=static_missing_links,
-            code_refs=_code_refs(target_path=target_path, mappings=trace_mappings, test_paths=test_paths),
-            code_snippets=code_snippets,
-            approved_context=approved_context,
-            validation_claims=validation_claims,
-            verification_evidence=verification_evidence,
-            symbol_evidence=symbol_evidence,
-        )
-        try:
-            review, llm_metadata = self._complete_review_json(
-                system=(
-                    "You are a strict software traceability validator. "
-                    "Return only valid JSON."
-                ),
-                prompt=prompt,
-                max_attempts=max_attempts,
-            )
-        except HarnessError as exc:
-            raise HarnessError(
-                "implementation_traceability_llm_failed",
-                f"LLM code trace review failed: {exc.message}",
-            ) from exc
-        review.setdefault("ok", False)
-        review.setdefault("summary", "")
-        review.setdefault("missing_links", [])
-        review.setdefault("graph_edges", [])
-        review.setdefault("risks", [])
-        review["llm_metadata"] = llm_metadata
-        review["review_context"] = _review_context(review.get("review_context"), code_snippets=code_snippets)
-        return review
-
-    def _complete_review_json(
-        self,
-        *,
-        system: str,
+        task: dict[str, object],
         prompt: str,
-        max_attempts: int = 2,
+        max_attempts: int,
     ) -> tuple[dict[str, object], dict[str, object]]:
-        """Dùng JSON mode và retry một lần nếu Validator trả payload không parse được."""
+        """Run one authoritative task and retry once with the exact contract error."""
 
-        settings = getattr(self.llm_client, "settings", None)
-        max_tokens = int(getattr(settings, "llm_structured_max_tokens", 8192))
-        completion_method = getattr(self.llm_client, "complete_with_metadata", None)
+        system = (
+            "You are the semantic Code Validator for one explicitly bounded task. "
+            "Judge requirement/design meaning; do not review claims owned by another task. "
+            "Return only valid JSON."
+        )
+        llm_client = (
+            self.reviewable_client_factory(task, prompt)
+            if self.reviewable_client_factory is not None
+            else self.llm_client
+        )
+        settings = getattr(llm_client, "settings", None)
+        request_options = phase4_llm_call_options(
+            settings,
+            "code_validator",
+            fallback_max_tokens=int(getattr(settings, "llm_structured_max_tokens", 8192)),
+        )
+        max_tokens = int(request_options.get("max_tokens") or 8192)
+        completion_method = getattr(llm_client, "complete_with_metadata", None)
         attempts: list[dict[str, object]] = []
         attempt_prompt = prompt
-        last_error = "LLM code trace review did not return a valid JSON object."
+        last_error = "Code validation task did not return a valid JSON object."
 
         for attempt in range(1, max(1, max_attempts) + 1):
+            review: dict[str, object] | None = None
             if callable(completion_method):
                 completion = completion_method(
                     system=system,
                     prompt=attempt_prompt,
                     json_mode=True,
-                    max_tokens=max_tokens,
+                    **request_options,
                 )
                 raw = str(getattr(completion, "content", ""))
                 finish_reason = str(getattr(completion, "finish_reason", "") or "")
@@ -548,7 +585,7 @@ class CodeTraceValidator:
                 usage = usage_value if isinstance(usage_value, dict) else {}
                 json_mode_requested = True
             else:
-                raw = str(self.llm_client.complete(system=system, prompt=attempt_prompt))
+                raw = str(llm_client.complete(system=system, prompt=attempt_prompt))
                 finish_reason = ""
                 usage = {}
                 json_mode_requested = False
@@ -559,20 +596,40 @@ class CodeTraceValidator:
                 "usage": usage,
                 "json_mode_requested": json_mode_requested,
                 "max_tokens": max_tokens,
+                "prompt_chars": len(attempt_prompt),
             }
             if finish_reason == "length":
-                last_error = "LLM code trace review output was truncated (finish_reason=length)."
+                last_error = "Code validation task output was truncated (finish_reason=length)."
                 metadata["parse_status"] = "truncated"
             else:
                 try:
                     review = parse_first_json_object(
                         raw,
-                        expected_keys={"ok", "summary", "missing_links", "graph_edges", "risks"},
+                        expected_keys={
+                            "task_id",
+                            "reviewed_claim_ids",
+                            "reviewed_design_ids",
+                            "reviewed_boundary_contract_ids",
+                            "ok",
+                            "summary",
+                            "findings",
+                            "observations",
+                        },
                     )
                 except json.JSONDecodeError:
                     metadata["parse_status"] = "invalid"
+                    last_error = "Response is not one complete JSON object with the required keys."
                 else:
-                    if isinstance(review, dict):
+                    try:
+                        _validate_code_validation_task_output(
+                            output=review,
+                            task=task,
+                            prompt=prompt,
+                        )
+                    except ValueError as exc:
+                        metadata["parse_status"] = "contract_invalid"
+                        last_error = str(exc)
+                    else:
                         metadata["parse_status"] = "valid"
                         attempts.append(metadata)
                         return review, {
@@ -580,22 +637,198 @@ class CodeTraceValidator:
                             "max_tokens": max_tokens,
                             "selected_attempt": attempt,
                             "attempts": attempts,
+                            "prompt_chars": len(prompt),
+                            "cache_hit": False,
                         }
-                    metadata["parse_status"] = "invalid"
-                    last_error = "LLM code trace review JSON must be an object."
             attempts.append(metadata)
-            attempt_prompt = (
-                prompt
-                + "\n\nFORMAT RECOVERY RETRY\n"
-                + f"The previous response was rejected: {last_error}\n"
-                + "Return one complete JSON object that follows expected_json_schema exactly."
+            attempt_prompt = _code_validation_recovery_prompt(
+                prompt=prompt,
+                previous_output=review,
+                contract_error=last_error,
             )
 
         raise HarnessError(
             "implementation_traceability_llm_failed",
-            f"{last_error} Structured output failed after {len(attempts)} attempts.",
+            f"{last_error} Task output failed after {len(attempts)} attempt(s).",
         )
 
+
+def _code_validation_recovery_prompt(
+    *,
+    prompt: str,
+    previous_output: dict[str, object] | None,
+    contract_error: str,
+) -> str:
+    """Retry a parsed contract failure without resending the whole task packet."""
+
+    if previous_output is None:
+        return (
+            prompt
+            + "\n\nCONTRACT RECOVERY RETRY\n"
+            + f"The previous response was rejected: {contract_error}\n"
+            + "Return one complete JSON object that follows expected_json_schema exactly. "
+            + "Do not add claims or IDs."
+        )
+    try:
+        payload = json.loads(prompt)
+    except json.JSONDecodeError:
+        return prompt
+
+    finding = next(
+        (
+            item
+            for item in _dict_items(previous_output.get("findings"))
+            if str(item.get("finding_id") or "") in contract_error
+        ),
+        {},
+    )
+    claim_ids = set(_string_items(finding.get("claim_ids")))
+    design_ids = set(_string_items(finding.get("design_refs")))
+    requirement_refs = set(_string_items(finding.get("requirement_refs")))
+    code_paths = {_target_path(value) for value in _string_items(finding.get("code_refs"))}
+    test_paths = {_target_path(value) for value in _string_items(finding.get("test_refs"))}
+    cited_paths = code_paths | test_paths
+    evidence_ref = str(finding.get("evidence_ref") or "").casefold()
+
+    relevant_evidence: dict[str, object] = {}
+    claims = [
+        item
+        for item in _dict_items(payload.get("authority_claims"))
+        if str(item.get("claim_id") or "") in claim_ids
+    ]
+    if claims:
+        relevant_evidence["authority_claims"] = claims
+    contracts = [
+        item
+        for item in _dict_items(payload.get("approved_design_contracts"))
+        if str(item.get("id") or "") in design_ids
+    ]
+    if contracts:
+        relevant_evidence["approved_design_contracts"] = contracts
+    mappings = [
+        item
+        for item in _dict_items(payload.get("static_trace_mappings"))
+        if str(item.get("requirement_ref") or "") in requirement_refs
+    ]
+    if mappings:
+        relevant_evidence["static_trace_mappings"] = mappings
+        mapped_targets = {
+            value
+            for item in mappings
+            for value in _string_items(item.get("planned_code_targets"))
+        }
+        trace_evidence = _dict_value(payload.get("static_trace_evidence"))
+        code_evidence = [
+            item
+            for item in _dict_items(trace_evidence.get("code_evidence"))
+            if str(item.get("planned_code_target") or "") in mapped_targets
+            or str(item.get("source_file") or "").replace("\\", "/") in cited_paths
+        ]
+        shared_test_files = sorted(
+            set(_string_items(trace_evidence.get("test_files")))
+        )
+        if code_evidence or shared_test_files:
+            relevant_evidence["static_trace_evidence"] = {
+                "code_evidence": code_evidence,
+                "test_files": shared_test_files,
+                **(
+                    {"join_rule": trace_evidence.get("join_rule")}
+                    if trace_evidence.get("join_rule")
+                    else {}
+                ),
+            }
+    snippets = [
+        item
+        for item in _dict_items(payload.get("code_snippets"))
+        if str(item.get("path") or "").replace("\\", "/") in cited_paths
+    ]
+    if snippets:
+        relevant_evidence["code_snippets"] = snippets
+    symbol_evidence = _dict_value(payload.get("symbol_evidence"))
+    symbol_files = [
+        item
+        for item in _dict_items(symbol_evidence.get("files"))
+        if str(item.get("path") or "").replace("\\", "/") in code_paths
+    ]
+    if symbol_files:
+        relevant_evidence["symbol_evidence"] = {
+            key: symbol_evidence.get(key)
+            for key in ("version", "extractor_id", "profile")
+            if symbol_evidence.get(key) is not None
+        } | {"files": symbol_files}
+    if "verification" in evidence_ref:
+        relevant_evidence["verification_evidence"] = payload.get("verification_evidence")
+
+    task_unit_ids = set(_string_items(_dict_value(payload.get("task_contract")).get("unit_ids")))
+    relevant_units: list[dict[str, object]] = []
+    for unit in _dict_items(payload.get("approved_units")):
+        unit_id = str(unit.get("unit_id") or "").strip()
+        if unit_id not in task_unit_ids:
+            continue
+        code_targets = [
+            {
+                "path": str(target.get("path") or "").strip().replace("\\", "/"),
+                **(
+                    {"symbol": str(target.get("symbol") or "").strip()}
+                    if str(target.get("symbol") or "").strip()
+                    else {}
+                ),
+            }
+            for target in _dict_items(unit.get("planned_code_targets"))
+            if str(target.get("path") or "").strip()
+        ]
+        projected_test_paths = _string_items(unit.get("test_paths"))
+        test_paths = sorted(
+            {
+                str(path).strip().replace("\\", "/")
+                for path in (
+                    projected_test_paths
+                    if "test_paths" in unit
+                    else [
+                        path
+                        for intent in _dict_items(unit.get("test_intents"))
+                        if str(intent.get("stage_id") or "").strip() != "typecheck"
+                        for path in _string_items(intent.get("target_paths"))
+                    ]
+                )
+                if str(path).strip()
+            }
+        )
+        relevant_units.append(
+            {
+                "unit_id": unit_id,
+                **({"title": unit.get("title")} if unit.get("title") else {}),
+                **({"objective": unit.get("objective")} if unit.get("objective") else {}),
+                "code_targets": code_targets,
+                "test_paths": test_paths,
+            }
+        )
+
+    return json.dumps(
+        {
+            "prompt_schema_version": (
+                "code_validation_contract_recovery_prompt_v6"
+                if payload.get("prompt_schema_version") == "code_validation_task_prompt_v6"
+                else "code_validation_contract_recovery_prompt_v4"
+            ),
+            "task": "Code Validation Contract Recovery v1",
+            "instruction": (
+                "Correct only the stated contract defect in previous_output. Preserve every semantic decision, "
+                "finding, severity and observation unless that exact field must change to satisfy contract_error. "
+                "Do not remove a finding to bypass validation. Use relevant_units only to select exact unit_ids; "
+                "it is implementation scope, not additional semantic authority. Return the complete corrected "
+                "JSON object only."
+            ),
+            "contract_error": contract_error,
+            "task_contract": payload.get("task_contract"),
+            "expected_json_schema": payload.get("expected_json_schema"),
+            "previous_output": previous_output,
+            "relevant_evidence": relevant_evidence,
+            "relevant_units": relevant_units,
+        },
+        ensure_ascii=False,
+        indent=0,
+    )
 
 def _v2_trace_mappings(
     *,
@@ -1118,206 +1351,996 @@ def _normalized_evidence_text(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
-def _code_trace_review_prompt(
-    *,
-    work_packet: dict[str, object],
-    trace_mappings: list[dict[str, object]],
-    static_missing_links: list[dict[str, object]],
-    code_refs: list[dict[str, object]],
-    code_snippets: list[dict[str, object]],
-    approved_context: dict[str, object],
-    validation_claims: list[dict[str, object]],
+def _project_verification_evidence(
     verification_evidence: dict[str, object],
-    symbol_evidence: dict[str, object],
-) -> str:
-    """Tạo prompt review graph code trace, yêu cầu model trả JSON duy nhất."""
+    *,
+    task_paths: set[str],
+    test_paths: set[str],
+) -> dict[str, object]:
+    """Keep task-relevant, stable proof so unrelated repairs preserve cache hits."""
 
-    review_input = {
-        "task": "Code Trace LLM Review v1",
-        "instruction": (
-            "Review whether the accumulated worktree completely covers the approved requirement/design graph and "
-            "implementation plan. Check every approved planned file, symbol, behavior, test intent, and trace link; "
-            "a compilable partial implementation must not pass merely because its current slice is internally valid. "
-            "Rule-based evidence is not enough; inspect responsibilities, target names, control flow, assertions, "
-            "coverage intent, and weak links. Return ok=false when files/symbols exist but the behavior or tests "
-            "do not satisfy the approved design. Use trace_mapping_issue when the trace mapping itself is weak or "
-            "points to a non-code artifact; use evidence_incomplete only when the provided evidence metadata says "
-            "a required file was truncated or omitted."
-        ),
-        "expected_json_schema": {
-            "ok": "boolean",
-            "confidence": "number between 0 and 1",
-            "summary": "short string",
-            "graph_edges": [
-                {
-                    "requirement_ref": "string",
-                    "design_element_id": "string",
-                    "code_ref": "file#symbol",
-                    "test_ref": "file or file#test",
-                    "evidence": "short string",
-                }
+    def selected_paths(value: object) -> list[str]:
+        return [path for path in _string_items(value) if path.replace("\\", "/") in task_paths]
+
+    def stage(item: dict[str, object]) -> dict[str, object]:
+        return {
+            key: item.get(key)
+            for key in (
+                "stage_id",
+                "status",
+                "argv",
+                "cwd",
+                "exit_code",
+                "reason",
+                "failure_kind",
+                "timed_out",
+            )
+            if item.get(key) not in (None, "")
+        } | {
+            "selected_test_files": selected_paths(item.get("selected_test_files")),
+            "verified_test_files": selected_paths(item.get("verified_test_files")),
+        }
+
+    verification_output = "\n".join(
+        str(value)
+        for value in [
+            verification_evidence.get("stdout"),
+            verification_evidence.get("stderr"),
+            *[
+                stage_item.get(key)
+                for stage_item in _dict_items(verification_evidence.get("stage_results"))
+                for key in ("stdout", "stderr")
             ],
-            "missing_links": [
-                {
-                    "type": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace | trace_mapping_issue | evidence_incomplete",
-                    "claim_id": "exact claim_id from fixed_validation_claims",
-                    "blocking": "boolean; true only when code/test/mapping must change before pass",
-                    "owner": "developer | validator | human | none",
-                    "recommended_action": "developer_repair | validator_mapping_fix | human_decision | none",
-                    "message": "short string",
-                    "requirement_ref": "optional string",
-                    "design_element_id": "optional string",
-                    "code_ref": "optional string",
-                    "evidence_ref": "approved artifact and section/id",
-                    "evidence_quote": "exact wording already present in this review input",
-                }
-            ],
-            "risks": ["short string"],
-        },
-        "developer_work_packet_summary": {
-            "run_id": work_packet.get("run_id"),
-            "issue_key": work_packet.get("issue_key"),
-            "implementation_step_count": _collection_size(work_packet.get("implementation_steps")),
-            "design_mapping_file_count": _collection_size(work_packet.get("design_mappings_by_file")),
-            "requirement_contract": work_packet.get("requirement_contract"),
-            "canonical_requirements": work_packet.get("canonical_requirements"),
-            "requirement_coverage_count": _collection_size(work_packet.get("requirement_coverage")),
-        },
-        "approved_behavior_contracts": _approved_behavior_contracts(work_packet),
-        "implementation_signature_contract": work_packet.get(
-            "implementation_signature_contract", {}
-        ),
-        "approved_sequence_evidence": _approved_sequence_evidence(approved_context),
-        "fixed_validation_claims": validation_claims,
-        "verification_evidence": verification_evidence,
-        "symbol_evidence": symbol_evidence,
-        "static_trace_mappings": trace_mappings,
-        "static_missing_links": static_missing_links,
-        "code_refs": code_refs,
-        "code_snippets": code_snippets,
-        "egress_confirmation": "Project owner explicitly approved sending source/test snippets to the LLM provider for Validator review.",
-        "validator_rules": [
-            "Return a blocking Developer finding for every approved planned file or symbol that is still absent from the accumulated worktree.",
-            "Every semantic finding must use one exact claim_id from fixed_validation_claims. Do not invent a new requirement or architecture claim.",
-            "Assess the complete fixed_validation_claims catalogue on this exact code snapshot; omit satisfied claims from missing_links.",
-            "Evaluate completeness across the full approved plan, not only files changed by the latest Developer slice.",
-            "If a code_snippet has content_truncated=false, do not claim that file evidence is truncated.",
-            "Do not require literal methods named true, false, displaySuccessMessage, displayErrorMessage, or displayCancellationMessage.",
-            "For mappings with trace_policy=boolean_response or semantic_side_effect, inspect the surrounding branch behavior and tests.",
-            "If the only problem is a weak design mapping, return type=trace_mapping_issue instead of asking Developer to change code.",
-            "Python recomputes pass/fail. Set blocking=true only for an actionable unresolved finding.",
-            "Do not dismiss or contradict a deterministic TypeScript signature mismatch already listed in static_missing_links.",
-            "Every blocking finding must identify evidence_ref and quote exact wording already visible in this review input.",
-            "The evidence_quote must directly support the approved behavior claimed in the finding message. When comparing actual and approved call order, quote wording that states the expected approved order and preserve that exact order.",
-            "Treat approved_behavior_contracts and approved_sequence_evidence as authoritative. Never infer message order or behavior from a sequence/design reference ID by itself.",
-            "For a multi-step workflow, evaluate the complete approved path across all participating methods before claiming that behavior is absent. A later confirm, commit, persist, save, or finalize method may own the terminal side effect and terminal success result.",
-            "Do not equate valid, pending, awaiting-confirmation, or in-progress with terminal success. Do not require success=true from an intermediate response unless the approved evidence explicitly defines that response as terminal success.",
-            "Do not return a blocking Developer finding solely because an intermediate state uses a generic failure/non-success result, a factory name, or a literal message when the code still performs the approved observable transition. If the approved artifacts do not require an explicit status field or factory and the downstream component recognizes the state and performs the transition, report the representation or string-coupling concern as blocking=false with owner=validator and recommended_action=validator_mapping_fix.",
-            "When a happy-path test is missing but the implementation path exists, report missing_test_assertion rather than missing_behavior and cite the canonical acceptance criterion or postcondition that requires the successful path.",
-            "Do not infer case-sensitivity, normalization, trimming, or another policy that is absent from this review input.",
-            "Open Questions are unresolved context, not approved constraints. Use owner=human and recommended_action=human_decision when a decision is required.",
-            "If evidence and tests already satisfy a mapping, omit it from missing_links or set blocking=false, owner=none, recommended_action=none.",
-            "Do not turn a prior implementation choice into an approved requirement.",
-            "Treat verification_evidence.executed_test_entrypoints as authoritative proof that those test entrypoints ran.",
-            "When symbol_evidence is present, treat its exact AST declarations as authoritative for symbol existence; never infer a declaration from a source-text substring.",
-            "Do not require a specific test framework when the target repository uses another discovered executable test entrypoint.",
+        ]
+        if value
+    ).replace("\\", "/").casefold()
+    observed_test_files = sorted(
+        path for path in test_paths if path.replace("\\", "/").casefold() in verification_output
+    )
+
+    return {
+        key: verification_evidence.get(key)
+        for key in (
+            "status",
+            "exit_code",
+            "reason",
+            "failure_kind",
+            "timed_out",
+            "discovered_test_entrypoints",
+            "executed_test_entrypoints",
+            "planned_stage_ids",
+            "executed_stage_ids",
+        )
+        if verification_evidence.get(key) not in (None, "")
+    } | {
+        "selected_test_files": selected_paths(verification_evidence.get("selected_test_files")),
+        "verified_test_files": selected_paths(verification_evidence.get("verified_test_files")),
+        "observed_task_test_files": observed_test_files,
+        "stage_results": [stage(item) for item in _dict_items(verification_evidence.get("stage_results"))],
+        "preparation_results": [
+            stage(item) for item in _dict_items(verification_evidence.get("preparation_results"))
         ],
     }
-    return (
-        "Code Trace LLM Review v1\n"
-        "Return only valid JSON. Do not wrap the JSON in markdown.\n\n"
-        f"{json.dumps(review_input, ensure_ascii=False, indent=2)}"
+
+
+def _project_task_trace_mapping(
+    item: dict[str, object],
+    *,
+    design_ids: set[str],
+    task_paths: set[str],
+) -> dict[str, object]:
+    return {
+        "requirement_ref": item.get("requirement_ref"),
+        "design_element_ids": [
+            value for value in _string_items(item.get("design_element_ids")) if value in design_ids
+        ],
+        "planned_code_targets": [
+            value
+            for value in _string_items(item.get("planned_code_targets"))
+            if _target_path(value) in task_paths
+        ],
+        "test_covered": item.get("test_covered"),
+        "evidence_status": item.get("evidence_status"),
+    }
+
+
+def _project_task_trace_evidence(
+    mappings: list[dict[str, object]],
+    *,
+    task_paths: set[str],
+    test_paths: set[str],
+) -> dict[str, object]:
+    """Hoist byte-identical task evidence so requirement mappings only carry links."""
+
+    evidence_by_value: dict[str, dict[str, object]] = {}
+    task_test_files: set[str] = set()
+    for item in mappings:
+        for evidence in _dict_items(item.get("code_evidence")):
+            if str(evidence.get("source_file") or "").replace("\\", "/") not in task_paths:
+                continue
+            key = json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            evidence_by_value.setdefault(key, evidence)
+        task_test_files.update(
+            value.replace("\\", "/")
+            for value in _string_items(item.get("test_files"))
+            if value.replace("\\", "/") in test_paths
+        )
+    return {
+        "code_evidence": [evidence_by_value[key] for key in sorted(evidence_by_value)],
+        "test_files": sorted(task_test_files),
+        "join_rule": (
+            "Join static_trace_mappings.planned_code_targets to code_evidence.planned_code_target "
+            "by exact string equality. test_files is the task-wide executed test inventory."
+        ),
+    }
+
+
+def _code_validation_task_prompt(
+    *,
+    task: dict[str, object],
+    code_snippets: list[dict[str, object]],
+    trace_mappings: list[dict[str, object]],
+    verification_evidence: dict[str, object],
+    symbol_evidence: dict[str, object],
+    scenario_results: list[dict[str, object]],
+) -> str:
+    is_boundary = task.get("task_kind") == "boundary"
+    authority_claim_ids = _string_items(task.get("authority_claim_ids"))
+    design_ids = _string_items(task.get("design_ids"))
+    context_only_design_ids = _string_items(task.get("context_only_design_ids"))
+    owned_boundary_contract_ids = _string_items(task.get("owned_boundary_contract_ids"))
+    requirement_refs = set(_string_items(task.get("requirement_refs")))
+    task_paths = _task_paths(task)
+    code_paths = {
+        str(item.get("path") or "").strip().replace("\\", "/")
+        for item in _dict_items(task.get("code_targets"))
+        if str(item.get("path") or "").strip()
+    }
+    target_symbols_by_path: dict[str, set[str]] = {}
+    for item in _dict_items(task.get("code_targets")):
+        path = str(item.get("path") or "").strip().replace("\\", "/")
+        symbol = str(item.get("symbol") or "").strip()
+        if path and symbol:
+            target_symbols_by_path.setdefault(path, set()).add(symbol)
+    test_paths = set(_string_items(task.get("test_paths")))
+    selected_mappings = [
+        item
+        for item in trace_mappings
+        if str(item.get("requirement_ref") or "") in requirement_refs
+        or (
+            task.get("task_kind") == "boundary"
+            and any(
+                _target_path(value) in task_paths
+                for value in _string_items(item.get("planned_code_targets"))
+            )
+        )
+    ]
+    projected_mappings = [
+        _project_task_trace_mapping(
+            item,
+            design_ids=set(design_ids),
+            task_paths=task_paths,
+        )
+        for item in selected_mappings
+    ]
+    scenario_claim_ownership = [
+        {
+            "task_id": item.get("task_id"),
+            "scenario_ids": item.get("scenario_ids"),
+            "scenario_owned_claim_ids": item.get("reviewed_claim_ids"),
+        }
+        for item in scenario_results
+        if item.get("task_kind") == "scenario"
+    ]
+    scenario_blocker_evidence_ownership = [
+        {
+            "owner_task_id": result.get("task_id"),
+            "scenario_ids": finding.get("scenario_ids") or result.get("scenario_ids") or [],
+            "claim_ids": finding.get("claim_ids") or [],
+            "unit_ids": finding.get("unit_ids") or [],
+            "design_refs": finding.get("design_refs") or [],
+            "code_refs": finding.get("code_refs") or [],
+            "code_paths": sorted(
+                {
+                    _target_path(value)
+                    for value in _string_items(finding.get("code_refs"))
+                    if _target_path(value)
+                }
+            ),
+            "test_paths": sorted(
+                {
+                    _target_path(value)
+                    for value in _string_items(finding.get("test_refs"))
+                    if _target_path(value)
+                }
+            ),
+            "evidence_ref": finding.get("evidence_ref"),
+            "evidence_quote": finding.get("evidence_quote"),
+        }
+        for result in scenario_results
+        if result.get("task_kind") == "scenario"
+        for finding in _dict_items(result.get("blocking_findings"))
+    ]
+    unit_scenarios = {
+        str(unit.get("unit_id") or "").strip(): str(unit.get("scenario_id") or "GLOBAL").strip()
+        or "GLOBAL"
+        for unit in _dict_items(task.get("units"))
+        if str(unit.get("unit_id") or "").strip()
+    }
+    design_scenarios = {
+        str(contract.get("id") or "").strip(): str(contract.get("scenario_id") or "GLOBAL").strip()
+        or "GLOBAL"
+        for contract in _dict_items(task.get("approved_design_contracts"))
+        if str(contract.get("id") or "").strip()
+    }
+    claim_review_matrix = []
+    for claim in _dict_items(task.get("claims")):
+        claim_kind = str(claim.get("claim_kind") or "").strip()
+        if claim_kind == "cross_scenario_dependency":
+            review_mode = "cross_scenario_dependency_interaction"
+        elif claim_kind == "shared_code_target":
+            review_mode = "same_target_cross_scenario_compatibility"
+        elif task.get("task_kind") == "boundary":
+            review_mode = "cross_scenario_requirement"
+        else:
+            review_mode = "scenario_requirement"
+        claim_unit_ids = _string_items(claim.get("unit_ids"))
+        claim_design_ids = _string_items(claim.get("design_element_ids"))
+        claim_review_matrix.append(
+            {
+                "claim_id": claim.get("claim_id"),
+                "review_mode": review_mode,
+                "unit_ids": claim_unit_ids,
+                "scenario_ids": sorted(
+                    (
+                        {unit_scenarios[value] for value in claim_unit_ids if value in unit_scenarios}
+                        if claim_unit_ids
+                        else {
+                            design_scenarios[value]
+                            for value in claim_design_ids
+                            if value in design_scenarios
+                        }
+                    )
+                ),
+            }
+        )
+    ownership_exclusions = {
+        "policy": (
+            "Scenario-owned claims and Design field paths are not reportable in this task. "
+            "A boundary finding must follow its claim_review_matrix review_mode; do not reopen "
+            "a defect whose producer and consumer are owned by one scenario."
+        ),
+        "scenario_claim_ownership": (
+            scenario_claim_ownership if task.get("task_kind") == "boundary" else []
+        ),
+        "scenario_blocker_evidence_ownership": (
+            scenario_blocker_evidence_ownership if task.get("task_kind") == "boundary" else []
+        ),
+        "scenario_owned_design_sections": task.get("scenario_owned_design_sections") or [],
+    }
+    payload = {
+        "prompt_schema_version": (
+            "code_validation_task_prompt_v6" if is_boundary else "code_validation_task_prompt_v4"
+        ),
+        "task": "Scenario + Boundary Code Validation v1",
+        "task_contract": {
+            "task_id": task.get("task_id"),
+            "task_kind": task.get("task_kind"),
+            "scenario_ids": task.get("scenario_ids"),
+            "unit_ids": task.get("unit_ids"),
+            "authority_claim_ids": authority_claim_ids,
+            "required_reviewed_design_ids": design_ids,
+            "context_only_design_ids": context_only_design_ids,
+            "required_reviewed_boundary_contract_ids": owned_boundary_contract_ids,
+            "allowed_requirement_refs": sorted(requirement_refs),
+            "allowed_code_paths": sorted(code_paths),
+            "allowed_test_paths": sorted(test_paths),
+            "allowed_owner_action_pairs": [
+                ["developer", "developer_repair"],
+                ["validator", "validator_mapping_fix"],
+                ["system", "block_run"],
+                ["none", "none"],
+            ],
+            "repair_policy": {
+                "semantic_authority": ["authority_claims", "approved_design_contracts"],
+                "explanatory_context": "related_design_context.contracts",
+                "frozen_artifacts": ["Requirement", "Design", "Plan"],
+                "implementation_scope": "task unit_ids plus allowed_code_paths and allowed_test_paths",
+                "implementation_choice_owner": "developer",
+                "validator_expected_change_mode": "required_outcome_only",
+                "out_of_scope_or_authority_conflict": "system/block_run",
+                "human_decision_available": False,
+            },
+            "review_scope": {
+                "active_dimensions": [
+                    "owned Requirement behavior",
+                    "owned Design behavior and boundary compatibility",
+                    "source and unit-test semantics provable from supplied evidence",
+                    "typecheck and unit verification evidence",
+                ],
+                "deferred_dimensions": [
+                    "rendered visual appearance",
+                    "responsive layout",
+                    "real-browser focus and announcement behavior",
+                    "DOM event timing or interaction not provable from current evidence",
+                    "end-to-end behavior not provable from current source and executed stages",
+                ],
+                "deferred_destination": "observations only; Browser/UI QA owns the verdict",
+                "warning_definition": "fully evidenced, non-blocking issue inside active_dimensions",
+                "observation_definition": "deferred-stage concern, unexecuted-stage limitation, or uncertainty",
+                "stop_condition": (
+                    "Assess each authority claim and owned boundary contract once; after all are classified, "
+                    "return JSON without reconsidering a verdict unless new supplied evidence contradicts it."
+                ),
+            },
+            "model_created_id_fields": ["finding_id"],
+        },
+        "instruction": (
+            ("Apply ownership_exclusions and task_contract.review_scope first. " if is_boundary else "Apply task_contract.review_scope first. ")
+            + "Review only this task's authority claims against the supplied owned contracts, current code/test "
+            "evidence, and executed verification evidence. Decide semantic correctness, not JSON shape. A file or "
+            "symbol existing is not enough when its behavior or test assertions do not satisfy the claim. Use "
+            "related_design_context only to interpret behavior in shared code entities; do not review or create "
+            "findings for its scenarios. Do not speculate about deferred dimensions."
+        ),
+        **(
+            {
+                "review_procedure": [
+                    "Read ownership_exclusions first and exclude every listed local evidence fingerprint from boundary findings.",
+                    "Assess each claim_review_matrix row exactly once and record one claim_assessment.",
+                    "A pass is a valid result; there is no blocker quota and no hidden-defect search after every row is assessed.",
+                    "When claim_assessments covers the exact authority claim set, return the JSON immediately.",
+                ],
+                "ownership_exclusions": ownership_exclusions,
+            }
+            if is_boundary
+            else {}
+        ),
+        "expected_json_schema": {
+            "task_id": "exact task_contract.task_id",
+            "reviewed_claim_ids": "exact complete authority_claim_ids array",
+            "reviewed_design_ids": "exact complete required_reviewed_design_ids array",
+            "reviewed_boundary_contract_ids": "exact complete required_reviewed_boundary_contract_ids array",
+            **(
+                {
+                    "claim_assessments": [
+                        {
+                            "claim_id": "one exact authority_claim_id; every authority claim appears exactly once",
+                            "verdict": "pass | finding",
+                            "finding_ids": "exact finding_ids whose claim_ids contain this claim; empty for pass",
+                        }
+                    ]
+                }
+                if is_boundary
+                else {}
+            ),
+            "ok": "boolean; true only when findings has no blocker",
+            "summary": "short string",
+            "findings": [
+                {
+                    "finding_id": "new unique stable string; this is the only ID you may create",
+                    "category": "semantic_gap | missing_behavior | missing_test_assertion | weak_trace | trace_mapping_issue | evidence_incomplete",
+                    "severity": "blocker | warning",
+                    "blocking": "boolean matching severity",
+                    "scenario_ids": "subset of task scenario_ids",
+                    "claim_ids": "non-empty subset of authority_claim_ids",
+                    "unit_ids": "non-empty subset of task unit_ids",
+                    "requirement_refs": "subset of task_contract.allowed_requirement_refs belonging to the selected claim_ids",
+                    "design_refs": "subset of required_reviewed_design_ids",
+                    "code_refs": "file or file#symbol refs under task_contract.allowed_code_paths",
+                    "test_refs": "file or file#test refs under task_contract.allowed_test_paths",
+                    "issue": "short explanation",
+                    "expected_change": "developer blocker: required observable outcome only; validator blocker: mapping/evidence correction; system blocker: conflicting or out-of-scope invariant; warning: empty string",
+                    "evidence_ref": "one supplied section/id",
+                    "evidence_quote": "exact text visible in this input",
+                    "owner": "developer | validator | system | none",
+                    "recommended_action": "developer_repair | validator_mapping_fix | block_run | none",
+                }
+            ],
+            "observations": ["short deferred-stage or other non-blocking strings; never repair instructions"],
+        },
+        "authority_claims": task.get("claims"),
+        "claim_review_matrix": claim_review_matrix,
+        "approved_design_contracts": task.get("approved_design_contracts"),
+        "deferred_review_context": {
+            "stage": "browser_ui_qa",
+            "policy": (
+                "These typed Design sections were intentionally omitted from current semantic authority. "
+                "Do not infer their content or create findings for them in this task."
+            ),
+            "design_sections": task.get("deferred_design_sections"),
+        },
+        "related_design_context": {
+            "role": "explanatory_only",
+            "selection_rule": (
+                "Approved Design contracts from other scenarios whose nodes use the exact same "
+                "runtime_binding.target as this task; only edges between those shared nodes or task-owned nodes."
+            ),
+            "context_only_design_ids": context_only_design_ids,
+            "contracts": task.get("context_only_design_contracts"),
+        },
+        **(
+            {
+                "ownership_exclusions": {
+                    "policy": (
+                        "Scenario-owned claims and Design field paths are not reportable in this task. "
+                        "A boundary finding must follow its claim_review_matrix review_mode; do not reopen "
+                        "a defect whose producer and consumer are owned by one scenario."
+                    ),
+                    "scenario_claim_ownership": [],
+                    "scenario_owned_design_sections": task.get("scenario_owned_design_sections") or [],
+                }
+            }
+            if not is_boundary
+            else {}
+        ),
+        "approved_units": task.get("units"),
+        "static_trace_mappings": projected_mappings,
+        "static_trace_evidence": _project_task_trace_evidence(
+            selected_mappings,
+            task_paths=task_paths,
+            test_paths=test_paths,
+        ),
+        "verification_evidence": _project_verification_evidence(
+            verification_evidence,
+            task_paths=task_paths,
+            test_paths=test_paths,
+        ),
+        "symbol_evidence": _project_symbol_evidence(
+            symbol_evidence,
+            paths=task_paths,
+            symbols_by_path=target_symbols_by_path,
+        ),
+        "code_snippets": code_snippets,
+        "validator_rules": [
+            "Return every active-scope finding in this task in one response; do not stop after the first blocker.",
+            *(
+                [
+                    "claim_assessments is the completion checklist: emit exactly one row per authority claim, link every finding to each claim it cites, and stop once the exact claim set is assessed."
+                ]
+                if is_boundary
+                else []
+            ),
+            "Use only exact task_contract IDs and paths; create only finding_id. Each requirement_ref must belong to a claim_id selected by the same finding.",
+            "authority_claims and approved_design_contracts are this task's semantic authority. approved_units are a compact frozen implementation scope index, not new business authority; a Plan-only expectation unsupported by Requirement or approved Design cannot block.",
+            "related_design_context is approved but explanatory-only context for exact shared runtime targets. Check it before calling shared-code behavior invented or unsupported. Never review its scenarios, add its IDs to reviewed_design_ids or design_refs, or create findings for it. Its presence also does not excuse code that breaks an owned claim or owned contract.",
+            "Classify each concern with task_contract.review_scope before judging it. Anything that needs deferred browser, DOM, visual, responsive, focus or announcement evidence goes only to observations; do not speculate toward a finding.",
+            "For an in-scope Requirement/Design gap, use developer/developer_repair and state only the observable outcome and evidence. Developer owns implementation choice. Do not edit frozen artifacts or prescribe a field, header, credential strategy, protocol, component, or topology unless Requirement/Design explicitly does.",
+            "Human decision is unavailable after Requirement approval. If frozen authority conflicts or the outcome cannot fit task units and allowed paths, use system/block_run and state the invariant; never assign out-of-scope work.",
+            "Every required_reviewed_boundary_contract_id is owned here. A same-scenario boundary_contract stays with the scenario task. Compare actual producer and consumer; separate endpoint tests are not integration proof, and an unadapted incompatibility that breaks the approved runtime interaction is a blocker.",
+            "task_kind=boundary owns only cross-scenario dependencies, shared-target compatibility and cross-scenario claims; it never re-reviews a scenario-local claim or boundary_contract.",
+            "Judge executable evidence only within verification_evidence stages. Absence of a deferred stage is not a defect and never creates a finding in this task.",
+            "static_trace_mappings are candidate links, not semantic proof. Join their planned_code_targets to static_trace_evidence.code_evidence by exact planned_code_target; static_trace_evidence.test_files is task-wide inventory. Use validator/validator_mapping_fix only for a supplied trace/evidence projection defect, never a product behavior defect.",
+            *(
+                [
+                    "Use claim_review_matrix as the finding boundary. cross_scenario_dependency_interaction compares only the listed dependency units; same_target_cross_scenario_compatibility compares only the exact shared target across its listed scenarios; cross_scenario_requirement reviews only the owned requirement across scenarios.",
+                    "ownership_exclusions is scope metadata, not semantic authority. Never reopen its scenario-owned claims or Design sections. scenario_blocker_evidence_ownership contains only structural evidence fingerprints already owned by local blockers; do not restate or relabel the same producer/consumer defect under a cross-scenario claim. A boundary finding must identify a matrix-owned interaction beyond every local fingerprint. A defect whose producer and consumer belong to one scenario remains local even when their files are shared by other scenarios.",
+                ]
+                if task.get("task_kind") == "boundary"
+                else []
+            ),
+            "Do not reinterpret a deterministic Harness rule or invent a new requirement, field name, component, or topology.",
+            "A warning finding requires complete visible evidence inside active_dimensions; use none/none and an empty expected_change. Put deferred-stage concerns and incomplete-evidence uncertainty in observations instead. Blockers must use developer, validator or system ownership as defined above, provide the matching expected_change kind, and cite exact visible evidence.",
+            "Use only one of task_contract.allowed_owner_action_pairs for every finding.",
+            "Set ok=false if and only if at least one finding has severity=blocker.",
+            "Use the review_scope stop_condition: assess each owned claim and boundary once, then return JSON without re-litigating settled judgments.",
+        ],
+        "egress_confirmation": "Project owner approved sending these bounded source/test excerpts to the LLM provider.",
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=0)
+
+
+def _validate_code_validation_task_output(
+    *,
+    output: dict[str, object],
+    task: dict[str, object],
+    prompt: str,
+) -> None:
+    task_id = str(task.get("task_id") or "")
+    if output.get("task_id") != task_id:
+        raise ValueError(f"task_id must be exactly {task_id}.")
+    expected_claims = set(_string_items(task.get("authority_claim_ids")))
+    reviewed_claims = _exact_string_array(output.get("reviewed_claim_ids"), "reviewed_claim_ids")
+    if set(reviewed_claims) != expected_claims or len(reviewed_claims) != len(expected_claims):
+        raise ValueError("reviewed_claim_ids must be the exact complete authority claim set.")
+    expected_design = set(_string_items(task.get("design_ids")))
+    reviewed_design = _exact_string_array(output.get("reviewed_design_ids"), "reviewed_design_ids")
+    if set(reviewed_design) != expected_design or len(reviewed_design) != len(expected_design):
+        raise ValueError("reviewed_design_ids must be the exact complete task design ID set.")
+    expected_boundary_contracts = set(_string_items(task.get("owned_boundary_contract_ids")))
+    reviewed_boundary_contracts = _exact_string_array(
+        output.get("reviewed_boundary_contract_ids"),
+        "reviewed_boundary_contract_ids",
+    )
+    if (
+        set(reviewed_boundary_contracts) != expected_boundary_contracts
+        or len(reviewed_boundary_contracts) != len(expected_boundary_contracts)
+    ):
+        raise ValueError(
+            "reviewed_boundary_contract_ids must be the exact complete owned boundary contract ID set."
+        )
+    if not isinstance(output.get("ok"), bool) or not isinstance(output.get("summary"), str):
+        raise ValueError("ok must be boolean and summary must be a string.")
+    findings = output.get("findings")
+    claim_assessments = output.get("claim_assessments")
+    observations = output.get("observations")
+    requires_claim_assessments = task.get("task_kind") == "boundary"
+    if not isinstance(findings, list) or not isinstance(observations, list) or not all(
+        isinstance(item, str) for item in observations
+    ):
+        raise ValueError("findings must be an array and observations must be an array of strings.")
+    if requires_claim_assessments and not isinstance(claim_assessments, list):
+        raise ValueError("Boundary claim_assessments must be an array.")
+
+    assessments_by_claim: dict[str, dict[str, object]] = {}
+    for raw_assessment in claim_assessments if isinstance(claim_assessments, list) else []:
+        if not isinstance(raw_assessment, dict):
+            raise ValueError("Every claim_assessment must be an object.")
+        claim_id = str(raw_assessment.get("claim_id") or "").strip()
+        if claim_id not in expected_claims or claim_id in assessments_by_claim:
+            raise ValueError("claim_assessments must contain each authority claim exactly once.")
+        verdict = str(raw_assessment.get("verdict") or "").strip()
+        if verdict not in {"pass", "finding"}:
+            raise ValueError(f"Claim assessment {claim_id} has an invalid verdict.")
+        _exact_string_array(raw_assessment.get("finding_ids"), f"{claim_id}.finding_ids")
+        assessments_by_claim[claim_id] = raw_assessment
+    if requires_claim_assessments and set(assessments_by_claim) != expected_claims:
+        raise ValueError("claim_assessments must contain the exact complete authority claim set.")
+
+    allowed_scenarios = set(_string_items(task.get("scenario_ids")))
+    allowed_units = set(_string_items(task.get("unit_ids")))
+    allowed_requirements = set(_string_items(task.get("requirement_refs")))
+    requirements_by_claim = {
+        str(claim.get("claim_id") or "").strip(): {
+            value
+            for value in [
+                str(claim.get("requirement_ref") or "").strip(),
+                *_string_items(claim.get("requirement_refs")),
+            ]
+            if value
+        }
+        for claim in _dict_items(task.get("claims"))
+        if str(claim.get("claim_id") or "").strip()
+    }
+    allowed_code_paths = {
+        str(item.get("path") or "").strip().replace("\\", "/")
+        for item in _dict_items(task.get("code_targets"))
+        if str(item.get("path") or "").strip()
+    }
+    allowed_test_paths = set(_string_items(task.get("test_paths")))
+    allowed_categories = {
+        "semantic_gap",
+        "missing_behavior",
+        "missing_test_assertion",
+        "weak_trace",
+        "trace_mapping_issue",
+        "evidence_incomplete",
+    }
+    allowed_owner_actions = {
+        ("developer", "developer_repair"),
+        ("validator", "validator_mapping_fix"),
+        ("system", "block_run"),
+        ("none", "none"),
+    }
+    finding_ids: set[str] = set()
+    finding_claims: dict[str, set[str]] = {}
+    blocking_count = 0
+    grounding_text = _task_prompt_grounding_text(prompt)
+    for raw in findings:
+        if not isinstance(raw, dict):
+            raise ValueError("Every finding must be an object.")
+        finding_id = str(raw.get("finding_id") or "").strip()
+        if not finding_id or finding_id in finding_ids:
+            raise ValueError("Every finding_id must be non-empty and unique within the task.")
+        finding_ids.add(finding_id)
+        category = str(raw.get("category") or "").strip()
+        severity = str(raw.get("severity") or "").strip()
+        blocking = raw.get("blocking")
+        if category not in allowed_categories or severity not in {"blocker", "warning"}:
+            raise ValueError(f"Finding {finding_id} has an invalid category or severity.")
+        if not isinstance(blocking, bool) or blocking != (severity == "blocker"):
+            raise ValueError(f"Finding {finding_id} blocking must match severity.")
+        blocking_count += int(blocking)
+        claim_ids = _exact_string_array(raw.get("claim_ids"), f"{finding_id}.claim_ids")
+        finding_claims[finding_id] = set(claim_ids)
+        unit_ids = _exact_string_array(raw.get("unit_ids"), f"{finding_id}.unit_ids")
+        scenario_ids = _exact_string_array(raw.get("scenario_ids"), f"{finding_id}.scenario_ids")
+        requirement_refs = _exact_string_array(raw.get("requirement_refs"), f"{finding_id}.requirement_refs")
+        design_refs = _exact_string_array(raw.get("design_refs"), f"{finding_id}.design_refs")
+        code_refs = _exact_string_array(raw.get("code_refs"), f"{finding_id}.code_refs")
+        test_refs = _exact_string_array(raw.get("test_refs"), f"{finding_id}.test_refs")
+        if not claim_ids or not set(claim_ids).issubset(expected_claims):
+            raise ValueError(f"Finding {finding_id} must cite task-owned claim_ids.")
+        if not unit_ids or not set(unit_ids).issubset(allowed_units):
+            raise ValueError(f"Finding {finding_id} must cite task-owned unit_ids.")
+        if not set(scenario_ids).issubset(allowed_scenarios):
+            raise ValueError(f"Finding {finding_id} has an out-of-task scenario_id.")
+        if not set(requirement_refs).issubset(allowed_requirements):
+            raise ValueError(f"Finding {finding_id} has an out-of-task requirement_ref.")
+        cited_claim_requirements = {
+            requirement_ref
+            for claim_id in claim_ids
+            for requirement_ref in requirements_by_claim.get(claim_id, set())
+        }
+        unrelated_requirement_refs = sorted(set(requirement_refs) - cited_claim_requirements)
+        if unrelated_requirement_refs:
+            raise ValueError(
+                f"Finding {finding_id} requirement_refs must belong to its cited claim_ids; "
+                "refs without a selected matching claim: " + ", ".join(unrelated_requirement_refs) + "."
+            )
+        if not set(design_refs).issubset(expected_design):
+            raise ValueError(f"Finding {finding_id} has an out-of-task design_ref.")
+        if any(_target_path(value) not in allowed_code_paths for value in code_refs):
+            raise ValueError(f"Finding {finding_id} has an out-of-task code_ref.")
+        if any(_target_path(value) not in allowed_test_paths for value in test_refs):
+            raise ValueError(f"Finding {finding_id} has an out-of-task test_ref.")
+        issue = str(raw.get("issue") or "").strip()
+        expected_change = str(raw.get("expected_change") or "").strip()
+        evidence_ref = str(raw.get("evidence_ref") or "").strip()
+        evidence_quote = str(raw.get("evidence_quote") or "").strip()
+        if (
+            not issue
+            or not evidence_ref
+            or not evidence_quote
+            or _normalized_evidence_text(evidence_quote) not in grounding_text
+        ):
+            raise ValueError(f"Finding {finding_id} must cite exact evidence visible in the task input.")
+        if blocking and not expected_change:
+            raise ValueError(f"Blocking finding {finding_id} requires expected_change.")
+        owner_action = (
+            str(raw.get("owner") or "").strip(),
+            str(raw.get("recommended_action") or "").strip(),
+        )
+        if owner_action not in allowed_owner_actions:
+            raise ValueError(f"Finding {finding_id} has an invalid owner/action pair.")
+        if severity == "warning" and owner_action != ("none", "none"):
+            raise ValueError(f"Warning {finding_id} must use none/none.")
+        if severity == "warning" and expected_change:
+            raise ValueError(f"Warning {finding_id} expected_change must be empty.")
+        if severity == "blocker" and owner_action == ("none", "none"):
+            raise ValueError(f"Blocking finding {finding_id} must have an actionable owner/action pair.")
+    if output.get("ok") is not (blocking_count == 0):
+        raise ValueError("ok must be true if and only if the task has no blocking findings.")
+    for claim_id, assessment in assessments_by_claim.items():
+        expected_finding_ids = {
+            finding_id for finding_id, claim_ids in finding_claims.items() if claim_id in claim_ids
+        }
+        assessed_finding_ids = set(
+            _exact_string_array(assessment.get("finding_ids"), f"{claim_id}.finding_ids")
+        )
+        verdict = str(assessment.get("verdict") or "").strip()
+        if assessed_finding_ids != expected_finding_ids or (verdict == "finding") != bool(
+            expected_finding_ids
+        ):
+            raise ValueError(
+                f"Claim assessment {claim_id} verdict and finding_ids must match findings that cite it."
+            )
+
+
+def _task_findings(
+    *,
+    review: dict[str, object],
+    task: dict[str, object],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    blockers: list[dict[str, object]] = []
+    observations: list[dict[str, object]] = [
+        {
+            "type": "llm_observation",
+            "blocking": False,
+            "owner": "none",
+            "recommended_action": "none",
+            "message": value,
+            "task_id": task.get("task_id"),
+        }
+        for value in _string_items(review.get("observations"))
+    ]
+    for raw in _dict_items(review.get("findings")):
+        owner = str(raw.get("owner") or "").strip()
+        category = str(raw.get("category") or "").strip()
+        link_type = (
+            "frozen_contract_conflict"
+            if owner == "system"
+            else category
+            if category in NON_REPAIRABLE_LLM_LINK_TYPES
+            else "llm_semantic_gap"
+        )
+        item = {
+            **raw,
+            "type": link_type,
+            "llm_type": category,
+            "task_id": task.get("task_id"),
+            "message": raw.get("issue"),
+            "claim_id": next(iter(_string_items(raw.get("claim_ids"))), ""),
+            "requirement_ref": next(iter(_string_items(raw.get("requirement_refs"))), ""),
+            "design_element_id": next(iter(_string_items(raw.get("design_refs"))), ""),
+            "code_ref": next(iter(_string_items(raw.get("code_refs"))), ""),
+        }
+        if raw.get("blocking") is True:
+            blockers.append(item)
+        else:
+            observations.append(item)
+    return blockers, observations
+
+
+def _task_code_snippets(
+    *,
+    target_path: Path,
+    task: dict[str, object],
+    ast_evidence: TypeScriptAstEvidence,
+    fallback_test_paths: list[str],
+) -> list[dict[str, object]]:
+    symbols_by_path: dict[str, set[str]] = {}
+    source_paths: list[str] = []
+    for target in _dict_items(task.get("code_targets")):
+        path = str(target.get("path") or "").strip().replace("\\", "/")
+        symbol = str(target.get("symbol") or "").strip()
+        if not path:
+            continue
+        if path not in source_paths:
+            source_paths.append(path)
+        if symbol:
+            symbols_by_path.setdefault(path, set()).add(symbol)
+    test_paths = _string_items(task.get("test_paths"))
+    if not test_paths and task.get("scenario_ids") == ["GLOBAL"]:
+        test_paths = fallback_test_paths
+    test_paths = [path for path in test_paths if path not in source_paths]
+
+    snippets: list[dict[str, object]] = []
+    for paths, total_limit, file_limit in (
+        (source_paths, MAX_TASK_SOURCE_SNIPPET_TOTAL_CHARS, MAX_TASK_SOURCE_SNIPPET_FILE_CHARS),
+        (test_paths, MAX_TASK_TEST_SNIPPET_TOTAL_CHARS, MAX_TASK_TEST_SNIPPET_FILE_CHARS),
+    ):
+        remaining = total_limit
+        for path in paths:
+            file_path = target_path / path
+            if remaining <= 0 or not file_path.is_file():
+                continue
+            text = file_path.read_text(encoding="utf-8", errors="replace")
+            lines = text.splitlines(keepends=True)
+            ranges = _task_symbol_dependency_ranges(
+                ast_evidence=ast_evidence,
+                path=path,
+                symbols=symbols_by_path.get(path, set()),
+                lines=lines,
+            )
+            selected_ranges = _merge_prioritized_line_ranges(
+                (
+                    max(1, start - TASK_SYMBOL_CONTEXT_LINES),
+                    min(len(lines), end + TASK_SYMBOL_CONTEXT_LINES),
+                )
+                for start, end in ranges
+            )
+            requested_ranges = selected_ranges or ([(1, len(lines))] if lines else [])
+            limit = min(file_limit, remaining)
+            bounded, included_ranges = _render_bounded_line_ranges(
+                lines=lines,
+                ranges=requested_ranges,
+                limit=limit,
+            )
+            snippets.append(
+                {
+                    "path": path,
+                    "content": bounded,
+                    "chars_total": len(text),
+                    "chars_included": sum(
+                        len("".join(lines[start - 1 : end])) for start, end in included_ranges
+                    ),
+                    "content_truncated": (
+                        sum(end - start + 1 for start, end in requested_ranges) < len(lines)
+                        or included_ranges != requested_ranges
+                    ),
+                    "line_ranges": [
+                        {"start_line": start, "end_line": end}
+                        for start, end in included_ranges
+                    ],
+                }
+            )
+            remaining -= len(bounded)
+    return snippets
+
+
+def _task_symbol_dependency_ranges(
+    *,
+    ast_evidence: TypeScriptAstEvidence,
+    path: str,
+    symbols: set[str],
+    lines: list[str],
+) -> list[tuple[int, int]]:
+    """Include local declarations referenced by the planned target, in dependency order."""
+
+    primary = list(ast_evidence.ranges_for(path, symbols=symbols))
+    if not primary or not symbols:
+        return primary
+    candidates = [
+        symbol
+        for file in ast_evidence.files
+        if file.get("path") == path
+        for symbol in _dict_items(file.get("symbols"))
+    ]
+    selected = set(primary)
+    ordered = list(primary)
+    frontier = list(primary)
+    while frontier:
+        referenced_text = "\n".join("".join(lines[start - 1 : end]) for start, end in frontier)
+        discovered: list[tuple[int, int]] = []
+        for symbol in candidates:
+            start = int(symbol.get("start_line") or 0)
+            end = int(symbol.get("end_line") or 0)
+            candidate = (start, end)
+            name = str(symbol.get("name") or "").strip()
+            if start <= 0 or end < start or candidate in selected or not name:
+                continue
+            if re.search(rf"\b{re.escape(name)}\b", referenced_text):
+                selected.add(candidate)
+                discovered.append(candidate)
+        ordered.extend(discovered)
+        frontier = discovered
+    return ordered
+
+
+def _merge_prioritized_line_ranges(
+    ranges: Any,
+) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in ranges:
+        overlaps = [
+            index
+            for index, existing in enumerate(merged)
+            if start <= existing[1] + 1 and end >= existing[0] - 1
+        ]
+        if not overlaps:
+            merged.append([start, end])
+            continue
+        first = overlaps[0]
+        merged[first] = [
+            min(start, *(merged[index][0] for index in overlaps)),
+            max(end, *(merged[index][1] for index in overlaps)),
+        ]
+        for index in reversed(overlaps[1:]):
+            del merged[index]
+    return [(start, end) for start, end in merged]
+
+
+def _render_bounded_line_ranges(
+    *,
+    lines: list[str],
+    ranges: list[tuple[int, int]],
+    limit: int,
+) -> tuple[str, list[tuple[int, int]]]:
+    parts: list[str] = []
+    included: list[tuple[int, int]] = []
+    used = 0
+    for start, end in ranges:
+        header = f"/* lines {start}-{end} */\n"
+        segment: list[str] = []
+        segment_used = len(header) + (1 if parts else 0)
+        actual_end = start - 1
+        for line_number in range(start, end + 1):
+            line = lines[line_number - 1]
+            if used + segment_used + len(line) > limit:
+                break
+            segment.append(line)
+            segment_used += len(line)
+            actual_end = line_number
+        if actual_end < start:
+            break
+        parts.append(header + "".join(segment))
+        included.append((start, actual_end))
+        used += segment_used
+        if actual_end < end:
+            break
+    return "\n".join(parts), included
+
+
+def _merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in sorted(ranges):
+        if not merged or start > merged[-1][1] + 1:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
+
+
+def _project_symbol_evidence(
+    symbol_evidence: dict[str, object],
+    *,
+    paths: set[str],
+    symbols_by_path: dict[str, set[str]],
+) -> dict[str, object]:
+    return {
+        "version": symbol_evidence.get("version"),
+        "extractor_id": symbol_evidence.get("extractor_id"),
+        "profile": symbol_evidence.get("profile"),
+        "files": [
+            {
+                **item,
+                "symbols": [
+                    symbol
+                    for symbol in _dict_items(item.get("symbols"))
+                    if _symbol_matches_targets(
+                        symbol,
+                        targets=symbols_by_path.get(str(item.get("path") or ""), set()),
+                    )
+                ],
+            }
+            for item in _dict_items(symbol_evidence.get("files"))
+            if str(item.get("path") or "") in paths
+            and symbols_by_path.get(str(item.get("path") or ""))
+        ],
+    }
+
+
+def _symbol_matches_targets(symbol: dict[str, object], *, targets: set[str]) -> bool:
+    name = str(symbol.get("name") or "")
+    qualified = str(symbol.get("qualified_name") or "")
+    return any(
+        target == name or target == qualified or qualified.endswith(f".{target}")
+        for target in targets
     )
 
 
-def _consensus_confidence(trials: list[dict[str, object]]) -> float | None:
-    values: list[float] = []
-    for trial in trials:
-        try:
-            values.append(float(trial.get("confidence")))
-        except (TypeError, ValueError):
-            continue
-    return round(sum(values) / len(values), 4) if values else None
+def _task_paths(task: dict[str, object]) -> set[str]:
+    return {
+        path
+        for path in [
+            *[
+                str(item.get("path") or "").strip().replace("\\", "/")
+                for item in _dict_items(task.get("code_targets"))
+            ],
+            *_string_items(task.get("test_paths")),
+        ]
+        if path
+    }
 
 
-def _consensus_summary(
-    trials: list[dict[str, object]],
-    blockers: list[dict[str, object]],
-    disputed: list[dict[str, object]],
-    inconclusive: bool,
-) -> str:
-    if inconclusive:
-        return "Semantic code review could not obtain the required valid adaptive consensus trials."
-    if blockers:
-        return f"Semantic consensus confirmed {len(blockers)} stable blocking finding(s)."
-    if disputed:
-        return f"Semantic consensus passed with {len(disputed)} minority finding(s) retained as disputed."
-    return f"Semantic consensus passed across {len(trials)} valid trial(s) with zero stable blockers."
+def _exact_string_array(value: object, field: str) -> list[str]:
+    if not isinstance(value, list) or not all(isinstance(item, str) and item.strip() == item and item for item in value):
+        raise ValueError(f"{field} must be an array of non-empty exact strings.")
+    if len(value) != len(set(value)):
+        raise ValueError(f"{field} must not contain duplicates.")
+    return list(value)
 
 
-def _collection_size(value: object) -> int:
-    if isinstance(value, (dict, list, tuple, set)):
-        return len(value)
-    return 0
-
-
-def _approved_behavior_contracts(work_packet: dict[str, object]) -> list[dict[str, object]]:
-    """Keep approved implementation behavior prominent without duplicating mappings."""
-
-    return [
-        {
-            "order": step.get("order"),
-            "title": step.get("title"),
-            "description": step.get("description"),
-        }
-        for step in _dict_items(work_packet.get("implementation_steps"))
-    ]
-
-
-def _approved_sequence_evidence(approved_context: dict[str, object]) -> list[str]:
-    """Expose ordered diagram messages; IDs alone do not describe their semantics."""
-
-    design = approved_context.get("design_artifact")
-    content = str(design.get("content") or "") if isinstance(design, dict) else str(design or "")
-    lines: list[str] = []
-    for raw_line in content.splitlines():
-        line = raw_line.strip()
-        if line and any(arrow in line for arrow in (" -> ", " --> ", " --x ")):
-            lines.append(line)
-    return lines[:120]
-
-
-def _code_refs(
+def _task_review_summary(
     *,
-    target_path: Path,
-    mappings: list[dict[str, object]],
-    test_paths: list[str],
-) -> list[dict[str, object]]:
-    """Gửi metadata file/symbol cho LLM mà không đưa nội dung code ra ngoài."""
+    task_results: list[dict[str, object]],
+    blockers: list[dict[str, object]],
+    inconclusive: bool,
+    deterministic_blocked: bool,
+) -> str:
+    if deterministic_blocked:
+        return "Deterministic preflight found blockers; semantic calls were skipped."
+    if inconclusive:
+        return "At least one semantic task was inconclusive; no repair is authorized."
+    if blockers:
+        return f"Scenario + Boundary review found {len(blockers)} blocking finding(s)."
+    return f"Scenario + Boundary review passed {len(task_results)} task(s)."
 
-    refs: list[dict[str, object]] = []
-    seen: set[tuple[str, str]] = set()
-    for item in mappings:
-        evidence = _dict_items(item.get("code_evidence")) or [item]
-        for value in evidence:
-            path = str(value.get("source_file") or "").strip().replace("\\", "/")
-            symbol = str(value.get("symbol") or "").strip()
-            key = (path, symbol)
-            if not path or key in seen:
-                continue
-            seen.add(key)
-            refs.append(
-                {
-                    "path": path,
-                    "kind": "source",
-                    "exists": (target_path / path).is_file(),
-                    "symbol": symbol,
-                    "symbol_found": value.get("symbol_found") is True,
-                }
-            )
-    for path in test_paths:
-        refs.append({"path": path, "kind": "test", "exists": (target_path / path).is_file()})
-    return refs
+
+def _task_prompt_grounding_text(prompt: str) -> str:
+    try:
+        payload = json.loads(prompt)
+    except json.JSONDecodeError:
+        return _normalized_evidence_text(prompt)
+    values: list[str] = []
+
+    def collect(value: object) -> None:
+        if isinstance(value, str):
+            values.append(value)
+        elif isinstance(value, dict):
+            for nested in value.values():
+                collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    collect(payload)
+    return _normalized_evidence_text("\n".join(values))
+
+
+def _target_path(value: str) -> str:
+    return str(value or "").split("#", 1)[0].strip().replace("\\", "/")
 
 
 def _code_snippets(
@@ -1379,26 +2402,3 @@ def _snippet_priority(path: str, mapping_count: int, test_paths: list[str]) -> t
     else:
         group = 3
     return (group, -mapping_count, path)
-
-
-def _review_context(value: object, *, code_snippets: list[dict[str, object]]) -> dict[str, object]:
-    context = dict(value) if isinstance(value, dict) else {}
-    context.update(
-        {
-            "code_snippets_included": bool(code_snippets),
-            "code_snippet_count": len(code_snippets),
-            "code_snippets_total_chars": sum(int(item.get("chars_sent") or 0) for item in code_snippets),
-            "code_snippets_truncated": any(bool(item.get("content_truncated")) for item in code_snippets),
-            "code_snippet_paths": [
-                {
-                    "path": item.get("path"),
-                    "role": item.get("role"),
-                    "chars_sent": item.get("chars_sent"),
-                    "chars_total": item.get("chars_total"),
-                    "content_truncated": item.get("content_truncated"),
-                }
-                for item in code_snippets
-            ],
-        }
-    )
-    return context

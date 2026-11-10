@@ -14,7 +14,7 @@ from ...core.errors import HarnessError
 from ...profiles import CodeTracePolicy
 
 
-TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v1"
+TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v2"
 TYPESCRIPT_AST_REQUEST_VERSION = "typescript_ast_request_v1"
 DEFAULT_TYPESCRIPT_AST_TIMEOUT_SECONDS = 30
 MAX_EXTRACTOR_ERROR_CHARS = 4000
@@ -82,6 +82,26 @@ class TypeScriptAstEvidence:
                 ):
                     matches.append(dict(symbol))
         return tuple(matches)
+
+    def ranges_for(self, path: str, *, symbols: set[str]) -> tuple[tuple[int, int], ...]:
+        """Return validated declaration line ranges for the requested symbols."""
+
+        ranges: list[tuple[int, int]] = []
+        for item in self.files:
+            if item.get("path") != path:
+                continue
+            for symbol in _dict_items(item.get("symbols")):
+                names = {
+                    str(symbol.get("name") or "").strip(),
+                    str(symbol.get("qualified_name") or "").strip(),
+                }
+                if symbols and not names.intersection(symbols):
+                    continue
+                start = int(symbol.get("start_line") or 0)
+                end = int(symbol.get("end_line") or 0)
+                if start > 0 and end >= start:
+                    ranges.append((start, end))
+        return tuple(ranges)
 
 
 class TypeScriptAstExtractor:
@@ -263,6 +283,8 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
         qualified_name = str(raw_symbol.get("qualified_name") or "").strip()
         parameters = raw_symbol.get("parameters")
         type_parameters = raw_symbol.get("type_parameters")
+        start_line = raw_symbol.get("start_line")
+        end_line = raw_symbol.get("end_line")
         if (
             kind not in _ALLOWED_SYMBOL_KINDS
             or not name
@@ -271,6 +293,10 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
             or not isinstance(type_parameters, list)
             or not all(isinstance(item, dict) for item in parameters)
             or not all(isinstance(item, str) for item in type_parameters)
+            or not isinstance(start_line, int)
+            or not isinstance(end_line, int)
+            or start_line < 1
+            or end_line < start_line
         ):
             raise _invalid_evidence(f"Extractor symbol schema is invalid for {path}.", run_id=run_id)
         normalized_parameters: list[dict[str, object]] = []
@@ -297,6 +323,8 @@ def _validated_symbols(value: object, *, path: str, run_id: str | None) -> list[
                 "type_parameters": list(type_parameters),
                 "async": raw_symbol.get("async") is True,
                 "exported": raw_symbol.get("exported") is True,
+                "start_line": start_line,
+                "end_line": end_line,
             }
         )
     return symbols

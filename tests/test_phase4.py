@@ -57,95 +57,99 @@ from tests._support import (
 pytestmark = pytest.mark.integration
 
 
+def _code_validation_task_response(
+    prompt: str,
+    *,
+    category: str = "",
+    owner: str = "developer",
+    action: str = "developer_repair",
+) -> dict[str, object]:
+    payload = json.loads(prompt)
+    contract = payload["task_contract"]
+    if "previous_output" in payload:
+        return dict(payload["previous_output"])
+    result: dict[str, object] = {
+        "task_id": contract["task_id"],
+        "reviewed_claim_ids": contract["authority_claim_ids"],
+        "reviewed_design_ids": contract["required_reviewed_design_ids"],
+        "reviewed_boundary_contract_ids": contract["required_reviewed_boundary_contract_ids"],
+        "claim_assessments": [
+            {"claim_id": claim_id, "verdict": "pass", "finding_ids": []}
+            for claim_id in contract["authority_claim_ids"]
+        ],
+        "ok": not category,
+        "summary": "Task passed." if not category else "Task found one blocker.",
+        "findings": [],
+        "observations": [],
+    }
+    if not category:
+        return result
+    claim = payload["authority_claims"][0]
+    result["findings"] = [
+        {
+            "finding_id": f"F-{contract['task_id']}",
+            "category": category,
+            "severity": "blocker",
+            "blocking": True,
+            "scenario_ids": contract["scenario_ids"],
+            "claim_ids": [claim["claim_id"]],
+            "unit_ids": [contract["unit_ids"][0]],
+            "requirement_refs": [claim["requirement_ref"]] if claim.get("requirement_ref") else [],
+            "design_refs": [],
+            "code_refs": [],
+            "test_refs": [],
+            "issue": "Approved behavior is not covered by code/test evidence.",
+            "expected_change": "Implement and test the approved behavior.",
+            "evidence_ref": claim["claim_id"],
+            "evidence_quote": claim["requirement_content"],
+            "owner": owner,
+            "recommended_action": action,
+        }
+    ]
+    result["claim_assessments"] = [
+        {
+            "claim_id": claim_id,
+            "verdict": "finding" if claim_id == claim["claim_id"] else "pass",
+            "finding_ids": [f"F-{contract['task_id']}"] if claim_id == claim["claim_id"] else [],
+        }
+        for claim_id in contract["authority_claim_ids"]
+    ]
+    return result
+
+
 class RejectingCodeTraceLlm:
     def complete(self, *, system: str, prompt: str) -> str:
-        review_input = json.loads(prompt.split("\n\n", 1)[1])
-        claim = review_input["fixed_validation_claims"][0]
-        return json.dumps(
-            {
-                "ok": False,
-                "confidence": 0.87,
-                "summary": "Semantic graph review found missing request-deletion coverage.",
-                "graph_edges": [],
-                "missing_links": [
-                    {
-                        "type": "missing_behavior",
-                        "claim_id": claim["claim_id"],
-                        "blocking": True,
-                        "owner": "developer",
-                        "recommended_action": "developer_repair",
-                        "message": "Approved requestDeletion behavior is not covered by code/test evidence.",
-                        "requirement_ref": claim["requirement_ref"],
-                        "design_element_id": claim["design_element_ids"][0],
-                        "evidence_ref": "approved_design:sequence",
-                        "evidence_quote": claim["requirement_content"],
-                    }
-                ],
-                "risks": ["Code file exists but behavior evidence is weak."],
-            }
-        )
+        return json.dumps(_code_validation_task_response(prompt, category="missing_behavior"))
 
 
 class TraceMappingIssueCodeTraceLlm:
     def complete(self, *, system: str, prompt: str) -> str:
-        review_input = json.loads(prompt.split("\n\n", 1)[1])
-        claim = review_input["fixed_validation_claims"][0]
         return json.dumps(
-            {
-                "ok": False,
-                "confidence": 0.9,
-                "summary": "Trace graph mapping is weak; code repair should not run.",
-                "graph_edges": [],
-                "missing_links": [
-                    {
-                        "type": "trace_mapping_issue",
-                        "claim_id": claim["claim_id"],
-                        "blocking": True,
-                        "owner": "validator",
-                        "recommended_action": "validator_mapping_fix",
-                        "message": "Sequence boolean response is not a code symbol.",
-                        "design_element_id": claim["design_element_ids"][0],
-                        "evidence_ref": "design_artifact:Sequence Diagrams",
-                        "evidence_quote": claim["requirement_content"],
-                    }
-                ],
-                "risks": ["Validator evidence/mapping issue."],
-            }
+            _code_validation_task_response(
+                prompt,
+                category="trace_mapping_issue",
+                owner="validator",
+                action="validator_mapping_fix",
+            )
         )
 
 
 class CapturingCodeTraceLlm:
     def __init__(self) -> None:
         self.prompt = ""
+        self.prompts: list[str] = []
 
     def complete(self, *, system: str, prompt: str) -> str:
         self.prompt = prompt
-        return json.dumps(
-            {
-                "ok": True,
-                "confidence": 0.93,
-                "summary": "Semantic review accepted code snippets.",
-                "graph_edges": [],
-                "missing_links": [],
-                "risks": [],
-            }
-        )
+        self.prompts.append(prompt)
+        return json.dumps(_code_validation_task_response(prompt))
 
 
 class ProseWrappedCodeTraceLlm:
     def complete(self, *, system: str, prompt: str) -> str:
         return (
             "Here is the review:\n"
-            + json.dumps(
-                {
-                    "ok": True,
-                    "confidence": 0.9,
-                    "summary": "Semantic review accepted code snippets despite prose wrapper.",
-                    "graph_edges": [],
-                    "missing_links": [],
-                    "risks": [],
-                }
-            )
+            + json.dumps(_code_validation_task_response(prompt))
         )
 
 
@@ -756,6 +760,108 @@ class PhaseFourTest(unittest.TestCase):
             )
         self.assertEqual(caught.exception.error_code, "developer_input_drift")
 
+    def test_repair_restores_approved_units_missing_from_scoped_packet(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings())
+        run_id = "run_restore_repair_units"
+        structured = workflow.store.write_json_artifact(
+            run_id,
+            "implementation_plan_structured_v2.json",
+            {"work_units": [{"unit_id": "WU-1"}, {"unit_id": "WU-2"}]},
+        )
+        scoped_packet = {
+            "source_ref": "fixture:UC-1",
+            "issue_key": "UC-1",
+            "execution_units": [{"unit_id": "WU-2"}],
+            "approved_plan": {},
+        }
+        restored_packet = {
+            **scoped_packet,
+            "execution_units": [{"unit_id": "WU-1"}, {"unit_id": "WU-2"}],
+        }
+        workspace = type("Workspace", (), {"to_dict": lambda self: {}})()
+
+        with (
+            patch.object(workflow.workspace_manager, "resolve", return_value=workspace),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation._planning_policy_for_state",
+                return_value=object(),
+            ),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation._verification_policy_for_state",
+                return_value=object(),
+            ),
+            patch(
+                "sdlc_harness.workflows.phase4_implementation.build_developer_work_packet",
+                return_value=restored_packet,
+            ) as rebuild,
+        ):
+            result = workflow._restore_missing_repair_units(
+                state={"source_ref": "fixture:UC-1"},
+                run_id=run_id,
+                artifact_paths={
+                    "implementation_plan_structured": workflow.store.relative(structured),
+                },
+                work_packet=scoped_packet,
+                repair_feedback={
+                    "repair_objective": {
+                        "contract_findings": [{"unit_ids": ["WU-1", "WU-2"]}],
+                    }
+                },
+                target_path=Path("target"),
+            )
+
+        self.assertEqual(
+            [unit["unit_id"] for unit in result["execution_units"]],
+            ["WU-1", "WU-2"],
+        )
+        rebuild.assert_called_once()
+
+    def test_developer_loop_accepts_harness_materialized_runtime_config_as_existing_dirty_state(self) -> None:
+        workflow = PhaseFourWorkflow(self._settings())
+        run_id = "run_harness_owned_dirty_path"
+        receipt = workflow.store.write_json_artifact(
+            run_id,
+            "runtime_config_execution_v1.json",
+            {
+                "schema_version": "runtime_config_execution_v1",
+                "status": "materialized",
+                "changed_paths": [".env.example"],
+            },
+        )
+        result = DeveloperExecutionResult(
+            summary="done",
+            files=[],
+            manifest_path="manifest.json",
+            journal_path="journal.json",
+            progress={"status": "completed"},
+        )
+
+        with (
+            patch.object(workflow.developer_tool_loop, "execute", return_value=result) as execute,
+            patch(
+                "sdlc_harness.workflows.phase4_implementation._verification_policy_for_state",
+                return_value=object(),
+            ),
+        ):
+            workflow._execute_developer_tool_loop(
+                state={"run_id": run_id},
+                run_id=run_id,
+                work_packet={},
+                target_path=Path("target"),
+                latest_artifacts={
+                    "runtime_config_execution": workflow.store.relative(receipt),
+                },
+                mode="implementation_repair",
+                current_phase="implementation_repair",
+                repair_iteration=1,
+                artifact_version=1,
+                manifest_key="developer_repair_execution_manifest",
+                journal_key="developer_repair_execution_journal",
+                repair_feedback={"repair_objective": {}},
+            )
+
+        self.assertEqual(execute.call_args.kwargs["expected_dirty_paths"], [".env.example"])
+
     def test_legacy_repair_state_uses_next_unused_session_ordinal(self) -> None:
         workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_next_repair_session"
@@ -1102,7 +1208,7 @@ class PhaseFourTest(unittest.TestCase):
 
         payload = result.to_dict()
         self.assertTrue(result.ok)
-        self.assertEqual(payload["mode"], "hybrid_rule_llm_code_trace_v3")
+        self.assertEqual(payload["mode"], "scenario_boundary_code_validation_v1")
         self.assertEqual(payload["requirement_contract"]["revision"], 3)
         self.assertEqual([item["requirement_ref"] for item in payload["mappings"]], ["REQ-1"])
         self.assertEqual(payload["stats"]["requirements_covered"], 1)
@@ -1761,7 +1867,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(trace["mappings"])
         self.assertFalse(trace["missing_links"])
         self.assertGreater(trace["stats"]["test_file_count"], 0)
-        self.assertEqual(trace["mode"], "hybrid_rule_llm_code_trace_v3")
+        self.assertEqual(trace["mode"], "scenario_boundary_code_validation_v1")
         self.assertTrue(trace["llm_required"])
         self.assertTrue(trace["llm_review"]["ok"])
         self.assertTrue(trace["llm_review"]["review_context"]["code_snippets_included"])
@@ -1784,12 +1890,16 @@ class PhaseFourTest(unittest.TestCase):
         self.assertIn("CulturalHeritage", llm.prompt)
         self.assertIn("DeleteCulturalHeritageFlow.test.ts", llm.prompt)
         self.assertIn("execute", llm.prompt)
-        payload = json.loads(llm.prompt.split("\n\n", 1)[1])
-        snippets = {item["path"]: item for item in payload["code_snippets"]}
+        payloads = [json.loads(prompt) for prompt in llm.prompts]
+        snippets = {
+            item["path"]: item
+            for payload in payloads
+            for item in payload["code_snippets"]
+        }
         flow_test = next(path for path in snippets if path.endswith("DeleteCulturalHeritageFlow.test.ts"))
         self.assertFalse(snippets[flow_test]["content_truncated"])
-        self.assertEqual(snippets[flow_test]["chars_sent"], snippets[flow_test]["chars_total"])
-        self.assertTrue(any(item["content_truncated"] is False for item in payload["code_snippets"]))
+        self.assertEqual(snippets[flow_test]["chars_included"], snippets[flow_test]["chars_total"])
+        self.assertTrue(any(item["content_truncated"] is False for item in snippets.values()))
 
     def test_code_trace_llm_accepts_prose_wrapped_json(self) -> None:
         tested = self._create_phase4_tested_run()
@@ -1800,6 +1910,54 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(response["status"], "implementation_traced")
         self.assertTrue(response["quality_reports"]["implementation_traceability"]["ok"])
+
+    def test_code_validation_step_review_pauses_input_and_output_then_resumes(self) -> None:
+        self.settings = self._settings(SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED="1")
+        tested = self._create_phase4_tested_run()
+
+        input_pending = PhaseFourWorkflow(self.settings).continue_run(run_id=str(tested["run_id"]))
+        self.assertEqual(input_pending["status"], "implementation_validation_step_review_required")
+        self.assertEqual(input_pending["pending_step_review"]["review_stage"], "input")
+
+        output_pending = PhaseFourWorkflow(
+            self.settings,
+            code_validation_step_review={
+                "enabled": True,
+                "call_id": input_pending["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_code_validation_step_review(run_id=str(tested["run_id"]))
+        self.assertEqual(output_pending["status"], "implementation_validation_step_review_required")
+        self.assertEqual(output_pending["pending_step_review"]["review_stage"], "output")
+
+        traced = PhaseFourWorkflow(
+            self.settings,
+            code_validation_step_review={
+                "enabled": True,
+                "call_id": output_pending["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_code_validation_step_review(run_id=str(tested["run_id"]))
+        self.assertEqual(traced["status"], "implementation_traced")
+
+    def test_code_validation_step_review_after_developer_resumes_validation_not_developer(self) -> None:
+        workflow = PhaseFourWorkflow(self.settings)
+        state = {
+            "run_id": "run_repair_validation_pause",
+            "status": "implementation_executing",
+            "current_phase": "implementation_repair",
+        }
+
+        workflow._pause_for_code_validation_step_review(
+            state=state,
+            run_id="run_repair_validation_pause",
+            progress={"call_id": "code-validation-scenario-SC-1-0001-a01-input", "review_stage": "input"},
+        )
+
+        self.assertEqual(
+            state["implementation_validation_resume"],
+            {"status": "implementation_tested", "current_phase": "implementation_testing"},
+        )
 
     def test_continue_run_runs_qa_after_implementation_traced(self) -> None:
         traced = self._create_phase4_traced_run()
@@ -2148,12 +2306,34 @@ class PhaseFourTest(unittest.TestCase):
         tested = self._create_phase4_tested_run()
         workflow = PhaseFourWorkflow(self.settings)
         workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
+        state = workflow.store.read_state(str(tested["run_id"]))
+        state["developer_execution"] = {
+            "executor": "tool_loop",
+            "mode": "implementation_repair",
+            "status": "blocked",
+            "session_id": "implementation_repair-v5",
+            "repair_iteration": 1,
+            "session_iteration": 5,
+            "artifact_version": 9,
+        }
+        workflow.store.write_state(state)
 
         response = workflow.continue_run(run_id=str(tested["run_id"]))
 
         self.assertEqual(response["current_phase"], "implementation_repair")
         self.assertEqual(response["status"], "implementation_repair_needed")
         self.assertIsNone(response["last_error"])
+        self.assertEqual(response["developer_execution"]["status"], "superseded")
+        self.assertEqual(
+            response["developer_execution"]["superseded_reason"],
+            "new_validator_repair_objective",
+        )
+        self.assertFalse(
+            workflow._tool_loop_session_active(
+                response,
+                mode="implementation_repair",
+            )
+        )
         self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
         trace = json.loads(
             (self.repo_root / str(response["latest_artifacts"]["requirement_design_code_trace"])).read_text(
@@ -2172,7 +2352,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(
             feedback["llm_review"]["summary"],
             "Validator reported 1 actionable blocking link(s). "
-            "Approved requestDeletion behavior is not covered by code/test evidence.",
+            "Approved behavior is not covered by code/test evidence.",
         )
         self.assertTrue(feedback["developer_constraints"]["allowed_paths"])
 

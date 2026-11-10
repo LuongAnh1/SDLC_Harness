@@ -85,8 +85,10 @@ class Settings:
     implementation_plan_step_review_input_enabled: bool
     implementation_plan_step_review_output_enabled: bool
     implementation_repair_limit: int
-    implementation_validation_trials: int
     implementation_validation_call_budget: int
+    implementation_validation_step_review_enabled: bool
+    implementation_validation_step_review_input_enabled: bool
+    implementation_validation_step_review_output_enabled: bool
     qa_repair_limit: int
     sync_mode: str
     atlassian_base_url: str
@@ -583,8 +585,18 @@ def load_settings(
             default=True,
         ),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),
-        implementation_validation_trials=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_TRIALS"), default=3, minimum=2),
         implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=6, minimum=2),
+        implementation_validation_step_review_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED")
+        ),
+        implementation_validation_step_review_input_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_INPUT_ENABLED"),
+            default=True,
+        ),
+        implementation_validation_step_review_output_enabled=_bool_value(
+            merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED"),
+            default=True,
+        ),
         qa_repair_limit=_int_value(merged.get("SDLC_QA_REPAIR_LIMIT"), default=1, minimum=0),
         sync_mode=sync_mode,
         atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),

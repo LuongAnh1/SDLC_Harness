@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -478,6 +479,7 @@ class ReviewableLlmClient:
             else exchange_call_id
         )
         exchange_path = self.root / f"exchange_{exchange_call_id}.json"
+        _write_json(exchange_path, pending)
         raise LlmStepReviewRequired(
             run_id=self.run_id,
             call_id=call_id,
@@ -488,9 +490,10 @@ class ReviewableLlmClient:
         )
 
     def _read_session(self) -> dict[str, object]:
-        if not self.session_path.exists():
+        session_path = _filesystem_path(self.session_path)
+        if not session_path.exists():
             return {"schema_version": f"{self.error_prefix}_step_review_v1", "calls": []}
-        value = json.loads(self.session_path.read_text(encoding="utf-8"))
+        value = json.loads(session_path.read_text(encoding="utf-8"))
         if not isinstance(value, dict):
             raise HarnessError(
                 f"{self.error_prefix}_step_review_corrupted",
@@ -559,7 +562,19 @@ def _replay_completion(exchange: dict[str, object], *, with_metadata: bool) -> s
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    _filesystem_path(path.parent).mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    filesystem_temporary = _filesystem_path(temporary)
+    filesystem_temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    filesystem_temporary.replace(_filesystem_path(path))
+
+
+def _filesystem_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)

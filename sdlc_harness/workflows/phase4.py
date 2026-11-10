@@ -135,11 +135,18 @@ class _PhaseFourCore:
         settings: Settings,
         *,
         developer_step_review: dict[str, object] | None = None,
+        code_validation_step_review: dict[str, object] | None = None,
     ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
+        self.code_validation_step_review = {
+            "enabled": settings.implementation_validation_step_review_enabled,
+            "review_input": settings.implementation_validation_step_review_input_enabled,
+            "review_output": settings.implementation_validation_step_review_output_enabled,
+            **dict(code_validation_step_review or {}),
+        }
         self.verification_runner = VerificationRunner()
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
@@ -151,13 +158,73 @@ class _PhaseFourCore:
         )
         self.code_trace_validator = CodeTraceValidator(
             self.llm_client,
-            validation_trials=settings.implementation_validation_trials,
             llm_call_budget=settings.implementation_validation_call_budget,
         )
         self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
         self.github_approver = GitHubCodeReviewApprover()
         self.workspace_manager = RunWorkspaceManager(settings)
+
+    def _pause_for_code_validation_step_review(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        progress: dict[str, object],
+    ) -> dict[str, object]:
+        resume_status = str(state.get("status") or "")
+        resume_phase = str(state.get("current_phase") or "")
+        if resume_status in {"implementation_executing", "implementation_paused"}:
+            # Developer/repair already finished before Code Validator requested review.
+            # Resume from the validated snapshot, never start another Developer session.
+            resume_status = "implementation_tested"
+            resume_phase = "implementation_testing"
+        state.update(
+            {
+                "updated_at": utc_now_iso(),
+                "status": "implementation_validation_step_review_required",
+                "pending_step_review": progress,
+                "implementation_validation_step_review": dict(self.code_validation_step_review),
+                "implementation_validation_resume": {
+                    "status": resume_status,
+                    "current_phase": resume_phase,
+                },
+                "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                "last_error": None,
+                "summary_for_user": (
+                    f"Code Validator đang chờ duyệt {progress.get('review_stage')} "
+                    f"{progress.get('call_id')} cho run {run_id}."
+                ),
+            }
+        )
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def continue_code_validation_step_review(self, *, run_id: str) -> dict[str, object]:
+        state = self.store.read_state(run_id)
+        if str(state.get("status") or "") != "implementation_validation_step_review_required":
+            raise HarnessError(
+                "implementation_validation_step_review_not_pending",
+                f"Run has no pending Code Validator step review: {run_id}",
+                run_id=run_id,
+            )
+        pinned = _dict_value(state.get("implementation_validation_step_review"))
+        decision = {
+            key: self.code_validation_step_review[key]
+            for key in ("call_id", "decision", "note")
+            if self.code_validation_step_review.get(key) is not None
+        }
+        self.code_validation_step_review = {**pinned, **decision, "enabled": True}
+        resume = _dict_value(state.get("implementation_validation_resume"))
+        state.update(
+            {
+                "status": resume.get("status") or "implementation_tested",
+                "current_phase": resume.get("current_phase") or "implementation_testing",
+                "pending_step_review": None,
+            }
+        )
+        self.store.write_state(state)
+        return self.continue_until_implementation_checkpoint(run_id=run_id)
 
 
     def approve_implementation_plan_checkpoint(
@@ -717,6 +784,7 @@ class _PhaseFourCore:
             "status": state.get("status"),
             "latest_artifacts": state.get("latest_artifacts", {}),
             "pending_checkpoint": state.get("pending_checkpoint"),
+            "pending_step_review": state.get("pending_step_review"),
             "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
@@ -1971,6 +2039,7 @@ def _is_repairable_code_trace_failure(trace_result: object) -> bool:
     repairable_types = {
         "missing_source_file",
         "missing_test_file",
+        "missing_code_symbol",
         "llm_semantic_gap",
         "contract_signature_mismatch",
     }
@@ -1997,6 +2066,8 @@ def _nonrepairable_code_trace_error_code(trace_result: object) -> str:
             continue
         link_type = str(item.get("type") or "").strip()
         owner = str(item.get("owner") or "").strip().lower()
+        if link_type == "frozen_contract_conflict" or owner == "system":
+            return "implementation_scope_conflict"
         if link_type == "open_requirement_question" or owner == "human":
             return "requirement_decision_needed"
         if link_type in {"trace_mapping_issue", "evidence_incomplete"}:
@@ -2174,11 +2245,22 @@ def _validator_repair_objective(missing_links: list[object]) -> dict[str, object
             key: raw.get(key)
             for key in (
                 "canonical_key",
+                "finding_id",
+                "task_id",
                 "type",
                 "message",
+                "issue",
+                "expected_change",
+                "scenario_ids",
+                "claim_ids",
+                "unit_ids",
                 "requirement_ref",
+                "requirement_refs",
                 "design_element_id",
+                "design_refs",
                 "code_ref",
+                "code_refs",
+                "test_refs",
                 "evidence_ref",
                 "evidence_quote",
                 "expected_signature",
@@ -2270,11 +2352,10 @@ def _implementation_repair_feedback(
         "severity": "repair_required",
         "summary": developer_summary,
         "required_action": (
-            "Verification has passed. Developer must choose and implement one coherent bounded slice of the missing "
-            "files, symbols, behaviors, tests, or trace links reported by Validator, using only allowed_paths and "
-            "the current worktree. Other missing links may remain for a later iteration. The harness will rerun "
-            "Verification and then Validator against the accumulated worktree. Do not edit the requirement or "
-            "approved design."
+            "Verification has passed. Developer must repair every blocking finding in this feedback as one "
+            "dependency-aware change, including all affected callers, implementations, and tests, using only "
+            "allowed_paths and the current worktree. The harness will rerun Verification and only the invalidated "
+            "Scenario + Boundary validation tasks. Do not edit the requirement or approved design."
         ),
         "target_repo": target_repo,
         "branch": branch,
@@ -2288,7 +2369,7 @@ def _implementation_repair_feedback(
             "previous_feedback_source": "",
         },
         "snapshot_fingerprint": getattr(trace_result, "snapshot_fingerprint", ""),
-        "semantic_consensus": getattr(trace_result, "semantic_consensus", {}),
+        "validation_aggregation": getattr(trace_result, "aggregation", {}),
         "missing_links": missing_links,
         "llm_review": {
             "ok": llm_review.get("ok"),

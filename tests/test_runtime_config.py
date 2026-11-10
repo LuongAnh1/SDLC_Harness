@@ -253,7 +253,7 @@ class RuntimeConfigTests(unittest.TestCase):
             ("global-model", "high", 49152, 480),
         )
 
-    def test_phase4_llm_profiles_have_action_and_repair_defaults_with_individual_overrides(self) -> None:
+    def test_phase4_llm_profiles_have_validator_action_and_repair_defaults_with_individual_overrides(self) -> None:
         settings = load_settings(
             root=self.root,
             runtime_root=self.runtime_root,
@@ -266,8 +266,18 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         )
 
+        validator_profile = settings.phase4_llm_profiles["code_validator"]
         action_profile = settings.phase4_llm_profiles["developer_action"]
         repair_profile = settings.phase4_llm_profiles["developer_repair"]
+        self.assertEqual(
+            (
+                validator_profile.model,
+                validator_profile.thinking_effort,
+                validator_profile.max_tokens,
+                validator_profile.timeout_seconds,
+            ),
+            ("deepseek-flash", "high", 32768, 600),
+        )
         self.assertEqual(
             (
                 action_profile.model,
@@ -287,6 +297,7 @@ class RuntimeConfigTests(unittest.TestCase):
             ("deepseek-flash", "high", 32768, 480),
         )
         fields = config_field_index()
+        self.assertIn("SDLC_PHASE4_CODE_VALIDATOR_THINKING_EFFORT", fields)
         self.assertIn("SDLC_PHASE4_DEVELOPER_ACTION_MAX_TOKENS", fields)
         self.assertIn("SDLC_PHASE4_DEVELOPER_REPAIR_TIMEOUT_SECONDS", fields)
 

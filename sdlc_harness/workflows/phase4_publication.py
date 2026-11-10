@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
+import re
 
 from ..artifacts.writers import (
     write_phase4_github_code_review,
@@ -10,6 +12,8 @@ from ..artifacts.writers import (
     write_phase4_github_pr_body,
 )
 from ..core.errors import HarnessError
+from ..llm.step_review import ReviewableLlmClient
+from ..agents.validator import CodeTraceValidator
 from ..storage.runtime import utc_now_iso
 from ..sync.github import (
     GitHubPublishError,
@@ -483,6 +487,17 @@ class PhaseFourPublicationCycle:
                 "content_truncated": len(content) > limit,
             }
 
+        for context_key, artifact_key in (
+            ("implementation_plan_structured_data", "implementation_plan_structured"),
+            ("vertical_design_graph_data", "vertical_design_graph"),
+            ("vertical_trace_graph_data", "vertical_trace_graph"),
+        ):
+            artifact_ref = _required_phase4_artifact(artifact_paths, artifact_key, run_id=run_id)
+            context[context_key] = _read_json_artifact(
+                self._existing_artifact_path(artifact_ref, run_id=run_id),
+                run_id=run_id,
+            )
+
         feedback_ref = str(artifact_paths.get("implementation_repair_feedback") or "").strip()
         if feedback_ref:
             feedback_path = self._existing_artifact_path(feedback_ref, run_id=run_id)
@@ -519,13 +534,41 @@ class PhaseFourPublicationCycle:
             if verification_evidence is not None
             else _dict_value(_dict_value(state.get("quality_reports")).get("verification"))
         )
-        return self.code_trace_validator.validate(
+        validator = self.code_trace_validator
+        if bool(self.code_validation_step_review.get("enabled")):
+            def reviewable_client(task: dict[str, object], prompt: str) -> ReviewableLlmClient:
+                task_id = str(task.get("task_id") or "task")
+                safe_task_id = re.sub(r"[^A-Za-z0-9_-]+", "-", task_id).strip("-") or "task"
+                prompt_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+                return ReviewableLlmClient(
+                    self.llm_client,
+                    store=self.store,
+                    run_id=run_id,
+                    review=self.code_validation_step_review,
+                    call_prefix=f"code-validation-{safe_task_id}",
+                    execution_dir=f"code_validation_execution/step_review/{prompt_digest}",
+                    error_prefix="implementation_validation",
+                    label=f"Code Validation {task_id}",
+                )
+
+            validator = CodeTraceValidator(
+                self.llm_client,
+                llm_call_budget=self.code_trace_validator.llm_call_budget,
+                symbol_extractor=self.code_trace_validator.symbol_extractor,
+                reviewable_client_factory=reviewable_client,
+            )
+        return validator.validate(
             target_path=target_path,
             work_packet=work_packet,
             approved_context=approved_context,
             verification_evidence=verification,
             previous_ledger=_dict_value(approved_context.get("prior_implementation_validation_ledger")),
             code_trace_policy=_code_trace_policy_for_state(state, run_id=run_id),
+            task_cache_path=(
+                self.store.run_dir(run_id)
+                / "code_validation_execution"
+                / "code_validation_task_cache_v1.json"
+            ),
         )
 
     def _write_implementation_validation_ledger(

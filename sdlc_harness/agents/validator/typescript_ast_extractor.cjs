@@ -55,6 +55,8 @@ function declarationSymbol(ts, node, sourceFile, owner) {
   if (!kind) {
     return null;
   }
+  const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
+  const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
   return {
     kind,
     name,
@@ -64,6 +66,8 @@ function declarationSymbol(ts, node, sourceFile, owner) {
     type_parameters: typeParameters(node, sourceFile),
     async: hasModifier(ts, node, ts.SyntaxKind.AsyncKeyword),
     exported: hasModifier(ts, node, ts.SyntaxKind.ExportKeyword),
+    start_line: start.line + 1,
+    end_line: end.line + 1,
   };
 }
 
@@ -131,7 +135,7 @@ for (const rawPath of request.files || []) {
 }
 
 process.stdout.write(JSON.stringify({
-  version: "typescript_ast_evidence_v1",
+  version: "typescript_ast_evidence_v2",
   extractor_id: request.extractor_id,
   profile: request.profile,
   files,

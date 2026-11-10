@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 from types import SimpleNamespace
 import unittest
 
-from sdlc_harness.llm.step_review import LlmStepReviewRequired, ReviewableLlmClient, _parsed_output
+from sdlc_harness.llm.step_review import (
+    LlmStepReviewRequired,
+    ReviewableLlmClient,
+    _filesystem_path,
+    _parsed_output,
+)
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.storage.runtime import RuntimeStore
@@ -34,6 +41,55 @@ class _FakeClient:
 
 
 class PhaseThreeStepReviewTest(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows extended paths only")
+    def test_step_review_supports_exchange_paths_longer_than_260_characters(self) -> None:
+        temp = tempfile.mkdtemp()
+        try:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            execution_dir = "step_review/" + "/".join(["x" * 60] * 3)
+            base = _FakeClient(['{"ok":true}'])
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-long-path",
+                call_prefix="code-validation-boundary-cross-scenario",
+                execution_dir=execution_dir,
+            )
+
+            with self.assertRaises(LlmStepReviewRequired) as paused:
+                first.complete(system="validator", prompt="review boundary")
+
+            exchange_path = root / str(paused.exception.progress["exchange_path"])
+            self.assertGreater(len(str(exchange_path)), 260)
+            filesystem_exchange = _filesystem_path(exchange_path)
+            filesystem_exchange.unlink()
+            recovered = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-long-path",
+                call_prefix="code-validation-boundary-cross-scenario",
+                execution_dir=execution_dir,
+            )
+            with self.assertRaises(LlmStepReviewRequired):
+                recovered.complete(system="validator", prompt="review boundary")
+            self.assertTrue(filesystem_exchange.exists())
+            resumed = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-long-path",
+                review={"call_id": paused.exception.progress["call_id"], "decision": "approve"},
+                call_prefix="code-validation-boundary-cross-scenario",
+                execution_dir=execution_dir,
+            )
+            self.assertEqual(
+                resumed.complete(system="validator", prompt="review boundary"),
+                '{"ok":true}',
+            )
+            self.assertEqual(len(base.prompts), 1)
+        finally:
+            shutil.rmtree(_filesystem_path(Path(temp)), ignore_errors=True)
+
     def test_parsed_output_accepts_validator_json_not_only_tool_actions(self) -> None:
         self.assertEqual(
             _parsed_output('{"ok":true,"findings":[]}'),

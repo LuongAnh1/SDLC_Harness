@@ -273,6 +273,20 @@ class ApplicationService:
                     settings,
                     plan_step_review=review,
                 ).continue_implementation_plan_step_review(run_id=run_id)
+            if str(state.get("status") or "") == "implementation_validation_step_review_required":
+                review = {"enabled": True}
+                for argument_name, review_key in (
+                    ("step_review_call_id", "call_id"),
+                    ("step_review_decision", "decision"),
+                    ("step_review_note", "note"),
+                ):
+                    value = self._optional_text(command, argument_name)
+                    if value is not None:
+                        review[review_key] = value
+                return PhaseFourWorkflow(
+                    settings,
+                    code_validation_step_review=review,
+                ).continue_code_validation_step_review(run_id=run_id)
             developer_review: dict[str, object] = {}
             review_all = bool(command.arguments.get("step_review"))
             if review_all or bool(command.arguments.get("step_review_input")):
@@ -292,6 +306,7 @@ class ApplicationService:
             return PhaseFourWorkflow(
                 settings,
                 developer_step_review=developer_review or None,
+                code_validation_step_review=developer_review or None,
             ).continue_until_implementation_checkpoint(
                 run_id=run_id
             )

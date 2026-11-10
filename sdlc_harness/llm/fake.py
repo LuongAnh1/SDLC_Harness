@@ -47,6 +47,8 @@ def fake_completion(prompt: str) -> str:
         return fake_implementation_plan_review(prompt)
     if "Developer Implementation Plan v1" in prompt:
         return fake_developer_implementation_plan(prompt)
+    if "Scenario + Boundary Code Validation v1" in prompt:
+        return fake_code_validation_task(prompt)
     if "Code Trace LLM Review v1" in prompt:
         return fake_code_trace_review(prompt)
     if (
@@ -58,6 +60,31 @@ def fake_completion(prompt: str) -> str:
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
+
+
+def fake_code_validation_task(prompt: str) -> str:
+    payload = json.loads(prompt)
+    contract = payload.get("task_contract") if isinstance(payload, dict) else {}
+    contract = contract if isinstance(contract, dict) else {}
+    return json.dumps(
+        {
+            "task_id": contract.get("task_id", ""),
+            "reviewed_claim_ids": list(contract.get("authority_claim_ids") or []),
+            "reviewed_design_ids": list(contract.get("required_reviewed_design_ids") or []),
+            "reviewed_boundary_contract_ids": list(
+                contract.get("required_reviewed_boundary_contract_ids") or []
+            ),
+            "claim_assessments": [
+                {"claim_id": claim_id, "verdict": "pass", "finding_ids": []}
+                for claim_id in list(contract.get("authority_claim_ids") or [])
+            ],
+            "ok": True,
+            "summary": "Fake Scenario + Boundary task passed.",
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
 
 
 def fake_requirement_source_action(prompt: str) -> str:

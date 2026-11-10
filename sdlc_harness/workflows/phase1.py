@@ -1578,6 +1578,7 @@ class PhaseOneWorkflow:
             "status": state.get("status"),
             "latest_artifacts": public_artifacts,
             "pending_checkpoint": state.get("pending_checkpoint"),
+            "pending_step_review": state.get("pending_step_review"),
             "allowed_next_actions": allowed_next_actions,
             "last_sync": state.get("last_sync"),
             "last_error": state.get("last_error"),
