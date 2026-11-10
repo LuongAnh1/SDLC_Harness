@@ -39,6 +39,7 @@ from sdlc_harness.agents.developer.execution import (
     _parse_action,
     _prior_attempt_feedback,
     _prepare_patch_text,
+    _required_test_mutation_paths,
     _reopen_database_entrypoint_items,
     _search_code,
     _selected_repair_paths,
@@ -49,6 +50,7 @@ from sdlc_harness.agents.developer.execution import (
     _timeout_diagnostic_state,
     _verification_diagnostic_fingerprint,
     _verification_repair_state,
+    _write_json_atomic,
     developer_execution_retry_allowed,
 )
 from sdlc_harness.agents.developer.repair_context import build_repair_closure
@@ -140,6 +142,28 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def test_atomic_json_write_retries_transient_windows_lock(self) -> None:
+        target = self.repo / "journal.json"
+        original_replace = Path.replace
+        attempts = 0
+
+        def flaky_replace(source: Path, destination: Path) -> Path:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise PermissionError(5, "Access is denied")
+            return original_replace(source, destination)
+
+        with (
+            patch.object(Path, "replace", autospec=True, side_effect=flaky_replace),
+            patch("sdlc_harness.agents.developer.execution.time.sleep") as sleep,
+        ):
+            _write_json_atomic(target, {"ok": True})
+
+        self.assertEqual(json.loads(target.read_text(encoding="utf-8")), {"ok": True})
+        self.assertEqual(attempts, 2)
+        sleep.assert_called_once_with(0.05)
 
     def test_repo_search_prunes_generated_state_but_allows_one_dependency_package(self) -> None:
         source = self.repo / "src" / "app.ts"
@@ -1222,6 +1246,285 @@ class DeveloperToolLoopTest(unittest.TestCase):
         ]
         return packet
 
+    def test_validator_repair_selects_all_finding_units_and_dependency_closure(self) -> None:
+        packet = self.unit_packet()
+        packet["proposed_files"].extend(
+            [
+                {"path": "src/Independent.java", "purpose": "Independent scenario"},
+                {"path": "src/Unrelated.java", "purpose": "Unrelated scenario"},
+            ]
+        )
+        packet["output_contract"]["allowed_paths"].extend(
+            ["src/Independent.java", "src/Unrelated.java"]
+        )
+        packet["execution_units"].extend(
+            [
+                {
+                    "unit_id": "WU-003",
+                    "order": 3,
+                    "title": "Independent repair target",
+                    "depends_on": [],
+                    "write_paths": ["src/Independent.java"],
+                    "requirement_refs": ["REQ-2"],
+                    "acceptance_refs": ["AC-2"],
+                    "design_node_ids": [],
+                    "design_edge_ids": [],
+                },
+                {
+                    "unit_id": "WU-004",
+                    "order": 4,
+                    "title": "Unrelated unit",
+                    "depends_on": [],
+                    "write_paths": ["src/Unrelated.java"],
+                    "requirement_refs": ["REQ-3"],
+                    "acceptance_refs": ["AC-3"],
+                    "design_node_ids": [],
+                    "design_edge_ids": [],
+                },
+            ]
+        )
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-1", "unit_ids": ["WU-002"]},
+                    {"finding_id": "F-2", "unit_ids": ["WU-003"]},
+                ]
+            },
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_unit_closure",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(
+            [item["id"] for item in manifest["items"]],
+            ["WU-001", "WU-002", "WU-003"],
+        )
+        self.assertNotIn("src/Unrelated.java", manifest["workspace_allowed_paths"])
+
+    def test_validator_repair_does_not_force_test_mutation_in_dependency_only_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["test_target_paths"] = ["src/Main.java"]
+        packet["execution_units"][0]["test_intents"] = [
+            {"id": "TI-DEPENDENCY", "target_path": "src/Main.java"}
+        ]
+        packet["execution_units"][1]["test_target_paths"] = ["src/MainTest.java"]
+        packet["execution_units"][1]["test_intents"] = [
+            {"id": "TI-DIRECT", "target_path": "src/MainTest.java"}
+        ]
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-1", "unit_ids": ["WU-002"]},
+                ]
+            },
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_dependency_test_gate",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        items = {item["id"]: item for item in manifest["items"]}
+        self.assertFalse(items["WU-001"]["test_intent_mutation_required"])
+        self.assertTrue(items["WU-002"]["test_intent_mutation_required"])
+
+    def test_validator_repair_prompt_projects_findings_and_hints_to_active_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["proposed_files"].append(
+            {"path": "src/Independent.java", "purpose": "Independent repair target"}
+        )
+        packet["output_contract"]["allowed_paths"].append("src/Independent.java")
+        packet["execution_units"].append(
+            {
+                "unit_id": "WU-003",
+                "order": 3,
+                "title": "Independent repair",
+                "depends_on": [],
+                "write_paths": ["src/Independent.java"],
+                "requirement_refs": ["REQ-2"],
+                "acceptance_refs": ["AC-2"],
+                "design_node_ids": [],
+                "design_edge_ids": [],
+            }
+        )
+        findings = [
+            {
+                "finding_id": "F-TEST",
+                "canonical_key": "repair:test",
+                "unit_ids": ["WU-002"],
+                "code_refs": ["src/MainTest.java#testBehavior"],
+                "message": "Repair the behavior test.",
+                "blocking": True,
+                "owner": "developer",
+                "recommended_action": "developer_repair",
+            },
+            {
+                "finding_id": "F-INDEPENDENT",
+                "canonical_key": "repair:independent",
+                "unit_ids": ["WU-003"],
+                "code_refs": ["src/Independent.java#run"],
+                "message": "Repair the independent unit.",
+                "blocking": True,
+                "owner": "developer",
+                "recommended_action": "developer_repair",
+            },
+        ]
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "required_action": "Repair every blocking finding in this feedback.",
+            "developer_constraints": {
+                "allowed_paths": [
+                    "src/Main.java",
+                    "src/MainTest.java",
+                    "src/Independent.java",
+                ]
+            },
+            "repair_objective": {
+                "objective_id": "repair:scoped",
+                "canonical_keys": ["repair:test", "repair:independent"],
+                "contract_findings": findings,
+            },
+            "missing_links": findings,
+        }
+
+        manifest = _build_manifest(
+            run_id="run_validator_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        dependency_prompt = _action_prompt(
+            item=items["WU-001"],
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        dependency_context = json.loads(dependency_prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            dependency_context["repair_feedback"]["repair_objective"]["contract_findings"],
+            [],
+        )
+        self.assertEqual(dependency_context["repair_feedback"]["missing_links"], [])
+        self.assertEqual(
+            dependency_context["repair_feedback"]["developer_constraints"]["allowed_paths"],
+            ["src/Main.java"],
+        )
+
+        direct_prompt = _action_prompt(
+            item=items["WU-002"],
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        direct_context = json.loads(direct_prompt.split("Execution context:\n", 1)[1])
+        direct_feedback = direct_context["repair_feedback"]
+        self.assertEqual(
+            [finding["finding_id"] for finding in direct_feedback["repair_objective"]["contract_findings"]],
+            ["F-TEST"],
+        )
+        self.assertEqual(direct_feedback["repair_objective"]["canonical_keys"], ["repair:test"])
+        self.assertEqual(
+            direct_feedback["developer_constraints"]["allowed_paths"],
+            ["src/MainTest.java"],
+        )
+        repair_hints = direct_context["repair_progress"]["repair_hints"]
+        self.assertNotIn("src/Independent.java", repair_hints.get("path_reasons", {}))
+        self.assertNotIn(
+            "src/Independent.java",
+            [excerpt.get("path") for excerpt in repair_hints.get("excerpts", [])],
+        )
+
+    def test_repair_manifest_hash_ignores_worktree_derived_prompt_context(self) -> None:
+        packet = self.unit_packet()
+        packet["output_contract"]["allowed_paths"].append("src/Helper.java")
+        packet["proposed_files"].append(
+            {"path": "src/Helper.java", "purpose": "Related repair context"}
+        )
+        packet["execution_units"][0]["context_paths"] = ["src/Main.java", "src/Helper.java"]
+        source = self.repo / "src/Main.java"
+        companion = self.repo / "src/Helper.java"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("class Main { void save() {} }\n", encoding="utf-8")
+        companion.write_text("class Helper {}\n", encoding="utf-8")
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-MAIN",
+                        "canonical_key": "repair:main",
+                        "unit_ids": ["WU-001"],
+                        "code_ref": "src/Main.java#save",
+                        "code_refs": ["src/Main.java#save"],
+                    }
+                ]
+            },
+        }
+
+        before = _build_manifest(
+            run_id="run_repair_prompt_context_hash",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        source.write_text(
+            "// inserted repair lines\n// move the discovered excerpt\nclass Main { void save() {} }\n",
+            encoding="utf-8",
+        )
+        companion.write_text(
+            "class Helper { void verify() { new Main().save(); } }\n",
+            encoding="utf-8",
+        )
+        after = _build_manifest(
+            run_id="run_repair_prompt_context_hash",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        self.assertEqual(before["input_hash"], after["input_hash"])
+        self.assertNotEqual(
+            before["items"][0]["diagnostic_paths"],
+            after["items"][0]["diagnostic_paths"],
+        )
+        self.assertNotEqual(
+            before["items"][0]["files"][0]["initial_sha256"],
+            after["items"][0]["files"][0]["initial_sha256"],
+        )
+
+
     def test_unit_aware_execution_uses_plan_units_and_durable_session(self) -> None:
         packet = self.unit_packet()
         packet["execution_units"][0]["component_id"] = "api"
@@ -1401,8 +1704,130 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
         self.assertIn(
-            "When test_intents are present, every listed test_target_path must be mutated",
+            "Every listed required_test_mutation_path must be mutated",
             llm.prompts[0],
+        )
+
+    def test_repair_requires_only_directly_cited_test_target_mutation(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        unit["write_paths"] = [
+            "src/Main.java",
+            "src/MainTest.java",
+            "src/RegressionTest.java",
+        ]
+        unit["test_target_paths"] = ["src/MainTest.java", "src/RegressionTest.java"]
+        unit["test_intents"] = [
+            {
+                "stage_id": "unit",
+                "intent": "Cover the directly repaired behavior.",
+                "target_paths": ["src/MainTest.java"],
+            },
+            {
+                "stage_id": "unit",
+                "intent": "Preserve an unrelated regression.",
+                "target_paths": ["src/RegressionTest.java"],
+            },
+        ]
+        packet["execution_units"] = [unit]
+        packet["proposed_files"].append(
+            {"path": "src/RegressionTest.java", "purpose": "Existing regression coverage"}
+        )
+        packet["output_contract"]["allowed_paths"].append("src/RegressionTest.java")
+
+        main_test = self.repo / "src/MainTest.java"
+        regression_test = self.repo / "src/RegressionTest.java"
+        main_test.parent.mkdir(parents=True, exist_ok=True)
+        main_test.write_text("class MainTest {}\n", encoding="utf-8")
+        regression_test.write_text("class RegressionTest {}\n", encoding="utf-8")
+        main_test_sha256 = hashlib.sha256(main_test.read_bytes()).hexdigest()
+        feedback = {
+            "feedback_source": "validator_code_trace",
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-DIRECT-TEST",
+                        "unit_ids": ["WU-001"],
+                        "code_refs": ["src/Main.java#save"],
+                        "test_refs": ["src/MainTest.java"],
+                    }
+                ]
+            },
+            "missing_links": [
+                {
+                    "finding_id": "F-DIRECT-TEST",
+                    "unit_ids": ["WU-001"],
+                    "code_ref": "src/Main.java#save",
+                    "test_ref": "src/MainTest.java",
+                    "blocking": True,
+                    "owner": "developer",
+                    "recommended_action": "developer_repair",
+                }
+            ],
+        }
+        llm = ScriptedLlm(
+            [
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/Main.java",
+                        "expected_sha256": "",
+                        "content": "class Main { int repaired = 1; }\n",
+                    },
+                ),
+                action(
+                    "repo.write_file",
+                    {
+                        "path": "src/MainTest.java",
+                        "expected_sha256": main_test_sha256,
+                        "content": "class MainTest { int coversRepair = 1; }\n",
+                    },
+                ),
+                action("repo.read", {"path": "src/RegressionTest.java"}),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "Direct repair and its cited test are complete.",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Repaired."},
+                            {
+                                "path": "src/MainTest.java",
+                                "status": "mutated",
+                                "reason": "Covered the direct finding.",
+                            },
+                            {
+                                "path": "src/RegressionTest.java",
+                                "status": "verified_unchanged",
+                                "reason": "Unrelated regression remains valid.",
+                            },
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_repair_direct_test_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+
+        manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
+        item = manifest["items"][0]
+        self.assertEqual(
+            _required_test_mutation_paths(item, repair_mode=True),
+            ["src/MainTest.java"],
+        )
+        context = json.loads(llm.prompts[0].split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            context["execution_unit_contract"]["required_test_mutation_paths"],
+            ["src/MainTest.java"],
+        )
+        self.assertEqual(
+            regression_test.read_text(encoding="utf-8"),
+            "class RegressionTest {}\n",
         )
 
     def test_unit_aware_replace_text_requires_one_exact_match_and_redacts_payloads(self) -> None:

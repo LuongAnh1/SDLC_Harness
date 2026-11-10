@@ -1743,12 +1743,9 @@ class DeveloperToolLoopExecutor:
                     and bool(declared_unchanged)
                     and not invalid_unchanged
                 )
-                required_test_mutations = (
-                    set(_string_items(item.get("test_target_paths"))) - set(mutated_paths)
-                    if _dict_items(item.get("test_intents"))
-                    and item.get("test_intent_mutation_required") is not False
-                    else set()
-                )
+                required_test_mutations = set(
+                    _required_test_mutation_paths(item, repair_mode=repair_mode)
+                ) - set(mutated_paths)
                 if required_test_mutations:
                     entry["actions"][-1]["completion_gate"] = {
                         "status": "rejected",
@@ -1759,8 +1756,8 @@ class DeveloperToolLoopExecutor:
                         {
                             "action": "rejected",
                             "error": (
-                                "complete requires each test_target_path attached to a test_intent to be mutated "
-                                "in this unit. A passing pre-existing test file does not prove the new intent. "
+                                "complete requires each required_test_mutation_path to be mutated in this unit. "
+                                "A passing pre-existing test file does not prove a directly affected intent. "
                                 f"missing_test_mutations={sorted(required_test_mutations)}."
                             ),
                         }
@@ -2441,6 +2438,53 @@ def developer_transport_retry_allowed(state: dict[str, object]) -> bool:
     return bool(required) and all(bool(artifacts.get(key)) for key in required)
 
 
+def _repair_objective_unit_ids(feedback: dict[str, object] | None) -> set[str]:
+    if not feedback:
+        return set()
+    objective = _dict_value(feedback.get("repair_objective"))
+    return {
+        unit_id
+        for finding in _dict_items(objective.get("contract_findings"))
+        for unit_id in _string_items(finding.get("unit_ids"))
+        if unit_id
+    }
+
+
+def _repair_dependency_closure(
+    *,
+    execution_units: list[dict[str, object]],
+    seed_unit_ids: set[str],
+    run_id: str,
+) -> set[str]:
+    unit_by_id = {
+        str(unit.get("unit_id") or ""): unit
+        for unit in execution_units
+        if str(unit.get("unit_id") or "")
+    }
+    unknown = sorted(seed_unit_ids - set(unit_by_id))
+    if unknown:
+        raise HarnessError(
+            "developer_repair_unit_ids_invalid",
+            f"Validator repair findings reference unknown execution units: {unknown}",
+            run_id=run_id,
+        )
+    selected = set(seed_unit_ids)
+    pending = list(seed_unit_ids)
+    while pending:
+        unit_id = pending.pop()
+        for dependency_id in _string_items(unit_by_id[unit_id].get("depends_on")):
+            if dependency_id not in unit_by_id:
+                raise HarnessError(
+                    "developer_repair_unit_dependency_invalid",
+                    f"Execution unit {unit_id} references unknown dependency {dependency_id}.",
+                    run_id=run_id,
+                )
+            if dependency_id not in selected:
+                selected.add(dependency_id)
+                pending.append(dependency_id)
+    return selected
+
+
 def _build_manifest(
     *,
     run_id: str,
@@ -2458,18 +2502,37 @@ def _build_manifest(
         raise HarnessError("developer_work_packet_allowed_paths_missing", "DeveloperWorkPacket has no allowed paths.", run_id=run_id)
     closure = build_repair_closure(work_packet=work_packet, feedback=repair_feedback, target_path=target_path)
     execution_units = _dict_items(work_packet.get("execution_units"))
+    repair_unit_ids = _repair_objective_unit_ids(repair_feedback)
+    repair_execution_paths: set[str] | None = None
     if repair_feedback and execution_units:
-        repair_seed = (
-            {path.strip().replace("\\", "/") for path in selected_paths}
-            if selected_paths is not None
-            else set(_string_items(closure.get("context_paths")))
-            or set(_string_items(closure.get("direct_repair_paths")))
-        )
-        affected_units = [
-            unit
-            for unit in execution_units
-            if set(_string_items(unit.get("write_paths"))) & repair_seed
-        ]
+        if repair_unit_ids:
+            selected_repair_unit_ids = _repair_dependency_closure(
+                execution_units=execution_units,
+                seed_unit_ids=repair_unit_ids,
+                run_id=run_id,
+            )
+            affected_units = [
+                unit
+                for unit in execution_units
+                if str(unit.get("unit_id") or "") in selected_repair_unit_ids
+            ]
+            repair_execution_paths = {
+                path
+                for unit in affected_units
+                for path in _string_items(unit.get("write_paths"))
+            }
+        else:
+            repair_seed = (
+                {path.strip().replace("\\", "/") for path in selected_paths}
+                if selected_paths is not None
+                else set(_string_items(closure.get("context_paths")))
+                or set(_string_items(closure.get("direct_repair_paths")))
+            )
+            affected_units = [
+                unit
+                for unit in execution_units
+                if set(_string_items(unit.get("write_paths"))) & repair_seed
+            ]
         context_selected = {
             path
             for unit in affected_units
@@ -2503,7 +2566,13 @@ def _build_manifest(
         for item in _dict_items(work_packet.get("canonical_requirements"))
     }
     steps = _dict_items(work_packet.get("implementation_steps"))
-    execution_paths = set(allowed) if not repair_feedback else context_selected
+    execution_paths = (
+        set(allowed)
+        if not repair_feedback
+        else repair_execution_paths
+        if repair_execution_paths is not None
+        else context_selected
+    )
     ordered = [path for path in allowed if path in execution_paths and not developer_path_is_test(path)]
     ordered.extend(path for path in allowed if path in execution_paths and developer_path_is_test(path))
     context_ordered = [path for path in ordered if path in context_selected]
@@ -2657,8 +2726,11 @@ def _build_manifest(
                     "ui_obligations": _dict_items(unit.get("ui_obligations")),
                     "required_stage_ids": _string_items(unit.get("required_stage_ids")),
                     "test_target_paths": _string_items(unit.get("test_target_paths")),
-                    "test_intent_mutation_required": unit.get(
-                        "test_intent_mutation_required", True
+                    "test_intent_mutation_required": (
+                        unit.get("test_intent_mutation_required", True)
+                        if not repair_feedback
+                        or str(unit.get("unit_id") or "") in repair_unit_ids
+                        else False
                     ),
                     "package_dependencies": _dict_items(unit.get("package_dependencies")),
                     "runtime_config_changes": _dict_items(
@@ -2714,10 +2786,15 @@ def _build_manifest(
             "Developer execution has no unit inside the approved repair scope.",
             run_id=run_id,
         )
+    workspace_scope = (
+        [path for path in allowed if path in context_selected or path in execution_paths]
+        if repair_feedback and repair_unit_ids
+        else allowed
+    )
     workspace_allowed_paths = list(
         dict.fromkeys(
             [
-                *allowed,
+                *workspace_scope,
                 *(path for item in items for path in _item_dependency_paths(item)),
             ]
         )
@@ -2732,7 +2809,11 @@ def _build_manifest(
         "workspace_allowed_paths": workspace_allowed_paths,
         "items": [
             {
-                **item,
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key not in {"repair_closure", "diagnostic_paths"}
+                },
                 "files": [
                     {key: value for key, value in file_item.items() if key != "initial_sha256"}
                     for file_item in _dict_items(item.get("files"))
@@ -2993,6 +3074,10 @@ def _action_prompt(
         "test_intent_mutation_required": item.get(
             "test_intent_mutation_required", True
         ),
+        "required_test_mutation_paths": _required_test_mutation_paths(
+            item,
+            repair_mode=repair_mode,
+        ),
     }
     app_visual_profile = dict(app_visual_profile or {})
     visual_profile_candidates = list(visual_profile_candidates or [])
@@ -3081,12 +3166,15 @@ def _action_prompt(
             if status.get("satisfied") is not True
         ],
         "developer_generation_context": manifest.get("developer_generation_context"),
-        "repair_feedback": _developer_repair_context(manifest.get("repair_feedback")),
+        "repair_feedback": _developer_repair_context(
+            manifest.get("repair_feedback"),
+            item=item,
+        ),
         "repair_progress": {
             "workspace_allowed_paths": _item_paths(item),
             "diagnostic_paths": diagnostic_paths,
             "contract_anchor_paths": anchor_paths,
-            "repair_hints": _dict_value(item.get("repair_closure")).get("repair_hints", {}),
+            "repair_hints": _developer_unit_repair_hints(item),
             "mutated_context_paths": sorted(handled_paths),
             "inspected_context_paths": sorted(inspected_paths),
             "completion_rule": (
@@ -3293,9 +3381,9 @@ def _action_prompt(
             "mutated|verified_unchanged|not_required. Every unit path needs a disposition, non-mutated paths need "
             "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes. "
             + (
-                "When test_intents are present, every listed test_target_path must be mutated in this unit; a passing "
-                "pre-existing test file is not coverage evidence for a new intent\n"
-                if item.get("test_intent_mutation_required") is not False
+                "Every listed required_test_mutation_path must be mutated in this unit; a passing pre-existing test "
+                "file is not coverage evidence for a directly affected intent\n"
+                if _required_test_mutation_paths(item, repair_mode=repair_mode)
                 else "This recovery reuses previously authored test intents. Do not mutate tests merely to recreate "
                 "coverage evidence; run the required stages against the current tests instead.\n"
             )
@@ -3314,6 +3402,10 @@ def _action_prompt(
             "behavior_contract_source": "active_focus.mandatory_obligations",
             "required_stage_ids": item.get("required_stage_ids", []),
             "test_target_paths": item.get("test_target_paths", []),
+            "required_test_mutation_paths": _required_test_mutation_paths(
+                item,
+                repair_mode=repair_mode,
+            ),
             "test_intent_mutation_required": item.get(
                 "test_intent_mutation_required", True
             ),
@@ -3436,12 +3528,22 @@ def _action_prompt(
     )
 
 
-def _developer_repair_context(value: object) -> dict[str, object]:
+def _developer_repair_context(
+    value: object,
+    *,
+    item: dict[str, object],
+) -> dict[str, object]:
     """Keep Validator observations out of the action context sent to Developer."""
 
     feedback = _dict_value(value)
     if str(feedback.get("feedback_source") or "") != "validator_code_trace":
         return feedback
+
+    unit_id = str(item.get("id") or "")
+
+    def assigned_to_unit(row: dict[str, object]) -> bool:
+        unit_ids = _string_items(row.get("unit_ids"))
+        return not unit_ids or unit_id in unit_ids
 
     actionable_links = [
         dict(item)
@@ -3450,10 +3552,38 @@ def _developer_repair_context(value: object) -> dict[str, object]:
         and str(item.get("owner") or "developer").strip().lower() == "developer"
         and str(item.get("recommended_action") or "developer_repair").strip().lower()
         == "developer_repair"
+        and assigned_to_unit(item)
     ]
+    repair_objective = dict(_dict_value(feedback.get("repair_objective")))
+    contract_findings = [
+        dict(finding)
+        for finding in _dict_items(repair_objective.get("contract_findings"))
+        if assigned_to_unit(finding)
+    ]
+    repair_objective["contract_findings"] = contract_findings
+    repair_objective["canonical_keys"] = [
+        canonical_key
+        for finding in contract_findings
+        if (canonical_key := str(finding.get("canonical_key") or ""))
+    ]
+
+    developer_constraints = dict(_dict_value(feedback.get("developer_constraints")))
+    unit_paths = set(_item_paths(item))
+    if "allowed_paths" in developer_constraints:
+        developer_constraints["allowed_paths"] = [
+            path
+            for path in _string_items(developer_constraints.get("allowed_paths"))
+            if path in unit_paths
+        ]
+
     messages = [str(item.get("message") or "").strip() for item in actionable_links]
     messages = [message for message in messages if message]
-    summary = f"Validator reported {len(actionable_links)} actionable blocking link(s)."
+    summary = (
+        f"Validator assigned {len(contract_findings)} blocking finding(s) to unit {unit_id}. "
+        "Repair only those findings within this unit's write paths."
+        if contract_findings
+        else f"Validator assigned no blocking finding to unit {unit_id}; preserve it as dependency context."
+    )
     if messages:
         summary += " " + " | ".join(messages)
 
@@ -3478,9 +3608,38 @@ def _developer_repair_context(value: object) -> dict[str, object]:
     }
     return {
         **{key: item for key, item in feedback.items() if key in allowed_keys},
+        "repair_objective": repair_objective,
+        "developer_constraints": developer_constraints,
         "summary": summary,
         "missing_links": actionable_links,
     }
+
+
+def _developer_unit_repair_hints(item: dict[str, object]) -> dict[str, object]:
+    """Project global repair discovery evidence onto the active unit's read scope."""
+
+    hints = _dict_value(_dict_value(item.get("repair_closure")).get("repair_hints"))
+    context_paths = set(_item_context_paths(item))
+    filtered: dict[str, object] = {}
+    for key in ("diagnostic_paths", "contract_anchor_paths"):
+        values = [path for path in _string_items(hints.get(key)) if path in context_paths]
+        if values:
+            filtered[key] = values
+    path_reasons = {
+        path: reasons
+        for path, reasons in _dict_value(hints.get("path_reasons")).items()
+        if path in context_paths
+    }
+    if path_reasons:
+        filtered["path_reasons"] = path_reasons
+    excerpts = [
+        dict(excerpt)
+        for excerpt in _dict_items(hints.get("excerpts"))
+        if str(excerpt.get("path") or "") in context_paths
+    ]
+    if excerpts:
+        filtered["excerpts"] = excerpts
+    return filtered
 
 
 def _execution_phase(
@@ -5890,6 +6049,23 @@ def _item_direct_repair_paths(item: dict[str, object]) -> list[str]:
     return list(dict.fromkeys(declared))
 
 
+def _required_test_mutation_paths(
+    item: dict[str, object],
+    *,
+    repair_mode: bool,
+) -> list[str]:
+    if (
+        not _dict_items(item.get("test_intents"))
+        or item.get("test_intent_mutation_required") is False
+    ):
+        return []
+    test_targets = _string_items(item.get("test_target_paths"))
+    if not repair_mode:
+        return test_targets
+    direct_repair_paths = set(_item_direct_repair_paths(item))
+    return [path for path in test_targets if path in direct_repair_paths]
+
+
 def _item_diagnostic_paths(item: dict[str, object]) -> list[str]:
     declared = [path.replace("\\", "/") for path in _string_items(item.get("diagnostic_paths"))]
     if not declared:
@@ -7284,7 +7460,14 @@ def _write_json_atomic(path: Path, value: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    for attempt in range(5):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (2**attempt))
 
 
 def _clip_json_value(value: object, limit: int) -> object:
