@@ -1221,6 +1221,7 @@ class DeveloperToolLoopExecutor:
                     app_visual_profile=app_visual_profile,
                     visual_profile_candidates=visual_candidates,
                     visual_app_scope_id=visual_app_scope_id,
+                    journal=journal,
                 )
                 active_options = (
                     repair_options
@@ -2504,6 +2505,7 @@ def _build_manifest(
     execution_units = _dict_items(work_packet.get("execution_units"))
     repair_unit_ids = _repair_objective_unit_ids(repair_feedback)
     repair_execution_paths: set[str] | None = None
+    selected_repair_unit_ids: set[str] | None = None
     if repair_feedback and execution_units:
         if repair_unit_ids:
             selected_repair_unit_ids = _repair_dependency_closure(
@@ -2634,41 +2636,23 @@ def _build_manifest(
             "Developer execution unit has no approved paths selected from the work packet.",
             run_id=run_id,
         )
-    expected_dirty_files = []
-    for raw_path in sorted(set(expected_dirty_paths or [])):
-        normalized_dirty_path = raw_path.strip().replace("\\", "/")
-        if (
-            not normalized_dirty_path
-            or normalized_dirty_path.startswith("/")
-            or Path(normalized_dirty_path).is_absolute()
-            or normalized_dirty_path == ".."
-            or normalized_dirty_path.startswith("../")
-            or "/../" in normalized_dirty_path
-        ):
-            raise HarnessError(
-                "developer_tool_unsafe_path",
-                f"Unsafe expected dirty path: {raw_path}",
-                run_id=run_id,
-            )
-        target = _safe_read_path(target_path, normalized_dirty_path, run_id=run_id)
-        relative = str(target.relative_to(target_path.resolve())).replace("\\", "/")
-        if relative in allowed:
-            continue
-        expected_dirty_files.append(
-            {
-                "path": relative,
-                "initial_sha256": _file_hash(target),
-            }
-        )
     file_by_path = {str(item.get("path") or ""): item for item in files}
     items: list[dict[str, object]] = []
     if execution_units:
-        selected_unit_ids = {
-            str(unit.get("unit_id") or "")
-            for unit in execution_units
-            if set(_string_items(unit.get("write_paths"))) & execution_paths
-        }
+        # Units of one code entity share write paths; a unit-scoped repair still runs
+        # only the cited units plus their dependency closure, never units that merely share a file.
+        selected_unit_ids = (
+            selected_repair_unit_ids
+            if selected_repair_unit_ids is not None
+            else {
+                str(unit.get("unit_id") or "")
+                for unit in execution_units
+                if set(_string_items(unit.get("write_paths"))) & execution_paths
+            }
+        )
         for unit in execution_units:
+            if str(unit.get("unit_id") or "") not in selected_unit_ids:
+                continue
             unit_paths = [
                 path for path in _string_items(unit.get("write_paths"))
                 if path in execution_paths and path in file_by_path
@@ -2799,6 +2783,49 @@ def _build_manifest(
             ]
         )
     )
+    scoped_paths = set(workspace_allowed_paths)
+    # A unit-scoped repair narrows writes, but approved outputs of other units remain in the
+    # uncommitted worktree: keep them as hash-bound read-only baselines instead of drift.
+    out_of_scope_plan_paths = (
+        [
+            path
+            for path in dict.fromkeys(
+                [
+                    *allowed,
+                    *(path for unit in execution_units for path in _item_dependency_paths(unit)),
+                ]
+            )
+            if path not in scoped_paths
+        ]
+        if selected_repair_unit_ids is not None
+        else []
+    )
+    expected_dirty_files = []
+    for raw_path in sorted({*(expected_dirty_paths or []), *out_of_scope_plan_paths}):
+        normalized_dirty_path = raw_path.strip().replace("\\", "/")
+        if (
+            not normalized_dirty_path
+            or normalized_dirty_path.startswith("/")
+            or Path(normalized_dirty_path).is_absolute()
+            or normalized_dirty_path == ".."
+            or normalized_dirty_path.startswith("../")
+            or "/../" in normalized_dirty_path
+        ):
+            raise HarnessError(
+                "developer_tool_unsafe_path",
+                f"Unsafe expected dirty path: {raw_path}",
+                run_id=run_id,
+            )
+        target = _safe_read_path(target_path, normalized_dirty_path, run_id=run_id)
+        relative = str(target.relative_to(target_path.resolve())).replace("\\", "/")
+        if relative in allowed and relative in scoped_paths:
+            continue
+        expected_dirty_files.append(
+            {
+                "path": relative,
+                "initial_sha256": _file_hash(target),
+            }
+        )
     input_payload = {
         "approved_plan": work_packet.get("approved_plan"),
         "effective_design_contract": work_packet.get("effective_design_contract"),
@@ -2944,10 +2971,22 @@ def _action_prompt(
     app_visual_profile: dict[str, object] | None = None,
     visual_profile_candidates: list[dict[str, object]] | None = None,
     visual_app_scope_id: str = "",
+    journal: dict[str, object] | None = None,
 ) -> str:
     unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
     context_repair = str(manifest.get("mode") or "") == "implementation_repair"
+    feedback_source = str(_dict_value(manifest.get("repair_feedback")).get("feedback_source") or "")
+    unit_repair_context = _developer_repair_context(manifest.get("repair_feedback"), item=item)
+    # A Validator repair also runs the dependency closure of the cited units. When no finding is projected
+    # onto this unit, nothing authorizes a mutation unless one of its own required stages fails.
+    dependency_context_only = (
+        unit_aware
+        and context_repair
+        and feedback_source == "validator_code_trace"
+        and not _dict_items(_dict_value(unit_repair_context.get("repair_objective")).get("contract_findings"))
+        and not _dict_items(unit_repair_context.get("missing_links"))
+    )
     paths = _item_context_paths(item)
     diagnostic_paths = _item_diagnostic_paths(item)
     anchor_paths = _item_contract_anchor_paths(item)
@@ -3132,6 +3171,11 @@ def _action_prompt(
         else ""
     )
     mandatory_obligations = _unit_mandatory_obligations(item)
+    shared_finding_progress = _shared_finding_progress(
+        item=item,
+        repair_context=unit_repair_context,
+        journal=journal,
+    )
     context = {
         "active_focus": {
             "unit_id": item.get("id"),
@@ -3154,7 +3198,7 @@ def _action_prompt(
             active_repair=bool(failed_stage_ids),
         ),
         "execution": {"mode": manifest.get("mode"), "base_sha": manifest.get("base_sha")},
-        "dependency_receipts": _completed_dependency_receipts(item=item, manifest=manifest)
+        "dependency_receipts": _completed_dependency_receipts(item=item, manifest=manifest, journal=journal)
         + [
             status
             for status in package_dependency_statuses
@@ -3166,10 +3210,8 @@ def _action_prompt(
             if status.get("satisfied") is not True
         ],
         "developer_generation_context": manifest.get("developer_generation_context"),
-        "repair_feedback": _developer_repair_context(
-            manifest.get("repair_feedback"),
-            item=item,
-        ),
+        "repair_feedback": unit_repair_context,
+        **({"shared_finding_progress": shared_finding_progress} if shared_finding_progress else {}),
         "repair_progress": {
             "workspace_allowed_paths": _item_paths(item),
             "diagnostic_paths": diagnostic_paths,
@@ -3178,7 +3220,11 @@ def _action_prompt(
             "mutated_context_paths": sorted(handled_paths),
             "inspected_context_paths": sorted(inspected_paths),
             "completion_rule": (
-                "Apply one coherent real mutation, including every related approved file needed to keep the worktree "
+                "No Validator finding is assigned to this unit. Complete it unchanged: every unit path needs a "
+                "verified_unchanged disposition backed by fresh inspection, and every required stage must pass on "
+                "the current hashes. A mutation is allowed only to repair a failing required stage."
+                if dependency_context_only
+                else "Apply one coherent real mutation, including every related approved file needed to keep the worktree "
                 "internally consistent, then call complete so Verification can rerun. Diagnostic paths are hints, "
                 "not a mutation boundary. A no-change completion requires inspected evidence and a specific reason."
                 if context_repair
@@ -3242,7 +3288,6 @@ def _action_prompt(
         if force_incremental
         else ""
     )
-    feedback_source = str(_dict_value(manifest.get("repair_feedback")).get("feedback_source") or "")
     phase_instruction = {
         "inspect_or_edit": (
             "Inspect only evidence that is still missing. Do not repeat an observation already recorded in "
@@ -3275,6 +3320,12 @@ def _action_prompt(
         ),
         "complete_required": "A mutation succeeded and only one action remains. You MUST call complete now.",
     }[phase]
+    if dependency_context_only and phase == "inspect_or_edit":
+        phase_instruction = (
+            "Inspect only unit paths whose current bytes are still missing; do not repeat an observation already "
+            "recorded in working_memory.action_ledger. Once every unit path is inspected, run the pending "
+            "verification stages."
+        )
     if failed_stage_ids:
         work_instruction = (
             "This is an active verification repair, not a fresh implementation pass. The current unit sources have "
@@ -3296,6 +3347,13 @@ def _action_prompt(
             "Diagnostic and contract-anchor paths are inspection hints only. Keep production code, callers, and tests "
             "consistent; do not regenerate unrelated files. Then call complete for Verification to rerun."
         )
+    elif dependency_context_only:
+        work_instruction = (
+            "Validator assigned no finding to this unit; it runs only as dependency context for the units that "
+            "carry the findings. Do not mutate it to anticipate their repair or to tidy existing behavior. Inspect "
+            "each unit path once, run every required verification stage on the current hashes, then call complete "
+            "with every path disposition verified_unchanged. Mutate only to repair a required stage that fails."
+        )
     elif feedback_source == "validator_code_trace":
         work_instruction = (
             "Verification already passed. Implement one coherent bounded slice from Validator's repair_objective. "
@@ -3307,7 +3365,7 @@ def _action_prompt(
             "Repair the reported quality feedback from the current worktree as one coherent bounded slice. Context "
             "paths may be inspected without modification. Call complete when the mutation is ready for its quality gate."
         )
-    if repair_mode and not mutated:
+    if repair_mode and not mutated and not dependency_context_only:
         work_instruction += (
             " If fresh inspection proves the reported failure is already resolved, call complete with "
             "no_change_required=true and list the inspected path plus a specific reason in unchanged_paths."
@@ -6340,18 +6398,41 @@ def _dedupe_prompt_rows(rows: list[dict[str, object]]) -> list[dict[str, object]
     return unique
 
 
+def _completed_unit_entries(journal: dict[str, object] | None) -> dict[str, dict[str, object]]:
+    return {
+        str(entry.get("id") or ""): entry
+        for entry in _dict_items(_dict_value(journal).get("items"))
+        if entry.get("status") == "completed" and str(entry.get("id") or "")
+    }
+
+
+def _unit_completion_outcome(entry: dict[str, object]) -> dict[str, object]:
+    """What a unit completed earlier in this session actually changed, as journaled by the Harness."""
+
+    return {
+        "mutated_paths": _string_items(entry.get("mutated_paths")),
+        "path_statuses": {
+            path: str(_dict_value(row).get("status") or "")
+            for path, row in _dict_value(entry.get("path_dispositions")).items()
+        },
+        "completion_summary": str(entry.get("summary") or "")[:800],
+    }
+
+
 def _completed_dependency_receipts(
     *,
     item: dict[str, object],
     manifest: dict[str, object],
+    journal: dict[str, object] | None = None,
 ) -> list[dict[str, object]]:
-    """Describe what a completed dependency owns instead of exposing only its ID."""
+    """Describe what a completed dependency owns and, within this session, what it changed."""
 
     by_id = {
         str(row.get("id") or ""): row
         for row in _dict_items(manifest.get("items"))
         if str(row.get("id") or "")
     }
+    completed = _completed_unit_entries(journal)
     receipts: list[dict[str, object]] = []
     for dependency_id in _string_items(item.get("depends_on")):
         dependency = _dict_value(by_id.get(dependency_id))
@@ -6369,8 +6450,41 @@ def _completed_dependency_receipts(
                     "planned_code_targets": _dict_items(dependency.get("planned_code_targets")),
                 }
             )
+        if dependency_id in completed:
+            receipt.update(_unit_completion_outcome(completed[dependency_id]))
         receipts.append(receipt)
     return receipts
+
+
+def _shared_finding_progress(
+    *,
+    item: dict[str, object],
+    repair_context: dict[str, object],
+    journal: dict[str, object] | None,
+) -> list[dict[str, object]]:
+    """Findings this unit shares with units that already completed in the current repair session."""
+
+    unit_id = str(item.get("id") or "")
+    completed = _completed_unit_entries(journal)
+    progress: list[dict[str, object]] = []
+    for finding in _dict_items(_dict_value(repair_context.get("repair_objective")).get("contract_findings")):
+        shared_ids = [
+            other for other in _string_items(finding.get("unit_ids")) if other != unit_id and other in completed
+        ]
+        if not shared_ids:
+            continue
+        progress.append(
+            {
+                "finding_id": str(finding.get("finding_id") or ""),
+                "completed_unit_ids": shared_ids,
+                "outcomes": {other: _unit_completion_outcome(completed[other]) for other in shared_ids},
+                "note": (
+                    "The finding text describes the code before these units ran in this session. Judge what is "
+                    "still missing from the current bytes, not from the finding text alone."
+                ),
+            }
+        )
+    return progress
 
 
 def _focused_execution_task(

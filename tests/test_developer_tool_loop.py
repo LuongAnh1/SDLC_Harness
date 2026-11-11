@@ -1340,6 +1340,92 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertFalse(items["WU-001"]["test_intent_mutation_required"])
         self.assertTrue(items["WU-002"]["test_intent_mutation_required"])
 
+    def shared_entity_repair_manifest(self) -> dict[str, object]:
+        """WU-003 shares a file with the cited unit but is downstream of it, not a dependency."""
+
+        packet = self.unit_packet()
+        packet["proposed_files"].append({"path": "src/Extra.java", "purpose": "Downstream helper"})
+        packet["output_contract"]["allowed_paths"].append("src/Extra.java")
+        packet["execution_units"].append(
+            {
+                "unit_id": "WU-003",
+                "order": 3,
+                "title": "Downstream scenario",
+                "depends_on": ["WU-002"],
+                "write_paths": ["src/MainTest.java", "src/Extra.java"],
+                "requirement_refs": ["REQ-1"],
+                "acceptance_refs": ["AC-2"],
+                "design_node_ids": [],
+                "design_edge_ids": [],
+            }
+        )
+        for path, content in (
+            ("src/Main.java", "class Main {}\n"),
+            ("src/MainTest.java", "class MainTest {}\n"),
+            ("src/Extra.java", "class Extra {}\n"),
+        ):
+            (self.repo / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / path).write_text(content, encoding="utf-8")
+        return _build_manifest(
+            run_id="run_validator_shared_entity",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback={
+                "feedback_source": "validator_code_trace",
+                "repair_objective": {
+                    "contract_findings": [{"finding_id": "F-1", "unit_ids": ["WU-002"]}]
+                },
+            },
+            repair_iteration=1,
+        )
+
+    def test_validator_repair_excludes_units_that_only_share_a_write_path(self) -> None:
+        manifest = self.shared_entity_repair_manifest()
+
+        self.assertEqual([item["id"] for item in manifest["items"]], ["WU-001", "WU-002"])
+        self.assertNotIn("src/Extra.java", manifest["workspace_allowed_paths"])
+        self.assertEqual(
+            manifest["expected_dirty_files"],
+            [
+                {
+                    "path": "src/Extra.java",
+                    "initial_sha256": hashlib.sha256(
+                        (self.repo / "src" / "Extra.java").read_bytes()
+                    ).hexdigest(),
+                }
+            ],
+        )
+
+    def test_unit_scoped_repair_freezes_out_of_scope_plan_outputs(self) -> None:
+        manifest = self.shared_entity_repair_manifest()
+        executor = self.executor(ScriptedLlm([]))
+        journal = {"items": [{"id": item["id"], "status": "pending"} for item in manifest["items"]]}
+
+        def validate() -> None:
+            executor._validate_workspace(
+                run_id="run_validator_shared_entity",
+                target_path=self.repo,
+                manifest=manifest,
+                journal=journal,
+                manifest_path="manifest.json",
+                journal_path="journal.json",
+            )
+
+        validate()
+
+        (self.repo / "src" / "Extra.java").write_text("class Extra { int changed; }\n", encoding="utf-8")
+        with self.assertRaises(DeveloperExecutionError) as tampered:
+            validate()
+        self.assertEqual(tampered.exception.error_code, "developer_workspace_drift")
+
+        (self.repo / "src" / "Extra.java").write_text("class Extra {}\n", encoding="utf-8")
+        (self.repo / "src" / "Rogue.java").write_text("class Rogue {}\n", encoding="utf-8")
+        with self.assertRaises(DeveloperExecutionError) as outside:
+            validate()
+        self.assertEqual(outside.exception.error_code, "developer_workspace_drift")
+        self.assertIn("src/Rogue.java", outside.exception.message)
+
     def test_validator_repair_prompt_projects_findings_and_hints_to_active_unit(self) -> None:
         packet = self.unit_packet()
         packet["proposed_files"].append(
@@ -1431,6 +1517,18 @@ class DeveloperToolLoopTest(unittest.TestCase):
             dependency_context["repair_feedback"]["developer_constraints"]["allowed_paths"],
             ["src/Main.java"],
         )
+        # A dependency-only unit must not be told to produce a repair mutation it has no finding for.
+        dependency_strategy = dependency_context["next_action"]["unit_strategy"]
+        self.assertIn("Validator assigned no finding to this unit", dependency_strategy)
+        self.assertIn("verified_unchanged", dependency_strategy)
+        self.assertNotIn("Implement one coherent bounded slice", dependency_strategy)
+        self.assertNotIn("reported failure is already resolved", dependency_strategy)
+        self.assertNotIn("Start editing", dependency_context["next_action"]["instruction"])
+        self.assertTrue(
+            dependency_context["repair_progress"]["completion_rule"].startswith(
+                "No Validator finding is assigned to this unit."
+            )
+        )
 
         direct_prompt = _action_prompt(
             item=items["WU-002"],
@@ -1451,6 +1549,15 @@ class DeveloperToolLoopTest(unittest.TestCase):
             ["F-TEST"],
         )
         self.assertEqual(direct_feedback["repair_objective"]["canonical_keys"], ["repair:test"])
+        self.assertIn(
+            "Implement one coherent bounded slice",
+            direct_context["next_action"]["unit_strategy"],
+        )
+        self.assertTrue(
+            direct_context["repair_progress"]["completion_rule"].startswith(
+                "Apply one coherent real mutation"
+            )
+        )
         self.assertEqual(
             direct_feedback["developer_constraints"]["allowed_paths"],
             ["src/MainTest.java"],
@@ -1461,6 +1568,74 @@ class DeveloperToolLoopTest(unittest.TestCase):
             "src/Independent.java",
             [excerpt.get("path") for excerpt in repair_hints.get("excerpts", [])],
         )
+
+    def test_shared_finding_prompt_reports_what_an_earlier_unit_changed(self) -> None:
+        packet = self.unit_packet()
+        finding = {
+            "finding_id": "F-SHARED",
+            "canonical_key": "repair:shared",
+            "unit_ids": ["WU-001", "WU-002"],
+            "message": "Producer and consumer disagree.",
+            "blocking": True,
+            "owner": "developer",
+            "recommended_action": "developer_repair",
+        }
+        manifest = _build_manifest(
+            run_id="run_shared_finding_progress",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="implementation_repair",
+            repair_feedback={
+                "feedback_source": "validator_code_trace",
+                "repair_objective": {"contract_findings": [finding]},
+                "missing_links": [finding],
+            },
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+        journal = {
+            "items": [
+                {
+                    "id": "WU-001",
+                    "status": "completed",
+                    "mutated_paths": ["src/Main.java"],
+                    "path_dispositions": {"src/Main.java": {"status": "mutated", "reason": "Adapted provider."}},
+                    "summary": "Provider now accepts the consumer transport.",
+                },
+                {"id": "WU-002", "status": "pending"},
+            ]
+        }
+
+        def context(journal_value: dict[str, object] | None) -> dict[str, object]:
+            prompt = _action_prompt(
+                item=items["WU-002"],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+                journal=journal_value,
+            )
+            return json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        with_journal = context(journal)
+        receipt = with_journal["dependency_receipts"][0]
+        self.assertEqual(receipt["unit_id"], "WU-001")
+        self.assertEqual(receipt["mutated_paths"], ["src/Main.java"])
+        self.assertEqual(receipt["path_statuses"], {"src/Main.java": "mutated"})
+        self.assertEqual(receipt["completion_summary"], "Provider now accepts the consumer transport.")
+        progress = with_journal["shared_finding_progress"]
+        self.assertEqual([row["finding_id"] for row in progress], ["F-SHARED"])
+        self.assertEqual(progress[0]["completed_unit_ids"], ["WU-001"])
+        self.assertEqual(progress[0]["outcomes"]["WU-001"]["mutated_paths"], ["src/Main.java"])
+
+        without_journal = context(None)
+        self.assertNotIn("shared_finding_progress", without_journal)
+        self.assertNotIn("mutated_paths", without_journal["dependency_receipts"][0])
 
     def test_repair_manifest_hash_ignores_worktree_derived_prompt_context(self) -> None:
         packet = self.unit_packet()
@@ -1608,6 +1783,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
                     "surfaces": ["api"],
                     "write_paths": ["src/Main.java"],
                     "planned_code_targets": source_unit["planned_code_targets"],
+                    "mutated_paths": ["src/Main.java"],
+                    "path_statuses": {"src/Main.java": "mutated"},
+                    "completion_summary": "implementation complete",
                 }
             ],
         )

@@ -819,15 +819,6 @@ class PhaseFourTest(unittest.TestCase):
     def test_developer_loop_accepts_harness_materialized_runtime_config_as_existing_dirty_state(self) -> None:
         workflow = PhaseFourWorkflow(self._settings())
         run_id = "run_harness_owned_dirty_path"
-        receipt = workflow.store.write_json_artifact(
-            run_id,
-            "runtime_config_execution_v1.json",
-            {
-                "schema_version": "runtime_config_execution_v1",
-                "status": "materialized",
-                "changed_paths": [".env.example"],
-            },
-        )
         result = DeveloperExecutionResult(
             summary="done",
             files=[],
@@ -835,32 +826,43 @@ class PhaseFourTest(unittest.TestCase):
             journal_path="journal.json",
             progress={"status": "completed"},
         )
+        receipts = {
+            "materialized": {"status": "materialized", "path": ".env.example", "changed_paths": [".env.example"]},
+            # A later repair round finds the file already materialized: the Harness still owns it.
+            "unchanged": {"status": "unchanged", "path": ".env.example", "changed_paths": []},
+        }
+        for version, (label, fields) in enumerate(receipts.items(), start=1):
+            with self.subTest(receipt=label):
+                receipt = workflow.store.write_json_artifact(
+                    run_id,
+                    f"runtime_config_execution_v{version}.json",
+                    {"schema_version": "runtime_config_execution_v1", **fields},
+                )
+                with (
+                    patch.object(workflow.developer_tool_loop, "execute", return_value=result) as execute,
+                    patch(
+                        "sdlc_harness.workflows.phase4_implementation._verification_policy_for_state",
+                        return_value=object(),
+                    ),
+                ):
+                    workflow._execute_developer_tool_loop(
+                        state={"run_id": run_id},
+                        run_id=run_id,
+                        work_packet={},
+                        target_path=Path("target"),
+                        latest_artifacts={
+                            "runtime_config_execution": workflow.store.relative(receipt),
+                        },
+                        mode="implementation_repair",
+                        current_phase="implementation_repair",
+                        repair_iteration=1,
+                        artifact_version=1,
+                        manifest_key="developer_repair_execution_manifest",
+                        journal_key="developer_repair_execution_journal",
+                        repair_feedback={"repair_objective": {}},
+                    )
 
-        with (
-            patch.object(workflow.developer_tool_loop, "execute", return_value=result) as execute,
-            patch(
-                "sdlc_harness.workflows.phase4_implementation._verification_policy_for_state",
-                return_value=object(),
-            ),
-        ):
-            workflow._execute_developer_tool_loop(
-                state={"run_id": run_id},
-                run_id=run_id,
-                work_packet={},
-                target_path=Path("target"),
-                latest_artifacts={
-                    "runtime_config_execution": workflow.store.relative(receipt),
-                },
-                mode="implementation_repair",
-                current_phase="implementation_repair",
-                repair_iteration=1,
-                artifact_version=1,
-                manifest_key="developer_repair_execution_manifest",
-                journal_key="developer_repair_execution_journal",
-                repair_feedback={"repair_objective": {}},
-            )
-
-        self.assertEqual(execute.call_args.kwargs["expected_dirty_paths"], [".env.example"])
+                self.assertEqual(execute.call_args.kwargs["expected_dirty_paths"], [".env.example"])
 
     def test_legacy_repair_state_uses_next_unused_session_ordinal(self) -> None:
         workflow = PhaseFourWorkflow(self._settings())

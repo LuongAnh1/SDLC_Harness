@@ -829,6 +829,14 @@ class PhaseFourImplementationCycle:
                             for path in runtime_config_receipt.get("changed_paths", [])
                             if isinstance(path, str) and path
                         ],
+                        # An `unchanged` receipt still owns the file an earlier receipt materialized.
+                        *[
+                            path
+                            for path in [runtime_config_receipt.get("path")]
+                            if runtime_config_receipt.get("status") == "unchanged"
+                            and isinstance(path, str)
+                            and path
+                        ],
                     ]
                 )
             )
