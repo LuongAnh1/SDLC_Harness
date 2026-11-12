@@ -38,6 +38,11 @@ class CheckpointApprovalWorkflow:
                 run_id=run_id,
                 checkpoint_id=checkpoint_id,
             )
+        if status == "waiting_runtime_closure_review":
+            return PhaseFourWorkflow(self.settings).approve_runtime_closure_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
         if status == "code_review_ready":
             return PhaseFourWorkflow(self.settings).approve_code_review_checkpoint(
                 run_id=run_id,

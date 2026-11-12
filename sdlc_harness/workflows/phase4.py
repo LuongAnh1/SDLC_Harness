@@ -37,7 +37,9 @@ from ..agents.developer import (
     developer_transport_retry_allowed,
     developer_execution_retry_allowed,
 )
+from ..agents.developer.closure_planner import RuntimeClosurePlanner
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
+from ..agents.validator.closure_review import RuntimeClosureValidator
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
 from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
@@ -136,17 +138,33 @@ class _PhaseFourCore:
         *,
         developer_step_review: dict[str, object] | None = None,
         code_validation_step_review: dict[str, object] | None = None,
+        qa_step_review: dict[str, object] | None = None,
+        runtime_closure_step_review: dict[str, object] | None = None,
     ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
         self.repo_context_provider = CodeGraphContextProvider(fake_mode=settings.llm_mode == "fake")
         self.llm_client = LlmClient(settings)
-        self.code_validation_step_review = {
+        validation_review_defaults = {
             "enabled": settings.implementation_validation_step_review_enabled,
             "review_input": settings.implementation_validation_step_review_input_enabled,
             "review_output": settings.implementation_validation_step_review_output_enabled,
+        }
+        self.code_validation_step_review = {
+            **validation_review_defaults,
             **dict(code_validation_step_review or {}),
         }
+        # QA and closure reuse the Phase 4 validation review settings; no separate settings.
+        self.qa_step_review = {
+            **validation_review_defaults,
+            **dict(qa_step_review or {}),
+        }
+        self.runtime_closure_step_review = {
+            **validation_review_defaults,
+            **dict(runtime_closure_step_review or {}),
+        }
+        self.closure_planner = RuntimeClosurePlanner(self.llm_client)
+        self.closure_validator = RuntimeClosureValidator(self.llm_client)
         self.verification_runner = VerificationRunner()
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
@@ -555,10 +573,7 @@ class _PhaseFourCore:
             run_id=run_id,
         )
 
-    def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
-        """Dispatch một transition khi caller đang giữ per-run workspace lock."""
-
-        state = self.store.read_state(run_id)
+    def _require_frozen_llm_mode(self, state: dict[str, object], *, run_id: str) -> None:
         frozen_llm = _dict_value(state.get("llm"))
         frozen_llm_mode = str(frozen_llm.get("mode") or "").strip().lower()
         current_llm_mode = str(self.settings.llm_mode or "").strip().lower()
@@ -571,11 +586,21 @@ class _PhaseFourCore:
                 ),
                 run_id=run_id,
             )
+
+    def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
+        """Dispatch một transition khi caller đang giữ per-run workspace lock."""
+
+        state = self.store.read_state(run_id)
+        self._require_frozen_llm_mode(state, run_id=run_id)
         status = str(state.get("status"))
         if status == "implementation_ready":
             return self._continue_developer_act(state=state, run_id=run_id)
         if status in {"implementation_executing", "implementation_paused"}:
             execution = _dict_value(state.get("developer_execution"))
+            if execution.get("mode") == "runtime_closure_repair":
+                return self._continue_runtime_closure_repair(state=state, run_id=run_id)
+            if self._runtime_closure_execution_active(state):
+                return self._continue_runtime_closure_act(state=state, run_id=run_id)
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
                 return self._continue_qa_repair(state=state, run_id=run_id)
             if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
@@ -583,6 +608,16 @@ class _PhaseFourCore:
             return self._continue_developer_act(state=state, run_id=run_id)
         if status == "blocked" and self._qa_generation_retry_allowed(state):
             return self._continue_qa_test(state=state, run_id=run_id)
+        if status == "blocked" and self._runtime_closure_retry_allowed(state):
+            return self._resume_runtime_closure_stage(state=state, run_id=run_id)
+        if (
+            status == "blocked"
+            and self._runtime_closure_execution_active(state)
+            and (developer_execution_retry_allowed(state) or developer_transport_retry_allowed(state))
+        ):
+            if _dict_value(state.get("developer_execution")).get("mode") == "runtime_closure_repair":
+                return self._continue_runtime_closure_repair(state=state, run_id=run_id)
+            return self._continue_runtime_closure_act(state=state, run_id=run_id)
         if status == "blocked" and developer_execution_retry_allowed(state):
             execution = _dict_value(state.get("developer_execution"))
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
@@ -602,6 +637,18 @@ class _PhaseFourCore:
         if status == "implementation_tested":
             return self._continue_code_trace(state=state, run_id=run_id)
         if status == "implementation_traced":
+            if self._runtime_closure_enforced(state):
+                return self._continue_runtime_closure_planning(state=state, run_id=run_id)
+            return self._continue_qa_test(state=state, run_id=run_id)
+        if status == "runtime_closure_ready":
+            return self._continue_runtime_closure_act(state=state, run_id=run_id)
+        if status == "runtime_closure_written":
+            return self._continue_runtime_closure_verification(state=state, run_id=run_id)
+        if status == "runtime_closure_verified":
+            return self._continue_runtime_closure_review(state=state, run_id=run_id)
+        if status == "runtime_closure_repair_needed":
+            return self._continue_runtime_closure_repair(state=state, run_id=run_id)
+        if status == "runtime_closed":
             return self._continue_qa_test(state=state, run_id=run_id)
         if status == "implementation_repair_needed":
             return self._continue_implementation_repair(state=state, run_id=run_id)
@@ -765,6 +812,8 @@ class _PhaseFourCore:
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
         if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
+            allowed_next_actions.insert(0, "continue_run")
+        if self._runtime_closure_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if developer_execution_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
@@ -1588,6 +1637,7 @@ def _code_review_publication_paths(
     qa_generated: dict[str, object],
     run_id: str,
     planning_policy: PlanningPathPolicy,
+    extra_paths: list[str] | None = None,
 ) -> list[str]:
     """Lập manifest file từ evidence của Developer, QA và Verification Runner."""
 
@@ -1599,6 +1649,8 @@ def _code_review_publication_paths(
             planning_policy=planning_policy,
         )
     }
+    # Runtime closure outputs (closure packet paths, D11 extensions, Harness probe spec; D13).
+    paths.update(_normalize_publication_path(path, run_id=run_id) for path in extra_paths or [])
     for test_file in _dict_items(qa_generated.get("test_files")):
         paths.add(_normalize_publication_path(str(test_file.get("path") or ""), run_id=run_id))
     for value in _nested_strings(work_packet):
@@ -2388,6 +2440,7 @@ def _implementation_repair_feedback(
 
 
 
+from .phase4_closure import PhaseFourRuntimeClosureCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
 from .phase4_qa import PhaseFourQaCycle
@@ -2395,10 +2448,11 @@ from .phase4_qa import PhaseFourQaCycle
 
 class PhaseFourWorkflow(
     PhaseFourPublicationCycle,
+    PhaseFourRuntimeClosureCycle,
     PhaseFourQaCycle,
     PhaseFourImplementationCycle,
     _PhaseFourCore,
 ):
-    """Stable public facade composed from the three Phase 4 behavior cycles."""
+    """Stable public facade composed from the Phase 4 behavior cycles."""
 
 

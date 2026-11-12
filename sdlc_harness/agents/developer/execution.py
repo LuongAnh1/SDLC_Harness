@@ -215,15 +215,19 @@ class DeveloperToolLoopExecutor:
         expected_dirty_paths: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
         on_progress: Callable[[dict[str, object], str, str], None] | None = None,
+        session_scope: str = "",
     ) -> DeveloperExecutionResult:
         normalized_scope = re.sub(r"[^a-z0-9_]+", "_", repair_scope.strip().lower()).strip("_")
         normalized_scope = normalized_scope or "implementation"
-        mode = f"{normalized_scope}_repair" if repair_feedback else "act"
-        session_ordinal = repair_iteration if session_iteration is None else max(0, session_iteration)
-        session_name = (
-            f"{mode}_v{session_ordinal}"
-            if repair_feedback
-            else f"act_v{max(1, session_ordinal)}"
+        act_scope = re.sub(r"[^a-z0-9_]+", "_", session_scope.strip().lower()).strip("_")
+        # A scoped act (e.g. runtime_closure) gets its own mode and session dir, never `act_v<n>`.
+        mode = f"{normalized_scope}_repair" if repair_feedback else (act_scope or "act")
+        session_name = developer_session_name(
+            repair_feedback=bool(repair_feedback),
+            repair_scope=normalized_scope,
+            session_scope=act_scope,
+            repair_iteration=repair_iteration,
+            session_iteration=session_iteration,
         )
         session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -974,7 +978,8 @@ class DeveloperToolLoopExecutor:
     ) -> None:
         item_id = str(item.get("id") or "")
         entry = _journal_item(journal, item_id)
-        item_paths = _item_paths(item)
+        # D11 (b): new files this item already created under its new_file_policy stay writable.
+        item_paths = list(dict.fromkeys([*_item_paths(item), *_journal_scope_extension_paths(journal, item_id)]))
         execution_hash_paths = _item_execution_hash_paths(item)
         working_state_file = session_dir / "units" / item_id / "working_state.json"
         resuming_step_review = entry.get("status") == "review_required" and working_state_file.is_file()
@@ -2280,6 +2285,7 @@ class DeveloperToolLoopExecutor:
         allowed = set(_string_items(manifest.get("workspace_allowed_paths")))
         expected_dirty_files = _dict_items(manifest.get("expected_dirty_files"))
         allowed.update(str(item.get("path") or "") for item in expected_dirty_files)
+        allowed.update(str(row.get("path") or "") for row in _dict_items(journal.get("scope_extensions")))
         status = subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=str(target_path),
@@ -2372,6 +2378,24 @@ def developer_execution_retry_allowed(state: dict[str, object]) -> bool:
     mode = str(execution.get("mode") or "")
     phase = str(state.get("current_phase") or "")
     artifacts = _dict_value(state.get("latest_artifacts"))
+    if mode == "runtime_closure_repair":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "runtime_closure_repair_feedback",
+                "runtime_closure_repair_execution_manifest",
+                "runtime_closure_repair_execution_journal",
+            )
+        )
+    if mode == "runtime_closure" or phase == "runtime_closure":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "runtime_closure_work_packet",
+                "runtime_closure_execution_manifest",
+                "runtime_closure_execution_journal",
+            )
+        )
     if mode == "developer_act" or phase == "implementation_writing":
         return all(
             bool(artifacts.get(key))
@@ -2434,9 +2458,32 @@ def developer_transport_retry_allowed(state: dict[str, object]) -> bool:
             "developer_qa_repair_execution_manifest",
             "developer_qa_repair_execution_journal",
         ),
+        "runtime_closure": ("runtime_closure_work_packet",),
+        "runtime_closure_repair": (
+            "runtime_closure_work_packet",
+            "runtime_closure_repair_feedback",
+            "runtime_closure_repair_execution_manifest",
+            "runtime_closure_repair_execution_journal",
+        ),
     }
     required = required_by_mode.get(mode)
     return bool(required) and all(bool(artifacts.get(key)) for key in required)
+
+
+def developer_session_name(
+    *,
+    repair_feedback: bool,
+    repair_scope: str,
+    session_scope: str,
+    repair_iteration: int,
+    session_iteration: int | None,
+) -> str:
+    """Session directory name shared by the executor and the workflow's error recovery."""
+
+    ordinal = repair_iteration if session_iteration is None else max(0, session_iteration)
+    if repair_feedback:
+        return f"{repair_scope}_repair_v{ordinal}"
+    return f"{session_scope or 'act'}_v{max(1, ordinal)}"
 
 
 def _repair_objective_unit_ids(feedback: dict[str, object] | None) -> set[str]:
@@ -2732,6 +2779,17 @@ def _build_manifest(
                         **closure,
                         "context_paths": unit_context,
                     } if repair_feedback else {},
+                    # Only runtime-closure units carry these; other manifests keep their exact bytes.
+                    **(
+                        {"closure_context": _dict_value(unit.get("closure_context"))}
+                        if _dict_value(unit.get("closure_context"))
+                        else {}
+                    ),
+                    **(
+                        {"new_file_policy": _dict_value(unit.get("new_file_policy"))}
+                        if _dict_value(unit.get("new_file_policy"))
+                        else {}
+                    ),
                 }
             )
     else:
@@ -5499,6 +5557,14 @@ def _execute_action(
         return {"ok": True, "path": path, "diff": completed.stdout[:12000], "truncated": len(completed.stdout) > 12000}
     if name == "write_file":
         path = str(args.get("path") or "")
+        if journal is not None and _new_file_extension_allowed(
+            item=item, item_paths=item_paths, repo_root=repo_root, path=path
+        ):
+            # D11 (b): a closure unit may create a new file under its component root; recorded for the owner.
+            journal.setdefault("scope_extensions", []).append(
+                {"path": path, "item_id": str(item.get("id") or ""), "rule": "D11b", "recorded_at": utc_now_iso()}
+            )
+            item_paths.append(path)
         target = _safe_write_target(repo_root, path, item_paths, run_id=run_id)
         content = args.get("content")
         if not isinstance(content, str) or len(content) > max_write_chars:
@@ -5724,6 +5790,45 @@ def _safe_read_path(repo_root: Path, raw: str, *, run_id: str, allow_root: bool 
     except ValueError as exc:
         raise HarnessError("developer_tool_unsafe_path", f"Read path escapes worktree: {raw}", run_id=run_id or None) from exc
     return target
+
+
+def _journal_scope_extension_paths(journal: dict[str, object] | None, item_id: str) -> list[str]:
+    return [
+        str(row.get("path") or "")
+        for row in _dict_items(_dict_value(journal).get("scope_extensions"))
+        if str(row.get("item_id") or "") == item_id and str(row.get("path") or "")
+    ]
+
+
+def _new_file_extension_allowed(
+    *,
+    item: dict[str, object],
+    item_paths: list[str],
+    repo_root: Path,
+    path: str,
+) -> bool:
+    """D11 (b): only a not-yet-existing file under the unit's component root, never protected or Harness-owned."""
+
+    policy = _dict_value(item.get("new_file_policy"))
+    if not policy or not path or path in item_paths:
+        return False
+    if (
+        path != path.strip()
+        or "\\" in path
+        or ":" in path
+        or path.startswith("/")
+        or any(part in {"", ".", ".."} for part in path.split("/"))
+    ):
+        return False
+    if not any(path.startswith(f"{root}/") for root in _string_items(policy.get("roots"))):
+        return False
+    if not path.endswith(tuple(_string_items(policy.get("suffixes")))):
+        return False
+    if any(path == entry or path.startswith(f"{entry}/") for entry in _string_items(policy.get("protected_paths"))):
+        return False
+    if path in _string_items(policy.get("reserved_paths")):
+        return False
+    return not (repo_root / path).exists()
 
 
 def _safe_write_target(
@@ -6378,6 +6483,12 @@ def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
         ),
         **({"boundaries": boundaries} if boundaries else {}),
         **({"runtime_wiring": wiring} if wiring else {}),
+        # Mandatory obligations reach the prompt in act and repair alike, unlike execution_task.
+        **(
+            {"runtime_closure": _dict_value(item.get("closure_context"))}
+            if _dict_value(item.get("closure_context"))
+            else {}
+        ),
         **(
             {"runtime_configuration": runtime_config_changes}
             if runtime_config_changes

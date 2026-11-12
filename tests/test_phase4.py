@@ -27,6 +27,10 @@ from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
+from sdlc_harness.agents.developer.closure_planner import RuntimeClosurePlanner
+from sdlc_harness.agents.validator.closure_review import RuntimeClosureValidator
+from sdlc_harness.llm.client import LlmCompletion
+from sdlc_harness.llm.fake import fake_qa_generated_tests, fake_runtime_closure_plan, fake_runtime_closure_review
 from sdlc_harness.profiles import (
     build_code_trace_policy,
     build_planning_path_policy,
@@ -35,7 +39,7 @@ from sdlc_harness.profiles import (
     get_language_profile,
     get_project_profile,
 )
-from sdlc_harness.verification import VerificationResult, VerificationRunner
+from sdlc_harness.verification import VerificationResult, VerificationRunner, VerificationStageResult
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase4 import (
@@ -228,6 +232,163 @@ class RecordingQaTester:
 class InvalidQaLlm:
     def complete(self, *, system: str, prompt: str) -> str:
         return '{"status": "pass", "summary": "cut off before scenarios"'
+
+
+class ScriptedClosureLlm:
+    """Serve scripted closure completions: text, (text, finish_reason), callable(prompt) or an exception."""
+
+    def __init__(self, responses: list[object] | None = None, default=None):
+        self.responses = list(responses or [])
+        self.default = default
+        self.prompts: list[str] = []
+
+    @property
+    def calls(self) -> int:
+        return len(self.prompts)
+
+    def complete_with_metadata(self, *, system: str, prompt: str, **options) -> LlmCompletion:
+        del system, options
+        self.prompts.append(prompt)
+        item = self.responses.pop(0) if self.responses else self.default
+        if isinstance(item, Exception):
+            raise item
+        if callable(item):
+            item = item(prompt)
+        content, finish_reason = item if isinstance(item, tuple) else (item, "stop")
+        return LlmCompletion(content=str(content), finish_reason=finish_reason)
+
+
+class ClosureVerificationRunnerStub:
+    """Scripted closure-suite outcomes; any other policy (QA) passes like SequenceVerificationRunner."""
+
+    def __init__(self, outcomes: list[str] | None = None):
+        self.outcomes = list(outcomes or [])
+        self.closure_calls: list[dict[str, object]] = []
+        self.other = SequenceVerificationRunner([])
+
+    def run(self, *, target_path: Path, work_packet: dict[str, object], verification_policy=None, runtime_probe=None, **kwargs):
+        if verification_policy is None or verification_policy.policy_version != "runtime_closure_stage_policy_v1":
+            return self.other.run(target_path=target_path, work_packet=work_packet, verification_policy=verification_policy, **kwargs)
+        self.closure_calls.append({"runtime_probe": runtime_probe, "stage_ids": list(work_packet["verification_stage_ids"])})
+        outcome = self.outcomes.pop(0) if self.outcomes else "passed"
+        probe_ids = list(runtime_probe.probe_ids)
+        failing = {
+            "env": ("database_ready", "environment", "Error: port is already allocated"),
+            "policy": ("runtime_probe", "policy", "Playwright JSON report is missing or invalid."),
+            "webserver": ("runtime_probe", "policy", "Error: Process from config.webServer was not able to start. [api] exited"),
+            "probe_fail": ("runtime_probe", "implementation", "Playwright test failure: RP-1: failed"),
+        }.get(outcome)
+        stages: list[VerificationStageResult] = []
+        stopped = False
+        for stage_id in verification_policy.stage_ids:
+            if stopped and stage_id != "cleanup":
+                continue
+            failed = failing is not None and failing[0] == stage_id
+            probe_results: tuple[dict[str, object], ...] = ()
+            if stage_id == "runtime_probe":
+                probe_results = tuple(
+                    {
+                        "probe_id": probe_id,
+                        "status": "failed" if outcome == "probe_fail" and index == 0 else "passed",
+                        "observation": {"probe_id": probe_id, "actual_status": 500 if outcome == "probe_fail" and index == 0 else 200, "actual_items": None, "response_body_excerpt": "boom"},
+                    }
+                    for index, probe_id in enumerate(probe_ids)
+                ) if outcome in {"passed", "probe_fail"} else ()
+            stages.append(
+                VerificationStageResult(
+                    stage_id=stage_id,
+                    status="failed" if failed else "passed",
+                    argv=("npm", "run", stage_id),
+                    cwd=".",
+                    timeout_seconds=120,
+                    exit_code=1 if failed else 0,
+                    duration_seconds=0.01,
+                    stdout="",
+                    stderr=failing[2] if failed else "",
+                    reason=failing[2] if failed else f"Verification stage completed successfully: {stage_id}",
+                    failure_kind=failing[1] if failed else "",
+                    probe_results=probe_results,
+                )
+            )
+            stopped = stopped or failed
+        terminal = next((item for item in stages if item.status == "failed"), stages[-1])
+        return VerificationResult(
+            status="failed" if failing else "passed",
+            command="",
+            cwd=str(target_path),
+            exit_code=terminal.exit_code,
+            duration_seconds=0.1,
+            stdout="",
+            stderr=terminal.stderr,
+            reason=terminal.reason,
+            failure_kind=terminal.failure_kind,
+            planned_stage_ids=tuple(verification_policy.stage_ids),
+            executed_stage_ids=tuple(item.stage_id for item in stages),
+            stage_results=tuple(stages),
+        )
+
+
+def closure_code_blocker(prompt: str) -> str:
+    contract = json.JSONDecoder().raw_decode(prompt)[0]["contract"]
+    unit_id = contract["closure_units"][0]["unit_id"]
+    return json.dumps(
+        {
+            "summary": "Demo provider leaks into production.",
+            "reviewed_input_ids": [item["input_id"] for item in contract["runtime_inputs"]],
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "category": "demo_isolation",
+                    "unit_ids": [unit_id],
+                    "issue": "The demo provider is wired into the production entrypoint.",
+                    "expected_change": "Use the demo provider only in verification.",
+                }
+            ],
+        }
+    )
+
+
+def closure_code_frozen_conflict(prompt: str) -> str:
+    payload = json.loads(closure_code_blocker(prompt))
+    payload["findings"][0]["category"] = "frozen_contract_conflict"
+    return json.dumps(payload)
+
+
+def closure_blocker_review(prompt: str) -> str:
+    contract = json.JSONDecoder().raw_decode(prompt)[0]["contract"]
+    input_ids = [item["input_id"] for item in contract["runtime_inputs"]]
+    return json.dumps(
+        {
+            "summary": "Provider is not credible.",
+            "reviewed_input_ids": input_ids,
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "category": "provider_validity",
+                    "input_ids": [input_ids[0]],
+                    "refs": ["PRE-1"],
+                    "issue": "The demo provider returns nothing usable.",
+                    "expected_change": "The provider returns seeded records.",
+                }
+            ],
+        }
+    )
+
+
+class CountingQaLlm:
+    """Count provider calls; serve queued responses, then the fake QA generator."""
+
+    def __init__(self, responses: list[str] | None = None):
+        self.calls = 0
+        self.prompts: list[str] = []
+        self.responses = list(responses or [])
+
+    def complete(self, *, system: str, prompt: str) -> str:
+        del system
+        self.calls += 1
+        self.prompts.append(prompt)
+        # The fake generator only understands the first-attempt prompt, not the repair prompt.
+        return self.responses.pop(0) if self.responses else fake_qa_generated_tests(self.prompts[0])
 
 
 class MissingRequirementQaLlm:
@@ -2144,6 +2305,809 @@ class PhaseFourTest(unittest.TestCase):
         raw_path = self.repo_root / str(response["latest_artifacts"]["qa_tester_raw_response"])
         self.assertIn("cut off before scenarios", raw_path.read_text(encoding="utf-8"))
 
+    def _qa_review_workflow(self, llm: "CountingQaLlm", **review: object) -> PhaseFourWorkflow:
+        workflow = PhaseFourWorkflow(
+            self.settings,
+            qa_step_review={"enabled": True, "review_input": False, "review_output": True, **review},
+        )
+        workflow.qa_tester = QaTesterAgent(llm)
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
+        return workflow
+
+    def _set_packet_runtime_surface(self, run: dict[str, object], runnable_status: str) -> None:
+        packet_path = self.repo_root / str(run["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        packet["execution_units"][0].setdefault("surface_contracts", []).append(
+            {
+                "design_node_id": "VDN-GATE-SCREEN",
+                "surface": "screen",
+                "surface_contract": {"runtime_surface": {"runnable_status": runnable_status, "required_inputs": []}},
+            }
+        )
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def test_qa_step_review_pauses_input_before_provider_then_replays_approved_output(self) -> None:
+        traced = self._create_phase4_traced_run()
+        run_id = str(traced["run_id"])
+        llm = CountingQaLlm()
+
+        input_pending = self._qa_review_workflow(llm, review_input=True).continue_run(run_id=run_id)
+        self.assertEqual(input_pending["status"], "qa_step_review_required", input_pending)
+        self.assertEqual(input_pending["pending_step_review"]["review_stage"], "input")
+        self.assertEqual(input_pending["pending_step_review"]["call_id"], "qa-generation-0001-a01-input")
+        self.assertIn("qa_execution/step_review/v1/", input_pending["pending_step_review"]["exchange_path"].replace("\\", "/"))
+        self.assertEqual(llm.calls, 0)
+        self.assertNotIn("qa_generated_tests", input_pending["latest_artifacts"])
+        with self.assertRaises(HarnessError) as not_resumable:
+            PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(not_resumable.exception.error_code, "run_not_continuable")
+
+        output_pending = self._qa_review_workflow(
+            llm,
+            review_input=True,
+            call_id=input_pending["pending_step_review"]["call_id"],
+            decision="approve",
+        ).continue_qa_step_review(run_id=run_id)
+        self.assertEqual(output_pending["status"], "qa_step_review_required", output_pending)
+        self.assertEqual(output_pending["pending_step_review"]["review_stage"], "output")
+        self.assertEqual(llm.calls, 1)
+
+        replay_llm = CountingQaLlm()
+        tested = self._qa_review_workflow(
+            replay_llm,
+            call_id=output_pending["pending_step_review"]["call_id"],
+            decision="approve",
+        ).continue_qa_step_review(run_id=run_id)
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(replay_llm.calls, 0)
+        self.assertIsNone(tested["pending_step_review"])
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertIsNone(state["qa_resume"])
+
+    def test_qa_step_review_second_agent_attempt_is_a_separate_ordinal(self) -> None:
+        traced = self._create_phase4_traced_run()
+        run_id = str(traced["run_id"])
+        llm = CountingQaLlm(responses=[InvalidQaLlm().complete(system="", prompt="")])
+
+        first = self._qa_review_workflow(llm).continue_run(run_id=run_id)
+        self.assertEqual(first["pending_step_review"]["call_id"], "qa-generation-0001-a01")
+        second = self._qa_review_workflow(
+            llm,
+            call_id="qa-generation-0001-a01",
+            decision="approve",
+        ).continue_qa_step_review(run_id=run_id)
+        self.assertEqual(second["status"], "qa_step_review_required", second)
+        self.assertEqual(second["pending_step_review"]["call_id"], "qa-generation-0002-a01")
+        self.assertEqual(llm.calls, 2)
+
+        tested = self._qa_review_workflow(
+            llm,
+            call_id="qa-generation-0002-a01",
+            decision="approve",
+        ).continue_qa_step_review(run_id=run_id)
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(llm.calls, 2)
+
+    def test_qa_step_review_after_qa_repair_resumes_qa_not_developer(self) -> None:
+        traced = self._create_phase4_traced_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.qa_tester = FailingQaTester()
+        workflow.verification_runner = SequenceVerificationRunner(["failed"])
+        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
+        run_id = str(repair_needed["run_id"])
+        feedback_path = str(repair_needed["latest_artifacts"]["qa_repair_feedback"])
+
+        llm = CountingQaLlm()
+        workflow = self._qa_review_workflow(llm)
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
+        paused = workflow.continue_run(run_id=run_id)
+        self.assertEqual(paused["status"], "qa_step_review_required", paused)
+        self.assertEqual(paused["qa_repair_iterations"], 1)
+        self.assertIn("code_change_report_v2.md", paused["latest_artifacts"]["code_change_report"])
+        self.assertIn("requirement_design_code_trace_v2.json", paused["latest_artifacts"]["requirement_design_code_trace"])
+
+        resume = self._qa_review_workflow(
+            llm,
+            call_id=paused["pending_step_review"]["call_id"],
+            decision="approve",
+        )
+        resume.developer_tool_loop = None  # Any Developer call would fail loudly.
+        tested = resume.continue_qa_step_review(run_id=run_id)
+
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(tested["qa_repair_iterations"], 1)
+        self.assertEqual(llm.calls, 1)
+        self.assertEqual(resume.verification_runner.calls, ["passed"])
+        self.assertIn("code_change_report_v2.md", tested["latest_artifacts"]["code_change_report"])
+        self.assertEqual(tested["quality_reports"]["qa_repair"]["repaired_from"], feedback_path)
+        generated = json.loads(
+            (self.repo_root / str(tested["latest_artifacts"]["qa_generated_tests"])).read_text(encoding="utf-8")
+        )
+        self.assertEqual(generated["repaired_from"], feedback_path)
+
+    def test_qa_requires_runtime_closure_for_unbound_runtime_surface(self) -> None:
+        traced = self._create_phase4_traced_run()
+        run_id = str(traced["run_id"])
+        self._set_packet_runtime_surface(traced, "externally_blocked")
+        llm = CountingQaLlm()
+
+        response = self._qa_review_workflow(llm, review_input=True).continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "blocked", response)
+        self.assertEqual(response["last_error"]["error_code"], "qa_requires_runtime_closure")
+        self.assertIn("VDN-GATE-SCREEN", response["last_error"]["message"])
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(llm.calls, 0)
+        self.assertNotIn("qa_generated_tests", response["latest_artifacts"])
+        self.assertFalse((self.store_run_dir(run_id) / "qa_execution").exists())
+
+    def test_qa_runs_when_runtime_surfaces_are_bound(self) -> None:
+        bound = self._create_phase4_traced_run()
+        self._set_packet_runtime_surface(bound, "bound")
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
+        self.assertEqual(workflow.continue_run(run_id=str(bound["run_id"]))["status"], "qa_tested")
+
+    def test_qa_runs_for_unbound_runtime_surface_after_runtime_closure(self) -> None:
+        closed = self._create_phase4_traced_run()
+        self._set_packet_runtime_surface(closed, "externally_blocked")
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(str(closed["run_id"]))
+        # Gate only: no pinned mode, so the dispatcher keeps the QA path and the gate sees runtime_closed.
+        state["runtime_closure"] = {"status": "runtime_closed"}
+        store.write_state(state)
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = SequenceVerificationRunner(["passed"])
+        self.assertEqual(workflow.continue_run(run_id=str(closed["run_id"]))["status"], "qa_tested")
+
+    def store_run_dir(self, run_id: str) -> Path:
+        return PhaseOneWorkflow(self.settings).store.run_dir(run_id)
+
+    # ---------------------------------------------------------------- L5.3.3 runtime closure
+
+    def _create_closure_run(self) -> str:
+        """A traced run whose frozen Design leaves one external input and one Plan env var to close."""
+
+        traced = self._create_phase4_traced_run()
+        worktree = self._workspace_path(traced)
+        files = {
+            "apps/web/src/ClosureEntry.tsx": 'import { ClosurePanel } from "./ClosurePanel";\nexport function ClosureEntry() {\n  return ClosurePanel();\n}\n',
+            "apps/web/src/ClosurePanel.tsx": "export function ClosurePanel() {\n  return null;\n}\n",
+            "apps/api/src/feed-client.ts": 'export const feedBaseUrl = process.env.FEED_BASE_URL ?? "http://127.0.0.1:9100";\n',
+        }
+        for relative, content in files.items():
+            (worktree / relative).parent.mkdir(parents=True, exist_ok=True)
+            (worktree / relative).write_text(content, encoding="utf-8")
+        packet_path = self.repo_root / str(traced["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        unit = packet["execution_units"][0]
+        entry, panel = "apps/web/src/ClosureEntry.tsx#ClosureEntry", "apps/web/src/ClosurePanel.tsx#ClosurePanel"
+        unit.setdefault("design_node_ids", []).append("VDN-closure-panel")
+        unit.setdefault("runtime_bindings", []).append(
+            {
+                "design_node_id": "VDN-closure-panel",
+                "runtime_kind": "ui_component",
+                "target": {"component_id": "web", "path": "apps/web/src/ClosurePanel.tsx", "symbol": "ClosurePanel"},
+                "attachment": {"owner_path": "apps/web/src/ClosureEntry.tsx", "owner_symbol": "ClosureEntry", "relation": "rendered_by"},
+            }
+        )
+        unit.setdefault("surface_contracts", []).append(
+            {
+                "design_node_id": "VDN-closure-panel",
+                "surface": "ui",
+                "surface_contract": {
+                    "runtime_surface": {
+                        "schema_version": "runtime_surface_binding_v1",
+                        "entrypoint": entry,
+                        "composition_path": [entry, panel],
+                        "required_inputs": [
+                            {
+                                "name": "recordFeed",
+                                "source": "external_use_case",
+                                "binding": "PRE-1",
+                                "provided_by": entry,
+                                "requirement_refs": ["PRE-1"],
+                            }
+                        ],
+                        "runnable_status": "externally_blocked",
+                    }
+                },
+            }
+        )
+        packet["runtime_config_impact"] = {
+            "status": "required",
+            "reason": "feed URL",
+            "changes": [
+                {
+                    "kind": "env_var",
+                    "unit_id": unit["unit_id"],
+                    "name": "FEED_BASE_URL",
+                    "default": "http://127.0.0.1:9100",
+                    "read_by": "apps/api/src/feed-client.ts",
+                    "purpose": "feed base URL",
+                }
+            ],
+        }
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+        return str(traced["run_id"])
+
+    def _closure_workflow(self, *, planner=None, validator=None, **review) -> PhaseFourWorkflow:
+        workflow = PhaseFourWorkflow(
+            self.settings,
+            runtime_closure_step_review={"enabled": True, **review} if review else None,
+        )
+        if planner is not None:
+            workflow.closure_planner = RuntimeClosurePlanner(planner)
+        if validator is not None:
+            workflow.closure_validator = RuntimeClosureValidator(validator)
+        return workflow
+
+    def _closure_contract_exists(self, run_id: str) -> bool:
+        return any((self.store_run_dir(run_id) / "artifacts").glob("runtime_closure_contract_v*.json"))
+
+    def test_runtime_closure_off_keeps_qa_path_then_enforce_recovers_qa_gate_block(self) -> None:
+        run_id = self._create_closure_run()
+
+        blocked = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(blocked["last_error"]["error_code"], "qa_requires_runtime_closure", blocked)
+        self.assertNotIn("runtime_closure", PhaseOneWorkflow(self.settings).store.read_state(run_id))
+        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
+
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(waiting["status"], "waiting_runtime_closure_review", waiting)
+
+    def test_runtime_closure_enforce_pins_run_and_reaches_owner_checkpoint(self) -> None:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+
+        waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+
+        self.assertEqual(waiting["status"], "waiting_runtime_closure_review", waiting)
+        self.assertEqual(waiting["current_phase"], "runtime_closure")
+        self.assertEqual(waiting["allowed_next_actions"], ["approve_checkpoint", "get_status", "cancel_run"])
+        checkpoint = waiting["pending_checkpoint"]
+        self.assertEqual(checkpoint["type"], "runtime_closure_review")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        pin = state["runtime_closure"]
+        self.assertEqual(
+            {key: pin[key] for key in ("mode", "contract_version", "verification_policy_version", "planning_attempt", "status")},
+            {
+                "mode": "enforce",
+                "contract_version": "runtime_closure_contract_v1",
+                "verification_policy_version": "runtime_closure_stage_policy_v1",
+                "planning_attempt": 1,
+                "status": "waiting_review",
+            },
+        )
+        for key in (
+            "runtime_closure_context",
+            "runtime_closure_contract",
+            "runtime_closure_contract_markdown",
+            "runtime_closure_contract_review",
+        ):
+            self.assertTrue((self.repo_root / waiting["latest_artifacts"][key]).is_file(), key)
+        contract = json.loads((self.repo_root / waiting["latest_artifacts"]["runtime_closure_contract"]).read_text(encoding="utf-8"))
+        self.assertEqual(sorted(item["name"] for item in contract["runtime_inputs"]), ["FEED_BASE_URL", "recordFeed"])
+        self.assertIn("apps/web/src/closure-provider-1.ts", contract["new_write_targets"])
+        markdown = (self.repo_root / waiting["latest_artifacts"]["runtime_closure_contract_markdown"]).read_text(encoding="utf-8")
+        self.assertIn("New write targets outside the frozen Plan", markdown)
+        # The owner approves literal probe request values at this checkpoint, so the Markdown shows them.
+        self.assertIn(", headers `", markdown)
+        self.assertIn(", json_body `", markdown)
+        self.assertEqual(waiting["quality_reports"]["runtime_closure_contract"]["runnable_status"], "fixture_bound")
+
+        with self.assertRaises(HarnessError) as wrong:
+            CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id, checkpoint_id="checkpoint_other")
+        self.assertEqual(wrong.exception.error_code, "checkpoint_not_current")
+
+        ready = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=checkpoint["checkpoint_id"]
+        )
+        self.assertEqual(ready["status"], "runtime_closure_ready", ready)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["status"], "approved")
+        self.assertEqual(state["runtime_closure"]["approved_contract"], checkpoint["contract_path"])
+
+    def _approved_closure_run(self) -> str:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+        waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        return run_id
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def test_runtime_closure_act_runs_developer_in_its_own_session(self) -> None:
+        run_id = self._approved_closure_run()
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        frozen_packet_ref = state["latest_artifacts"]["developer_work_packet"]
+        frozen_packet_path = self.repo_root / frozen_packet_ref
+        frozen_packet_hash = self._sha256(frozen_packet_path)
+        act_manifest = self.store_run_dir(run_id) / "developer_execution" / "act_v1" / "manifest.json"
+        act_manifest_hash = self._sha256(act_manifest) if act_manifest.exists() else ""
+        worktree = Path(json.loads((self.repo_root / state["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8"))["worktree_path"])
+
+        written = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+
+        self.assertEqual(written["status"], "runtime_closure_written", written)
+        self.assertEqual(written["current_phase"], "runtime_closure")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["developer_execution"]["mode"], "runtime_closure")
+        self.assertEqual(state["developer_execution"]["status"], "completed")
+        self.assertEqual(state["runtime_closure"]["status"], "written")
+        # Frozen inputs stay byte-identical; the closure has its own packet and session.
+        self.assertEqual(state["latest_artifacts"]["developer_work_packet"], frozen_packet_ref)
+        self.assertEqual(self._sha256(frozen_packet_path), frozen_packet_hash)
+        if act_manifest_hash:
+            self.assertEqual(self._sha256(act_manifest), act_manifest_hash)
+        session_dir = self.store_run_dir(run_id) / "developer_execution" / "runtime_closure_v1"
+        self.assertTrue((session_dir / "manifest.json").is_file())
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["mode"], "runtime_closure")
+        packet = json.loads((self.repo_root / state["latest_artifacts"]["runtime_closure_work_packet"]).read_text(encoding="utf-8"))
+        self.assertEqual(packet["mode"], "runtime_closure")
+        units = {unit["component_id"]: unit for unit in packet["execution_units"]}
+        self.assertEqual(sorted(units), ["e2e", "web"])
+        web_context, e2e_context = units["web"]["closure_context"], units["e2e"]["closure_context"]
+        self.assertEqual([item["name"] for item in web_context["resolves"]], ["recordFeed"])
+        self.assertEqual([item["name"] for item in e2e_context["resolves"]], ["FEED_BASE_URL"])
+        self.assertEqual(web_context["stand_ins"], [])
+        self.assertEqual(e2e_context["stand_ins"][0]["module"], "tests/e2e/support/closure-stand-in-2.ts")
+        self.assertEqual(e2e_context["env_providers"], [{"env_key": "FEED_BASE_URL", "read_by": "apps/api/src/feed-client.ts", "default": "http://127.0.0.1:9100"}])
+        self.assertTrue(set(web_context["frozen_baseline_paths"]) and "apps/web/src/closure-provider-1.ts" not in web_context["frozen_baseline_paths"])
+        # Frozen-Plan worktree changes outside the closure scope are hash-bound baselines.
+        frozen_dirty = {item["path"] for item in manifest["expected_dirty_files"]}
+        self.assertTrue(frozen_dirty)
+        self.assertFalse(frozen_dirty & set(packet["output_contract"]["allowed_paths"]))
+        self.assertTrue((worktree / "apps/web/src/closure-provider-1.ts").is_file())
+        self.assertTrue((worktree / "tests/e2e/support/closure-stand-in-2.ts").is_file())
+        # Runtime config receipt is published for the closure packet (Plan env + closure env).
+        receipt = json.loads((self.repo_root / state["latest_artifacts"]["runtime_config_execution"]).read_text(encoding="utf-8"))
+        self.assertIn(f"_v{state['runtime_closure']['artifact_version']}.json", state["latest_artifacts"]["runtime_config_execution"])
+        self.assertIn("FEED_BASE_URL", (worktree / ".env.example").read_text(encoding="utf-8"))
+        self.assertEqual(receipt["run_id"], run_id)
+        self.assertTrue(state["runtime_closure"]["frozen_packet_sha256"])
+        self.assertEqual(state["runtime_closure"]["repair_iterations"], 0)
+
+    def test_runtime_closure_prompt_scope_write_scope_and_frozen_baselines(self) -> None:
+        from sdlc_harness.agents.developer.execution import (
+            DeveloperExecutionError,
+            _action_prompt,
+            _safe_write_target,
+            _unit_mandatory_obligations,
+        )
+
+        run_id = self._approved_closure_run()
+        written = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(written["status"], "runtime_closure_written", written)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        worktree = Path(json.loads((self.repo_root / state["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8"))["worktree_path"])
+        session_dir = self.store_run_dir(run_id) / "developer_execution" / "runtime_closure_v1"
+        manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+        items = {item["component_id"]: item for item in manifest["items"]}
+
+        # Each unit prompt carries its own closure context and nothing of the other unit's.
+        web_prompt = _action_prompt(
+            item=items["web"],
+            manifest=manifest,
+            history=[],
+            target_path=worktree,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        self.assertIn('"runtime_closure"', web_prompt)
+        self.assertIn("recordFeed", web_prompt)
+        self.assertIn("apps/web/src/closure-provider-1.ts#closureProvider1", web_prompt)
+        self.assertNotIn("closure-stand-in-2.ts", web_prompt)
+        self.assertNotIn("startClosureStandIn2", web_prompt)
+        # Non-closure Developer items keep their exact obligations: no closure key is added.
+        act_manifest = self.store_run_dir(run_id) / "developer_execution" / "act_v1" / "manifest.json"
+        for item in json.loads(act_manifest.read_text(encoding="utf-8"))["items"]:
+            self.assertNotIn("closure_context", item)
+            self.assertNotIn("runtime_closure", _unit_mandatory_obligations(item))
+
+        # Writes stay inside the unit's approved closure paths.
+        frozen_plan_path = next(path for path in items["web"]["closure_context"]["frozen_baseline_paths"])
+        for path in (frozen_plan_path, "package.json", "apps/web/src/unlisted.ts"):
+            with self.assertRaises(HarnessError) as outside:
+                _safe_write_target(worktree, path, items["web"]["paths"], run_id=run_id)
+            self.assertEqual(outside.exception.error_code, "developer_act_out_of_scope")
+
+        # A frozen-Plan file outside the closure scope is a hash-bound baseline: editing it is drift.
+        baseline = next(item["path"] for item in manifest["expected_dirty_files"] if item["path"] != ".env.example")
+        (worktree / baseline).write_text((worktree / baseline).read_text(encoding="utf-8") + "\n// drift\n", encoding="utf-8")
+        packet = json.loads((self.repo_root / state["latest_artifacts"]["runtime_closure_work_packet"]).read_text(encoding="utf-8"))
+        with self.assertRaises(DeveloperExecutionError) as drift:
+            PhaseFourWorkflow(self.settings).developer_tool_loop.execute(
+                run_id=run_id,
+                work_packet=packet,
+                target_path=worktree,
+                session_iteration=1,
+                expected_dirty_paths=state["runtime_closure"]["expected_dirty_paths"],
+                session_scope="runtime_closure",
+            )
+        self.assertEqual(drift.exception.error_code, "developer_workspace_drift")
+
+    # ---------------------------------------------------------------- L5.3.6 post-execution
+
+    def _written_closure_run(self, *, outcomes=None, validator=None, **settings) -> tuple[str, ClosureVerificationRunnerStub]:
+        if settings:
+            self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce", **settings)
+        run_id = self._approved_closure_run() if not settings else self._approved_closure_run_with_current_settings()
+        written = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(written["status"], "runtime_closure_written", written)
+        return run_id, ClosureVerificationRunnerStub(outcomes)
+
+    def _approved_closure_run_with_current_settings(self) -> str:
+        run_id = self._create_closure_run()
+        waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        return run_id
+
+    def _closure_step(self, run_id: str, runner: ClosureVerificationRunnerStub, *, validator=None) -> dict[str, object]:
+        workflow = PhaseFourWorkflow(self.settings)
+        workflow.verification_runner = runner
+        if validator is not None:
+            workflow.closure_validator = RuntimeClosureValidator(validator)
+        return workflow.continue_run(run_id=run_id)
+
+    def _closure_worktree(self, run_id: str) -> Path:
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        return Path(json.loads((self.repo_root / state["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8"))["worktree_path"])
+
+    def test_runtime_closure_fake_run_goes_from_written_to_runtime_closed_then_qa(self) -> None:
+        run_id, runner = self._written_closure_run()
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+
+        verified = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(verified["status"], "runtime_closure_verified", verified)
+        self.assertEqual(validator.calls, 0)  # no Validator while the mechanical steps run
+        call = runner.closure_calls[0]
+        self.assertEqual(call["stage_ids"][-2:], ["runtime_probe", "cleanup"])
+        self.assertEqual(len(call["runtime_probe"].probe_ids), 1)
+        self.assertEqual(call["runtime_probe"].stand_in_env_keys, ("FEED_BASE_URL",))
+        spec = (self._closure_worktree(run_id) / "tests/e2e/runtime-closure.probe.spec.ts").read_text(encoding="utf-8")
+        self.assertIn('test("RP-1"', spec)
+        # The owner accepted this contract-review warning at the checkpoint; the code review must see it.
+        review_file = self.repo_root / verified["latest_artifacts"]["runtime_closure_contract_review"]
+        accepted = {"severity": "warning", "category": "probe_evidence", "issue": "accepted at checkpoint"}
+        review_file.write_text(
+            json.dumps({**json.loads(review_file.read_text(encoding="utf-8")), "warnings": [accepted]}), encoding="utf-8"
+        )
+
+        closed = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(closed["status"], "runtime_closed", closed)
+        self.assertEqual(validator.calls, 1)
+        self.assertIn('"prompt_kind": "Runtime Closure Code Review v1"', validator.prompts[0])
+        code_prompt = json.loads(validator.prompts[0])
+        self.assertEqual(code_prompt["accepted_contract_warnings"], [accepted])
+        self.assertTrue(code_prompt["execution_facts"])
+        self.assertIn("Never raise one of them", "\n".join(code_prompt["rules"]))
+        report = closed["quality_reports"]["runtime_closure"]
+        self.assertEqual((report["runnable_status"], report["blocked_scenario_ids"]), ("fixture_bound", []))
+        markdown = (self.repo_root / closed["latest_artifacts"]["runtime_closure_report"]).read_text(encoding="utf-8")
+        self.assertIn("## Probes by scenario", markdown)
+        self.assertIn("| RP-1 |", markdown)
+        for key in ("runtime_closure_verification", "runtime_closure_regression", "runtime_closure_code_review"):
+            self.assertTrue((self.repo_root / closed["latest_artifacts"][key]).is_file(), key)
+        regression = json.loads((self.repo_root / closed["latest_artifacts"]["runtime_closure_regression"]).read_text(encoding="utf-8"))
+        self.assertTrue(regression["ok"])
+        publication = PhaseFourWorkflow(self.settings)._runtime_closure_publication_paths(
+            state=PhaseOneWorkflow(self.settings).store.read_state(run_id), run_id=run_id
+        )
+        self.assertIn("apps/web/src/closure-provider-1.ts", publication)
+        self.assertIn("tests/e2e/runtime-closure.probe.spec.ts", publication)
+
+        qa = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(qa["status"], "qa_tested", qa)
+
+    def test_runtime_closure_environment_failure_blocks_without_counting_then_retries(self) -> None:
+        run_id, runner = self._written_closure_run(outcomes=["env", "passed"])
+
+        blocked = self._closure_step(run_id, runner)
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_environment_failed")
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["repair_iterations"], 0)
+        self.assertNotIn("runtime_closure_repair_feedback", state["latest_artifacts"])
+
+        verified = self._closure_step(run_id, runner)
+        self.assertEqual(verified["status"], "runtime_closure_verified", verified)
+
+    def test_runtime_closure_policy_failure_blocks_as_harness_fault(self) -> None:
+        run_id, runner = self._written_closure_run(outcomes=["policy"])
+        blocked = self._closure_step(run_id, runner)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_verification_policy_failed", blocked)
+        self.assertEqual(blocked["allowed_next_actions"], ["get_status", "cancel_run"])
+
+    def test_runtime_closure_probe_failure_repairs_routed_units_and_reruns_from_g14(self) -> None:
+        run_id, runner = self._written_closure_run(outcomes=["probe_fail", "passed"])
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+
+        needed = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(needed["status"], "runtime_closure_repair_needed", needed)
+        self.assertEqual(validator.calls, 0)
+        feedback = json.loads((self.repo_root / needed["latest_artifacts"]["runtime_closure_repair_feedback"]).read_text(encoding="utf-8"))
+        self.assertEqual(feedback["feedback_source"], "runtime_closure_verification")
+        failure = feedback["probe_failures"][0]
+        for field in ("probe_id", "scenario_ids", "service", "method", "path", "expected_status", "actual_status", "expected_min_items", "actual_items", "response_body_excerpt", "proves_input_ids"):
+            self.assertIn(field, failure)
+        finding = feedback["repair_objective"]["contract_findings"][0]
+        self.assertEqual(finding["routing_rule"], 1)
+        contract = json.loads((self.repo_root / needed["latest_artifacts"]["runtime_closure_contract"]).read_text(encoding="utf-8"))
+        resolving = sorted(
+            unit["unit_id"] for unit in contract["closure_units"] if set(unit["resolves_input_ids"]) & set(failure["proves_input_ids"])
+        )
+        self.assertEqual(finding["unit_ids"], resolving)
+
+        written = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(written["status"], "runtime_closure_written", written)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["repair_iterations"], 1)
+        self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "runtime_closure_repair_v1").is_dir())
+
+        verified = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(verified["status"], "runtime_closure_verified", verified)
+        self.assertEqual(len(runner.closure_calls), 2)
+        self.assertEqual(validator.calls, 0)
+
+    def test_runtime_closure_shared_repair_counter_hits_the_limit(self) -> None:
+        run_id, runner = self._written_closure_run(outcomes=["probe_fail", "probe_fail"], SDLC_IMPLEMENTATION_REPAIR_LIMIT="1")
+
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_repair_needed")
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_written")
+        blocked = self._closure_step(run_id, runner)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_repair_limit_exceeded", blocked)
+
+    def test_runtime_closure_code_review_blocker_repairs_and_frozen_conflict_blocks(self) -> None:
+        run_id, runner = self._written_closure_run()
+        validator = ScriptedClosureLlm([closure_code_blocker, closure_code_frozen_conflict])
+
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_verified")
+        needed = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(needed["status"], "runtime_closure_repair_needed", needed)
+        feedback = json.loads((self.repo_root / needed["latest_artifacts"]["runtime_closure_repair_feedback"]).read_text(encoding="utf-8"))
+        self.assertEqual(feedback["feedback_source"], "runtime_closure_code_review")
+        self.assertEqual(feedback["repair_objective"]["contract_findings"][0]["routing_rule"], 3)
+
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_written")
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_verified")
+        blocked = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_frozen_contract_conflict", blocked)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["repair_iterations"], 1)  # the conflict is not routed to repair
+
+    def test_runtime_closure_g14_missing_provider_repairs_and_stray_file_blocks(self) -> None:
+        run_id, runner = self._written_closure_run()
+        worktree = self._closure_worktree(run_id)
+
+        (worktree / "apps/web/src/closure-provider-1.ts").write_text("export {};\n", encoding="utf-8")
+        needed = self._closure_step(run_id, runner)
+        self.assertEqual(needed["status"], "runtime_closure_repair_needed", needed)
+        self.assertEqual(runner.closure_calls, [])  # G14 runs before any verification stage
+        feedback = json.loads((self.repo_root / needed["latest_artifacts"]["runtime_closure_repair_feedback"]).read_text(encoding="utf-8"))
+        self.assertEqual(feedback["g14_issues"][0]["check"], "provider_missing")
+
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_written")
+        (worktree / "apps/api/src/stray-closure-file.ts").write_text("export const stray = 1;\n", encoding="utf-8")
+        blocked = self._closure_step(run_id, runner)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_scope_conflict", blocked)
+
+    def test_runtime_closure_code_review_contract_breaks_twice_then_retries_review(self) -> None:
+        run_id, runner = self._written_closure_run()
+        wrong_ids = json.dumps({"summary": "x", "reviewed_input_ids": ["RI-000000000000"], "findings": []})
+        validator = ScriptedClosureLlm([wrong_ids, wrong_ids], default=fake_runtime_closure_review)
+
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_verified")
+        blocked = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_inconclusive", blocked)
+        self.assertEqual(validator.calls, 2)  # one exact-error retry, then fail closed
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        self.assertNotIn("runtime_closure_repair_feedback", blocked["latest_artifacts"])
+
+        closed = self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(closed["status"], "runtime_closed", closed)
+        self.assertEqual(len(runner.closure_calls), 1)  # the retry resumed review, not verification
+
+    def test_runtime_closure_code_review_step_review_resumes_the_review(self) -> None:
+        run_id, runner = self._written_closure_run()
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_verified")
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+
+        def workflow(**review):
+            flow = PhaseFourWorkflow(self.settings, runtime_closure_step_review={"enabled": True, "review_input": False, "review_output": True, **review})
+            flow.verification_runner = runner
+            flow.closure_validator = RuntimeClosureValidator(validator)
+            # Regression has its own (Code Validator) review; keep it off to isolate the closure review pause.
+            flow.code_validation_step_review = {**flow.code_validation_step_review, "enabled": False}
+            return flow
+
+        paused = workflow().continue_run(run_id=run_id)
+        self.assertEqual(paused["status"], "runtime_closure_step_review_required", paused)
+        call_id = paused["pending_step_review"]["call_id"]
+        self.assertTrue(call_id.startswith("runtime-closure-code-review-"))
+        closed = workflow(call_id=call_id, decision="approve").continue_runtime_closure_step_review(run_id=run_id)
+        self.assertEqual(closed["status"], "runtime_closed", closed)
+        self.assertEqual(validator.calls, 1)  # the approved output was replayed
+
+    def test_runtime_closure_new_file_recorded_by_the_session_is_an_approved_scope_extension(self) -> None:
+        run_id, runner = self._written_closure_run()
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        packet = json.loads((self.repo_root / state["latest_artifacts"]["runtime_closure_work_packet"]).read_text(encoding="utf-8"))
+        web_unit = next(unit for unit in packet["execution_units"] if unit["component_id"] == "web")
+        self.assertEqual(web_unit["new_file_policy"]["roots"], ["apps/web/src"])
+        self.assertEqual(web_unit["closure_context"]["new_file_roots"], ["apps/web/src"])
+
+        # Simulate a Developer write that created a new file under its component root (D11 b).
+        journal_ref = state["latest_artifacts"]["runtime_closure_execution_journal"]
+        journal_file = self.repo_root / journal_ref
+        journal = json.loads(journal_file.read_text(encoding="utf-8"))
+        journal["scope_extensions"] = [{"path": "apps/web/src/session-helper.ts", "item_id": web_unit["unit_id"], "rule": "D11b"}]
+        journal_file.write_text(json.dumps(journal), encoding="utf-8")
+        (self._closure_worktree(run_id) / "apps/web/src/session-helper.ts").write_text("export const helper = 1;\n", encoding="utf-8")
+        workflow = PhaseFourWorkflow(self.settings)
+        state["runtime_closure"] = workflow._with_session_scope_extensions(state["runtime_closure"], journal_ref=journal_ref, run_id=run_id)
+        store.write_state(state)
+        self.assertEqual(
+            [(item["path"], item["rule"]) for item in state["runtime_closure"]["scope_extensions"]],
+            [("apps/web/src/session-helper.ts", "D11b")],
+        )
+
+        verified = self._closure_step(run_id, runner)  # G14 accepts the recorded extension
+        self.assertEqual(verified["status"], "runtime_closure_verified", verified)
+        publication = workflow._runtime_closure_publication_paths(state={**store.read_state(run_id), "runtime_closure": {**store.read_state(run_id)["runtime_closure"], "status": "runtime_closed"}}, run_id=run_id)
+        self.assertIn("apps/web/src/session-helper.ts", publication)
+
+    def test_runtime_closure_webserver_start_failure_is_a_composition_defect(self) -> None:
+        run_id, runner = self._written_closure_run(outcomes=["webserver"])
+        needed = self._closure_step(run_id, runner)
+        self.assertEqual(needed["status"], "runtime_closure_repair_needed", needed)
+        feedback = json.loads((self.repo_root / needed["latest_artifacts"]["runtime_closure_repair_feedback"]).read_text(encoding="utf-8"))
+        finding = feedback["repair_objective"]["contract_findings"][0]
+        self.assertEqual(finding["routing_rule"], 5)
+        self.assertEqual(feedback["verification"]["stage_results"][-2]["stage_id"], "runtime_probe")
+
+    def test_runtime_closure_act_transport_failure_resumes_the_closure_session(self) -> None:
+        run_id = self._approved_closure_run()
+        workflow = PhaseFourWorkflow(self.settings)
+        original = workflow.developer_tool_loop.execute
+        calls: list[dict[str, object]] = []
+
+        def failing_execute(**kwargs):
+            calls.append(kwargs)
+            raise HarnessError("llm_transport_failed", "LLM request failed: connection reset")
+
+        workflow.developer_tool_loop.execute = failing_execute
+        paused = workflow.continue_run(run_id=run_id)
+        self.assertEqual(paused["status"], "implementation_paused", paused)
+        self.assertEqual(paused["current_phase"], "runtime_closure")
+        self.assertEqual(calls[0]["session_scope"], "runtime_closure")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["developer_execution"]["mode"], "runtime_closure")
+        packet_ref = state["runtime_closure"]["work_packet"]
+        del original
+
+        resumed = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(resumed["status"], "runtime_closure_written", resumed)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["work_packet"], packet_ref)  # the packet is not rebuilt
+        self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "runtime_closure_v2").exists())
+
+    def test_runtime_closure_inconclusive_outputs_fail_closed_and_retry_on_a_new_attempt(self) -> None:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+        invalid_contract = json.dumps({"resolutions": "not a list", "closure_units": [], "runtime_probes": []})
+        planner = ScriptedClosureLlm(
+            [
+                "",
+                '{"resolutions": [',
+                ('{"resolutions": []}', "length"),
+                HarnessError("llm_transport_failed", "connection reset"),
+                invalid_contract,
+                invalid_contract,
+            ],
+            default=fake_runtime_closure_plan,
+        )
+        for expected_attempt in range(1, 6):
+            response = self._closure_workflow(planner=planner).continue_run(run_id=run_id)
+            self.assertEqual(response["status"], "blocked", response)
+            self.assertEqual(response["last_error"]["error_code"], "runtime_closure_inconclusive", response)
+            self.assertIsNone(response["pending_checkpoint"])
+            self.assertIn("continue_run", response["allowed_next_actions"])
+            self.assertFalse(self._closure_contract_exists(run_id))
+            state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+            self.assertEqual(state["runtime_closure"]["planning_attempt"], expected_attempt)
+        self.assertEqual(planner.calls, 6)  # the contract-invalid output got exactly one retry
+
+        validator = ScriptedClosureLlm([""], default=fake_runtime_closure_review)
+        blocked = self._closure_workflow(planner=planner, validator=validator).continue_run(run_id=run_id)
+        self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_inconclusive", blocked)
+        self.assertFalse(self._closure_contract_exists(run_id))
+
+        waiting = self._closure_workflow(planner=planner, validator=validator).continue_run(run_id=run_id)
+        self.assertEqual(waiting["status"], "waiting_runtime_closure_review", waiting)
+        self.assertTrue(self._closure_contract_exists(run_id))
+
+    def test_runtime_closure_validator_blocker_gets_one_planner_patch_round(self) -> None:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+        planner = ScriptedClosureLlm(default=fake_runtime_closure_plan)
+        validator = ScriptedClosureLlm([closure_blocker_review], default=fake_runtime_closure_review)
+
+        waiting = self._closure_workflow(planner=planner, validator=validator).continue_run(run_id=run_id)
+
+        self.assertEqual(waiting["status"], "waiting_runtime_closure_review", waiting)
+        self.assertEqual((planner.calls, validator.calls), (2, 2))
+        self.assertNotIn('"previous_round"', planner.prompts[0])
+        self.assertIn('"previous_round"', planner.prompts[1])
+        self.assertIn("The demo provider returns nothing usable.", planner.prompts[1])
+        self.assertIn("previous_blocking_findings", validator.prompts[1])
+        review = json.loads((self.repo_root / waiting["latest_artifacts"]["runtime_closure_contract_review"]).read_text(encoding="utf-8"))
+        self.assertEqual(len(review["rounds"]), 2)
+
+    def test_runtime_closure_unsupported_config_kind_blocks_before_checkpoint(self) -> None:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+
+        def with_compose(prompt: str) -> str:
+            output = json.loads(fake_runtime_closure_plan(prompt))
+            output["runtime_config_changes"] = [
+                {"kind": "compose_service", "unit_key": "web-closure", "service": "feed", "image": "feed:1.0.0", "healthcheck": "true", "purpose": "feed"}
+            ]
+            return json.dumps(output)
+
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+        response = self._closure_workflow(planner=ScriptedClosureLlm(default=with_compose), validator=validator).continue_run(run_id=run_id)
+
+        self.assertEqual(response["status"], "blocked", response)
+        self.assertEqual(response["last_error"]["error_code"], "runtime_closure_config_unsupported")
+        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertIsNone(response["pending_checkpoint"])
+        self.assertEqual(validator.calls, 0)
+        self.assertFalse(self._closure_contract_exists(run_id))
+
+    def test_runtime_closure_step_review_pauses_each_call_and_replays_approved_ones(self) -> None:
+        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        run_id = self._create_closure_run()
+        planner = ScriptedClosureLlm(default=fake_runtime_closure_plan)
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+        review = {"review_input": True, "review_output": True}
+
+        paused = self._closure_workflow(planner=planner, validator=validator, **review).continue_run(run_id=run_id)
+        expected = [
+            ("runtime-closure-planner-0001-a01-input", "input", 0, 0),
+            ("runtime-closure-planner-0001-a01", "output", 1, 0),
+            ("runtime-closure-validator-0001-a01-input", "input", 1, 0),
+            ("runtime-closure-validator-0001-a01", "output", 1, 1),
+        ]
+        for call_id, stage, planner_calls, validator_calls in expected:
+            self.assertEqual(paused["status"], "runtime_closure_step_review_required", paused)
+            self.assertEqual((paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]), (call_id, stage))
+            self.assertEqual((planner.calls, validator.calls), (planner_calls, validator_calls))
+            self.assertFalse(self._closure_contract_exists(run_id))
+            paused = self._closure_workflow(
+                planner=planner, validator=validator, call_id=call_id, decision="approve"
+            ).continue_runtime_closure_step_review(run_id=run_id)
+
+        self.assertEqual(paused["status"], "waiting_runtime_closure_review", paused)
+        self.assertEqual((planner.calls, validator.calls), (1, 1))
+        exchange_dir = self.store_run_dir(run_id) / "runtime_closure_execution" / "step_review" / "attempt_1"
+        self.assertTrue((exchange_dir / "planner" / "exchange_runtime-closure-planner-0001-a01.json").is_file())
+        self.assertTrue((exchange_dir / "validator" / "exchange_runtime-closure-validator-0001-a01.json").is_file())
+
     def _retired_java_code_trace_normalizes_boolean_and_notification_sequence_mappings(self) -> None:
         source_dir = self.target_repo / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"
         test_dir = self.target_repo / "src" / "test" / "java" / "com" / "sdlc" / "etour" / "heritage"
@@ -2928,7 +3892,7 @@ class PhaseFourTest(unittest.TestCase):
         }
 
         with (
-            patch("sdlc_harness.verification.runner.subprocess.run") as subprocess_run,
+            patch("sdlc_harness.verification.runner._run_bounded") as subprocess_run,
             self.assertRaises(HarnessError) as caught,
         ):
             VerificationRunner(timeout_seconds=10).run(

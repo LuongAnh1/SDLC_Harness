@@ -16,6 +16,7 @@ from ..agents.developer import (
     refresh_developer_work_packet,
     upgrade_developer_dependency_scope,
 )
+from ..agents.developer.execution import developer_session_name
 from ..agents.developer.runtime_config import (
     env_runtime_config_changes,
     materialize_env_example,
@@ -811,6 +812,7 @@ class PhaseFourImplementationCycle:
         repair_feedback: dict[str, object] | None = None,
         repair_scope: str = "implementation",
         expected_dirty_paths: list[str] | None = None,
+        session_scope: str = "",
     ) -> DeveloperExecutionResult:
         """Chạy một durable tool-loop session và phản chiếu tiến độ vào workflow state."""
 
@@ -900,15 +902,17 @@ class PhaseFourImplementationCycle:
                 expected_dirty_paths=expected_dirty_paths,
                 verification_policy=_verification_policy_for_state(state, run_id=run_id),
                 on_progress=persist_progress,
+                **({"session_scope": session_scope} if session_scope else {}),
             )
         except DeveloperExecutionError:
             raise
         except HarnessError as exc:
-            session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = (
-                f"{repair_scope}_repair_v{session_ordinal}"
-                if repair_feedback
-                else f"act_v{max(1, session_ordinal)}"
+            session_name = developer_session_name(
+                repair_feedback=bool(repair_feedback),
+                repair_scope=repair_scope,
+                session_scope=session_scope,
+                repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
             )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"
@@ -930,11 +934,12 @@ class PhaseFourImplementationCycle:
                 },
             ) from exc
         except Exception as exc:
-            session_ordinal = repair_iteration if session_iteration is None else session_iteration
-            session_name = (
-                f"{repair_scope}_repair_v{session_ordinal}"
-                if repair_feedback
-                else f"act_v{max(1, session_ordinal)}"
+            session_name = developer_session_name(
+                repair_feedback=bool(repair_feedback),
+                repair_scope=repair_scope,
+                session_scope=session_scope,
+                repair_iteration=repair_iteration,
+                session_iteration=session_iteration,
             )
             session_dir = self.store.run_dir(run_id) / "developer_execution" / session_name
             manifest_file = session_dir / "manifest.json"

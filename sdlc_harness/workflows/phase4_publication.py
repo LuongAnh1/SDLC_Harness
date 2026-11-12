@@ -184,6 +184,7 @@ class PhaseFourPublicationCycle:
                 qa_generated=qa_generated,
                 run_id=run_id,
                 planning_policy=_planning_policy_for_state(state, run_id=run_id),
+                extra_paths=self._runtime_closure_publication_paths(state=state, run_id=run_id),
             )
             pr_title = f"[{issue_key}] Implement approved use case"
             pr_body = _code_review_pr_body(
@@ -524,11 +525,15 @@ class PhaseFourPublicationCycle:
         target_path: Path,
         work_packet: dict[str, object],
         verification_evidence: dict[str, object] | None = None,
+        approved_closure_changes: dict[str, object] | None = None,
     ) -> object:
         approved_context = self._code_trace_approved_context(
             artifact_paths=artifact_paths,
             run_id=run_id,
         )
+        if approved_closure_changes:
+            # Only tasks whose sources the closure changed receive it; other prompts stay byte-identical.
+            approved_context = {**approved_context, "approved_closure_changes": approved_closure_changes}
         verification = (
             _dict_value(verification_evidence)
             if verification_evidence is not None

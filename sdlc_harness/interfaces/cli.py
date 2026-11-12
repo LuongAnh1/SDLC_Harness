@@ -65,6 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     continue_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     continue_run.add_argument("--implementation-repair-limit", default=None)
     continue_run.add_argument("--qa-repair-limit", default=None)
+    continue_run.add_argument("--implementation-plan-repair-limit", default=None)
+    continue_run.add_argument("--runtime-closure-mode", choices=["off", "enforce"], default=None)
     continue_run.add_argument("--step-review", action="store_true")
     continue_run.add_argument("--step-review-input", action="store_true")
     continue_run.add_argument("--step-review-output", action="store_true")
@@ -226,6 +228,7 @@ _SETTINGS_OVERRIDE_ARGUMENTS: dict[str, str] = {
     "implementation_plan_repair_limit": "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT",
     "implementation_repair_limit": "SDLC_IMPLEMENTATION_REPAIR_LIMIT",
     "qa_repair_limit": "SDLC_QA_REPAIR_LIMIT",
+    "runtime_closure_mode": "SDLC_RUNTIME_CLOSURE_MODE",
     "sync_mode": "SDLC_SYNC_MODE",
     "target_repo": "SDLC_TARGET_REPO_PATH",
     "target_remote": "SDLC_TARGET_REPO_REMOTE",

@@ -20,12 +20,26 @@ def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, objec
             "Fake Developer generation requires the immutable project profile context.",
             run_id=str(work_packet.get("run_id") or "") or None,
         )
+    # Runtime-closure units name their providers as planned code targets; declare them so fake runs pass G14.
+    closure_symbols: dict[str, list[str]] = defaultdict(list)
+    if work_packet.get("mode") == "runtime_closure":
+        for unit in _dict_items(work_packet.get("execution_units")):
+            for target in _dict_items(unit.get("planned_code_targets")):
+                path, symbol = str(target.get("path") or ""), str(target.get("symbol") or "")
+                if path and symbol and symbol not in closure_symbols[path]:
+                    closure_symbols[path].append(symbol)
     for path in allowed_paths:
         content = _profiled_content(
             path,
             signatures=_dict_items(_dict_value(context.get("signatures_by_file")).get(path)),
             mappings=_dict_items(mappings_by_file.get(path)),
         )
+        if closure_symbols.get(path):
+            content = "".join(
+                f"export async function {symbol}(..._args: unknown[]): Promise<{{ close(): Promise<void> }}> {{\n"
+                "  return { close: async () => undefined };\n}\n"
+                for symbol in closure_symbols[path]
+            )
         files.append(
             {
                 "path": path,

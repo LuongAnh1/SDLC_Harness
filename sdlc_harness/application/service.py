@@ -29,6 +29,19 @@ from ..workflows.target_repo import TargetRepoPreparationWorkflow
 from ..workflows.workspace_adoption import WorkspaceAdoptionWorkflow
 from ..workflows.workspace_cleanup import WorkspaceCleanupWorkflow
 
+# Paused Phase 4 status -> (PhaseFourWorkflow review argument, resume method).
+_PHASE4_STEP_REVIEW_RESUMES = {
+    "implementation_validation_step_review_required": (
+        "code_validation_step_review",
+        "continue_code_validation_step_review",
+    ),
+    "qa_step_review_required": ("qa_step_review", "continue_qa_step_review"),
+    "runtime_closure_step_review_required": (
+        "runtime_closure_step_review",
+        "continue_runtime_closure_step_review",
+    ),
+}
+
 
 class ApplicationService:
     """Dựng settings và dispatch command tới workflow sở hữu nghiệp vụ."""
@@ -273,7 +286,9 @@ class ApplicationService:
                     settings,
                     plan_step_review=review,
                 ).continue_implementation_plan_step_review(run_id=run_id)
-            if str(state.get("status") or "") == "implementation_validation_step_review_required":
+            phase4_resume = _PHASE4_STEP_REVIEW_RESUMES.get(str(state.get("status") or ""))
+            if phase4_resume is not None:
+                review_argument, resume_method = phase4_resume
                 review = {"enabled": True}
                 for argument_name, review_key in (
                     ("step_review_call_id", "call_id"),
@@ -283,10 +298,8 @@ class ApplicationService:
                     value = self._optional_text(command, argument_name)
                     if value is not None:
                         review[review_key] = value
-                return PhaseFourWorkflow(
-                    settings,
-                    code_validation_step_review=review,
-                ).continue_code_validation_step_review(run_id=run_id)
+                workflow = PhaseFourWorkflow(settings, **{review_argument: review})
+                return getattr(workflow, resume_method)(run_id=run_id)
             developer_review: dict[str, object] = {}
             review_all = bool(command.arguments.get("step_review"))
             if review_all or bool(command.arguments.get("step_review_input")):
@@ -307,6 +320,8 @@ class ApplicationService:
                 settings,
                 developer_step_review=developer_review or None,
                 code_validation_step_review=developer_review or None,
+                qa_step_review=developer_review or None,
+                runtime_closure_step_review=developer_review or None,
             ).continue_until_implementation_checkpoint(
                 run_id=run_id
             )

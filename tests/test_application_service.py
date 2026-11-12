@@ -616,6 +616,64 @@ class ApplicationServiceTests(unittest.TestCase):
         )
         phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
 
+    def test_continue_run_routes_qa_step_review_to_phase_four_qa(self) -> None:
+        self.write_state(
+            status="qa_step_review_required",
+            current_phase="qa_testing",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "qa_tested"}
+        arguments = {
+            "run_id": "run_1",
+            "step_review_call_id": "qa-generation-0001-a01",
+            "step_review_decision": "approve",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {"status": "qa_step_review_required"}
+            phase_four_type.return_value.continue_qa_step_review.return_value = response
+
+            result = self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(result, response)
+        self.assertEqual(
+            phase_four_type.call_args.kwargs["qa_step_review"],
+            {"enabled": True, "call_id": "qa-generation-0001-a01", "decision": "approve"},
+        )
+        phase_four_type.return_value.continue_qa_step_review.assert_called_once_with(run_id="run_1")
+        phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
+    def test_continue_run_routes_runtime_closure_step_review(self) -> None:
+        self.write_state(
+            status="runtime_closure_step_review_required",
+            current_phase="runtime_closure",
+            allowed_next_actions=["continue_run", "get_status", "cancel_run"],
+        )
+        response = {"ok": True, "run_id": "run_1", "status": "waiting_runtime_closure_review"}
+        arguments = {
+            "run_id": "run_1",
+            "step_review_call_id": "runtime-closure-planner-0001-a01",
+            "step_review_decision": "approve",
+        }
+        with (
+            patch("sdlc_harness.application.service.PhaseOneWorkflow") as phase_one_type,
+            patch("sdlc_harness.application.service.PhaseFourWorkflow") as phase_four_type,
+        ):
+            phase_one_type.return_value.store.read_state.return_value = {"status": "runtime_closure_step_review_required"}
+            phase_four_type.return_value.continue_runtime_closure_step_review.return_value = response
+
+            result = self.service.execute(self.command("continue-run", arguments))
+
+        self.assertEqual(result, response)
+        self.assertEqual(
+            phase_four_type.call_args.kwargs["runtime_closure_step_review"],
+            {"enabled": True, "call_id": "runtime-closure-planner-0001-a01", "decision": "approve"},
+        )
+        phase_four_type.return_value.continue_runtime_closure_step_review.assert_called_once_with(run_id="run_1")
+        phase_four_type.return_value.continue_until_implementation_checkpoint.assert_not_called()
+
     def test_approval_and_workspace_commands_dispatch(self) -> None:
         self.write_state()
         with (

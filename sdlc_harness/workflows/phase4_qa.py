@@ -6,7 +6,7 @@ from ..agents.developer import (
     DeveloperExecutionError,
     refresh_developer_work_packet,
 )
-from ..agents.tester import QaTestResult
+from ..agents.tester import QaTestResult, QaTesterAgent
 from ..artifacts.writers import (
     write_phase4_code_change_report,
     write_phase4_code_trace_report,
@@ -20,7 +20,7 @@ from ..artifacts.writers import (
     write_phase4_test_report,
 )
 from ..core.errors import HarnessError
-from ..llm.step_review import LlmStepReviewRequired
+from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..storage.runtime import utc_now_iso
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4 import (
@@ -63,9 +63,12 @@ class PhaseFourQaCycle:
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
         qa_version = _next_qa_artifact_version(self.store, run_id)
+        # Set only while QA started from a QA repair is paused for step review.
+        repaired_from = str(_dict_value(state.get("qa_resume")).get("repaired_from") or "") or None
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
+            _require_runtime_closure_for_qa(state=state, work_packet=work_packet, run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             qa_run = self._run_qa_generated_tests(
                 state=state,
@@ -74,6 +77,15 @@ class PhaseFourQaCycle:
                 work_packet=work_packet,
                 target_info=target_info,
                 qa_version=qa_version,
+                repaired_from=repaired_from,
+            )
+        except LlmStepReviewRequired as exc:
+            return self._pause_for_qa_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+                latest_artifacts=latest_artifacts,
+                repaired_from=repaired_from,
             )
         except HarnessError as exc:
             return self._block_qa_error(
@@ -93,7 +105,7 @@ class PhaseFourQaCycle:
             qa_run=qa_run,
             qa_version=qa_version,
             qa_repair_iterations=_int_value(state.get("qa_repair_iterations")),
-            repaired_from=None,
+            repaired_from=repaired_from,
         )
 
     def _continue_qa_repair(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
@@ -480,6 +492,18 @@ class PhaseFourQaCycle:
                 qa_version=qa_version,
                 repaired_from=feedback_path,
             )
+        except LlmStepReviewRequired as exc:
+            # Developer repair, verification and trace already passed; persist them so
+            # the resume runs only QA and never repeats the repair.
+            return self._pause_for_qa_step_review(
+                state=state,
+                run_id=run_id,
+                progress=exc.progress,
+                latest_artifacts=latest_artifacts,
+                repaired_from=feedback_path,
+                quality_reports=quality_reports,
+                qa_repair_iterations=repair_iteration,
+            )
         except HarnessError as exc:
             return self._block_qa_error(
                 state=state,
@@ -533,7 +557,23 @@ class PhaseFourQaCycle:
             context["repaired_from"] = repaired_from
         if qa_policy is not None:
             context["qa_generation_profile"] = qa_policy.prompt_context()
-        generated_tests = self.qa_tester.generate_tests(
+        qa_tester = self.qa_tester
+        base_client = getattr(qa_tester, "llm_client", None)
+        if base_client is not None and bool(self.qa_step_review.get("enabled")):
+            # Each agent attempt is its own ordinal, so attempt 2 is reviewed separately.
+            qa_tester = QaTesterAgent(
+                ReviewableLlmClient(
+                    base_client,
+                    store=self.store,
+                    run_id=run_id,
+                    review=self.qa_step_review,
+                    call_prefix="qa-generation",
+                    execution_dir=f"qa_execution/step_review/v{qa_version}",
+                    error_prefix="qa",
+                    label="QA Tester",
+                )
+            )
+        generated_tests = qa_tester.generate_tests(
             context=context,
             qa_policy=qa_policy,
         )
@@ -670,6 +710,7 @@ class PhaseFourQaCycle:
         result = qa_run["result"]
         if not isinstance(result, QaTestResult):
             raise HarnessError("qa_test_failed", "QA result object is invalid.", run_id=run_id)
+        state["qa_resume"] = None
         applied_tests = _dict_items(qa_run.get("applied_tests"))
         quality_reports = {
             **(quality_reports_override or _dict_value(state.get("quality_reports"))),
@@ -821,6 +862,7 @@ class PhaseFourQaCycle:
             ),
             "last_error": exc.to_response(),
             "summary_for_user": f"{summary_prefix}: {exc.message}",
+            "qa_resume": None,
         }
         if qa_repair_iterations is not None:
             update["qa_repair_iterations"] = qa_repair_iterations
@@ -828,3 +870,103 @@ class PhaseFourQaCycle:
         self.store.write_state(state)
         return self._status_response(state, created_new_run=False)
 
+    def _pause_for_qa_step_review(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        progress: dict[str, object],
+        latest_artifacts: dict[str, str],
+        repaired_from: str | None,
+        quality_reports: dict[str, object] | None = None,
+        qa_repair_iterations: int | None = None,
+    ) -> dict[str, object]:
+        """Persist a QA generation exchange that waits for operator review."""
+
+        update: dict[str, object] = {
+            "updated_at": utc_now_iso(),
+            "current_phase": "qa_testing",
+            "status": "qa_step_review_required",
+            "latest_artifacts": latest_artifacts,
+            "pending_checkpoint": None,
+            "pending_step_review": progress,
+            "qa_step_review": dict(self.qa_step_review),
+            "qa_resume": {"repaired_from": repaired_from},
+            "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+            "last_error": None,
+            "summary_for_user": (
+                f"QA/Tester Agent đang chờ duyệt {progress.get('review_stage')} "
+                f"{progress.get('call_id')} cho run {run_id}."
+            ),
+        }
+        if quality_reports is not None:
+            update["quality_reports"] = quality_reports
+        if qa_repair_iterations is not None:
+            update["qa_repair_iterations"] = qa_repair_iterations
+        state.update(update)
+        self.store.write_state(state)
+        return self._status_response(state, created_new_run=False)
+
+    def continue_qa_step_review(self, *, run_id: str) -> dict[str, object]:
+        """Resume QA generation with the operator decision for the pending exchange."""
+
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            if str(state.get("status") or "") != "qa_step_review_required":
+                raise HarnessError(
+                    "qa_step_review_not_pending",
+                    f"Run has no pending QA step review: {run_id}",
+                    run_id=run_id,
+                )
+            self._require_frozen_llm_mode(state, run_id=run_id)
+            pinned = _dict_value(state.get("qa_step_review"))
+            decision = {
+                key: self.qa_step_review[key]
+                for key in ("call_id", "decision", "note")
+                if self.qa_step_review.get(key) is not None
+            }
+            self.qa_step_review = {**pinned, **decision, "enabled": True}
+            state["pending_step_review"] = None
+            # Status stays qa_step_review_required until QA writes its outcome or pauses again.
+            return self._continue_qa_test(state=state, run_id=run_id)
+
+
+def _runtime_closure_closed(state: dict[str, object]) -> bool:
+    # L5.3.6 writes this status when the run reaches runtime_closed.
+    return str(_dict_value(state.get("runtime_closure")).get("status") or "") == "runtime_closed"
+
+
+def _unbound_runtime_surface_ids(work_packet: dict[str, object]) -> list[str]:
+    """Design node ids whose frozen runtime surface is not runnable as delivered."""
+
+    return sorted(
+        {
+            str(binding.get("design_node_id") or "")
+            for unit in _dict_items(work_packet.get("execution_units"))
+            for binding in _dict_items(unit.get("surface_contracts"))
+            for runtime in [_dict_value(_dict_value(binding.get("surface_contract")).get("runtime_surface"))]
+            if runtime and str(runtime.get("runnable_status") or "") != "bound"
+        }
+    )
+
+
+def _require_runtime_closure_for_qa(
+    *,
+    state: dict[str, object],
+    work_packet: dict[str, object],
+    run_id: str,
+) -> None:
+    """QA tests a runnable app; unbound runtime surfaces need Runtime Closure first."""
+
+    if _runtime_closure_closed(state):
+        return
+    surface_ids = _unbound_runtime_surface_ids(work_packet)
+    if surface_ids:
+        raise HarnessError(
+            "qa_requires_runtime_closure",
+            (
+                "QA cannot run before Runtime/Integration Closure: frozen Design runtime surfaces "
+                f"are not bound: {', '.join(surface_ids)}."
+            ),
+            run_id=run_id,
+        )
