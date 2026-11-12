@@ -373,6 +373,7 @@ class CodeTraceValidator:
                     verification_evidence=verification_evidence,
                     symbol_evidence=symbol_evidence,
                     scenario_results=task_results,
+                    approved_closure_changes=_dict_value(approved_context.get("approved_closure_changes")) or None,
                 )
                 cached = task_cache.get(prompt)
                 if cached is not None:
@@ -1483,6 +1484,7 @@ def _code_validation_task_prompt(
     verification_evidence: dict[str, object],
     symbol_evidence: dict[str, object],
     scenario_results: list[dict[str, object]],
+    approved_closure_changes: dict[str, object] | None = None,
 ) -> str:
     is_boundary = task.get("task_kind") == "boundary"
     authority_claim_ids = _string_items(task.get("authority_claim_ids"))
@@ -1648,7 +1650,8 @@ def _code_validation_task_prompt(
                 "implementation_scope": "task unit_ids plus allowed_code_paths and allowed_test_paths",
                 "implementation_choice_owner": "developer",
                 "validator_expected_change_mode": "required_outcome_only",
-                "out_of_scope_or_authority_conflict": "system/block_run",
+                "out_of_scope_or_unsatisfiable_requirement": "system/block_run",
+                "approved_design_conflict": "follow the reading that satisfies the owned Requirement; record it in observations",
                 "human_decision_available": False,
             },
             "review_scope": {
@@ -1730,7 +1733,7 @@ def _code_validation_task_prompt(
                     "code_refs": "file or file#symbol refs under task_contract.allowed_code_paths",
                     "test_refs": "file or file#test refs under task_contract.allowed_test_paths",
                     "issue": "short explanation",
-                    "expected_change": "developer blocker: required observable outcome only; validator blocker: mapping/evidence correction; system blocker: conflicting or out-of-scope invariant; warning: empty string",
+                    "expected_change": "developer blocker: required observable outcome only; validator blocker: mapping/evidence correction; system blocker: unsatisfiable or out-of-scope invariant; warning: empty string",
                     "evidence_ref": "one supplied section/id",
                     "evidence_quote": "exact text visible in this input",
                     "owner": "developer | validator | system | none",
@@ -1803,10 +1806,11 @@ def _code_validation_task_prompt(
             ),
             "Use only exact task_contract IDs and paths; create only finding_id. Each requirement_ref must belong to a claim_id selected by the same finding.",
             "authority_claims and approved_design_contracts are this task's semantic authority. approved_units are a compact frozen implementation scope index, not new business authority; a Plan-only expectation unsupported by Requirement or approved Design cannot block.",
-            "related_design_context is approved but explanatory-only context for exact shared runtime targets. Check it before calling shared-code behavior invented or unsupported. Never review its scenarios, add its IDs to reviewed_design_ids or design_refs, or create findings for it. Its presence also does not excuse code that breaks an owned claim or owned contract.",
+            "related_design_context is approved but explanatory-only context for exact shared runtime targets. Check it before calling shared-code behavior invented or unsupported. Never review its scenarios, add its IDs to reviewed_design_ids or design_refs, or create findings for it. Its presence does not excuse code that breaks an owned claim or owned contract, except under the approved-Design-conflict rule.",
+            "Approved Design contracts froze before implementation and can contradict each other. When an owned contract and another approved contract (owned or in related_design_context) require incompatible behavior from the same code, do not block the run and do not require code to break one approved contract to satisfy the other. Accept the current implementation when it follows one of the conflicting contracts and still satisfies the owned Requirement claims; otherwise report a developer finding for the reading that satisfies them. Record each such conflict in observations with both Design IDs and the reading you applied.",
             "Classify each concern with task_contract.review_scope before judging it. Anything that needs deferred browser, DOM, visual, responsive, focus or announcement evidence goes only to observations; do not speculate toward a finding.",
             "For an in-scope Requirement/Design gap, use developer/developer_repair and state only the observable outcome and evidence. Developer owns implementation choice. Do not edit frozen artifacts or prescribe a field, header, credential strategy, protocol, component, or topology unless Requirement/Design explicitly does.",
-            "Human decision is unavailable after Requirement approval. If frozen authority conflicts or the outcome cannot fit task units and allowed paths, use system/block_run and state the invariant; never assign out-of-scope work.",
+            "Human decision is unavailable after Requirement approval. If no reading of the frozen authority can satisfy the owned Requirement claims, or the outcome cannot fit task units and allowed paths, use system/block_run and state the invariant; never assign out-of-scope work.",
             "Every required_reviewed_boundary_contract_id is owned here. A same-scenario boundary_contract stays with the scenario task. Compare actual producer and consumer; separate endpoint tests are not integration proof, and an unadapted incompatibility that breaks the approved runtime interaction is a blocker.",
             "task_kind=boundary owns only cross-scenario dependencies, shared-target compatibility and cross-scenario claims; it never re-reviews a scenario-local claim or boundary_contract.",
             "Judge executable evidence only within verification_evidence stages. Absence of a deferred stage is not a defect and never creates a finding in this task.",
@@ -1827,6 +1831,17 @@ def _code_validation_task_prompt(
         ],
         "egress_confirmation": "Project owner approved sending these bounded source/test excerpts to the LLM provider.",
     }
+    closure_changes = _dict_value(approved_closure_changes)
+    touched = sorted(
+        set(_string_items(closure_changes.get("changed_paths")))
+        & {str(item.get("path") or "").replace("\\", "/") for item in code_snippets}
+    )
+    if touched:
+        # Context, not a gate: the owner approved these closure changes after the Design froze.
+        payload["approved_closure_changes"] = {
+            **{key: value for key, value in closure_changes.items() if key != "changed_paths"},
+            "changed_paths_in_this_task": touched,
+        }
     return json.dumps(payload, ensure_ascii=False, indent=0)
 
 

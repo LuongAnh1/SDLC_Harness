@@ -466,6 +466,14 @@ def _project_context_design_contract(contract: dict[str, object]) -> dict[str, o
             for key in semantic_keys
             if surface_contract.get(key) not in (None, [], {}, "")
         }
+        # Shared-code behavior can live only in the experience contract (e.g. error-state feedback).
+        experience = {
+            key: value
+            for key, value in _dict(surface_contract.get("experience_contract")).items()
+            if key not in DEFERRED_UI_EXPERIENCE_FIELDS and value not in (None, [], {}, "")
+        }
+        if experience:
+            projected["surface_contract"]["experience_contract"] = experience
     return projected
 
 

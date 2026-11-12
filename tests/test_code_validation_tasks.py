@@ -1306,7 +1306,10 @@ class CodeValidationTaskTest(unittest.TestCase):
                     "schema_version": "design_surface_contract_v1",
                     "surface": "business_rule",
                     "decision": f"Decision for {scenario_id}.",
-                    "experience_contract": {"large_visual_context": "must not leak"},
+                    "experience_contract": {
+                        "runtime_states": {"error": {"presentation": f"{scenario_id} error feedback"}},
+                        "focus_flow": ["browser-only focus detail"],
+                    },
                 },
                 "source_observation_refs": ["repo:large-context"],
             }
@@ -1375,7 +1378,11 @@ class CodeValidationTaskTest(unittest.TestCase):
         self.assertNotIn("VDN-3-OTHER", context)
         self.assertNotIn("VDE-3-OTHER", context)
         self.assertNotIn("source_observation_refs", context["VDN-3A"])
-        self.assertNotIn("experience_contract", context["VDN-3A"]["surface_contract"])
+        # Shared-code behavior in the experience contract stays visible; browser-deferred fields do not.
+        self.assertEqual(
+            context["VDN-3A"]["surface_contract"]["experience_contract"],
+            {"runtime_states": {"error": {"presentation": "SC-3 error feedback"}}},
+        )
 
         prompt = json.loads(
             _code_validation_task_prompt(
@@ -1399,6 +1406,10 @@ class CodeValidationTaskTest(unittest.TestCase):
         rules = "\n".join(prompt["validator_rules"])
         self.assertIn("Check it before calling shared-code behavior invented", rules)
         self.assertIn("Never review its scenarios", rules)
+        self.assertIn("do not block the run and do not require code to break one approved contract", rules)
+        self.assertEqual(
+            prompt["task_contract"]["repair_policy"]["out_of_scope_or_unsatisfiable_requirement"], "system/block_run"
+        )
 
     def test_code_review_projects_browser_ui_fields_out_of_current_authority_and_units(self) -> None:
         unit = {
