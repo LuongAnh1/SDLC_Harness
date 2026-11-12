@@ -76,6 +76,7 @@ class Settings:
     design_step_review_output_enabled: bool
     designer_ui_contract_version: str
     uiux_skill_mode: str
+    runtime_closure_mode: str
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
     vertical_trace_mode: str
@@ -459,6 +460,9 @@ def load_settings(
     uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
     if uiux_skill_mode not in {"off", "enforce"}:
         uiux_skill_mode = "off"
+    runtime_closure_mode = merged.get("SDLC_RUNTIME_CLOSURE_MODE", "off").strip().lower() or "off"
+    if runtime_closure_mode not in {"off", "enforce"}:
+        runtime_closure_mode = "off"
     verification_policy_version = merged.get(
         "SDLC_VERIFICATION_POLICY_VERSION",
         "verification_stage_policy_v1",
@@ -563,6 +567,7 @@ def load_settings(
         ),
         designer_ui_contract_version=designer_ui_contract_version,
         uiux_skill_mode=uiux_skill_mode,
+        runtime_closure_mode=runtime_closure_mode,
         uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
         uiux_skill_timeout_seconds=_int_value(
             merged.get("SDLC_UIUX_SKILL_TIMEOUT_SECONDS"),

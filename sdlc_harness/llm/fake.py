@@ -9,6 +9,13 @@ import re
 def fake_completion(prompt: str) -> str:
     """Fake output theo loại prompt để test không gọi API thật."""
 
+    # Closure prompts embed repository source, so match them first by their exact JSON marker.
+    if prompt.startswith('{\n  "prompt_kind": "Runtime Closure Planner v1"'):
+        return fake_runtime_closure_plan(prompt)
+    if prompt.startswith(
+        ('{\n  "prompt_kind": "Runtime Closure Contract Review v1"', '{\n  "prompt_kind": "Runtime Closure Code Review v1"')
+    ):
+        return fake_runtime_closure_review(prompt)
     if "# Requirement Source Tool Loop" in prompt:
         return fake_requirement_source_action(prompt)
     if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
@@ -60,6 +67,180 @@ def fake_completion(prompt: str) -> str:
     if "QA Tester Acceptance Review v1" in prompt:
         return fake_qa_tester_review()
     return fake_refined_requirement(prompt)
+
+
+def _closure_prompt_payload(prompt: str) -> dict[str, object]:
+    # A contract retry appends plain text after the JSON prompt.
+    payload, _ = json.JSONDecoder().raw_decode(prompt)
+    return payload if isinstance(payload, dict) else {}
+
+
+def fake_runtime_closure_plan(prompt: str) -> str:
+    """Resolve every input generically so the contract passes G1-G15 in fake mode."""
+
+    payload = _closure_prompt_payload(prompt)
+    context = payload.get("closure_context") or {}
+    policy = payload.get("path_policy") or {}
+    roots = policy.get("component_editable_roots") or {}
+    browser_component = str(policy.get("browser_test_component_id") or "e2e")
+    browser_root = str(policy.get("browser_test_root") or "tests/e2e")
+    inputs = [item for item in context.get("runtime_inputs") or [] if isinstance(item, dict)]
+
+    def component_of(path: str) -> str:
+        matches = [
+            (len(root), component)
+            for component, component_roots in roots.items()
+            for root in component_roots
+            if path.startswith(f"{root}/")
+        ]
+        return max(matches)[1] if matches else next(iter(roots), "")
+
+    units: dict[str, dict[str, object]] = {}
+
+    def unit_for(component: str) -> dict[str, object]:
+        return units.setdefault(
+            component,
+            {
+                "key": f"{component}-closure",
+                "component_id": component,
+                "objective": f"Provide approved runtime inputs owned by {component}.",
+                "depends_on": [],
+                "resolves_input_ids": [],
+                "write_paths": [],
+                "test_target_paths": [],
+                "required_stage_ids": ["typecheck"],
+                "test_intents": [],
+                "context_paths": [],
+            },
+        )
+
+    resolutions: list[dict[str, object]] = []
+    demo_inputs: list[str] = []
+    stand_ins: list[dict[str, object]] = []
+    for index, item in enumerate(inputs, start=1):
+        input_id = str(item.get("input_id") or "")
+        source = item.get("design_source")
+        env = item.get("env") if isinstance(item.get("env"), dict) else None
+        if env:
+            resolutions.append(
+                {
+                    "input_id": input_id,
+                    "kind": "existing_runtime",
+                    "provider": {"kind": "env_var", "env_key": env["env_key"], "read_by": env["read_by"], "change_ref": "plan"},
+                    "decision_ref": None,
+                    "reason": "Production keeps the approved environment default.",
+                }
+            )
+            module = f"{browser_root}/support/closure-stand-in-{index}.ts"
+            unit = unit_for(browser_component)
+            unit["write_paths"].append(module)
+            unit["resolves_input_ids"].append(input_id)
+            stand_ins.append(
+                {
+                    "stand_in_id": f"VS-{len(stand_ins) + 1}",
+                    "for_input_id": input_id,
+                    "decision_ref": "",
+                    "module": module,
+                    "start_export": f"startClosureStandIn{index}",
+                    "env_key": env["env_key"],
+                }
+            )
+            continue
+        if source == "existing_runtime":
+            resolutions.append(
+                {
+                    "input_id": input_id,
+                    "kind": "existing_runtime",
+                    "provider": {"kind": "symbol", "ref": item.get("provided_by")},
+                    "decision_ref": None,
+                    "reason": "The provider already exists.",
+                }
+            )
+            continue
+        component = component_of(str(item.get("consumer") or "").split("#", 1)[0])
+        root = (roots.get(component) or [""])[0]
+        path = f"{root}/closure-provider-{index}.ts"
+        decision = None
+        if source == "demo_fixture":
+            decision = (item.get("design_decision_refs") or [None])[0]
+        elif source != "new_boundary":
+            demo_inputs.append(input_id)
+            decision = "CD-1"
+        resolutions.append(
+            {
+                "input_id": input_id,
+                "kind": "new_boundary" if source == "new_boundary" else "approved_demo_fixture",
+                "provider": {"kind": "symbol", "ref": f"{path}#closureProvider{index}"},
+                "decision_ref": decision,
+                "reason": "Closure writes the provider.",
+            }
+        )
+        unit = unit_for(component)
+        unit["write_paths"].append(path)
+        unit["resolves_input_ids"].append(input_id)
+
+    decisions: list[dict[str, object]] = []
+    if demo_inputs:
+        decisions.append(
+            {"id": "CD-1", "input_ids": demo_inputs, "statement": "Serve demo data locally.", "scope": "demo_and_verification_only"}
+        )
+    if stand_ins:
+        stand_in_decision = f"CD-{len(decisions) + 1}"
+        decisions.append(
+            {
+                "id": stand_in_decision,
+                "input_ids": [item["for_input_id"] for item in stand_ins],
+                "statement": "Use a local stand-in for the external system during verification only.",
+                "scope": "demo_and_verification_only",
+            }
+        )
+        for item in stand_ins:
+            item["decision_ref"] = stand_in_decision
+
+    probes = []
+    for index, scenario_id in enumerate(str(item) for item in context.get("scenario_ids") or []):
+        proves = [str(item["input_id"]) for item in inputs if scenario_id in (item.get("scenario_ids") or [])]
+        if index == 0:
+            proves += [str(item["input_id"]) for item in inputs if not item.get("scenario_ids")]
+        probes.append(
+            {
+                "probe_id": f"RP-{index + 1}",
+                "scenario_ids": [scenario_id],
+                "service": "api",
+                "method": "GET",
+                "path": "/health",
+                "headers_from_input_ids": [],
+                "expect_status": 200,
+                "expect_json_array_min_items": None,
+                "proves_input_ids": proves,
+            }
+        )
+    return json.dumps(
+        {
+            "resolutions": resolutions,
+            "closure_declared_inputs": [],
+            "demo_decisions": decisions,
+            "closure_units": list(units.values()),
+            "runtime_config_changes": [],
+            "runtime_probes": probes,
+            "verification_stand_ins": stand_ins,
+            "unresolved": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_runtime_closure_review(prompt: str) -> str:
+    contract = _closure_prompt_payload(prompt).get("contract") or {}
+    return json.dumps(
+        {
+            "summary": "Fake closure review passed.",
+            "reviewed_input_ids": [
+                str(item.get("input_id") or "") for item in contract.get("runtime_inputs") or [] if isinstance(item, dict)
+            ],
+            "findings": [],
+        }
+    )
 
 
 def fake_code_validation_task(prompt: str) -> str:

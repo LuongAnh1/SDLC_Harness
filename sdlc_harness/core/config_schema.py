@@ -88,6 +88,20 @@ PHASE4_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "max_tokens": 32768,
         "timeout": 600,
     },
+    "closure_planner": {
+        "label": "Runtime closure planner",
+        "model": "deepseek-flash",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 600,
+    },
+    "closure_validator": {
+        "label": "Runtime closure validator",
+        "model": "deepseek-flash",
+        "effort": "high",
+        "max_tokens": 32768,
+        "timeout": 600,
+    },
 }
 
 
@@ -398,6 +412,14 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED", "Pause Code Validator LLM steps", "boolean", False, "Dừng Phase 4 tại từng input/output Code Validator để người vận hành kiểm tra."),
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_INPUT_ENABLED", "Review Code Validator input", "boolean", True, "Dừng trước khi gửi từng task Code Validator."),
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED", "Review Code Validator output", "boolean", True, "Dừng sau khi nhận từng output Code Validator."),
+            _field(
+                "SDLC_RUNTIME_CLOSURE_MODE",
+                "Runtime closure mode",
+                "enum",
+                "off",
+                "Off giữ đường QA cũ; enforce đưa run implementation_traced qua Runtime/Integration Closure (pin theo run).",
+                options=("off", "enforce"),
+            ),
             _field("SDLC_QA_REPAIR_LIMIT", "QA repair limit", "integer", 1, "Số vòng sửa code sau QA.", minimum=0),
         ),
     },
