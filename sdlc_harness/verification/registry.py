@@ -14,12 +14,20 @@ from ..core.errors import HarnessError
 from ..profiles import (
     DEVELOPER_INTENT_STAGE_OWNER,
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
     VerificationStagePolicy,
 )
 
 
 DEFAULT_STAGE_TIMEOUT_SECONDS = 120
+# The only spec the runtime_probe stage runs; Harness renders it from the approved closure contract.
+RUNTIME_PROBE_SPEC_PATH = "tests/e2e/runtime-closure.probe.spec.ts"
+_SUPPORTED_POLICY_VERSIONS = {
+    LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+}
 PROFILED_ENV_ALLOWLIST = (
     "PATH",
     "PATHEXT",
@@ -252,12 +260,39 @@ _TYPESCRIPT_FULLSTACK_V2_SPECS = (
     ),
 )
 
+def _closure_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[VerificationStageSpec, ...]:
+    """Closure suite = v2 suite with browser_e2e replaced by the Harness-owned runtime_probe."""
+
+    def closure_spec(spec: VerificationStageSpec) -> VerificationStageSpec:
+        if spec.stage_id != "browser_e2e":
+            return spec
+        return VerificationStageSpec(
+            stage_id="runtime_probe",
+            argv=spec.argv,
+            cwd=spec.cwd,
+            inherited_env_keys=spec.inherited_env_keys,
+            fixed_env=spec.fixed_env,
+            timeout_seconds=spec.timeout_seconds,
+            required_package_script=spec.required_package_script,
+            required_test_framework=spec.required_test_framework,
+            machine_reporter_args=spec.machine_reporter_args,
+            developer_selectable=False,
+            report_kind=spec.report_kind,
+            report_path=spec.report_path,
+        )
+
+    return tuple(closure_spec(spec) for spec in specs)
+
+
 _STAGE_SPECS_BY_POLICY = {
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
     },
     VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V2_SPECS,
+    },
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": _closure_specs(_TYPESCRIPT_FULLSTACK_V2_SPECS),
     },
 }
 
@@ -273,10 +308,7 @@ def resolve_verification_preparation_specs(
 ) -> tuple[VerificationPreparationSpec, ...]:
     """Resolve ordered preparation đã review, không nhận argv từ LLM hay work packet."""
 
-    if policy.policy_version not in {
-        LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
-        VERIFICATION_STAGE_POLICY_VERSION,
-    }:
+    if policy.policy_version not in _SUPPORTED_POLICY_VERSIONS:
         raise HarnessError(
             "verification_stage_policy_invalid",
             f"Unsupported verification stage policy version: {policy.policy_version}",
@@ -303,10 +335,7 @@ def resolve_verification_stage_specs(
 ) -> tuple[VerificationStageSpec, ...]:
     """Resolve exact ordered specs và chặn policy bị đổi sau khi snapshot."""
 
-    if policy.policy_version not in {
-        LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
-        VERIFICATION_STAGE_POLICY_VERSION,
-    }:
+    if policy.policy_version not in _SUPPORTED_POLICY_VERSIONS:
         raise HarnessError(
             "verification_stage_policy_invalid",
             f"Unsupported verification stage policy version: {policy.policy_version}",

@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,9 @@ from ..profiles import (
     profiled_execution_field_paths,
 )
 from .registry import (
+    PROFILED_ENV_ALLOWLIST,
+    PROFILED_FIXED_ENV,
+    RUNTIME_PROBE_SPEC_PATH,
     VerificationPreparationSpec,
     VerificationStageSpec,
     resolve_verification_preparation_specs,
@@ -37,6 +41,39 @@ from .registry import (
 
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
+RUNTIME_PROBE_ANNOTATION_TYPE = "runtime_probe"
+_PROBE_ID = re.compile(r"^RP-[1-9][0-9]*$")
+_STAND_IN_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
+# Keys the runner owns; a contract-declared stand-in may never override them.
+_RESERVED_ENV_KEYS = {
+    *(key.casefold() for key in PROFILED_ENV_ALLOWLIST),
+    *(key.casefold() for key, _ in PROFILED_FIXED_ENV),
+    "compose_project_name",
+    "sdlc_postgres_port",
+    "database_url",
+}
+_RESERVED_ENV_PREFIXES = ("node_", "npm_", "playwright_", "postgres_")
+# Run-scoped database identity; Compose creates it and DATABASE_URL points at it.
+_RUN_DATABASE_USER = "postgres"
+_RUN_DATABASE_PASSWORD = "postgres"
+_RUN_DATABASE_NAME = "sdlc_app"
+_RUN_SCOPED_STAGE_IDS = {
+    "database_ready",
+    "migrate_and_seed",
+    "api_database_integration",
+    "service_health",
+    "browser_e2e",
+    "runtime_probe",
+    "cleanup",
+}
+
+
+@dataclass(frozen=True)
+class RuntimeProbeRun:
+    """What the runtime_probe stage needs from an approved closure contract (IDs only, no argv/env values)."""
+
+    probe_ids: tuple[str, ...]
+    stand_in_env_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,9 +94,10 @@ class VerificationStageResult:
     timed_out: bool = False
     selected_test_files: tuple[str, ...] = ()
     verified_test_files: tuple[str, ...] = ()
+    probe_results: tuple[dict[str, object], ...] = ()
 
     def to_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "stage_id": self.stage_id,
             "status": self.status,
             "argv": list(self.argv),
@@ -75,6 +113,9 @@ class VerificationStageResult:
             "selected_test_files": list(self.selected_test_files),
             "verified_test_files": list(self.verified_test_files),
         }
+        if self.probe_results:
+            payload["probe_results"] = [dict(item) for item in self.probe_results]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -137,6 +178,7 @@ class VerificationRunner:
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
         qa_policy: QaTestPolicy | None = None,
+        runtime_probe: RuntimeProbeRun | None = None,
     ) -> VerificationResult:
         """Run verification and publish bounded result metadata."""
 
@@ -146,6 +188,7 @@ class VerificationRunner:
             required_test_files=required_test_files,
             verification_policy=verification_policy,
             qa_policy=qa_policy,
+            runtime_probe=runtime_probe,
         )
         emit_current(
             category="verification",
@@ -235,6 +278,7 @@ class VerificationRunner:
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
         qa_policy: QaTestPolicy | None = None,
+        runtime_probe: RuntimeProbeRun | None = None,
     ) -> VerificationResult:
         """Chạy profile-owned stages và fail closed nếu thiếu snapshot policy."""
 
@@ -250,6 +294,7 @@ class VerificationRunner:
             required_test_files=required_test_files,
             verification_policy=verification_policy,
             qa_policy=qa_policy,
+            runtime_probe=runtime_probe,
         )
 
     def _run_profiled_stages(
@@ -262,11 +307,16 @@ class VerificationRunner:
         qa_policy: QaTestPolicy | None,
         selected_stage_ids: tuple[str, ...] | None = None,
         developer_unit_scope: bool = False,
+        runtime_probe: RuntimeProbeRun | None = None,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
         run_id = str(work_packet.get("run_id") or "") or None
         specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
+        probe_stage_planned = any(spec.stage_id == "runtime_probe" for spec in specs)
+        stand_in_env = (
+            _runtime_probe_stand_in_env(runtime_probe, run_id=run_id) if probe_stage_planned else {}
+        )
         if selected_stage_ids is not None:
             selected = set(selected_stage_ids)
             specs = tuple(spec for spec in specs if spec.stage_id in selected)
@@ -361,7 +411,25 @@ class VerificationRunner:
                     selected_test_files=selected_test_files,
                     failure_kind="policy",
                 )
-            env = _profiled_verification_env(spec, run_id=run_id)
+            env = _profiled_verification_env(
+                spec,
+                run_id=run_id,
+                # Stand-in URLs exist only for the probe stage; no other stage sees them.
+                extra_env=stand_in_env if spec.stage_id == "runtime_probe" else None,
+            )
+            if (
+                spec.stage_id == "runtime_probe"
+                and runtime_probe is not None
+                and runtime_probe.probe_ids
+                and not (target_root / RUNTIME_PROBE_SPEC_PATH).is_file()
+            ):
+                return _profiled_preflight_failure(
+                    target_path=target_root,
+                    planned_stage_ids=planned_stage_ids,
+                    reason=f"Harness runtime probe spec is missing: {RUNTIME_PROBE_SPEC_PATH}",
+                    selected_test_files=selected_test_files,
+                    failure_kind="policy",
+                )
             executable = shutil.which(spec.argv[0], path=_environment_value(env, "PATH") or "")
             if not executable:
                 return _profiled_preflight_failure(
@@ -378,7 +446,26 @@ class VerificationRunner:
         for spec, stage_cwd, executable, env in prepared:
             if first_failure is not None and not spec.always_run:
                 continue
-            if spec.stage_id == "unit":
+            if spec.stage_id == "runtime_probe" and runtime_probe is not None and not runtime_probe.probe_ids:
+                # Every scenario is blocked by an approved unresolved input: nothing to request.
+                stage_results.append(
+                    VerificationStageResult(
+                        stage_id=spec.stage_id,
+                        status="passed",
+                        argv=(),
+                        cwd=spec.cwd,
+                        timeout_seconds=spec.timeout_seconds,
+                        exit_code=None,
+                        duration_seconds=0.0,
+                        stdout="",
+                        stderr="",
+                        reason="No approved runtime probe: every scenario is blocked by an unresolved input.",
+                    )
+                )
+                continue
+            if spec.stage_id == "runtime_probe":
+                stage_selected_files: tuple[str, ...] = (RUNTIME_PROBE_SPEC_PATH,)
+            elif spec.stage_id == "unit":
                 stage_selected_files = tuple(
                     path
                     for path in selected_test_files
@@ -435,7 +522,7 @@ class VerificationRunner:
                     *executable_reporter_args,
                     *stage_selected_files,
                 ]
-            elif stage_selected_files and spec.stage_id == "browser_e2e":
+            elif stage_selected_files and spec.stage_id in {"browser_e2e", "runtime_probe"}:
                 logical_argv = (*spec.argv, "--", *stage_selected_files)
                 executable_argv = [executable, *spec.argv[1:], "--", *stage_selected_files]
             start = time.monotonic()
@@ -449,15 +536,10 @@ class VerificationRunner:
                 ]
                 completed_steps: list[subprocess.CompletedProcess[str]] = []
                 for _, step_argv in command_steps:
-                    completed_step = subprocess.run(
+                    completed_step = _run_bounded(
                         step_argv,
                         cwd=str(stage_cwd),
                         env=env,
-                        shell=False,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
                         timeout=spec.timeout_seconds,
                     )
                     completed_steps.append(completed_step)
@@ -511,6 +593,7 @@ class VerificationRunner:
                 verified_test_files: tuple[str, ...] = ()
                 report_error = ""
                 report_failure_kind = ""
+                probe_results: tuple[dict[str, object], ...] = ()
                 if report_path is not None:
                     verified_test_files, report_error, report_failure_kind = _vitest_verified_test_files(
                         report_path=report_path,
@@ -523,6 +606,15 @@ class VerificationRunner:
                         target_root=target_root,
                         selected_test_files=stage_selected_files,
                     )
+                    if spec.stage_id == "runtime_probe" and runtime_probe is not None:
+                        probe_results, probe_error = _runtime_probe_outcomes(
+                            report_path=target_root / spec.report_path,
+                            target_root=target_root,
+                            probe_ids=runtime_probe.probe_ids,
+                        )
+                        if probe_error:
+                            # A missing or duplicated probe is a Harness/policy fault, never a code defect.
+                            report_error, report_failure_kind = probe_error, "policy"
                 stage_passed = completed.returncode == 0 and not report_error
                 failure_kind = ""
                 if not stage_passed:
@@ -550,6 +642,7 @@ class VerificationRunner:
                     failure_kind=failure_kind,
                     selected_test_files=stage_selected_files,
                     verified_test_files=verified_test_files,
+                    probe_results=probe_results,
                 )
             finally:
                 if report_directory is not None:
@@ -853,6 +946,25 @@ def _vitest_assertion_diagnostic(assertion: dict[str, object]) -> str:
     return f"{title}: {message}" if message else title
 
 
+def _playwright_report_relative_file(raw_file: str, *, payload: object, target_root: Path) -> str | None:
+    """Target-relative POSIX path of a report suite file, or None when it is outside the target.
+
+    Playwright writes suite files relative to ``config.rootDir`` (the configured testDir), not
+    to the repository root; an absolute ``rootDir`` is therefore the base for relative files.
+    """
+
+    config = payload.get("config") if isinstance(payload, dict) else None
+    root_dir = str(config.get("rootDir") or "") if isinstance(config, dict) else ""
+    base = Path(root_dir) if root_dir and Path(root_dir).is_absolute() else target_root
+    candidate = Path(raw_file)
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    try:
+        return candidate.resolve().relative_to(target_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
 def _playwright_verified_test_files(
     *,
     report_path: Path,
@@ -881,13 +993,10 @@ def _playwright_verified_test_files(
         raw_file = str(suite.get("file") or inherited_file).strip()
         relative_file = ""
         if raw_file:
-            candidate = Path(raw_file)
-            if not candidate.is_absolute():
-                candidate = target_root / candidate
-            try:
-                relative_file = candidate.resolve().relative_to(target_root).as_posix()
-            except (OSError, ValueError):
+            resolved = _playwright_report_relative_file(raw_file, payload=payload, target_root=target_root)
+            if resolved is None:
                 return "Playwright JSON report references a test file outside the target repository."
+            relative_file = resolved
             if relative_file not in reported:
                 reported.append(relative_file)
 
@@ -922,7 +1031,8 @@ def _playwright_verified_test_files(
         if not isinstance(children, list):
             return "Playwright JSON report contains an invalid nested suites entry."
         for child in children:
-            error = visit_suite(child, relative_file or raw_file)
+            # Children inherit the file as Playwright reported it, so it resolves against the same base.
+            error = visit_suite(child, raw_file)
             if error:
                 return error
         return ""
@@ -952,29 +1062,137 @@ def _playwright_verified_test_files(
     return ordered_reported, "", ""
 
 
+def _runtime_probe_outcomes(
+    *,
+    report_path: Path,
+    target_root: Path,
+    probe_ids: tuple[str, ...],
+) -> tuple[tuple[dict[str, object], ...], str]:
+    """Per-probe status and Harness annotation from the Playwright JSON report of the probe spec."""
+
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return (), "Playwright JSON report is missing or invalid for the runtime probe spec."
+    outcomes: dict[str, dict[str, object]] = {}
+    problems: list[str] = []
+
+    def visit(suite: object, inherited_file: str) -> None:
+        if not isinstance(suite, dict):
+            return
+        raw_file = str(suite.get("file") or inherited_file)
+        relative = ""
+        if raw_file:
+            relative = _playwright_report_relative_file(raw_file, payload=payload, target_root=target_root) or ""
+        for spec in suite.get("specs") or []:
+            if not isinstance(spec, dict) or relative != RUNTIME_PROBE_SPEC_PATH:
+                continue
+            title = str(spec.get("title") or "").strip()
+            if title not in probe_ids:
+                problems.append(f"unexpected test `{title}` in the probe spec")
+                continue
+            if title in outcomes:
+                problems.append(f"probe `{title}` ran more than once")
+                continue
+            statuses: list[str] = []
+            observation: dict[str, object] = {}
+            for test in spec.get("tests") or []:
+                if not isinstance(test, dict):
+                    continue
+                annotations = list(test.get("annotations") or [])
+                for result in test.get("results") or []:
+                    if isinstance(result, dict):
+                        statuses.append(str(result.get("status") or "").strip().lower())
+                        annotations.extend(result.get("annotations") or [])
+                for annotation in annotations:
+                    if isinstance(annotation, dict) and annotation.get("type") == RUNTIME_PROBE_ANNOTATION_TYPE:
+                        try:
+                            parsed = json.loads(str(annotation.get("description") or ""))
+                        except json.JSONDecodeError:
+                            parsed = None
+                        if isinstance(parsed, dict):
+                            observation = parsed
+            outcomes[title] = {
+                "probe_id": title,
+                "status": "passed" if statuses and all(item == "passed" for item in statuses) else "failed",
+                "observation": observation,
+            }
+        for child in suite.get("suites") or []:
+            visit(child, raw_file)
+
+    suites = payload.get("suites") if isinstance(payload, dict) else None
+    for suite in suites if isinstance(suites, list) else []:
+        visit(suite, "")
+    missing = [probe_id for probe_id in probe_ids if probe_id not in outcomes]
+    if missing:
+        problems.append(f"no result for probe(s) {missing}")
+    ordered = tuple(outcomes[probe_id] for probe_id in probe_ids if probe_id in outcomes)
+    if problems:
+        return ordered, "Runtime probe report does not match the approved probes: " + "; ".join(problems)
+    return ordered, ""
+
+
+def _runtime_probe_stand_in_env(runtime_probe: RuntimeProbeRun | None, *, run_id: str | None) -> dict[str, str]:
+    """Run-scoped loopback URLs for approved stand-ins; keys come from the contract, values from Harness."""
+
+    if runtime_probe is None:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "The runtime_probe stage requires the approved probe set of the runtime closure contract.",
+            run_id=run_id,
+        )
+    invalid = [probe_id for probe_id in runtime_probe.probe_ids if not _PROBE_ID.fullmatch(probe_id)]
+    if invalid or len(set(runtime_probe.probe_ids)) != len(runtime_probe.probe_ids):
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            f"Runtime probe ids must be unique RP-<n> ids: {list(runtime_probe.probe_ids)}",
+            run_id=run_id,
+        )
+    env: dict[str, str] = {}
+    for key in runtime_probe.stand_in_env_keys:
+        folded = key.casefold()
+        if (
+            not _STAND_IN_ENV_KEY.fullmatch(key)
+            or folded in _RESERVED_ENV_KEYS
+            or folded.startswith(_RESERVED_ENV_PREFIXES)
+            or key in env
+        ):
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Stand-in env key is reserved, duplicated or invalid: {key}",
+                run_id=run_id,
+            )
+        digest = hashlib.sha256(f"{run_id or ''}\0{key}".encode("utf-8")).hexdigest()
+        env[key] = f"http://127.0.0.1:{40000 + int(digest[:8], 16) % 10000}"
+    return env
+
+
 def _profiled_verification_env(
     spec: VerificationStageSpec | VerificationPreparationSpec,
     *,
     run_id: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     allowed = {key.casefold() for key in spec.inherited_env_keys}
     env = {key: value for key, value in os.environ.items() if key.casefold() in allowed}
     env.update(dict(spec.fixed_env))
-    if run_id and getattr(spec, "stage_id", "") in {
-        "database_ready",
-        "migrate_and_seed",
-        "api_database_integration",
-        "service_health",
-        "browser_e2e",
-        "cleanup",
-    }:
+    env.update(extra_env or {})
+    if run_id and getattr(spec, "stage_id", "") in _RUN_SCOPED_STAGE_IDS:
         digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
         port = 50000 + (int(digest[:8], 16) % 10000)
         env.update(
             {
                 "COMPOSE_PROJECT_NAME": f"sdlc_{digest[:10]}",
                 "SDLC_POSTGRES_PORT": str(port),
-                "DATABASE_URL": f"postgresql://postgres:postgres@127.0.0.1:{port}/sdlc_app",
+                # Compose reads these to create the database DATABASE_URL names; without them it
+                # falls back to the target's own defaults and authentication fails.
+                "POSTGRES_USER": _RUN_DATABASE_USER,
+                "POSTGRES_PASSWORD": _RUN_DATABASE_PASSWORD,
+                "POSTGRES_DB": _RUN_DATABASE_NAME,
+                "DATABASE_URL": (
+                    f"postgresql://{_RUN_DATABASE_USER}:{_RUN_DATABASE_PASSWORD}"
+                    f"@127.0.0.1:{port}/{_RUN_DATABASE_NAME}"
+                ),
             }
         )
     return env
@@ -1100,15 +1318,10 @@ def _run_profiled_preparation(
 
     started = time.monotonic()
     try:
-        completed = subprocess.run(
+        completed = _run_bounded(
             [executable, *spec.argv[1:]],
             cwd=str(stage_cwd),
             env=env,
-            shell=False,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=spec.timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -1230,12 +1443,20 @@ def _preparation_marker_matches(path: Path, *, fingerprint: str) -> bool:
 
 def _command_failure_kind(*, stdout: str, stderr: str) -> str:
     combined = f"{stdout}\n{stderr}".casefold()
-    missing_command_markers = (
+    environment_markers = (
         "is not recognized as an internal or external command",
         "command not found",
         "could not determine executable to run",
+        # Busy ports and an unreachable database are machine state, not code defects.
+        "eaddrinuse",
+        "address already in use",
+        "port is already allocated",
+        "is already used, make sure that nothing is running on the port",
+        "can't reach database server",
+        # Database credentials come from the run-scoped env, never from target code.
+        "authentication failed against database server",
     )
-    return "environment" if any(marker in combined for marker in missing_command_markers) else "implementation"
+    return "environment" if any(marker in combined for marker in environment_markers) else "implementation"
 
 
 def _dependency_setup_failure_kind(*, stdout: str, stderr: str) -> str:
@@ -1264,6 +1485,77 @@ def _truncate_output(value: str) -> str:
     if len(value) <= MAX_OUTPUT_CHARS:
         return value
     return value[:MAX_OUTPUT_CHARS].rstrip() + "\n... truncated ..."
+
+
+_KILL_GRACE_SECONDS = 10
+
+
+def _run_bounded(
+    argv: list[str],
+    *,
+    cwd: str,
+    env: dict[str, str],
+    timeout: int,
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` whose timeout also ends the command's descendants.
+
+    npm starts the real tool (Playwright, its webServers, Prisma) as a grandchild. Killing only
+    npm leaves that grandchild holding the output pipes, and ``subprocess.run`` then waits for
+    them forever after its own kill. Raises ``TimeoutExpired`` with the output read so far.
+    """
+
+    process = subprocess.Popen(
+        argv,
+        cwd=cwd,
+        env=env,
+        shell=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        # POSIX: own process group so the whole tree can be signalled at once.
+        start_new_session=os.name != "nt",
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _kill_process_tree(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_KILL_GRACE_SECONDS)
+        except subprocess.TimeoutExpired:
+            # A descendant outlived the tree kill and still holds the pipes; give up on the output
+            # rather than wait: the stage is already over.
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(argv, timeout, output=stdout, stderr=stderr) from None
+    except BaseException:
+        _kill_process_tree(process)
+        raise
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def _kill_process_tree(process: subprocess.Popen[str]) -> None:
+    if os.name == "nt":
+        # shortcut: taskkill /T follows parent PIDs, so a descendant whose parent already exited
+        # escapes it; use a Job Object if verification ever leaks such processes.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=_KILL_GRACE_SECONDS,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
 
 
 def _decode_timeout_output(value: Any) -> str:

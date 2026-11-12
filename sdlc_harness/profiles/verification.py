@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 
 LEGACY_VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v1"
 VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v2"
+# Pinned per run in state.runtime_closure, never in profile_snapshot (L5.3).
+RUNTIME_CLOSURE_STAGE_POLICY_VERSION = "runtime_closure_stage_policy_v1"
+# Harness-owned stages that execute a catalog stage's reviewed command; the target's
+# protected profile manifest only lists catalog stages, so it stays unchanged.
+_CATALOG_STAGE_ALIASES = {"runtime_probe": "browser_e2e"}
 LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
 PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
 PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VERSION
@@ -43,6 +48,19 @@ _ACTIVE_STAGE_IDS_BY_POLICY = {
             "frontend_build",
             "service_health",
             "browser_e2e",
+            "cleanup",
+        ),
+    },
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": (
+            "database_ready",
+            "migrate_and_seed",
+            "typecheck",
+            "unit",
+            "api_database_integration",
+            "frontend_build",
+            "service_health",
+            "runtime_probe",
             "cleanup",
         ),
     },
@@ -70,7 +88,21 @@ _STAGE_OWNERS_BY_POLICY = {
             "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
         },
     },
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": {
+            "database_ready": HARNESS_GLOBAL_STAGE_OWNER,
+            "migrate_and_seed": HARNESS_GLOBAL_STAGE_OWNER,
+            "typecheck": DEVELOPER_INTENT_STAGE_OWNER,
+            "unit": DEVELOPER_INTENT_STAGE_OWNER,
+            "api_database_integration": HARNESS_GLOBAL_STAGE_OWNER,
+            "frontend_build": HARNESS_GLOBAL_STAGE_OWNER,
+            "service_health": HARNESS_GLOBAL_STAGE_OWNER,
+            "runtime_probe": HARNESS_GLOBAL_STAGE_OWNER,
+            "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
+        },
+    },
 }
+_EXPLICIT_OWNERSHIP_POLICIES = {VERIFICATION_STAGE_POLICY_VERSION, RUNTIME_CLOSURE_STAGE_POLICY_VERSION}
 # What each active stage can observe; fixed by the profile's protected tsconfig/vitest config.
 _STAGE_CAPABILITIES_BY_PROJECT = {
     "typescript_fullstack_v1": {
@@ -85,6 +117,9 @@ _STAGE_CAPABILITIES_BY_PROJECT = {
         "frontend_build": "Builds the Vite frontend and therefore observes imports, stylesheets and production bundling.",
         "service_health": "Validates the protected web/API runtime bootstrap before browser execution.",
         "browser_e2e": "Runs Playwright Chromium and observes DOM interaction, focus, keyboard, CSS and viewport layout.",
+        "runtime_probe": "Boots the target's API and web services through its Playwright webServer and sends the "
+        "approved request-only HTTP probes; proves each service answers with the expected status and, optionally, "
+        "a JSON array of at least N items. Observes no DOM, focus, CSS or layout.",
         "cleanup": "Always tears down the isolated database resources, including after failure or timeout.",
     },
 }
@@ -272,7 +307,11 @@ def build_verification_stage_policy_version(
             "verification_stage_policy_invalid",
             f"Project profile has no active verification suite: {project.profile_id}",
         )
-    unsupported = [stage_id for stage_id in stage_ids if stage_id not in project.verification_stage_ids]
+    unsupported = [
+        stage_id
+        for stage_id in stage_ids
+        if _CATALOG_STAGE_ALIASES.get(stage_id, stage_id) not in project.verification_stage_ids
+    ]
     if unsupported:
         raise HarnessError(
             "verification_stage_policy_invalid",
@@ -288,9 +327,18 @@ def build_verification_stage_policy_version(
                 .get(project.profile_id, {})
                 .items()
             )
-            if policy_version == VERIFICATION_STAGE_POLICY_VERSION
+            if policy_version in _EXPLICIT_OWNERSHIP_POLICIES
             else ()
         ),
+    )
+
+
+def build_runtime_closure_stage_policy(*, project: ProjectProfile) -> VerificationStagePolicy:
+    """The closure verification suite; pinned in run state, independent of profile_snapshot."""
+
+    return build_verification_stage_policy_version(
+        project=project,
+        policy_version=RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
     )
 
 
