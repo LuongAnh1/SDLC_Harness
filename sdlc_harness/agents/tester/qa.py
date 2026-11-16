@@ -13,18 +13,26 @@ import json
 import re
 from typing import Any
 
+from ...core.config import phase4_llm_call_options
 from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
 from ...profiles import QaTestPolicy
 
 QA_STATUSES = {"pass", "fail", "skipped"}
+# L5.4.3: empty, truncated, unparsable or transport-failed output is inconclusive. It blocks with
+# no second (repair-prompt) call; only parseable output that breaks the contract is retried once.
+QA_INCONCLUSIVE = "qa_tester_inconclusive"
+_TRANSPORT_ERROR_CODES = {"llm_transport_failed", "requirement_refiner_failed"}
+# A raw artifact is always written for an inconclusive output, so a retry gets a new QA version
+# and a new step-review directory instead of replaying the approved inconclusive exchange.
+_EMPTY_OUTPUT_MARKER = "(empty provider output)"
 
 
 class QaTesterLlmError(HarnessError):
     """Lỗi QA LLM có giữ raw response để workflow ghi artifact debug."""
 
-    def __init__(self, message: str, *, raw_response: str = ""):
-        super().__init__("qa_tester_llm_failed", message)
+    def __init__(self, message: str, *, raw_response: str = "", error_code: str = "qa_tester_llm_failed"):
+        super().__init__(error_code, message)
         self.raw_response = raw_response
 
 
@@ -151,7 +159,19 @@ class QaTesterAgent:
         )
         prompt = _profiled_qa_generation_prompt(context=context, qa_policy=qa_policy)
         for attempt in range(2):
-            raw = self.llm_client.complete(system=system, prompt=prompt)
+            raw, finish_reason = self._complete(system=system, prompt=prompt)
+            if finish_reason == "length":
+                raise QaTesterLlmError(
+                    "QA/Tester output is inconclusive: provider output was truncated (finish_reason=length).",
+                    raw_response=raw or _EMPTY_OUTPUT_MARKER,
+                    error_code=QA_INCONCLUSIVE,
+                )
+            if not raw.strip():
+                raise QaTesterLlmError(
+                    "QA/Tester output is inconclusive: provider output was empty.",
+                    raw_response=_EMPTY_OUTPUT_MARKER,
+                    error_code=QA_INCONCLUSIVE,
+                )
             try:
                 return _generated_suite_from_raw(raw=raw, context=context, qa_policy=qa_policy)
             except HarnessError as exc:
@@ -170,6 +190,25 @@ class QaTesterAgent:
                     qa_policy=qa_policy,
                 )
         raise AssertionError("QA generation retry loop must return or raise")
+
+    def _complete(self, *, system: str, prompt: str) -> tuple[str, str]:
+        """One provider call with the `qa_tester` profile; keeps finish_reason when the client has it."""
+
+        method = getattr(self.llm_client, "complete_with_metadata", None)
+        try:
+            if not callable(method):
+                return str(self.llm_client.complete(system=system, prompt=prompt) or ""), ""
+            options = phase4_llm_call_options(getattr(self.llm_client, "settings", None), "qa_tester")
+            completion = method(system=system, prompt=prompt, **options)
+            return str(getattr(completion, "content", "") or ""), str(getattr(completion, "finish_reason", "") or "")
+        except HarnessError as exc:
+            if exc.error_code not in _TRANSPORT_ERROR_CODES:
+                raise
+            raise QaTesterLlmError(
+                f"QA/Tester output is inconclusive: provider call failed: {exc.message}",
+                raw_response=_EMPTY_OUTPUT_MARKER,
+                error_code=QA_INCONCLUSIVE,
+            ) from exc
 
 
 def _generated_suite_from_raw(
@@ -330,8 +369,9 @@ def _parse_generated_tests_payload(
         parsed = parse_first_json_object(raw, expected_keys={"summary", "test_files", "scenarios"})
     except json.JSONDecodeError as exc:
         raise QaTesterLlmError(
-            "QA/Tester LLM did not return a valid JSON object.",
+            "QA/Tester output is inconclusive: it is not a valid JSON object.",
             raw_response=raw,
+            error_code=QA_INCONCLUSIVE,
         ) from exc
     test_files = _normalized_test_files(
         parsed.get("test_files"),

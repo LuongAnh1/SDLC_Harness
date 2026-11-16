@@ -45,7 +45,83 @@ class RecordingQaLlm:
         return json.dumps(self.payload)
 
 
+VALID_QA_PATH = "apps/api/src/FeatureAcceptance.test.ts"
+VALID_QA_PAYLOAD = {
+    "summary": "Vitest acceptance",
+    "test_files": [
+        {
+            "path": VALID_QA_PATH,
+            "content": 'import { it, expect } from "vitest"; it("works", () => expect(true).toBe(true));',
+            "scenarios": ["works"],
+        }
+    ],
+    "scenarios": [
+        {"name": "works", "expected_result": "works", "test_file": VALID_QA_PATH, "risk": "", "requirement_ids": ["REQ-1"]}
+    ],
+    "risks": [],
+}
+
+
+class MetadataQaLlm:
+    """Serve (content, finish_reason) pairs or exceptions through complete_with_metadata."""
+
+    def __init__(self, responses: list[object]):
+        self.responses = list(responses)
+        self.calls: list[dict[str, object]] = []
+
+    def complete_with_metadata(self, *, system: str, prompt: str, **options):
+        from sdlc_harness.llm.client import LlmCompletion
+
+        self.calls.append({"prompt": prompt, "options": options})
+        item = self.responses.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        content, finish_reason = item if isinstance(item, tuple) else (item, "stop")
+        return LlmCompletion(content=content, finish_reason=finish_reason)
+
+
 class ProfiledQaTest(unittest.TestCase):
+    def test_inconclusive_output_blocks_without_a_repair_call(self) -> None:
+        for label, response in (
+            ("truncated", (json.dumps(VALID_QA_PAYLOAD), "length")),
+            ("empty", ("  ", "stop")),
+            ("unparsable", ('{"summary": "cut off', "stop")),
+            ("transport", HarnessError("llm_transport_failed", "connection reset")),
+        ):
+            with self.subTest(label):
+                llm = MetadataQaLlm([response, (json.dumps(VALID_QA_PAYLOAD), "stop")])
+                with self.assertRaises(QaTesterLlmError) as caught:
+                    QaTesterAgent(llm).generate_tests(context=self.context, qa_policy=self.qa_policy)
+                self.assertEqual(caught.exception.error_code, "qa_tester_inconclusive")
+                self.assertEqual(len(llm.calls), 1)  # never a second, repair-prompt call
+                self.assertTrue(caught.exception.raw_response)  # always recorded: a retry gets a new version
+
+    def test_contract_invalid_output_still_gets_one_exact_retry(self) -> None:
+        invalid = json.dumps({**VALID_QA_PAYLOAD, "scenarios": []})
+        llm = MetadataQaLlm([(invalid, "stop"), (json.dumps(VALID_QA_PAYLOAD), "stop")])
+
+        generated = QaTesterAgent(llm).generate_tests(context=self.context, qa_policy=self.qa_policy)
+
+        self.assertEqual(generated.test_files[0]["path"], VALID_QA_PATH)
+        self.assertEqual(len(llm.calls), 2)
+        self.assertIn("returned no scenarios", llm.calls[1]["prompt"])
+        twice = MetadataQaLlm([(invalid, "stop"), (invalid, "stop")])
+        with self.assertRaises(QaTesterLlmError) as caught:
+            QaTesterAgent(twice).generate_tests(context=self.context, qa_policy=self.qa_policy)
+        self.assertEqual(caught.exception.error_code, "qa_tester_llm_failed")
+
+    def test_valid_output_is_unchanged_and_uses_the_qa_tester_profile(self) -> None:
+        from sdlc_harness.core.config import load_settings
+
+        llm = MetadataQaLlm([(json.dumps(VALID_QA_PAYLOAD), "stop")])
+        llm.settings = load_settings(root=self.target)
+        generated = QaTesterAgent(llm).generate_tests(context=self.context, qa_policy=self.qa_policy)
+
+        self.assertEqual([item["path"] for item in generated.test_files], [VALID_QA_PATH])
+        self.assertEqual(generated.scenarios[0]["requirement_ids"], ["REQ-1"])
+        self.assertEqual(llm.calls[0]["options"].get("max_tokens"), 32768)
+        self.assertEqual(llm.calls[0]["options"].get("reasoning_effort"), "high")
+
     def setUp(self) -> None:
         project = get_project_profile("typescript_fullstack_v1")
         planning = build_planning_path_policy(
