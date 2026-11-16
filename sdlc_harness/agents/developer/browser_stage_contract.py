@@ -59,6 +59,10 @@ UI_POLISH_UNIT_RULES = (
     "The exact Design visual_contract overrides the app visual profile when they differ.",
     "Use the approved profile tokens and keep visual changes inside the paths of this unit.",
 )
+UI_POLISH_ACCEPTED_WARNING_INSTRUCTION = (
+    "The owner approved this contract with these Validator warnings on this unit. Apply each expected_change "
+    "when it fits inside this unit's paths without changing behavior, semantics or copy; otherwise leave it."
+)
 
 BROWSER_REPAIR_RUNTIME_RULES = (
     "The approved runtime closure is behavior authority for browser repair, including its runtime inputs, demo "
@@ -614,6 +618,57 @@ def visual_contracts_by_node(frozen_packet: dict[str, object]) -> dict[str, dict
     return result
 
 
+UI_POLISH_GUIDANCE_SCHEMA_VERSION = "ui_polish_guidance_v1"
+# Fixed generic presentation queries, one per approved visual_contract topic: a query never carries text from the
+# contract itself, so no use-case vocabulary reaches the skill. Only the ux domain: the react domain is rendering
+# performance advice, not presentation (checked against the skill on 2026-11-16).
+_POLISH_GUIDANCE_TOPICS = (
+    ("hierarchy", ("hierarchy",), "visual hierarchy heading emphasis"),
+    ("typography", ("typography",), "typography font size line height"),
+    ("focus_appearance", ("focus_appearance",), "visible focus indicator keyboard"),
+    ("color_and_tokens", ("color_and_tokens",), "color contrast semantic status colors"),
+    ("layout", ("layout", "responsive_rules"), "responsive layout spacing grid"),
+)
+# Code examples carry raw colors and utility classes; only the advice itself is kept.
+_POLISH_GUIDANCE_FIELDS = {"Category": "category", "Issue": "issue", "Do": "do", "Don't": "dont", "Severity": "severity"}
+UI_POLISH_GUIDANCE_AUTHORITY = (
+    "Advice from the ui-ux-pro-max skill on how to apply the approved visual authority. Authority order: Design "
+    "visual_contract > committed app visual profile > this guidance. It never adds tokens, colors, fonts or styles "
+    "and is never an authority_ref."
+)
+
+
+def ui_polish_guidance(
+    *,
+    search: Callable[[dict[str, object]], dict[str, object]],
+    visual_contracts: dict[str, dict[str, object]],
+    visual_profile: dict[str, object],
+) -> dict[str, object]:
+    """Bounded skill guidance for UI Polish; never a visual-profile search, so no new style can enter."""
+
+    searches = [
+        (topic, query)
+        for topic, fields, query in _POLISH_GUIDANCE_TOPICS
+        if any(visual.get(field) for visual in visual_contracts.values() for field in fields)
+    ]
+    style_words = re.findall(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*", _text(_dict(visual_profile.get("style")).get("keywords")))
+    if len(style_words) >= 2:
+        searches.append(("profile_style", " ".join(style_words[:8])))
+    rows: dict[tuple[str, str], dict[str, object]] = {}
+    for topic, query in searches:
+        for raw in _dicts(search({"query": query, "mode": "domain", "domain": "ux"}).get("results")):
+            row = {name: _text(raw.get(field)) for field, name in _POLISH_GUIDANCE_FIELDS.items() if _text(raw.get(field))}
+            entry = rows.setdefault((_text(row.get("category")), _text(row.get("issue"))), {"topics": [], **row})
+            entry["topics"].append(topic)
+    return {
+        "schema_version": UI_POLISH_GUIDANCE_SCHEMA_VERSION,
+        "source": "ui-ux-pro-max",
+        "authority": UI_POLISH_GUIDANCE_AUTHORITY,
+        "searches": [{"topic": topic, "domain": "ux", "query": query} for topic, query in searches],
+        "rows": list(rows.values()),
+    }
+
+
 def assemble_ui_polish_contract(
     *,
     run_id: str,
@@ -805,8 +860,13 @@ def build_ui_polish_work_packet(
     contract_ref: str,
     frozen_packet: dict[str, object],
     version: int,
+    accepted_warnings: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
-    """Project the approved polish units through the existing closure packet machinery."""
+    """Project the approved polish units through the existing closure packet machinery.
+
+    ``accepted_warnings`` are the contract-review warnings the owner approved at checkpoint 1; each reaches only
+    the units it cites (r9, 2026-11-16: an accepted action-order warning never reached the Developer).
+    """
 
     # Read-only context is the whole approved Polish scope: a stylesheet-only unit must see the markup it styles.
     scope_paths = [path for unit in _dicts(contract.get("polish_units")) for path in _texts(unit.get("write_paths"))]
@@ -842,6 +902,11 @@ def build_ui_polish_work_packet(
     execution_units = []
     for unit in _dicts(packet.get("execution_units")):
         polish = by_id.get(_text(unit.get("unit_id")), {})
+        warnings = [
+            {key: warning[key] for key in ("category", "issue", "expected_change") if _text(warning.get(key))}
+            for warning in _dicts(accepted_warnings)
+            if _text(unit.get("unit_id")) in _texts(warning.get("unit_ids"))
+        ]
         payload = {
             **unit,
             "title": f"UI Polish: {_text(polish.get('key'))}",
@@ -855,6 +920,16 @@ def build_ui_polish_work_packet(
                 "visual_authority": contract.get("authority"),
                 "authority_refs": _texts(polish.get("authority_refs")),
                 "new_paths": _texts(polish.get("new_paths")),
+                **(
+                    {
+                        "accepted_contract_warnings": {
+                            "instruction": UI_POLISH_ACCEPTED_WARNING_INSTRUCTION,
+                            "items": warnings,
+                        }
+                    }
+                    if warnings
+                    else {}
+                ),
             },
         }
         payload["input_digest"] = "sha256:" + hashlib.sha256(

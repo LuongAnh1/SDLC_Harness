@@ -8,7 +8,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ..developer.closure_planner import _parse_json_object, call_structured_json
-from ..developer.polish_planner import POLISH_INCONCLUSIVE
+from ..developer.polish_planner import IMAGE_INPUTS_RULE, POLISH_INCONCLUSIVE, image_inputs
 
 
 POLISH_REVIEW_PROMPT_MARKER = "UI Polish Contract Review v1"
@@ -47,6 +47,12 @@ _OUTPUT_SCHEMA = {
     ],
     "observations": ["..."],
 }
+
+_POLISH_GUIDANCE_RULE = (
+    "uiux_guidance is ui-ux-pro-max advice, not authority: never cite it in authority_refs and never block only "
+    "because a guidance row is not applied. Judge against Design, the visual profile and the captures; guidance may "
+    "explain a finding or observation."
+)
 
 _BROWSER_QA_SYSTEM = (
     "You are the SDLC Harness Browser QA Validator. Judge one runnable scenario from typed obligations and browser "
@@ -139,6 +145,7 @@ class UiPolishValidator:
                 contract=contract,
                 validator_context=validator_context,
                 previous_round=previous_round,
+                images=images,
             ),
             profile_name="polish_validator",
             parse=lambda raw: parse_polish_review(
@@ -169,7 +176,7 @@ class UiPolishValidator:
         result = call_structured_json(
             self.llm_client,
             system=_SYSTEM,
-            prompt=polish_result_review_prompt(contract=contract, result_context=result_context),
+            prompt=polish_result_review_prompt(contract=contract, result_context=result_context, images=images),
             profile_name="polish_validator",
             parse=lambda raw: parse_polish_review(
                 raw,
@@ -265,6 +272,7 @@ def polish_review_prompt(
     contract: dict[str, object],
     validator_context: dict[str, object],
     previous_round: dict[str, object] | None = None,
+    images: list[dict[str, object]] | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "prompt_kind": POLISH_REVIEW_PROMPT_MARKER,
@@ -276,10 +284,13 @@ def polish_review_prompt(
             "A visual_authority finding cites at least one supplied evidence ref and one supplied authority ref.",
             "A blocker means the contract must change before code is written. design_conflict is always a warning: "
             "follow the reading that satisfies Requirement and record both Design IDs in observations.",
+            *([_POLISH_GUIDANCE_RULE] if validator_context.get("uiux_guidance") else []),
+            *([IMAGE_INPUTS_RULE] if images else []),
         ],
         "output_schema": _OUTPUT_SCHEMA,
         "contract": contract,
         "validator_context": validator_context,
+        **({"image_inputs": image_inputs(images)} if images else {}),
     }
     if previous_round:
         payload["previous_round"] = previous_round
@@ -290,6 +301,7 @@ def polish_result_review_prompt(
     *,
     contract: dict[str, object],
     result_context: dict[str, object],
+    images: list[dict[str, object]] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -301,12 +313,24 @@ def polish_result_review_prompt(
                 "Images are primary for visual hierarchy, layout, spacing, consistency and adherence to visual authority.",
                 "A visual_authority finding cites a supplied image evidence ref and an authority ref.",
                 "Every blocker cites the exact polish unit_ids that can repair it without widening the approved contract.",
+                # r9 (2026-11-16): the same unringed focused control was a blocker in one review and a warning in
+                # the next, justified as "no regression versus baseline". A first wording that also made every cited
+                # Design visual_contract decision blocker-worthy sent the review into exhaustive "potential issue"
+                # lists until max_tokens; severity is bounded by the unit objective instead.
+                "Severity follows each unit's objective: a blocker is an outcome the objective names that the after "
+                "evidence shows absent or contradicted, fixable inside that unit's write paths; matching the baseline "
+                "never excuses it. Anything the objective does not name is at most a warning.",
+                "Judge each unit's objective once against its evidence and report only defects; do not enumerate or "
+                "re-check details that pass.",
                 "Do not promote an accepted contract warning to blocker unless the implementation adds new contradictory evidence.",
                 "design_conflict is always a warning: follow the reading that satisfies Requirement and record both Design IDs.",
+                *([_POLISH_GUIDANCE_RULE] if result_context.get("uiux_guidance") else []),
+                *([IMAGE_INPUTS_RULE] if images else []),
             ],
             "output_schema": _OUTPUT_SCHEMA,
             "contract": contract,
             "result_context": result_context,
+            **({"image_inputs": image_inputs(images)} if images else {}),
         },
         # Compact: this prompt carries before and after evidence for every capture, and indentation alone
         # cost about a third of its characters (r9, 2026-11-16).

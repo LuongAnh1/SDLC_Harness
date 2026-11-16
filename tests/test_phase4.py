@@ -29,6 +29,7 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence, 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.agents.developer.closure_planner import RuntimeClosurePlanner
+from sdlc_harness.agents.designer.uiux import UIUX_MODE_STATE_KEY, UiUxGuidanceProvider
 from sdlc_harness.agents.developer.polish_planner import UiPolishPlanner
 from sdlc_harness.agents.validator.closure_review import RuntimeClosureValidator
 from sdlc_harness.agents.validator.browser_review import (
@@ -4285,6 +4286,15 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(planner.options[0]["images"])
         self.assertTrue(validator.options[0]["images"])
         self.assertTrue(planner.options[0]["accepts_images"])
+        # Images reach the provider without captions: the prompt lists their labels in attachment order.
+        for client in (planner, validator):
+            self.assertEqual(
+                [item["label"] for item in json.loads(client.prompts[0])["image_inputs"]],
+                [item["label"] for item in client.options[0]["images"]],
+            )
+        # A run that did not pin the UI/UX skill gets no guidance and no guidance rule.
+        self.assertNotIn("uiux_guidance", planner.prompts[0])
+        self.assertNotIn("ui_polish_guidance", waiting["latest_artifacts"])
         contract = self._artifact(waiting, "ui_polish_contract")
         self.assertEqual(contract["schema_version"], "ui_polish_contract_v1")
         self.assertEqual(contract["polish_units"][0]["write_paths"], ["apps/web/src/ClosurePanel.tsx"])
@@ -4304,6 +4314,103 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(
             approved_state["browser_stages"]["polish"]["approved_contract"],
             waiting["latest_artifacts"]["ui_polish_contract"],
+        )
+
+    def _uiux_pinned_polish_step(
+        self,
+        runner: BrowserVerificationRunnerStub,
+        provider: UiUxGuidanceProvider | None,
+    ) -> tuple[str, dict[str, object], ScriptedClosureLlm, ScriptedClosureLlm]:
+        run_id, _ = self._captured_polish_run(runner)
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        state[UIUX_MODE_STATE_KEY] = "enforce"
+        store.write_state(state)
+        planner = ScriptedClosureLlm(default=fake_ui_polish_plan)
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        planner.settings = validator.settings = self.settings
+        workflow = self._browser_workflow(runner)
+        workflow.polish_planner = UiPolishPlanner(planner)
+        workflow.polish_validator = UiPolishValidator(validator)
+        workflow.developer_tool_loop.uiux_provider = provider
+        return run_id, workflow.continue_run(run_id=run_id), planner, validator
+
+    def test_ui_polish_fails_closed_when_the_pinned_uiux_skill_is_not_configured(self) -> None:
+        _, blocked, planner, _ = self._uiux_pinned_polish_step(BrowserVerificationRunnerStub(), None)
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "ui_polish_guidance_unavailable")
+        self.assertEqual(planner.calls, 0)
+
+    def test_ui_polish_consults_the_pinned_uiux_skill_for_planner_and_validators(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, waiting, planner, validator = self._uiux_pinned_polish_step(
+            runner, UiUxGuidanceProvider(skill_root=None, fake_mode=True)
+        )
+        self.assertEqual(waiting["status"], "waiting_ui_polish_contract_review", waiting)
+        guidance = self._artifact(waiting, "ui_polish_guidance")
+        # The fixture's visual_contract has only `layout`: one fixed generic query, never contract text.
+        self.assertEqual(
+            guidance["searches"], [{"topic": "layout", "domain": "ux", "query": "responsive layout spacing grid"}]
+        )
+        self.assertEqual(guidance["rows"][0]["topics"], ["layout"])
+        for prompt, context_key in ((planner.prompts[0], "planner_context"), (validator.prompts[0], "validator_context")):
+            payload = json.loads(prompt)
+            self.assertEqual(payload[context_key]["uiux_guidance"], guidance)
+            self.assertTrue(any("uiux_guidance" in rule for rule in payload["rules"]))
+        checkpoint = (self.repo_root / waiting["latest_artifacts"]["ui_polish_contract_checkpoint"]).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("UI/UX guidance consulted", checkpoint)
+
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+        result_validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        result_validator.settings = self.settings
+        workflow = self._browser_workflow(runner)
+        workflow.polish_validator = UiPolishValidator(result_validator)
+        self.assertEqual(workflow.continue_run(run_id=run_id)["status"], "waiting_ui_polish_review")
+        result_prompt = json.loads(result_validator.prompts[0])
+        self.assertEqual(result_prompt["result_context"]["uiux_guidance"], guidance)
+        self.assertTrue(any("uiux_guidance" in rule for rule in result_prompt["rules"]))
+
+    def test_ui_polish_packet_carries_the_accepted_contract_warnings_to_the_developer(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+
+        def review_with_warning(prompt: str) -> str:
+            review = json.loads(fake_ui_polish_review(prompt))
+            review["findings"] = [
+                {
+                    "severity": "warning",
+                    "category": "scope",
+                    "unit_ids": review["reviewed_unit_ids"][:1],
+                    "evidence_refs": [],
+                    "authority_refs": [],
+                    "issue": "Visual action order differs from DOM order.",
+                    "expected_change": "Keep DOM order.",
+                }
+            ]
+            return json.dumps(review)
+
+        waiting = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=review_with_warning),
+        )
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        written = self._browser_step(run_id, runner)
+
+        self.assertEqual(written["status"], "ui_polish_written", written)
+        packet = self._artifact(written, "ui_polish_work_packet")
+        self.assertEqual(
+            packet["execution_units"][0]["closure_context"]["accepted_contract_warnings"]["items"],
+            [{"category": "scope", "issue": "Visual action order differs from DOM order.", "expected_change": "Keep DOM order."}],
         )
 
     def test_ui_polish_default_fake_client_reaches_the_contract_checkpoint(self) -> None:

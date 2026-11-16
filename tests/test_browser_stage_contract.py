@@ -25,6 +25,7 @@ from sdlc_harness.agents.developer.browser_stage_contract import (
     readiness_scope_drift,
     resolve_module,
     static_import_problems,
+    ui_polish_guidance,
 )
 from sdlc_harness.profiles import (
     browser_stage_facts,
@@ -535,6 +536,46 @@ class UiPolishContractTest(unittest.TestCase):
         self.assertEqual(packet["output_contract"]["allowed_paths"], [self.view])
         self.assertEqual(packet["execution_units"][0]["surfaces"], ["ui"])
         self.assertIn("visual_authority", packet["execution_units"][0]["closure_context"])
+        self.assertNotIn("accepted_contract_warnings", packet["execution_units"][0]["closure_context"])
+
+    def test_polish_packet_routes_accepted_contract_warnings_to_the_cited_units_only(self) -> None:
+        output = self.output()
+        output["polish_units"].append(
+            {
+                "key": "ledger-styles",
+                "objective": "Tighten the focus ring.",
+                "write_paths": [],
+                "new_paths": ["apps/web/src/LedgerView.css"],
+                "depends_on": [],
+                "authority_refs": ["primary"],
+            }
+        )
+        contract = self.contract(output)
+        ids = {unit["key"]: unit["unit_id"] for unit in contract["polish_units"]}
+        warning = {
+            "severity": "warning",
+            "category": "scope",
+            "unit_ids": [ids["ledger-styles"]],
+            "evidence_refs": ["baseline:V-0:mobile:s00"],
+            "authority_refs": ["VDN-UI"],
+            "issue": "Visual action order contradicts DOM order on small screens.",
+            "expected_change": "Stack actions in DOM order without reversal.",
+        }
+        packet = build_ui_polish_work_packet(
+            contract=contract,
+            contract_ref="artifacts/ui_polish_contract_v1.json",
+            frozen_packet=self.frozen,
+            version=1,
+            accepted_warnings=[warning],
+        )
+        units = {unit["title"]: unit["closure_context"] for unit in packet["execution_units"]}
+
+        self.assertEqual(
+            units["UI Polish: ledger-styles"]["accepted_contract_warnings"]["items"],
+            [{key: warning[key] for key in ("category", "issue", "expected_change")}],
+        )
+        self.assertIn("expected_change", units["UI Polish: ledger-styles"]["accepted_contract_warnings"]["instruction"])
+        self.assertNotIn("accepted_contract_warnings", units["UI Polish: ledger-shell"])
 
     def test_stylesheet_only_polish_unit_can_read_the_markup_of_the_approved_scope(self) -> None:
         stylesheet = "apps/web/src/LedgerView.css"
@@ -561,6 +602,55 @@ class UiPolishContractTest(unittest.TestCase):
         self.assertEqual(styles["write_paths"], [stylesheet])
         self.assertEqual(styles["context_paths"], [stylesheet, self.view])
         self.assertEqual(units["UI Polish: ledger-shell"]["context_paths"], [self.view])
+
+
+class UiPolishGuidanceTest(unittest.TestCase):
+    def test_queries_are_fixed_topics_and_rows_keep_only_advice(self) -> None:
+        queries: list[dict[str, object]] = []
+
+        def search(arguments: dict[str, object]) -> dict[str, object]:
+            queries.append(arguments)
+            shared = {"Category": "Accessibility", "Issue": "Color Contrast", "Do": "4.5:1", "Don't": "Low contrast",
+                      "Code Example Good": "#333 on white", "Severity": "High"}
+            own = {"Category": "Layout", "Issue": f"Row {len(queries)}", "Do": "Align", "Don't": "Drift"}
+            return {"results": [shared, own]}
+
+        guidance = ui_polish_guidance(
+            search=search,
+            visual_contracts={
+                "VDN-A": {"typography": ["Ledger totals use tabular figures"], "layout": [], "style_target_policy": "x"},
+                "VDN-B": {"responsive_rules": ["Ledger rows stack below 600px"], "color_and_tokens": []},
+            },
+            visual_profile={"style": {"keywords": "Calm, ledger-like, roomy & bright; muted"}},
+        )
+
+        # Only non-empty topics are searched (responsive_rules counts for layout), each with its fixed generic query;
+        # the profile style keywords are reduced to plain words. No contract text reaches a query.
+        self.assertEqual(
+            [(item["topic"], item["query"]) for item in guidance["searches"]],
+            [
+                ("typography", "typography font size line height"),
+                ("layout", "responsive layout spacing grid"),
+                ("profile_style", "Calm ledger-like roomy bright muted"),
+            ],
+        )
+        self.assertTrue(all(item == {**item, "mode": "domain", "domain": "ux"} for item in queries))
+        self.assertNotIn("tabular", json.dumps(queries))
+        # A row seen by several searches appears once with every topic; code examples are dropped.
+        self.assertEqual(
+            guidance["rows"][0],
+            {"topics": ["typography", "layout", "profile_style"], "category": "Accessibility",
+             "issue": "Color Contrast", "do": "4.5:1", "dont": "Low contrast", "severity": "High"},
+        )
+        self.assertEqual(len(guidance["rows"]), 4)
+        self.assertIn("never an authority_ref", guidance["authority"])
+
+    def test_no_topics_and_no_style_means_no_search(self) -> None:
+        def search(arguments: dict[str, object]) -> dict[str, object]:
+            raise AssertionError("no search expected")
+
+        guidance = ui_polish_guidance(search=search, visual_contracts={"VDN-A": {"hierarchy": []}}, visual_profile={})
+        self.assertEqual((guidance["searches"], guidance["rows"]), ([], []))
 
 
 if __name__ == "__main__":

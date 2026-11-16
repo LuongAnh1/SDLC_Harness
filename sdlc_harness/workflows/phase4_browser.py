@@ -40,8 +40,10 @@ from ..agents.developer.browser_stage_contract import (
     readiness_findings,
     readiness_scope_drift,
     static_import_problems,
+    ui_polish_guidance,
     visual_contracts_by_node,
 )
+from ..agents.designer.uiux import UIUX_MODE_STATE_KEY
 from ..agents.developer.polish_planner import POLISH_INCONCLUSIVE, UiPolishPlanner
 from ..agents.developer.visual_profile import app_visual_scope_id, read_visual_profiles
 from ..agents.developer.closure_contract import (
@@ -2338,6 +2340,20 @@ class PhaseFourBrowserStagesCycle:
         evidence = _selected_evidence(manifest=manifest, images=images)
         evidence_refs = {str(item["evidence_ref"]) for item in evidence}
         authority_refs = set(_dict_value(visual_profile.get("tokens"))) | set(visual_contracts)
+        guidance: dict[str, object] = {}
+        # Hướng 1 (owner, 2026-11-16): a run that pinned the UI/UX skill consults it here instead of waiting for the
+        # Developer to ask; guidance stays out of authority_refs (U4 accepts profile token keys and Design IDs only).
+        if str(state.get(UIUX_MODE_STATE_KEY) or "off") == "enforce":
+            provider = self.developer_tool_loop.uiux_provider
+            if provider is None:
+                raise HarnessError(
+                    "ui_polish_guidance_unavailable",
+                    "This run pins the UI/UX skill but SDLC_UIUX_SKILL_MODE is not enforce.",
+                    run_id=run_id,
+                )
+            guidance = ui_polish_guidance(
+                search=provider.search, visual_contracts=visual_contracts, visual_profile=visual_profile
+            )
         context = {
             "visual_profile_ref": profile_ref,
             "visual_profile": visual_profile,
@@ -2348,8 +2364,10 @@ class PhaseFourBrowserStagesCycle:
             "baseline_evidence": evidence,
             "omitted_capture_keys": _string_items(selection.get("omitted_capture_keys")),
             "path_policy": planning_policy.prompt_context(),
+            **({"uiux_guidance": guidance} if guidance else {}),
         }
         return {
+            "guidance": guidance,
             **inputs,
             "profile_path": profile_path,
             "profile_ref": profile_ref,
@@ -2485,6 +2503,10 @@ class PhaseFourBrowserStagesCycle:
                 outcome["review"],
             )
             latest_artifacts["ui_polish_contract_review"] = review_ref
+            if inputs["guidance"]:
+                latest_artifacts["ui_polish_guidance"] = _write_closure_json(
+                    self.store, run_id, f"ui_polish_guidance_v{version}.json", inputs["guidance"]
+                )
             if not outcome["ok"]:
                 raise HarnessError("ui_polish_contract_invalid", str(outcome["message"]), run_id=run_id)
             contract_ref = _write_closure_json(
@@ -2512,6 +2534,7 @@ class PhaseFourBrowserStagesCycle:
                     review=outcome["review"],
                     images=inputs["images"],
                     manifest_key="browser_baseline_evidence_manifest",
+                    guidance=inputs["guidance"],
                 ),
             )
             latest_artifacts["ui_polish_contract_checkpoint"] = checkpoint_ref
@@ -2634,6 +2657,15 @@ class PhaseFourBrowserStagesCycle:
             raise HarnessError("ui_polish_packet_missing", "UI Polish has no approved work packet.", run_id=run_id)
         return _read_json_artifact(self._existing_artifact_path(packet_ref, run_id=run_id), run_id=run_id)
 
+    def _accepted_polish_contract_warnings(
+        self, latest_artifacts: dict[str, str], *, run_id: str
+    ) -> list[dict[str, object]]:
+        review_ref = str(latest_artifacts.get("ui_polish_contract_review") or "")
+        if not review_ref:
+            return []
+        review = _read_json_artifact(self._existing_artifact_path(review_ref, run_id=run_id), run_id=run_id)
+        return _dict_items(review.get("warnings"))
+
     def _continue_ui_polish_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
         try:
@@ -2651,6 +2683,7 @@ class PhaseFourBrowserStagesCycle:
                     contract_ref=contract_ref,
                     frozen_packet=inputs["frozen_packet"],
                     version=packet_version,
+                    accepted_warnings=self._accepted_polish_contract_warnings(latest_artifacts, run_id=run_id),
                 )
                 packet_ref = _write_closure_json(
                     self.store, run_id, f"ui_polish_work_packet_v{packet_version}.json", packet
@@ -3180,6 +3213,12 @@ class PhaseFourBrowserStagesCycle:
                 for unit in _dict_items(contract.get("polish_units"))
                 for ref in _string_items(unit.get("authority_refs"))
             }
+            guidance_ref = str(latest_artifacts.get("ui_polish_guidance") or "")
+            guidance = (
+                _read_json_artifact(self._existing_artifact_path(guidance_ref, run_id=run_id), run_id=run_id)
+                if guidance_ref
+                else {}
+            )
             result_review = self._ui_polish_result_validator(run_id=run_id, attempt=attempt).review_result(
                 contract=contract,
                 result_context={
@@ -3191,6 +3230,7 @@ class PhaseFourBrowserStagesCycle:
                     "omitted_image_capture_keys": _string_items(selection.get("omitted_capture_keys")),
                     "accepted_contract_warnings": _dict_items(accepted_contract_review.get("warnings")),
                     "code_validator_regression": {"ok": True, "artifact": regression_ref},
+                    **({"uiux_guidance": guidance} if guidance else {}),
                 },
                 evidence_refs=evidence_refs,
                 visual_evidence_refs=visual_refs,
@@ -5242,6 +5282,7 @@ def _ui_polish_checkpoint_markdown(
     review: dict[str, object],
     images: list[dict[str, object]],
     manifest_key: str,
+    guidance: dict[str, object] | None = None,
 ) -> str:
     lines = [
         f"# UI Polish contract v{version}",
@@ -5264,6 +5305,13 @@ def _ui_polish_checkpoint_markdown(
             f"{quote(manifest_key, safe='')}/{quote(capture_key, safe='')}"
         )
         lines.append(f"- [{label}]({url})")
+    if guidance:
+        lines.extend(["", "## UI/UX guidance consulted (advice, not authority)", ""])
+        lines.extend(
+            f"- [{', '.join(_string_items(row.get('topics')))}] {row.get('issue')}: do {row.get('do')}; "
+            f"don't {row.get('dont')}"
+            for row in _dict_items(guidance.get("rows"))
+        )
     lines.extend(
         [
             "",

@@ -33,6 +33,24 @@ _RULES = (
     "Design IDs in out_of_scope instead of changing Design.",
 )
 
+_GUIDANCE_RULE = (
+    "planner_context.uiux_guidance is ui-ux-pro-max advice on how to apply the approved authority, ranked below "
+    "Design and the profile. Use it to judge which baseline presentation issues deserve a unit and to phrase their "
+    "objectives; it never adds tokens, colors, fonts or styles and is never an authority_ref."
+)
+
+# Images reach the provider without captions: without this list the r9 Polish reviews guessed which picture was
+# which capture and cited image labels that do not exist (2026-11-16).
+IMAGE_INPUTS_RULE = (
+    "`image_inputs` lists the attached images in attachment order: the Nth attached image is item N. Refer to an "
+    "image only by its label."
+)
+
+
+def image_inputs(images: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [{"label": item.get("label"), "sha256": item.get("sha256")} for item in images]
+
+
 _OUTPUT_SCHEMA = {
     "authority": {
         "visual_profile_ref": {"app_scope_id": "web:apps/...", "sha256": "sha256:..."},
@@ -67,7 +85,7 @@ class UiPolishPlanner:
         return call_structured_json(
             self.llm_client,
             system=_SYSTEM,
-            prompt=polish_planner_prompt(planner_context=planner_context, previous_round=previous_round),
+            prompt=polish_planner_prompt(planner_context=planner_context, previous_round=previous_round, images=images),
             profile_name="polish_planner",
             parse=parse_polish_planner_output,
             contract_error_code=POLISH_PLANNER_CONTRACT_INVALID,
@@ -82,12 +100,18 @@ def polish_planner_prompt(
     *,
     planner_context: dict[str, object],
     previous_round: dict[str, object] | None = None,
+    images: list[dict[str, object]] | None = None,
 ) -> str:
     payload: dict[str, object] = {
         "prompt_kind": POLISH_PLANNER_PROMPT_MARKER,
-        "rules": list(_RULES),
+        "rules": [
+            *_RULES,
+            *([_GUIDANCE_RULE] if planner_context.get("uiux_guidance") else []),
+            *([IMAGE_INPUTS_RULE] if images else []),
+        ],
         "output_schema": _OUTPUT_SCHEMA,
         "planner_context": planner_context,
+        **({"image_inputs": image_inputs(images)} if images else {}),
     }
     if previous_round:
         payload["previous_round"] = {

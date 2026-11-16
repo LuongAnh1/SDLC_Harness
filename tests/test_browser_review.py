@@ -191,6 +191,29 @@ def test_polish_result_prompt_is_compact_and_explains_shared_values() -> None:
     assert any("`same_as`" in rule for rule in json.loads(prompt)["rules"])
 
 
+def test_polish_result_prompt_defines_blocker_severity_without_baseline_parity() -> None:
+    rules = json.loads(polish_result_review_prompt(contract={"polish_units": []}, result_context={}))["rules"]
+
+    severity = [rule for rule in rules if rule.startswith("Severity follows each unit's objective")]
+    assert len(severity) == 1
+    assert "matching the baseline never excuses it" in severity[0]
+    # Bounded by the objective: the Design-wide wording made the review enumerate until max_tokens (r9).
+    assert "visual_contract" not in severity[0]
+    assert any(rule.startswith("Judge each unit's objective once") for rule in rules)
+
+
+def test_polish_result_prompt_names_the_attached_images_in_order() -> None:
+    images = [{"label": "before:V-0:desktop:s00", "sha256": "a"}, {"label": "after:V-0:desktop:s00", "sha256": "b"}]
+
+    payload = json.loads(polish_result_review_prompt(contract={"polish_units": []}, result_context={}, images=images))
+    plain = json.loads(polish_result_review_prompt(contract={"polish_units": []}, result_context={}))
+
+    assert [item["label"] for item in payload["image_inputs"]] == ["before:V-0:desktop:s00", "after:V-0:desktop:s00"]
+    assert any(rule.startswith("`image_inputs` lists the attached images") for rule in payload["rules"])
+    assert "image_inputs" not in plain
+    assert not any("image_inputs" in rule for rule in plain["rules"])
+
+
 class _SettingsClient:
     def __init__(self, *, window: object, responses: list[str]):
         self.settings = type("Settings", (), {"llm_context_window_tokens": window, "llm_structured_max_tokens": 1000})()
