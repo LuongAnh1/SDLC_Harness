@@ -10,6 +10,7 @@ output that breaks the Planner output contract is retried once with the exact er
 from __future__ import annotations
 
 import json
+import math
 from typing import Any
 
 from ...core.config import phase4_llm_call_options
@@ -31,6 +32,11 @@ from .closure_contract import (
 CLOSURE_PLANNER_PROMPT_MARKER = "Runtime Closure Planner v1"
 INCONCLUSIVE = "runtime_closure_inconclusive"
 _TRANSPORT_ERROR_CODES = {"llm_transport_failed", "requirement_refiner_failed"}
+# Real DeepSeek calls of this Harness (2026-11-16): indented JSON prompts used 3.37-4.46 characters per prompt
+# token, the compact evidence-heavy UI Polish result prompt 2.74 (images included), and one screenshot about
+# 300-400 tokens. Both allowances lean high so an oversized prompt is caught before the call.
+PROMPT_CHARS_PER_TOKEN = 2.6
+IMAGE_PROMPT_TOKENS = 1024
 _REQUIRED_LISTS = ("resolutions", "closure_units", "runtime_probes")
 _OPTIONAL_LISTS = (
     "closure_declared_inputs",
@@ -212,6 +218,10 @@ def call_structured_json(
     contract_error_code: str,
     label: str,
     run_id: str = "",
+    inconclusive_code: str = INCONCLUSIVE,
+    images: list[dict[str, object]] | tuple[dict[str, object], ...] = (),
+    retry_guard=None,
+    retry_instruction=None,
 ) -> dict[str, object]:
     """One provider call with one exact-error retry; every other failure is inconclusive."""
 
@@ -223,18 +233,47 @@ def call_structured_json(
     )
     attempts: list[dict[str, object]] = []
     contract_error = ""
+    contract_payload: dict[str, object] | None = None
+    contract_output = ""
     for attempt in (1, 2):
         request_prompt = prompt
         if contract_error:
+            correction_instruction = (
+                retry_instruction(contract_error)
+                if callable(retry_instruction)
+                else "Correct only the fields named by that contract error."
+            )
             request_prompt += (
                 "\n\nYour previous answer broke the output contract:\n"
                 f"{contract_error}\n"
-                "Return one corrected JSON object only. Copy exact IDs from the supplied context."
+                "Harness collection positions are one-based: `findings[1]` means the first finding. "
+                f"{correction_instruction} Except inside those permitted fields, keep "
+                "exactly the same object keys, list lengths, list item order and values as the previous JSON. "
+                "Adding, removing or renaming any other key is a contract change; do not add wrapper or metadata "
+                "keys such as `type`. Preserve every semantic decision. Return the complete corrected JSON object "
+                "only and copy exact IDs from the supplied context.\n\nPrevious JSON:\n"
+                f"{contract_output}"
             )
+        overflow = _context_overflow(
+            settings,
+            system=system,
+            prompt=request_prompt,
+            image_count=len(images),
+            max_tokens=int(options.get("max_tokens") or 0),
+        )
+        if overflow:
+            raise _inconclusive(label, overflow, attempts, run_id, code=inconclusive_code)
         try:
             method = getattr(client, "complete_with_metadata", None)
             if callable(method):
-                completion = method(system=system, prompt=request_prompt, json_mode=True, **options)
+                image_options = {"images": list(images)} if images else {}
+                completion = method(
+                    system=system,
+                    prompt=request_prompt,
+                    json_mode=True,
+                    **image_options,
+                    **options,
+                )
                 raw = str(getattr(completion, "content", "") or "")
                 finish_reason = str(getattr(completion, "finish_reason", "") or "")
             else:
@@ -245,22 +284,56 @@ def call_structured_json(
         except HarnessError as exc:
             if exc.error_code not in _TRANSPORT_ERROR_CODES:
                 raise
-            raise _inconclusive(label, f"provider call failed: {exc.message}", attempts, run_id) from exc
+            raise _inconclusive(
+                label, f"provider call failed: {exc.message}", attempts, run_id, code=inconclusive_code
+            ) from exc
         attempts.append({"attempt": attempt, "finish_reason": finish_reason, "chars": len(raw)})
         if finish_reason == "length":
-            raise _inconclusive(label, "provider output was truncated (finish_reason=length).", attempts, run_id, raw)
+            raise _inconclusive(
+                label, "provider output was truncated (finish_reason=length).", attempts, run_id, raw, code=inconclusive_code
+            )
         if not raw.strip():
-            raise _inconclusive(label, "provider output was empty.", attempts, run_id, raw)
+            raise _inconclusive(label, "provider output was empty.", attempts, run_id, raw, code=inconclusive_code)
         try:
             parsed = parse(raw)
+            if attempt == 2 and retry_guard is not None and contract_payload is not None:
+                retry_guard(contract_payload, _parse_json_object(raw), contract_error)
         except HarnessError as exc:
             if exc.error_code == contract_error_code and attempt == 1:
                 contract_error = exc.message
+                contract_output = raw
+                try:
+                    contract_payload = _parse_json_object(raw)
+                except HarnessError:
+                    contract_payload = None
                 attempts[-1]["contract_error"] = exc.message
                 continue
-            raise _inconclusive(label, exc.message, attempts, run_id, raw) from exc
+            raise _inconclusive(label, exc.message, attempts, run_id, raw, code=inconclusive_code) from exc
         return {"output": parsed, "raw": raw, "attempts": attempts}
     raise AssertionError("unreachable")
+
+
+def _context_overflow(
+    settings: object,
+    *,
+    system: str,
+    prompt: str,
+    image_count: int,
+    max_tokens: int,
+) -> str:
+    """Why the request cannot fit the configured context window, or "" when it fits or no window is set."""
+
+    window = getattr(settings, "llm_context_window_tokens", None)
+    if not isinstance(window, int) or isinstance(window, bool) or window <= 0:
+        return ""
+    prompt_tokens = math.ceil((len(system) + len(prompt)) / PROMPT_CHARS_PER_TOKEN) + image_count * IMAGE_PROMPT_TOKENS
+    if prompt_tokens + max_tokens <= window:
+        return ""
+    return (
+        f"the prompt needs about {prompt_tokens} tokens ({len(system) + len(prompt)} characters, {image_count} "
+        f"image(s)) plus {max_tokens} output tokens, more than the {window}-token context window; "
+        "no provider call was made."
+    )
 
 
 def _parse_json_object(raw: str) -> dict[str, object]:
@@ -286,8 +359,10 @@ def _inconclusive(
     attempts: list[dict[str, object]],
     run_id: str,
     raw: str = "",
+    *,
+    code: str = INCONCLUSIVE,
 ) -> HarnessError:
-    error = HarnessError(INCONCLUSIVE, f"{label} output is inconclusive: {reason}", run_id=run_id or None)
+    error = HarnessError(code, f"{label} output is inconclusive: {reason}", run_id=run_id or None)
     error.attempts = list(attempts)  # type: ignore[attr-defined]
     error.raw_response = raw  # type: ignore[attr-defined]
     return error

@@ -402,12 +402,22 @@ def _wiring_endpoints(unit: dict[str, object], planning_policy: PlanningPathPoli
 def _ui_obligations(node: dict[str, object]) -> list[dict[str, str]]:
     """Enumerate UI behavior and externally supplied runtime inputs with stable ids."""
 
+    return [{"id": row_id, "summary": summary} for row_id, summary, _contract in ui_obligation_rows(node)]
+
+
+def ui_obligation_rows(node: dict[str, object]) -> list[tuple[str, str, dict[str, object]]]:
+    """Each UI obligation as (stable id, summary, the approved item's fields the summary leaves out)."""
+
     if str(node.get("surface") or "") != "ui":
         return []
     contract = _dict(node.get("surface_contract"))
     experience = _dict(contract.get("experience_contract"))
     runtime_surface = _dict(contract.get("runtime_surface"))
-    rows: list[tuple[str, str, str]] = []
+
+    def rest(item: dict[str, object], *summarized: str) -> dict[str, object]:
+        return {key: value for key, value in item.items() if key not in summarized}
+
+    rows: list[tuple[str, str, str, dict[str, object]]] = []
     external_inputs = sorted(
         (
             item
@@ -424,26 +434,34 @@ def _ui_obligations(node: dict[str, object]) -> list[dict[str, str]]:
                 name,
                 f"{name}: external_use_case via {item.get('binding') or ''}; "
                 f"provided by {item.get('provided_by') or ''}",
+                {},
             )
         )
     for name, state in sorted(_dict(experience.get("runtime_states")).items()):
         if isinstance(state, dict) and not state.get("not_applicable"):
-            rows.append(("state", str(name), f"{name}: {state.get('trigger') or ''}".strip()))
+            rows.append(
+                ("state", str(name), f"{name}: {state.get('trigger') or ''}".strip(), rest(state, "trigger", "not_applicable"))
+            )
     for index, value in enumerate(_strings(contract.get("validations")), start=1):
-        rows.append(("validation", str(index), value))
+        rows.append(("validation", str(index), value, {}))
     for index, item in enumerate(_dicts(contract.get("transitions")), start=1):
         rows.append(
-            ("transition", str(index), f"{item.get('from') or ''} -> {item.get('to') or ''} on {item.get('action') or ''}")
+            (
+                "transition",
+                str(index),
+                f"{item.get('from') or ''} -> {item.get('to') or ''} on {item.get('action') or ''}",
+                rest(item, "from", "to", "action"),
+            )
         )
     for index, item in enumerate(_dicts(experience.get("feedback")), start=1):
-        rows.append(("feedback", str(index), str(item.get("trigger") or "")))
+        rows.append(("feedback", str(index), str(item.get("trigger") or ""), rest(item, "trigger")))
     for kind in ("accessibility", "focus_flow", "responsive"):
         for index, value in enumerate(_strings(experience.get(kind)), start=1):
-            rows.append((kind, str(index), value))
+            rows.append((kind, str(index), value, {}))
     for index, item in enumerate(_dicts(experience.get("focus_policies")), start=1):
-        rows.append(("focus_policy", str(index), str(item.get("event") or "")))
+        rows.append(("focus_policy", str(index), str(item.get("event") or ""), rest(item, "event")))
     node_id = str(node.get("id") or "")
-    return [{"id": f"{node_id}:{kind}.{key}", "summary": summary} for kind, key, summary in rows]
+    return [(f"{node_id}:{kind}.{key}", summary, detail) for kind, key, summary, detail in rows]
 
 
 def unit_write_scope(unit: dict[str, object], planning_policy: PlanningPathPolicy) -> dict[str, object]:

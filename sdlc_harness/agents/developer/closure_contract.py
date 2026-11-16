@@ -790,6 +790,36 @@ def extend_closure_work_packet(
     }
 
 
+def select_plan_unit_owners(
+    *,
+    paths: list[str],
+    cited_unit_ids: list[str],
+    plan_units: list[dict[str, object]],
+) -> dict[str, object]:
+    """Apply closure routing rules 2-3 to frozen Plan units without closure-only inputs."""
+
+    units = {_text(unit.get("unit_id")): unit for unit in plan_units if _text(unit.get("unit_id"))}
+    cited = set(cited_unit_ids) & set(units)
+    assignments: dict[str, set[str]] = {}
+    for path in list(dict.fromkeys(paths)):
+        writers = [unit_id for unit_id, unit in units.items() if path in _texts(unit.get("write_paths"))]
+        owner = next((unit_id for unit_id in writers if unit_id in cited), writers[0] if writers else "")
+        if owner:
+            assignments.setdefault(owner, set()).add(path)
+    return {
+        "unit_ids": sorted(assignments),
+        "assignments": [
+            {"plan_unit_id": unit_id, "paths": sorted(owned_paths)}
+            for unit_id, owned_paths in sorted(assignments.items())
+        ],
+        "unmatched_paths": sorted(
+            path for path in dict.fromkeys(paths)
+            if not any(path in owned for owned in assignments.values())
+        ),
+        "cited_without_owned_path": sorted(cited - set(assignments)),
+    }
+
+
 def route_closure_problems(
     *,
     problems: list[dict[str, object]],
@@ -811,7 +841,8 @@ def route_closure_problems(
     packet_units = _dicts(packet.get("execution_units"))
     packet_ids = {_text(unit.get("unit_id")) for unit in packet_units}
     path_owner = {path: _text(unit.get("unit_id")) for unit in packet_units for path in _texts(unit.get("write_paths"))}
-    plan_units = {_text(unit.get("unit_id")): unit for unit in _dicts(frozen_packet.get("execution_units"))}
+    frozen_plan_units = _dicts(frozen_packet.get("execution_units"))
+    plan_units = {_text(unit.get("unit_id")): unit for unit in frozen_plan_units}
     probes = {_text(item.get("probe_id")): item for item in _dicts(contract.get("runtime_probes"))}
     protected = tuple(planning_policy.protected_paths)
     findings: list[dict[str, object]] = []
@@ -845,16 +876,20 @@ def route_closure_problems(
                 unit_ids, rule = owned, 2
             else:
                 cited_ids = set(_texts(problem.get("unit_ids")))
-                for path in paths:
-                    writers = [uid for uid, unit in plan_units.items() if path in _texts(unit.get("write_paths"))]
-                    # A path shared by several Plan units goes to the unit the finding cites.
-                    owner = next((uid for uid in writers if uid in cited_ids), writers[0] if writers else "")
-                    if owner:
-                        extensions.setdefault(owner, set()).add(path)
-                        if owner not in unit_ids:
-                            unit_ids.append(owner)
-                        rule = 2
-                    elif not is_protected(path) and (target_path / path).is_file():
+                selected = select_plan_unit_owners(
+                    paths=paths,
+                    cited_unit_ids=sorted(cited_ids),
+                    plan_units=frozen_plan_units,
+                )
+                unit_ids = _texts(selected.get("unit_ids"))
+                for assignment in _dicts(selected.get("assignments")):
+                    extensions.setdefault(_text(assignment.get("plan_unit_id")), set()).update(
+                        _texts(assignment.get("paths"))
+                    )
+                if unit_ids:
+                    rule = 2
+                for path in _texts(selected.get("unmatched_paths")):
+                    if not is_protected(path) and (target_path / path).is_file():
                         conflicts.append(f"`{path}` exists outside the frozen Plan and the closure contract")
         if not unit_ids:
             cited = _texts(problem.get("unit_ids"))
@@ -863,13 +898,18 @@ def route_closure_problems(
             if closure_cited:
                 unit_ids, rule = sorted(set(closure_cited)), 3
             elif plan_cited:
-                for uid in plan_cited:
-                    cited_paths = [path for path in paths if path in _texts(plan_units[uid].get("write_paths"))]
-                    if cited_paths:
-                        extensions.setdefault(uid, set()).update(cited_paths)
-                        unit_ids.append(uid)
-                    else:
-                        conflicts.append(f"Plan unit `{uid}` is cited without an exact path it owns")
+                selected = select_plan_unit_owners(
+                    paths=paths,
+                    cited_unit_ids=plan_cited,
+                    plan_units=frozen_plan_units,
+                )
+                unit_ids = _texts(selected.get("unit_ids"))
+                for assignment in _dicts(selected.get("assignments")):
+                    extensions.setdefault(_text(assignment.get("plan_unit_id")), set()).update(
+                        _texts(assignment.get("paths"))
+                    )
+                for uid in _texts(selected.get("cited_without_owned_path")):
+                    conflicts.append(f"Plan unit `{uid}` is cited without an exact path it owns")
                 rule = 3
         if not unit_ids and probe:
             unit_ids = sorted(
@@ -1045,12 +1085,8 @@ def render_runtime_probe_spec(contract: dict[str, object]) -> str:
         "// Generated by SDLC Harness from the approved runtime closure contract. Do not edit by hand.",
         'import { expect, test, type APIRequestContext } from "@playwright/test";',
         f'import config from "{config_import}";',
+        *stand_in_import_lines(stand_ins, spec_path=RUNTIME_PROBE_SPEC_PATH),
     ]
-    for index, stand_in in enumerate(stand_ins, start=1):
-        module = PurePosixPath(_text(stand_in.get("module")))
-        relative = posixpath.relpath(str(module.with_suffix("")), str(spec_dir))
-        relative = relative if relative.startswith(".") else f"./{relative}"
-        lines.append(f'import {{ {_text(stand_in.get("start_export"))} as standIn{index} }} from "{relative}";')
     lines += [
         "",
         "type ProbeServer = { name?: string; url?: string };",
@@ -1115,22 +1151,8 @@ def render_runtime_probe_spec(contract: dict[str, object]) -> str:
         "    expect(items ?? -1).toBeGreaterThanOrEqual(probe.expect_json_array_min_items);",
         "  }",
         "}",
+        *stand_in_hook_lines(stand_ins),
     ]
-    if stand_ins:
-        lines += ["", "test.beforeAll(async () => {"]
-        lines += [
-            f'  standIns.push(await standIn{index}(standInPort({json.dumps(_text(stand_in.get("env_key")))})));'
-            for index, stand_in in enumerate(stand_ins, start=1)
-        ]
-        lines += [
-            "});",
-            "",
-            "test.afterAll(async () => {",
-            "  for (const standIn of standIns.reverse()) {",
-            "    await standIn.close();",
-            "  }",
-            "});",
-        ]
     for probe in probes:
         literal = json.dumps(
             {
@@ -1153,6 +1175,41 @@ def render_runtime_probe_spec(contract: dict[str, object]) -> str:
             "});",
         ]
     return "\n".join(lines) + "\n"
+
+
+def stand_in_import_lines(stand_ins: list[dict[str, object]], *, spec_path: str) -> list[str]:
+    """Imports of the approved stand-in start functions, relative to a Harness-rendered spec."""
+
+    spec_dir = PurePosixPath(spec_path).parent
+    lines = []
+    for index, stand_in in enumerate(stand_ins, start=1):
+        module = PurePosixPath(_text(stand_in.get("module")))
+        relative = posixpath.relpath(str(module.with_suffix("")), str(spec_dir))
+        relative = relative if relative.startswith(".") else f"./{relative}"
+        lines.append(f'import {{ {_text(stand_in.get("start_export"))} as standIn{index} }} from "{relative}";')
+    return lines
+
+
+def stand_in_hook_lines(stand_ins: list[dict[str, object]]) -> list[str]:
+    """beforeAll/afterAll hooks starting each stand-in on its run-scoped port (needs `standIns`, `standInPort`)."""
+
+    if not stand_ins:
+        return []
+    return [
+        "",
+        "test.beforeAll(async () => {",
+        *(
+            f'  standIns.push(await standIn{index}(standInPort({json.dumps(_text(stand_in.get("env_key")))})));'
+            for index, stand_in in enumerate(stand_ins, start=1)
+        ),
+        "});",
+        "",
+        "test.afterAll(async () => {",
+        "  for (const standIn of standIns.reverse()) {",
+        "    await standIn.close();",
+        "  }",
+        "});",
+    ]
 
 
 def expected_new_write_targets(contract: dict[str, object], *, context: dict[str, object]) -> list[str]:
