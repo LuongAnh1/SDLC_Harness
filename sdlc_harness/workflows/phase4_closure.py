@@ -1512,6 +1512,8 @@ class _ClosureRepository:
 
 
 _HARNESS_OWNED_PATHS = {".env.example", RUNTIME_PROBE_SPEC_PATH}
+# Stages that boot the services through the Playwright webServer (L5.3 probe, L5.4 browser capture).
+_SERVICE_STAGE_IDS = {"runtime_probe", "browser_capture"}
 _PROBE_SERVICE_MARKER = re.compile(r"\[(api|web)\]")
 
 
@@ -1632,8 +1634,8 @@ def _classify_closure_verification(result) -> dict[str, object]:
         # By runtime_probe the database, migrations and build already passed: a service that never
         # becomes ready is a composition defect, unless a tool marker says the machine is at fault.
         environment_marker = _command_failure_kind(stdout=stage.stdout, stderr=stage.stderr) == "environment"
-        kind = "implementation" if stage.stage_id == "runtime_probe" and not environment_marker else "environment"
-    elif kind == "policy" and stage.stage_id == "runtime_probe" and "config.webserver" in text.casefold():
+        kind = "implementation" if stage.stage_id in _SERVICE_STAGE_IDS and not environment_marker else "environment"
+    elif kind == "policy" and stage.stage_id in _SERVICE_STAGE_IDS and "config.webserver" in text.casefold():
         kind = "implementation"
     return {
         "kind": kind,

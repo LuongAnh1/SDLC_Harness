@@ -16,6 +16,18 @@ def fake_completion(prompt: str) -> str:
         ('{\n  "prompt_kind": "Runtime Closure Contract Review v1"', '{\n  "prompt_kind": "Runtime Closure Code Review v1"')
     ):
         return fake_runtime_closure_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser Journey Planner v1"'):
+        return fake_browser_journey_plan(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "UI Polish Planner v1"'):
+        return fake_ui_polish_plan(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "UI Polish Contract Review v1"'):
+        return fake_ui_polish_review(prompt)
+    if prompt.startswith('{"prompt_kind": "UI Polish Result Review v1"'):
+        return fake_ui_polish_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser QA Scenario Review v1"'):
+        return fake_browser_qa_review(prompt)
+    if prompt.startswith('{\n  "prompt_kind": "Browser Journey Execution Review v1"'):
+        return fake_browser_journey_review(prompt)
     if "# Requirement Source Tool Loop" in prompt:
         return fake_requirement_source_action(prompt)
     if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
@@ -230,6 +242,35 @@ def fake_runtime_closure_plan(prompt: str) -> str:
     )
 
 
+def fake_browser_journey_plan(prompt: str) -> str:
+    """One `goto /` view per runnable scenario citing that scenario's obligations; passes J1-J6."""
+
+    payload = _closure_prompt_payload(prompt)
+    obligations = [item for item in payload.get("obligations") or [] if isinstance(item, dict)]
+    views = []
+    cited: set[str] = set()
+    for index, scenario_id in enumerate(str(item) for item in payload.get("runnable_scenario_ids") or []):
+        refs = [
+            str(item["obligation_id"])
+            for item in obligations
+            if scenario_id in (item.get("scenario_ids") or []) and str(item["obligation_id"]) not in cited
+        ]
+        cited.update(refs)
+        nodes = sorted(
+            {str(item["design_node_id"]) for item in obligations if str(item["obligation_id"]) in refs}
+        ) or list((payload.get("scenario_design_nodes") or {}).get(scenario_id) or [])[:1]
+        views.append(
+            {
+                "key": f"scenario-{index + 1}",
+                "scenario_id": scenario_id,
+                "design_node_ids": nodes,
+                "obligation_refs": refs,
+                "steps": [{"action": "goto", "path": "/"}],
+            }
+        )
+    return json.dumps({"views": views, "not_reachable": [], "observations": []}, ensure_ascii=False)
+
+
 def fake_runtime_closure_review(prompt: str) -> str:
     contract = _closure_prompt_payload(prompt).get("contract") or {}
     return json.dumps(
@@ -266,6 +307,135 @@ def fake_code_validation_task(prompt: str) -> str:
         },
         ensure_ascii=False,
     )
+
+
+def fake_ui_polish_plan(prompt: str) -> str:
+    """One presentation-only unit over the first eligible UI path."""
+
+    payload = _closure_prompt_payload(prompt)
+    context = payload.get("planner_context") if isinstance(payload.get("planner_context"), dict) else {}
+    candidates = [str(item) for item in context.get("candidate_paths") or [] if str(item)]
+    design_ids = [str(item) for item in context.get("design_node_ids") or [] if str(item)]
+    tokens = [str(item) for item in context.get("profile_token_keys") or [] if str(item)]
+    refs = [*(design_ids[:1]), *(tokens[:1])]
+    return json.dumps(
+        {
+            "authority": {
+                "visual_profile_ref": context.get("visual_profile_ref") or {},
+                "design_node_ids": design_ids,
+            },
+            "polish_units": [
+                {
+                    "key": "app-shell-polish",
+                    "objective": "Improve visual hierarchy, spacing and shell consistency without changing behavior.",
+                    "write_paths": candidates[:1],
+                    "new_paths": [],
+                    "depends_on": [],
+                    "authority_refs": refs,
+                }
+            ],
+            "out_of_scope": ["Behavior, data flow, copy and accessibility semantics remain unchanged."],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_ui_polish_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    contract = payload.get("contract") if isinstance(payload.get("contract"), dict) else {}
+    unit_ids = [str(item.get("unit_id")) for item in contract.get("polish_units") or [] if isinstance(item, dict)]
+    return json.dumps(
+        {
+            "summary": "Fake UI Polish contract stays presentation-only and follows the approved authority.",
+            "reviewed_unit_ids": unit_ids,
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_browser_qa_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    scenario = payload.get("scenario") if isinstance(payload.get("scenario"), dict) else {}
+    obligations = [item for item in scenario.get("obligations") or [] if isinstance(item, dict)]
+    evidence = payload.get("review_context") if isinstance(payload.get("review_context"), dict) else {}
+    refs = [
+        str(item.get("evidence_ref") or "")
+        for item in evidence.get("evidence") or []
+        if isinstance(item, dict) and str(item.get("evidence_ref") or "")
+    ]
+    return json.dumps(
+        {
+            "summary": "Fake Browser QA scenario review passed.",
+            "reviewed_obligation_ids": [str(item.get("obligation_id") or "") for item in obligations],
+            "verdicts": [
+                {
+                    "obligation_id": str(item.get("obligation_id") or ""),
+                    "verdict": "satisfied",
+                    "evidence_refs": refs[:1],
+                }
+                for item in obligations
+            ],
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_browser_journey_review(prompt: str) -> str:
+    payload = _closure_prompt_payload(prompt)
+    scenario = payload.get("scenario") if isinstance(payload.get("scenario"), dict) else {}
+    views = [item for item in scenario.get("views") or [] if isinstance(item, dict)]
+    not_reachable = [item for item in scenario.get("not_reachable") or [] if isinstance(item, dict)]
+    context = payload.get("review_context") if isinstance(payload.get("review_context"), dict) else {}
+    evidence = [item for item in context.get("evidence") or [] if isinstance(item, dict)]
+    return json.dumps(
+        {
+            "summary": "Fake browser journey execution review passed.",
+            "reviewed_view_ids": [str(item.get("view_id") or "") for item in views],
+            "reviewed_not_reachable_obligation_ids": [
+                str(item.get("obligation_id") or "") for item in not_reachable
+            ],
+            "view_evidence": [
+                {
+                    "view_id": str(view.get("view_id") or ""),
+                    "evidence_refs": [
+                        str(item.get("evidence_ref") or "")
+                        for item in evidence
+                        if str(item.get("view_id") or "") == str(view.get("view_id") or "")
+                        and str(item.get("evidence_ref") or "")
+                    ][:1],
+                }
+                for view in views
+            ],
+            "obligation_verdicts": fake_journey_obligation_verdicts(views, evidence),
+            "not_reachable_verdicts": [
+                {"obligation_id": str(item.get("obligation_id") or ""), "verdict": "justified"}
+                for item in not_reachable
+            ],
+            "findings": [],
+            "observations": [],
+        },
+        ensure_ascii=False,
+    )
+
+
+def fake_journey_obligation_verdicts(views: list[dict], evidence: list[dict]) -> list[dict[str, object]]:
+    """One `satisfied` verdict per obligation the views cite, on the first capture of a view that cites it."""
+
+    first_ref: dict[str, str] = {}
+    for item in evidence:
+        first_ref.setdefault(str(item.get("view_id") or ""), str(item.get("evidence_ref") or ""))
+    cited: dict[str, str] = {}
+    for view in views:
+        for obligation_id in view.get("obligation_refs") or []:
+            cited.setdefault(str(obligation_id), first_ref.get(str(view.get("view_id") or ""), ""))
+    return [
+        {"obligation_id": obligation_id, "verdict": "satisfied", "evidence_refs": [ref]}
+        for obligation_id, ref in sorted(cited.items())
+    ]
 
 
 def fake_requirement_source_action(prompt: str) -> str:

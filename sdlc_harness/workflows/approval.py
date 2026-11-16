@@ -43,6 +43,16 @@ class CheckpointApprovalWorkflow:
                 run_id=run_id,
                 checkpoint_id=checkpoint_id,
             )
+        if status == "waiting_ui_polish_contract_review":
+            return PhaseFourWorkflow(self.settings).approve_ui_polish_contract_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
+        if status == "waiting_ui_polish_review":
+            return PhaseFourWorkflow(self.settings).approve_ui_polish_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
         if status == "code_review_ready":
             return PhaseFourWorkflow(self.settings).approve_code_review_checkpoint(
                 run_id=run_id,

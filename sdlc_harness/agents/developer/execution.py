@@ -302,6 +302,7 @@ class DeveloperToolLoopExecutor:
                 compatible_manifest = None
                 persisted_paths: set[str] = set()
                 context_upgrade = _merge_context_only_manifest(existing, manifest)
+                runtime_authority_upgrade = _merge_runtime_authority_manifest(existing, manifest)
                 entrypoint_scope_upgrade = _merge_database_entrypoint_scope_manifest(
                     existing,
                     manifest,
@@ -338,6 +339,9 @@ class DeveloperToolLoopExecutor:
                     )
                 if context_upgrade is not None:
                     existing = context_upgrade
+                    context_contract_migrated = True
+                elif runtime_authority_upgrade is not None:
+                    existing = runtime_authority_upgrade
                     context_contract_migrated = True
                 elif entrypoint_scope_upgrade is not None:
                     existing, scope_reopened_item_ids = entrypoint_scope_upgrade
@@ -866,7 +870,9 @@ class DeveloperToolLoopExecutor:
         repair_iteration: int,
     ) -> None:
         del repair_iteration
-        generated_files = fake_developer_files(work_packet)
+        # Fake Polish is intentionally a no-op: overwriting real UI source with synthetic
+        # declarations would make the later regression check test the fixture, not the workflow.
+        generated_files = [] if work_packet.get("mode") == "ui_polish" else fake_developer_files(work_packet)
         by_path = {str(item.get("path") or ""): item for item in generated_files}
         for item in _dict_items(manifest.get("items")):
             item_id = str(item.get("id") or "")
@@ -1245,9 +1251,13 @@ class DeveloperToolLoopExecutor:
                     system=(
                         "You are Developer Executor in a controlled SDLC worktree. One response proposes exactly "
                         "one JSON action and then stops. The action is not executed until the Harness returns its "
-                        "tool result in a later turn. Never narrate reasoning, emit or repeat a second action, or "
-                        "claim an action ran without a Harness tool result. Use tools only within the approved "
-                        "execution unit; do not include analysis, thinking markers, or markdown."
+                        "tool result in a later turn. Reason only far enough to choose the current action: do not "
+                        "plan, draft, or evaluate later actions or files. Outcomes owned by a required Verification "
+                        "stage are not preconditions for the current action; follow the typed contract and let the "
+                        "Harness stage judge them instead of speculating about toolchain behavior. Never narrate "
+                        "reasoning, emit or repeat a second action, or claim an action ran without a Harness tool "
+                        "result. Use tools only within the approved execution unit; do not include analysis, thinking "
+                        "markers, or markdown."
                     ),
                     prompt=prompt,
                     json_mode=True,
@@ -2396,6 +2406,51 @@ def developer_execution_retry_allowed(state: dict[str, object]) -> bool:
                 "runtime_closure_execution_journal",
             )
         )
+    if mode == "browser_readiness_repair":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "browser_readiness_repair_feedback",
+                "browser_readiness_repair_execution_manifest",
+                "browser_readiness_repair_execution_journal",
+            )
+        )
+    if mode == "browser_readiness":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "browser_readiness_work_packet",
+                "browser_readiness_execution_manifest",
+                "browser_readiness_execution_journal",
+            )
+        )
+    if mode == "ui_polish_repair":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "ui_polish_repair_feedback",
+                "ui_polish_repair_execution_manifest",
+                "ui_polish_repair_execution_journal",
+            )
+        )
+    if mode == "ui_polish":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "ui_polish_work_packet",
+                "ui_polish_execution_manifest",
+                "ui_polish_execution_journal",
+            )
+        )
+    if mode == "browser_qa_repair":
+        return all(
+            bool(artifacts.get(key))
+            for key in (
+                "browser_qa_repair_feedback",
+                "browser_qa_repair_execution_manifest",
+                "browser_qa_repair_execution_journal",
+            )
+        )
     if mode == "developer_act" or phase == "implementation_writing":
         return all(
             bool(artifacts.get(key))
@@ -2464,6 +2519,26 @@ def developer_transport_retry_allowed(state: dict[str, object]) -> bool:
             "runtime_closure_repair_feedback",
             "runtime_closure_repair_execution_manifest",
             "runtime_closure_repair_execution_journal",
+        ),
+        "browser_readiness": ("browser_readiness_work_packet",),
+        "browser_readiness_repair": (
+            "browser_readiness_work_packet",
+            "browser_readiness_repair_feedback",
+            "browser_readiness_repair_execution_manifest",
+            "browser_readiness_repair_execution_journal",
+        ),
+        "ui_polish": ("ui_polish_work_packet",),
+        "ui_polish_repair": (
+            "ui_polish_work_packet",
+            "ui_polish_repair_feedback",
+            "ui_polish_repair_execution_manifest",
+            "ui_polish_repair_execution_journal",
+        ),
+        "browser_qa_repair": (
+            "developer_work_packet",
+            "browser_qa_repair_feedback",
+            "browser_qa_repair_execution_manifest",
+            "browser_qa_repair_execution_journal",
         ),
     }
     required = required_by_mode.get(mode)
@@ -2779,10 +2854,15 @@ def _build_manifest(
                         **closure,
                         "context_paths": unit_context,
                     } if repair_feedback else {},
-                    # Only runtime-closure units carry these; other manifests keep their exact bytes.
+                    # Runtime closure units carry write-time context; browser repair units carry read-only authority.
                     **(
                         {"closure_context": _dict_value(unit.get("closure_context"))}
                         if _dict_value(unit.get("closure_context"))
+                        else {}
+                    ),
+                    **(
+                        {"runtime_closure_authority": _dict_value(unit.get("runtime_closure_authority"))}
+                        if _dict_value(unit.get("runtime_closure_authority"))
                         else {}
                     ),
                     **(
@@ -3084,6 +3164,15 @@ def _action_prompt(
         for stage_id, episode in repair_state.items()
         if episode.get("verification_forced") is True
     )
+    no_change_verification_stage_ids = (
+        pending_stage_ids
+        if repair_mode
+        and not mutated
+        and not failed_stage_ids
+        and bool(paths)
+        and set(paths) <= inspected_paths
+        else []
+    )
     phase = _execution_phase(
         history=history,
         mutated=mutated,
@@ -3198,9 +3287,14 @@ def _action_prompt(
             else "list_files|read_file|search_code|read_diff|write_file|apply_patch|complete"
         ),
         "arguments": {},
-        "summary": "short evidence conclusion and next-action reason",
+        "summary": (
+            "short current hypothesis or observation plus the next-action reason; "
+            "never claim more than the tool evidence proves"
+        ),
     }
     if unit_aware and verification_forced_stage_ids:
+        action_schema["action"] = "verification.run_stage"
+    if unit_aware and no_change_verification_stage_ids:
         action_schema["action"] = "verification.run_stage"
     if unit_aware and pending_package_dependency_ids:
         action_schema["action"] = "package.ensure_workspace_dependency"
@@ -3286,7 +3380,9 @@ def _action_prompt(
                 "internally consistent, then call complete so Verification can rerun. Diagnostic paths are hints, "
                 "not a mutation boundary. A no-change completion requires inspected evidence and a specific reason."
                 if context_repair
-                else "Complete after one coherent mutation; the owning quality gate will rerun."
+                else "Complete after one coherent mutation; the owning quality gate will rerun. If fresh inspection "
+                "proves this unit already satisfies its contract, run every required stage on the current hashes, then "
+                "complete with every unit path marked verified_unchanged and a specific reason."
             ),
         },
         "target_state": {
@@ -3302,13 +3398,15 @@ def _action_prompt(
             "failed_stage_ids": failed_stage_ids,
             "verification_ready_stage_ids": verification_ready_stage_ids,
             "verification_forced_stage_ids": verification_forced_stage_ids,
+            "no_change_verification_stage_ids": no_change_verification_stage_ids,
             "pending_package_dependency_ids": pending_package_dependency_ids,
         },
         "active_failures": active_failures,
         "test_authoring_policy": test_authoring_policy,
         "working_memory": action_memory,
     }
-    if visual_profile_required or app_visual_profile:
+    item_surfaces = {value.strip().lower() for value in _string_items(item.get("surfaces"))}
+    if visual_profile_required or (app_visual_profile and "ui" in item_surfaces):
         context["app_visual_profile"] = {
             "app_scope_id": visual_app_scope_id,
             "status": "committed" if app_visual_profile else "required",
@@ -3384,6 +3482,12 @@ def _action_prompt(
             "recorded in working_memory.action_ledger. Once every unit path is inspected, run the pending "
             "verification stages."
         )
+    if no_change_verification_stage_ids:
+        phase_instruction = (
+            "Fresh inspection indicates this repair unit may be unchanged. Your next and only allowed action MUST be "
+            f"verification.run_stage for one of {no_change_verification_stage_ids}. After all required stages pass "
+            "on the current hashes, complete with every unit path marked verified_unchanged and a specific reason."
+        )
     if failed_stage_ids:
         work_instruction = (
             "This is an active verification repair, not a fresh implementation pass. The current unit sources have "
@@ -3425,8 +3529,8 @@ def _action_prompt(
         )
     if repair_mode and not mutated and not dependency_context_only:
         work_instruction += (
-            " If fresh inspection proves the reported failure is already resolved, call complete with "
-            "no_change_required=true and list the inspected path plus a specific reason in unchanged_paths."
+            " If fresh inspection proves this unit already satisfies its contract, run every pending required stage "
+            "on the current hashes, then complete with every unit path marked verified_unchanged and a specific reason."
         )
     if timeout_diagnostic:
         if timeout_diagnostic.get("status") == "instrumentation_required":
@@ -3472,15 +3576,15 @@ def _action_prompt(
             else ""
         )
         available_actions = (
-            "- repo.list: arguments {prefix?, limit?}\n"
-            "- repo.read: arguments {path, start_line?, end_line?}\n"
+            "- repo.list: arguments {prefix?, limit?}; results are limited to execution_unit_contract.read_context_paths\n"
+            "- repo.read: arguments {path, start_line?, end_line?}; path must be in execution_unit_contract.read_context_paths\n"
             f"- repo.read_batch: arguments {{requests: [{{path, start_line?, end_line?}}]}}; 1-{_MAX_BATCH_OBSERVATIONS} "
-            "read-only requests, each result is independent\n"
+            "read-only requests, each path must be in execution_unit_contract.read_context_paths and each result is independent\n"
             "- repo.search: arguments {query, prefix?, limit?}; query is one case-insensitive literal substring, "
-            "not regex or Boolean syntax\n"
+            "not regex or Boolean syntax; only read_context_paths are searched even when prefix is broader\n"
             f"- repo.search_batch: arguments {{queries: [string], prefix?, limit_per_query?}}; 1-{_MAX_BATCH_OBSERVATIONS} "
-            "case-insensitive literal substrings, use this instead of OR syntax\n"
-            "- repo.read_diff: arguments {path}\n"
+            "case-insensitive literal substrings, use this instead of OR syntax; only read_context_paths are searched\n"
+            "- repo.read_diff: arguments {path}; path must be in execution_unit_contract.read_context_paths\n"
             "- codegraph.query: arguments {operation, query?, symbol?, file?, files?, kind?, limit?, depth?, "
             "file_filter?, pattern?}; operation is symbols|node|callers|callees|impact|affected_tests|files|explore\n"
             "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
@@ -3539,19 +3643,22 @@ def _action_prompt(
                 "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
                 "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
                 "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+                "Repository reads, diffs, listings and searches are confined to read_context_paths. CodeGraph topology may name a connected out-of-unit path, but it does not grant source access to that path; leave its inspection and repair to the later unit that declares it as context.",
                 "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
                 "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
             ],
         }
-        if verification_forced_stage_ids:
+        forced_stage_ids = verification_forced_stage_ids or no_change_verification_stage_ids
+        if forced_stage_ids:
             available_actions = (
                 "- verification.run_stage: arguments {stage_id}; stage_id MUST be one of "
-                f"{verification_forced_stage_ids}\n"
+                f"{forced_stage_ids}\n"
             )
-            phase_instruction = (
-                "Harness rejected an exact no-effect mutation. Your next and only allowed action MUST be "
-                f"verification.run_stage for one of {verification_forced_stage_ids}."
-            )
+            if verification_forced_stage_ids:
+                phase_instruction = (
+                    "Harness rejected an exact no-effect mutation. Your next and only allowed action MUST be "
+                    f"verification.run_stage for one of {verification_forced_stage_ids}."
+                )
         if pending_package_dependency_ids:
             available_actions = (
                 "- package.ensure_workspace_dependency: arguments {dependency_id}; dependency_id MUST be one of "
@@ -3586,7 +3693,10 @@ def _action_prompt(
             "after at least one successful mutation. no_change_required=true requires fresh inspected evidence.\n"
         )
     context["next_action"] = {
-        "response_scope": "Choose and emit exactly one tool action; completing the whole unit is not required in this response.",
+        "response_scope": (
+            "Choose and emit exactly one tool action. Do not plan or draft a later file or action before the Harness "
+            "returns this action's result; completing the whole unit is not required in this response."
+        ),
         "unit_strategy": work_instruction,
         "instruction": phase_instruction,
         "consistency_boundary": (
@@ -3601,9 +3711,10 @@ def _action_prompt(
         ),
         "design_rule": (
             "Implement the explicit mandatory obligations without inventing sibling controls, alternate flows, or a "
-            "new interaction model. Preserve existing behavior unless an obligation explicitly changes it. When the "
-            "contract permits multiple presentations, choose the smallest compatible extension once and proceed; do "
-            "not redesign it again without new tool or verification evidence."
+            "new interaction model. Preserve unrelated observable behavior, including timing, fallback, and error "
+            "handling, unless an obligation explicitly changes it. When the contract permits multiple presentations, "
+            "choose the smallest compatible extension once and proceed; do not redesign it again without new tool or "
+            "verification evidence."
         ),
     }
     signature_contract_ref = (
@@ -3626,20 +3737,26 @@ def _action_prompt(
         "Treat active_focus.mandatory_obligations as the single canonical behavior "
         "checklist; execution_task and the short goal are navigation summaries, not competing contracts. "
         "Choose exactly one next action, emit its JSON object, and end the response immediately. Only Harness "
-        "tool results in working_memory prove execution. Treat authoritative_sources as the single verified current "
+        "tool result fields in working_memory prove execution or source facts. Treat authoritative_sources as the "
+        "single verified current "
         "worktree view; each entry includes its freshness and verification action. Do not read the same "
         "path/range again unless a successful mutation changed that file. If working_memory.omitted_sources lists "
         "a path/range, its bytes are not present in this prompt; do not claim they were inspected, and request only "
         "the missing range when it is required. Do not output source code "
-        "outside the JSON action. Use working_memory.graph_evidence to locate symbols and call paths. Before "
+        "outside the JSON action. working_memory.agent_hypotheses and summary text in diagnostic_breadcrumbs or "
+        "graph_evidence are unverified notes written by a prior model response, not evidence; overturn them whenever "
+        "authoritative source bytes or tool-result fields disagree. Use working_memory.graph_evidence to locate "
+        "symbols and call paths. Before "
         "changing an existing shared or boundary symbol, obtain node or impact evidence unless fresh seed evidence "
         "already covers it. CodeGraph never replaces repo.read/repo.read_diff for exact current bytes and hashes, "
-        "and never expands execution_unit_contract.write_paths. "
+        "and never expands execution_unit_contract.read_context_paths or write_paths. Do not query or inspect source "
+        "for a connected path unless it appears in read_context_paths. "
         "In summary, state the conclusion established by the latest relevant evidence "
         "and why the chosen action follows. Keep it brief; do not include chain-of-thought. "
         f"{test_authoring_instruction}"
-        "Follow next_action for the current response. Do not design, serialize, or validate the whole unit before "
-        "choosing that one action.\n\n"
+        "Follow next_action for the current response. Do not design, serialize, or validate a later file or action "
+        "before the Harness returns the current tool result. Do not speculate about outcomes assigned to pending "
+        "Verification stages.\n\n"
         f"Execution context:\n{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}"
     )
 
@@ -3651,7 +3768,16 @@ def _developer_repair_context(
 ) -> dict[str, object]:
     """Keep Validator observations out of the action context sent to Developer."""
 
-    feedback = _dict_value(value)
+    feedback = dict(_dict_value(value))
+    developer_constraints = dict(_dict_value(feedback.get("developer_constraints")))
+    unit_paths = set(_item_paths(item))
+    if "allowed_paths" in developer_constraints:
+        developer_constraints["allowed_paths"] = [
+            path
+            for path in _string_items(developer_constraints.get("allowed_paths"))
+            if path in unit_paths
+        ]
+        feedback["developer_constraints"] = developer_constraints
     if str(feedback.get("feedback_source") or "") != "validator_code_trace":
         return feedback
 
@@ -3682,15 +3808,6 @@ def _developer_repair_context(
         for finding in contract_findings
         if (canonical_key := str(finding.get("canonical_key") or ""))
     ]
-
-    developer_constraints = dict(_dict_value(feedback.get("developer_constraints")))
-    unit_paths = set(_item_paths(item))
-    if "allowed_paths" in developer_constraints:
-        developer_constraints["allowed_paths"] = [
-            path
-            for path in _string_items(developer_constraints.get("allowed_paths"))
-            if path in unit_paths
-        ]
 
     messages = [str(item.get("message") or "").strip() for item in actionable_links]
     messages = [message for message in messages if message]
@@ -4404,7 +4521,7 @@ def _action_memory(
     max_evidence_chars: int,
 ) -> dict[str, object]:
     ledger_by_key: dict[str, dict[str, object]] = {}
-    evidence_conclusions_by_key: dict[str, dict[str, object]] = {}
+    agent_hypotheses_by_key: dict[str, dict[str, object]] = {}
     mutation_state_by_path: dict[str, dict[str, object]] = {}
     verification_state_by_stage: dict[str, dict[str, object]] = {}
     graph_evidence: list[dict[str, object]] = []
@@ -4440,9 +4557,9 @@ def _action_memory(
                 if graph_row.get("fresh") is True:
                     graph_row["fresh"] = False
                     graph_row["stale_after_action"] = index
-            for evidence_key, evidence in list(evidence_conclusions_by_key.items()):
+            for evidence_key, evidence in list(agent_hypotheses_by_key.items()):
                 if evidence.get("path") == path:
-                    evidence_conclusions_by_key.pop(evidence_key, None)
+                    agent_hypotheses_by_key.pop(evidence_key, None)
             mutation_state_by_path[path] = {
                 key: value
                 for key, value in {
@@ -4470,6 +4587,7 @@ def _action_memory(
                         "verified_at_action": index,
                         "fresh": True,
                         "summary": summary[:500],
+                        "summary_epistemic_status": "unverified_agent_hypothesis",
                         "evidence": _clip_json_value(result, 4000),
                     }.items()
                     if value is not None and value != "" and value != []
@@ -4487,7 +4605,7 @@ def _action_memory(
                 ensure_ascii=False,
                 sort_keys=True,
             )
-            evidence_conclusions_by_key[evidence_key] = {
+            agent_hypotheses_by_key[evidence_key] = {
                 key: value
                 for key, value in {
                     "action": action,
@@ -4497,6 +4615,7 @@ def _action_memory(
                     "end_line": result.get("end_line"),
                     "verified_at_action": index,
                     "summary": summary[:500],
+                    "epistemic_status": "unverified_agent_hypothesis",
                     "outcome": (
                         "ok"
                         if result.get("ok") is True
@@ -4558,6 +4677,7 @@ def _action_memory(
                     "path": path,
                     "stage_id": arguments.get("stage_id") or result.get("stage_id"),
                     "summary": summary[:500],
+                    "summary_epistemic_status": "unverified_agent_hypothesis",
                     "outcome": outcome,
                 }.items()
                 if value is not None and value != ""
@@ -4720,7 +4840,7 @@ def _action_memory(
         )
     memory = {
         "projection": {
-            "version": "developer_working_memory_projection_v3",
+            "version": "developer_working_memory_projection_v4",
             "history_count": len(history),
             "action_ledger_total": len(complete_ledger),
             "action_ledger_retained": len(ledger),
@@ -4730,8 +4850,8 @@ def _action_memory(
         "inspected_sources": inspected_sources,
         "recent_results": recent_results,
     }
-    if evidence_conclusions_by_key:
-        memory["evidence_conclusions"] = list(evidence_conclusions_by_key.values())
+    if agent_hypotheses_by_key:
+        memory["agent_hypotheses"] = list(agent_hypotheses_by_key.values())
     if mutation_state_by_path:
         memory["mutation_state"] = list(mutation_state_by_path.values())
     if verification_state_by_stage:
@@ -5205,6 +5325,39 @@ def _execute_action(
     raw_name = str(action["action"])
     name = _ACTION_TO_LEGACY.get(raw_name, raw_name)
     args = _dict_value(action.get("arguments"))
+    unit_read_paths = set(_item_context_paths(item) or item_paths)
+
+    def scoped_read_path(raw_path: object, *, allow_root: bool = False) -> str | None:
+        target = _safe_read_path(
+            repo_root,
+            str(raw_path or ""),
+            run_id=run_id,
+            allow_root=allow_root,
+        )
+        relative = str(target.relative_to(repo_root.resolve())).replace("\\", "/")
+        if relative == ".":
+            relative = ""
+        if relative in unit_read_paths:
+            return relative
+        if allow_root and any(
+            not relative or path == relative or path.startswith(relative.rstrip("/") + "/")
+            for path in unit_read_paths
+        ):
+            return relative
+        return None
+
+    def read_scope_error(raw_path: object) -> dict[str, object]:
+        return {
+            "ok": False,
+            "error": "developer_unit_read_out_of_scope",
+            "path": str(raw_path or ""),
+            "approved_read_context_paths": sorted(unit_read_paths),
+            "instruction": (
+                "Inspect only execution_unit_contract.read_context_paths. "
+                "A later dependency unit owns evidence outside this unit."
+            ),
+        }
+
     if raw_name == "uiux.search_visual_profile":
         if "ui" not in {value.strip().lower() for value in _string_items(item.get("surfaces"))}:
             return {"ok": False, "error": "developer_uiux_not_ui_unit"}
@@ -5424,6 +5577,10 @@ def _execute_action(
             }
         results: list[dict[str, object]] = []
         for index, request in enumerate(requests):
+            requested_path = request.get("path")
+            if scoped_read_path(requested_path) is None:
+                results.append({"request_index": index, **read_scope_error(requested_path)})
+                continue
             try:
                 result = _read_file(
                     repo_root,
@@ -5465,7 +5622,12 @@ def _execute_action(
                 "limit": limit,
             }
             try:
-                result = _search_code(repo_root, search_args, run_id=run_id)
+                result = _search_code(
+                    repo_root,
+                    search_args,
+                    run_id=run_id,
+                    allowed_paths=sorted(unit_read_paths),
+                )
             except HarnessError as exc:
                 result = {"ok": False, "error": exc.error_code, "reason": exc.message}
             results.append({"request_index": index, "query": query.strip(), **result})
@@ -5531,6 +5693,19 @@ def _execute_action(
             "report_digest": _json_hash(report_payload),
         }
     if name == "list_files":
+        if raw_name == "repo.list":
+            prefix_value = args.get("prefix")
+            relative_prefix = scoped_read_path(prefix_value, allow_root=True)
+            if relative_prefix is None:
+                return read_scope_error(prefix_value)
+            limit = max(1, min(int(args.get("limit") or 100), 200))
+            files = [
+                path
+                for path in sorted(unit_read_paths)
+                if (not relative_prefix or path == relative_prefix or path.startswith(relative_prefix + "/"))
+                and (repo_root / path).is_file()
+            ]
+            return {"ok": True, "files": files[:limit], "truncated": len(files) > limit}
         prefix = _safe_read_path(repo_root, str(args.get("prefix") or ""), run_id=run_id, allow_root=True)
         limit = max(1, min(int(args.get("limit") or 100), 200))
         files = []
@@ -5544,11 +5719,20 @@ def _execute_action(
                         break
         return {"ok": True, "files": files, "truncated": len(files) >= limit}
     if name == "read_file":
+        if raw_name == "repo.read" and scoped_read_path(args.get("path")) is None:
+            return read_scope_error(args.get("path"))
         return _read_file(repo_root, args, run_id=run_id)
     if name == "search_code":
-        return _search_code(repo_root, args, run_id=run_id)
+        return _search_code(
+            repo_root,
+            args,
+            run_id=run_id,
+            allowed_paths=sorted(unit_read_paths) if raw_name == "repo.search" else None,
+        )
     if name == "read_diff":
         path = str(args.get("path") or "")
+        if raw_name == "repo.read_diff" and scoped_read_path(path) is None:
+            return read_scope_error(path)
         _safe_read_path(repo_root, path, run_id=run_id)
         completed = subprocess.run(
             ["git", "diff", "--", path], cwd=str(repo_root), check=True, capture_output=True,
@@ -5907,7 +6091,13 @@ def _read_file(
     }
 
 
-def _search_code(repo_root: Path, args: dict[str, object], *, run_id: str) -> dict[str, object]:
+def _search_code(
+    repo_root: Path,
+    args: dict[str, object],
+    *,
+    run_id: str,
+    allowed_paths: list[str] | None = None,
+) -> dict[str, object]:
     query = str(args.get("query") or "")
     if not query or len(query) > 200:
         return {"ok": False, "error": "invalid_query"}
@@ -5942,7 +6132,25 @@ def _search_code(repo_root: Path, args: dict[str, object], *, run_id: str) -> di
     scanned_files = 0
     skipped_large_files = 0
     deadline = time.monotonic() + _SEARCH_TIMEOUT_SECONDS
-    candidates = [prefix] if prefix.is_file() else _walk_search_files(prefix)
+    if allowed_paths is None:
+        candidates = [prefix] if prefix.is_file() else _walk_search_files(prefix)
+    else:
+        resolved_prefix = prefix.resolve()
+        candidates = [
+            candidate
+            for relative in allowed_paths
+            if (
+                (candidate := _safe_read_path(repo_root, relative, run_id=run_id)).is_file()
+                and (candidate == resolved_prefix or resolved_prefix in candidate.parents)
+            )
+        ]
+        if not candidates:
+            return {
+                "ok": False,
+                "error": "developer_unit_read_out_of_scope",
+                "prefix": raw_prefix,
+                "approved_read_context_paths": sorted(allowed_paths),
+            }
     for path in candidates:
         if time.monotonic() >= deadline:
             return {
@@ -6485,8 +6693,14 @@ def _unit_mandatory_obligations(item: dict[str, object]) -> dict[str, object]:
         **({"runtime_wiring": wiring} if wiring else {}),
         # Mandatory obligations reach the prompt in act and repair alike, unlike execution_task.
         **(
-            {"runtime_closure": _dict_value(item.get("closure_context"))}
-            if _dict_value(item.get("closure_context"))
+            {
+                "runtime_closure": (
+                    _dict_value(item.get("runtime_closure_authority"))
+                    or _dict_value(item.get("closure_context"))
+                )
+            }
+            if _dict_value(item.get("runtime_closure_authority"))
+            or _dict_value(item.get("closure_context"))
             else {}
         ),
         **(
@@ -6691,6 +6905,54 @@ def _inspected_paths(history: list[dict[str, object]], *, required_paths: list[s
 
 def _manifest_paths(manifest: dict[str, object]) -> set[str]:
     return {path for item in _dict_items(manifest.get("items")) for path in _item_paths(item)}
+
+
+def _merge_runtime_authority_manifest(
+    existing: dict[str, object],
+    candidate: dict[str, object],
+) -> dict[str, object] | None:
+    """Allow one additive, prompt-only runtime-authority upgrade in an active repair."""
+
+    if not str(existing.get("mode") or "").endswith("_repair") or existing.get("mode") != candidate.get("mode"):
+        return None
+    if "uiux_capability" in candidate and candidate.get("uiux_capability") != existing.get("uiux_capability"):
+        return None
+    rebuilt_fields = {"created_at", "input_hash", "items", "uiux_capability"}
+    old_top = {key: value for key, value in existing.items() if key not in rebuilt_fields}
+    new_top = {key: value for key, value in candidate.items() if key not in rebuilt_fields}
+    if old_top != new_top:
+        return None
+    old_items = _dict_items(existing.get("items"))
+    new_items = _dict_items(candidate.get("items"))
+    if [item.get("id") for item in old_items] != [item.get("id") for item in new_items]:
+        return None
+
+    upgraded = False
+    for old_item, new_item in zip(old_items, new_items):
+        old_stable = {
+            key: value
+            for key, value in old_item.items()
+            if key not in {"input_digest", "runtime_closure_authority"}
+        }
+        new_stable = {
+            key: value
+            for key, value in new_item.items()
+            if key not in {"input_digest", "runtime_closure_authority"}
+        }
+        old_authority = _dict_value(old_item.get("runtime_closure_authority"))
+        new_authority = _dict_value(new_item.get("runtime_closure_authority"))
+        if old_stable != new_stable or not new_authority or (old_authority and old_authority != new_authority):
+            return None
+        upgraded = upgraded or not old_authority
+    if not upgraded:
+        return None
+
+    merged = json.loads(json.dumps(existing))
+    merged["input_hash"] = candidate.get("input_hash")
+    for old_item, new_item in zip(_dict_items(merged.get("items")), new_items):
+        old_item["runtime_closure_authority"] = _dict_value(new_item.get("runtime_closure_authority"))
+        old_item["input_digest"] = new_item.get("input_digest")
+    return merged
 
 
 def _merge_context_only_manifest(

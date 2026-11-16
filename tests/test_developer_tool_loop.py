@@ -32,6 +32,7 @@ from sdlc_harness.agents.developer.execution import (
     _merge_context_only_manifest,
     _merge_database_entrypoint_scope_manifest,
     _merge_dependency_manifest_scope_manifest,
+    _merge_runtime_authority_manifest,
     _remember_developer_uiux_guidance,
     _new_journal,
     _new_test_context_policy_error,
@@ -234,6 +235,10 @@ class DeveloperToolLoopTest(unittest.TestCase):
             ".notice { color: green; }\n",
             encoding="utf-8",
         )
+        (source_dir / "outside.ts").write_text(
+            "const authorization = 'must stay outside this unit';\n",
+            encoding="utf-8",
+        )
         common = {
             "run_id": "run-batch-read",
             "work_packet": {},
@@ -249,6 +254,10 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         css_read_result = _execute_action(
             action={"action": "repo.read", "arguments": {"path": "src/styles.css"}},
+            **common,
+        )
+        outside_read_result = _execute_action(
+            action={"action": "repo.read", "arguments": {"path": "src/outside.ts"}},
             **common,
         )
         read_result = _execute_action(
@@ -286,16 +295,24 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertTrue(read_result["ok"])
         self.assertTrue(css_read_result["ok"])
         self.assertIn(".notice { color: green; }", css_read_result["content"])
+        self.assertEqual(outside_read_result["error"], "developer_unit_read_out_of_scope")
         self.assertTrue(read_result["partial"])
         self.assertEqual(read_result["succeeded"], 2)
         self.assertEqual(read_result["results"][0]["path"], "src/app.ts")
         self.assertEqual(read_result["results"][1]["path"], "src/styles.css")
         self.assertIn(".notice { color: green; }", read_result["results"][1]["content"])
-        self.assertEqual(read_result["results"][2]["error"], "file_not_readable")
+        self.assertEqual(
+            read_result["results"][2]["error"],
+            "developer_unit_read_out_of_scope",
+        )
         self.assertTrue(search_result["ok"])
         self.assertEqual(
             [[hit["line"] for hit in row["hits"]] for row in search_result["results"]],
             [[1], [2]],
+        )
+        self.assertEqual(
+            [hit["path"] for hit in search_result["results"][0]["hits"]],
+            ["src/app.ts"],
         )
         self.assertEqual(over_limit["error"], "invalid_search_batch")
 
@@ -1017,7 +1034,15 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("repo.search_batch", prompt)
         self.assertIn("not regex or Boolean syntax", prompt)
         self.assertIn("affected_tests", prompt)
-        self.assertIn("never expands execution_unit_contract.write_paths", prompt)
+        self.assertIn(
+            "never expands execution_unit_contract.read_context_paths or write_paths",
+            prompt,
+        )
+        self.assertIn("only read_context_paths are searched", prompt)
+        self.assertIn("leave its inspection and repair to the later unit", prompt)
+        self.assertIn("Do not plan or draft a later file or action", context["next_action"]["response_scope"])
+        self.assertIn("timing, fallback, and error handling", context["next_action"]["design_rule"])
+        self.assertIn("Do not speculate about outcomes assigned to pending Verification stages", prompt)
         available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
         self.assertNotIn("package.ensure_workspace_dependency", available)
 
@@ -1088,6 +1113,41 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertNotIn("qa_test_intents", context["active_focus"]["mandatory_obligations"])
         self.assertIn("qa_test_intents", context["read_only_qa_acceptance"])
         self.assertIn("accepted_runtime_decisions", context["read_only_qa_acceptance"])
+
+        committed_profile = {"profile_id": "VP-1", "style": "quiet"}
+        ui_profile_prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            app_visual_profile=committed_profile,
+        )
+        ui_profile_context = json.loads(ui_profile_prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(ui_profile_context["app_visual_profile"]["profile"], committed_profile)
+
+        non_ui_profile_prompt = _action_prompt(
+            item={"id": "WU-RUNTIME", "paths": ["src/runtime.ts"], "required_stage_ids": []},
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+            app_visual_profile=committed_profile,
+        )
+        non_ui_profile_context = json.loads(
+            non_ui_profile_prompt.split("Execution context:\n", 1)[1]
+        )
+        self.assertNotIn("app_visual_profile", non_ui_profile_context)
 
         journal["uiux_disabled"] = {"reason": "designer_uiux_failed"}
         self.assertFalse(_developer_uiux_available(manifest=manifest, journal=journal, item=item))
@@ -1637,6 +1697,106 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertNotIn("shared_finding_progress", without_journal)
         self.assertNotIn("mutated_paths", without_journal["dependency_receipts"][0])
 
+    def test_non_validator_repair_prompt_limits_allowed_paths_to_active_unit(self) -> None:
+        packet = self.unit_packet()
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "required_action": "Repair the browser journey blocker.",
+            "developer_constraints": {
+                "allowed_paths": ["src/Main.java", "src/MainTest.java"]
+            },
+            "repair_objective": {
+                "contract_findings": [
+                    {
+                        "finding_id": "F-BROWSER",
+                        "unit_ids": ["WU-001", "WU-002"],
+                    }
+                ]
+            },
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        def allowed_paths(unit_id: str) -> list[str]:
+            prompt = _action_prompt(
+                item=items[unit_id],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+            )
+            context = json.loads(prompt.split("Execution context:\n", 1)[1])
+            return context["repair_feedback"]["developer_constraints"]["allowed_paths"]
+
+        self.assertEqual(allowed_paths("WU-001"), ["src/Main.java"])
+        self.assertEqual(allowed_paths("WU-002"), ["src/MainTest.java"])
+
+    def test_inspected_no_change_repair_forces_required_verification_before_completion(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"][0]["required_stage_ids"] = ["unit", "typecheck"]
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "developer_constraints": {"allowed_paths": ["src/Main.java"]},
+            "repair_objective": {
+                "contract_findings": [
+                    {"finding_id": "F-BROWSER", "unit_ids": ["WU-001"]}
+                ]
+            },
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_no_change_verification",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        prompt = _action_prompt(
+            item=manifest["items"][0],
+            manifest=manifest,
+            history=[
+                {
+                    "action": "repo.read",
+                    "arguments": {"path": "src/Main.java"},
+                    "result": {
+                        "ok": True,
+                        "path": "src/Main.java",
+                        "content": "1: class Main {}",
+                    },
+                }
+            ],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=2,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        self.assertEqual(
+            context["action_budget"]["no_change_verification_stage_ids"],
+            ["typecheck", "unit"],
+        )
+        self.assertIn("next and only allowed action MUST be verification.run_stage", prompt)
+        available = prompt.split("Available actions:\n", 1)[1].split("\nA mutation", 1)[0]
+        self.assertIn("verification.run_stage", available)
+        self.assertNotIn("execution.complete_unit", available)
+        self.assertIn("every unit path marked verified_unchanged", context["repair_progress"]["completion_rule"])
+
     def test_repair_manifest_hash_ignores_worktree_derived_prompt_context(self) -> None:
         packet = self.unit_packet()
         packet["output_contract"]["allowed_paths"].append("src/Helper.java")
@@ -1752,6 +1912,8 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("repo.write_file", llm.prompts[0])
         self.assertIn("execution.complete_unit", llm.prompts[0])
         self.assertIn("The action is not executed until the Harness returns its tool result", llm.systems[0])
+        self.assertIn("do not plan, draft, or evaluate later actions or files", llm.systems[0])
+        self.assertIn("instead of speculating about toolchain behavior", llm.systems[0])
         self.assertIn("end the response immediately", llm.prompts[0])
         self.assertIn("Treat authoritative_sources as the single verified current", llm.prompts[0])
         self.assertEqual(llm.calls[0]["model"], "deepseek-flash")
@@ -2203,7 +2365,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertNotIn("internally consistent and buildable", prompt)
         self.assertFalse(context["test_authoring_policy"]["repository_evidence_satisfied"])
         self.assertIn("single canonical behavior checklist", prompt)
-        self.assertIn("Do not design, serialize, or validate the whole unit", prompt)
+        self.assertIn("Do not design, serialize, or validate a later file or action", prompt)
         self.assertIn("CSS class names alone do not prove responsive behavior", prompt)
         self.assertIn("Never add production props", prompt)
 
@@ -2562,6 +2724,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
                     "action": "repo.write_file",
                     "path": "src/Main.java",
                     "summary": "The approved file is absent; create the minimal Main implementation.",
+                    "summary_epistemic_status": "unverified_agent_hypothesis",
                     "outcome": "ok",
                 }
             ],
@@ -3873,7 +4036,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(memory["verification_state"][0]["result"]["status"], "passed")
         self.assertNotIn("private model reasoning", json.dumps(memory))
 
-    def test_action_memory_invalidates_stale_evidence_conclusion_after_mutation(self) -> None:
+    def test_action_memory_invalidates_stale_agent_hypothesis_after_mutation(self) -> None:
         history = [
             {
                 "action": "repo.read",
@@ -3896,9 +4059,11 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         memory = _action_memory(history, target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
 
-        conclusions = memory["evidence_conclusions"]
-        self.assertEqual(len(conclusions), 1)
-        self.assertEqual(conclusions[0]["summary"], "Current implementation contains the guard.")
+        hypotheses = memory["agent_hypotheses"]
+        self.assertEqual(len(hypotheses), 1)
+        self.assertEqual(hypotheses[0]["summary"], "Current implementation contains the guard.")
+        self.assertEqual(hypotheses[0]["epistemic_status"], "unverified_agent_hypothesis")
+        self.assertNotIn("evidence_conclusions", memory)
         self.assertNotIn("Old implementation", json.dumps(memory))
 
     def test_action_memory_marks_graph_evidence_stale_after_mutation(self) -> None:
@@ -3933,7 +4098,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
 
         memory = _action_memory(history, target_item_paths=["src/Main.ts"], max_evidence_chars=1000)
 
-        self.assertEqual(memory["projection"]["version"], "developer_working_memory_projection_v3")
+        self.assertEqual(memory["projection"]["version"], "developer_working_memory_projection_v4")
         self.assertFalse(memory["graph_evidence"][0]["fresh"])
         self.assertEqual(memory["graph_evidence"][0]["stale_after_action"], 2)
         self.assertTrue(memory["graph_evidence"][1]["fresh"])
@@ -4425,6 +4590,81 @@ class DeveloperToolLoopTest(unittest.TestCase):
         changed = json.loads(json.dumps(candidate))
         changed["items"][1]["paths"] = ["src/Other.java"]
         self.assertIsNone(_merge_context_only_manifest(existing, changed))
+
+    def test_runtime_authority_manifest_upgrade_is_prompt_only(self) -> None:
+        packet = self.unit_packet()
+        feedback = {
+            "feedback_source": "browser_journey_review",
+            "repair_objective": {"contract_findings": [{"finding_id": "F-1", "unit_ids": ["WU-001"]}]},
+        }
+        existing = _build_manifest(
+            run_id="run_runtime_authority_upgrade",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        candidate_packet = json.loads(json.dumps(packet))
+        candidate_packet["execution_units"][0]["runtime_closure_authority"] = {
+            "schema_version": "browser_repair_runtime_authority_v1",
+            "runtime_probes": [{"probe_id": "RP-1", "expect_status": 204}],
+            "probe_observations": [{"probe_id": "RP-1", "actual_status": 204}],
+        }
+        candidate_packet["execution_units"][0]["input_digest"] = "sha256:runtime-authority"
+        candidate = _build_manifest(
+            run_id="run_runtime_authority_upgrade",
+            work_packet=candidate_packet,
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        existing["created_at"] = "2026-01-01T00:00:00Z"
+        existing["uiux_capability"] = {
+            "status": "available",
+            "fingerprint": "sha256:persisted-session-capability",
+        }
+        candidate["created_at"] = "2026-01-02T00:00:00Z"
+
+        merged = _merge_runtime_authority_manifest(existing, candidate)
+
+        self.assertIsNotNone(merged)
+        assert merged is not None
+        self.assertEqual(merged["input_hash"], candidate["input_hash"])
+        self.assertEqual(merged["created_at"], existing["created_at"])
+        self.assertEqual(merged["uiux_capability"], existing["uiux_capability"])
+        self.assertEqual(merged["items"][0]["paths"], existing["items"][0]["paths"])
+        self.assertEqual(
+            merged["items"][0]["runtime_closure_authority"]["probe_observations"][0]["actual_status"],
+            204,
+        )
+        prompt = _action_prompt(
+            item=merged["items"][0],
+            manifest=merged,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(
+            context["active_focus"]["mandatory_obligations"]["runtime_closure"]["probe_observations"][0][
+                "actual_status"
+            ],
+            204,
+        )
+        self.assertIn("agent_hypotheses", prompt)
+        changed = json.loads(json.dumps(candidate))
+        changed["items"][0]["paths"] = ["src/MainTest.java"]
+        self.assertIsNone(_merge_runtime_authority_manifest(existing, changed))
+        changed_capability = json.loads(json.dumps(candidate))
+        changed_capability["uiux_capability"] = {"status": "unavailable"}
+        self.assertIsNone(_merge_runtime_authority_manifest(existing, changed_capability))
 
     def test_database_entrypoint_scope_upgrade_reopens_only_completed_provider(self) -> None:
         barrel = "packages/db/src/index.ts"
@@ -4918,6 +5158,46 @@ class DeveloperToolLoopTest(unittest.TestCase):
         state["last_error"] = {"error_code": "developer_repair_stalled"}
         self.assertTrue(developer_execution_retry_allowed(state))
         state["latest_artifacts"].pop("developer_execution_journal")
+        self.assertFalse(developer_execution_retry_allowed(state))
+
+    def test_ui_polish_sessions_can_resume_only_with_their_durable_artifacts(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "ui_polish",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "ui_polish"},
+            "latest_artifacts": {
+                "ui_polish_work_packet": "packet.json",
+                "ui_polish_execution_manifest": "manifest.json",
+                "ui_polish_execution_journal": "journal.json",
+            },
+        }
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["developer_execution"] = {"mode": "ui_polish_repair"}
+        state["latest_artifacts"] = {
+            "ui_polish_repair_feedback": "feedback.json",
+            "ui_polish_repair_execution_manifest": "manifest.json",
+            "ui_polish_repair_execution_journal": "journal.json",
+        }
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["latest_artifacts"].pop("ui_polish_repair_execution_journal")
+        self.assertFalse(developer_execution_retry_allowed(state))
+
+    def test_browser_qa_repair_can_resume_only_with_its_durable_artifacts(self) -> None:
+        state = {
+            "status": "blocked",
+            "current_phase": "browser_qa",
+            "last_error": {"error_code": "developer_act_out_of_scope"},
+            "developer_execution": {"mode": "browser_qa_repair"},
+            "latest_artifacts": {
+                "browser_qa_repair_feedback": "feedback.json",
+                "browser_qa_repair_execution_manifest": "manifest.json",
+                "browser_qa_repair_execution_journal": "journal.json",
+            },
+        }
+
+        self.assertTrue(developer_execution_retry_allowed(state))
+        state["latest_artifacts"].pop("browser_qa_repair_execution_journal")
         self.assertFalse(developer_execution_retry_allowed(state))
 
     def test_repair_prompt_contains_structured_verification_feedback(self) -> None:

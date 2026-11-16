@@ -38,9 +38,13 @@ from ..agents.developer import (
     developer_execution_retry_allowed,
 )
 from ..agents.developer.closure_planner import RuntimeClosurePlanner
+from ..agents.developer.polish_planner import UiPolishPlanner
 from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
+from ..agents.tester.journey_planner import BrowserJourneyPlanner
 from ..agents.validator.closure_review import RuntimeClosureValidator
+from ..agents.validator.browser_review import BrowserQaValidator, UiPolishValidator
 from ..agents.validator import CodeTraceValidator, build_requirement_graph_v2
+from ..agents.validator.typescript_ast import TypeScriptAstExtractor
 from ..artifacts import read_frozen_requirement_input
 from ..artifacts.writers import (
     write_phase4_developer_work_packet,
@@ -114,6 +118,8 @@ REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
 RETRYABLE_QA_GENERATION_ERROR_CODES = {
     "qa_tester_llm_failed",
     "qa_requirement_coverage_invalid",
+    # Fail-closed provider output (L5.4.3): no repair call, a later continue_run tries again.
+    "qa_tester_inconclusive",
 }
 CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "requirement_packet": 12000,
@@ -140,6 +146,7 @@ class _PhaseFourCore:
         code_validation_step_review: dict[str, object] | None = None,
         qa_step_review: dict[str, object] | None = None,
         runtime_closure_step_review: dict[str, object] | None = None,
+        browser_stage_step_review: dict[str, object] | None = None,
     ):
         self.settings = settings
         self.store = RuntimeStore(repo_root=settings.repo_root, runtime_root=settings.runtime_root)
@@ -163,9 +170,19 @@ class _PhaseFourCore:
             **validation_review_defaults,
             **dict(runtime_closure_step_review or {}),
         }
+        self.browser_stage_step_review = {
+            **validation_review_defaults,
+            **dict(browser_stage_step_review or {}),
+        }
         self.closure_planner = RuntimeClosurePlanner(self.llm_client)
+        self.journey_planner = BrowserJourneyPlanner(self.llm_client)
+        self.polish_planner = UiPolishPlanner(self.llm_client)
+        self.polish_validator = UiPolishValidator(self.llm_client)
+        self.browser_qa_validator = BrowserQaValidator(self.llm_client)
         self.closure_validator = RuntimeClosureValidator(self.llm_client)
         self.verification_runner = VerificationRunner()
+        # AST literals/module references for Browser Readiness (demo literals, R5).
+        self.module_facts_extractor = TypeScriptAstExtractor()
         self.developer_tool_loop = DeveloperToolLoopExecutor(
             settings=settings,
             store=self.store,
@@ -597,6 +614,8 @@ class _PhaseFourCore:
             return self._continue_developer_act(state=state, run_id=run_id)
         if status in {"implementation_executing", "implementation_paused"}:
             execution = _dict_value(state.get("developer_execution"))
+            if self._browser_execution_active(state):
+                return self._continue_browser_developer(state=state, run_id=run_id)
             if execution.get("mode") == "runtime_closure_repair":
                 return self._continue_runtime_closure_repair(state=state, run_id=run_id)
             if self._runtime_closure_execution_active(state):
@@ -618,6 +637,14 @@ class _PhaseFourCore:
             if _dict_value(state.get("developer_execution")).get("mode") == "runtime_closure_repair":
                 return self._continue_runtime_closure_repair(state=state, run_id=run_id)
             return self._continue_runtime_closure_act(state=state, run_id=run_id)
+        if status == "blocked" and self._browser_retry_stage(state):
+            return self._resume_browser_stage(state=state, run_id=run_id)
+        if (
+            status == "blocked"
+            and self._browser_execution_active(state)
+            and (developer_execution_retry_allowed(state) or developer_transport_retry_allowed(state))
+        ):
+            return self._continue_browser_developer(state=state, run_id=run_id)
         if status == "blocked" and developer_execution_retry_allowed(state):
             execution = _dict_value(state.get("developer_execution"))
             if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
@@ -649,7 +676,47 @@ class _PhaseFourCore:
         if status == "runtime_closure_repair_needed":
             return self._continue_runtime_closure_repair(state=state, run_id=run_id)
         if status == "runtime_closed":
+            if self._browser_stages_enforced(state):
+                return self._continue_browser_readiness(state=state, run_id=run_id)
             return self._continue_qa_test(state=state, run_id=run_id)
+        if status == "browser_readiness_ready":
+            return self._continue_browser_readiness_act(state=state, run_id=run_id)
+        if status == "browser_readiness_written":
+            return self._continue_browser_readiness_verification(state=state, run_id=run_id)
+        if status == "browser_readiness_repair_needed":
+            return self._continue_browser_readiness_repair(state=state, run_id=run_id)
+        if status == "browser_ready":
+            return self._continue_browser_journey_planning(state=state, run_id=run_id)
+        if status == "browser_journey_planned":
+            return self._continue_browser_baseline_capture(state=state, run_id=run_id)
+        if status == "browser_journey_captured":
+            return self._continue_browser_journey_review(state=state, run_id=run_id)
+        if status == "browser_journey_patch_needed":
+            return self._continue_browser_journey_patch(state=state, run_id=run_id)
+        if status == "browser_journey_repair_needed":
+            return self._continue_browser_journey_repair(state=state, run_id=run_id)
+        if status == "browser_journey_repair_written":
+            return self._continue_browser_journey_repair_verification(state=state, run_id=run_id)
+        if status == "browser_baseline_captured":
+            return self._continue_ui_polish_planning(state=state, run_id=run_id)
+        if status == "ui_polish_ready":
+            return self._continue_ui_polish_act(state=state, run_id=run_id)
+        if status == "ui_polish_written":
+            return self._continue_ui_polish_verification(state=state, run_id=run_id)
+        if status == "ui_polish_verified":
+            return self._continue_ui_polish_review(state=state, run_id=run_id)
+        if status == "ui_polish_repair_needed":
+            return self._continue_ui_polish_repair(state=state, run_id=run_id)
+        if status == "ui_polished":
+            return self._continue_browser_qa_review(state=state, run_id=run_id)
+        if status == "browser_qa_journey_patch_needed":
+            return self._continue_browser_qa_journey_patch(state=state, run_id=run_id)
+        if status == "browser_qa_repair_needed":
+            return self._continue_browser_qa_repair(state=state, run_id=run_id)
+        if status == "browser_qa_written":
+            return self._continue_browser_qa_verification(state=state, run_id=run_id)
+        if status == "browser_qa_verified":
+            return self._continue_browser_qa_review(state=state, run_id=run_id)
         if status == "implementation_repair_needed":
             return self._continue_implementation_repair(state=state, run_id=run_id)
         if status == "qa_repair_needed":
@@ -2440,6 +2507,7 @@ def _implementation_repair_feedback(
 
 
 
+from .phase4_browser import PhaseFourBrowserStagesCycle
 from .phase4_closure import PhaseFourRuntimeClosureCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
@@ -2448,6 +2516,7 @@ from .phase4_qa import PhaseFourQaCycle
 
 class PhaseFourWorkflow(
     PhaseFourPublicationCycle,
+    PhaseFourBrowserStagesCycle,
     PhaseFourRuntimeClosureCycle,
     PhaseFourQaCycle,
     PhaseFourImplementationCycle,

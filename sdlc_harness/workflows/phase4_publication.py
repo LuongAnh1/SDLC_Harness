@@ -37,6 +37,12 @@ from .phase4 import (
 )
 
 
+def _code_validation_verification_evidence(value: object) -> dict[str, object]:
+    evidence = _dict_value(value)
+    nested = evidence.get("verification")
+    return _dict_value(nested) if isinstance(nested, dict) else evidence
+
+
 class PhaseFourPublicationCycle:
     """Own this Phase 4 transition cycle; composed by PhaseFourWorkflow."""
 
@@ -184,7 +190,10 @@ class PhaseFourPublicationCycle:
                 qa_generated=qa_generated,
                 run_id=run_id,
                 planning_policy=_planning_policy_for_state(state, run_id=run_id),
-                extra_paths=self._runtime_closure_publication_paths(state=state, run_id=run_id),
+                extra_paths=[
+                    *self._runtime_closure_publication_paths(state=state, run_id=run_id),
+                    *self._browser_publication_paths(state=state, run_id=run_id),
+                ],
             )
             pr_title = f"[{issue_key}] Implement approved use case"
             pr_body = _code_review_pr_body(
@@ -534,10 +543,10 @@ class PhaseFourPublicationCycle:
         if approved_closure_changes:
             # Only tasks whose sources the closure changed receive it; other prompts stay byte-identical.
             approved_context = {**approved_context, "approved_closure_changes": approved_closure_changes}
-        verification = (
-            _dict_value(verification_evidence)
+        verification = _code_validation_verification_evidence(
+            verification_evidence
             if verification_evidence is not None
-            else _dict_value(_dict_value(state.get("quality_reports")).get("verification"))
+            else _dict_value(state.get("quality_reports")).get("verification")
         )
         validator = self.code_trace_validator
         if bool(self.code_validation_step_review.get("enabled")):

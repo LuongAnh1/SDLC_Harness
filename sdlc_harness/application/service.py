@@ -40,6 +40,10 @@ _PHASE4_STEP_REVIEW_RESUMES = {
         "runtime_closure_step_review",
         "continue_runtime_closure_step_review",
     ),
+    "browser_stage_step_review_required": (
+        "browser_stage_step_review",
+        "continue_browser_stage_step_review",
+    ),
 }
 
 

@@ -38,6 +38,7 @@ _RUN_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)$")
 _EVENT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/events$")
 _RUN_OPERATIONS_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/operations$")
 _ARTIFACT_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/artifacts/([^/]+)$")
+_BROWSER_EVIDENCE_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/browser-evidence/([^/]+)/([^/]+)$")
 _ACTION_ROUTE = re.compile(r"^/api/v1/runs/([^/]+)/actions$")
 _OPERATION_ROUTE = re.compile(r"^/api/v1/operations/([^/]+)$")
 _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -215,6 +216,16 @@ class SdlcRequestHandler(BaseHTTPRequestHandler):
                         artifact_key=artifact_key,
                     ),
                 )
+                return
+            evidence_match = _BROWSER_EVIDENCE_ROUTE.fullmatch(path)
+            if evidence_match:
+                self._require_no_query(parsed.query)
+                image = self.server.read_service.read_browser_evidence_image(
+                    run_id=unquote(evidence_match.group(1)),
+                    manifest_key=unquote(evidence_match.group(2)),
+                    capture_key=unquote(evidence_match.group(3)),
+                )
+                self._write_bytes(200, image["content"], media_type=str(image["media_type"]))
                 return
             raise HarnessError("route_not_found", "API route was not found.")
         except HarnessError as exc:

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 import subprocess
@@ -28,9 +29,27 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence, 
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.agents.developer.closure_planner import RuntimeClosurePlanner
+from sdlc_harness.agents.developer.polish_planner import UiPolishPlanner
 from sdlc_harness.agents.validator.closure_review import RuntimeClosureValidator
+from sdlc_harness.agents.validator.browser_review import (
+    BrowserQaValidator,
+    UiPolishValidator,
+    browser_qa_review_prompt,
+    journey_execution_review_prompt,
+)
 from sdlc_harness.llm.client import LlmCompletion
-from sdlc_harness.llm.fake import fake_qa_generated_tests, fake_runtime_closure_plan, fake_runtime_closure_review
+from sdlc_harness.agents.tester.journey_planner import BrowserJourneyPlanner
+from sdlc_harness.llm.fake import (
+    fake_browser_journey_plan,
+    fake_browser_journey_review,
+    fake_journey_obligation_verdicts,
+    fake_browser_qa_review,
+    fake_ui_polish_plan,
+    fake_ui_polish_review,
+    fake_qa_generated_tests,
+    fake_runtime_closure_plan,
+    fake_runtime_closure_review,
+)
 from sdlc_harness.profiles import (
     build_code_trace_policy,
     build_planning_path_policy,
@@ -48,6 +67,8 @@ from sdlc_harness.workflows.phase4 import (
     _verification_repair_feedback,
     _verification_attempt_count,
 )
+from sdlc_harness.workflows.phase4_browser import _scenario_candidate_units
+from sdlc_harness.workflows.phase4_publication import _code_validation_verification_evidence
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import (
     DirectoryOverlayTemplate,
@@ -59,6 +80,32 @@ from tests._support import (
 
 
 pytestmark = pytest.mark.integration
+
+
+def test_code_validation_verification_evidence_unwraps_browser_artifact() -> None:
+    verification = {
+        "status": "passed",
+        "executed_stage_ids": ["unit", "browser_capture"],
+        "stage_results": [{"stage_id": "unit", "status": "passed"}],
+    }
+
+    assert _code_validation_verification_evidence(
+        {
+            "schema_version": "browser_journey_verification_v1",
+            "source": "implementation_repair",
+            "verification": verification,
+        }
+    ) == verification
+
+
+def test_code_validation_verification_evidence_preserves_raw_report() -> None:
+    verification = {
+        "status": "passed",
+        "executed_stage_ids": ["typecheck"],
+        "stage_results": [{"stage_id": "typecheck", "status": "passed"}],
+    }
+
+    assert _code_validation_verification_evidence(verification) == verification
 
 
 def _code_validation_task_response(
@@ -241,14 +288,16 @@ class ScriptedClosureLlm:
         self.responses = list(responses or [])
         self.default = default
         self.prompts: list[str] = []
+        self.options: list[dict[str, object]] = []
 
     @property
     def calls(self) -> int:
         return len(self.prompts)
 
     def complete_with_metadata(self, *, system: str, prompt: str, **options) -> LlmCompletion:
-        del system, options
+        del system
         self.prompts.append(prompt)
+        self.options.append(dict(options))
         item = self.responses.pop(0) if self.responses else self.default
         if isinstance(item, Exception):
             raise item
@@ -328,6 +377,133 @@ class ClosureVerificationRunnerStub:
         )
 
 
+class BrowserVerificationRunnerStub:
+    """Scripted browser-suite outcomes (L5.4.1B); every other policy goes to the closure stub."""
+
+    def __init__(self, outcomes: list[str] | None = None):
+        self.outcomes = list(outcomes or [])
+        self.calls: list[dict[str, object]] = []
+        self.closure = ClosureVerificationRunnerStub()
+
+    def run(self, *, target_path: Path, work_packet: dict[str, object], verification_policy=None, runtime_probe=None, browser_capture=None, **kwargs):
+        if verification_policy is None or verification_policy.policy_version != "browser_stage_policy_v1":
+            return self.closure.run(
+                target_path=target_path, work_packet=work_packet, verification_policy=verification_policy,
+                runtime_probe=runtime_probe, **kwargs,
+            )
+        self.calls.append(
+            {"runtime_probe": runtime_probe, "browser_capture": browser_capture, "stage_ids": list(work_packet["verification_stage_ids"])}
+        )
+        outcome = self.outcomes.pop(0) if self.outcomes else "passed"
+        literal = browser_capture.forbidden_build_literals[0] if browser_capture.forbidden_build_literals else ""
+        failing = {
+            "env": ("database_ready", "environment", "Error: port is already allocated"),
+            "r3": ("frontend_build", "implementation", f"R3: the production build contains demo literal(s): `{literal}`"),
+        }.get(outcome)
+        stages: list[VerificationStageResult] = []
+        stopped = False
+        for stage_id in verification_policy.stage_ids:
+            if stopped and stage_id != "cleanup":
+                continue
+            failed = failing is not None and failing[0] == stage_id
+            probe_results = tuple(
+                {"probe_id": probe_id, "status": "passed", "observation": {"probe_id": probe_id, "actual_status": 200}}
+                for probe_id in runtime_probe.probe_ids
+            ) if stage_id == "runtime_probe" else ()
+            capture_rows = []
+            if stage_id == "browser_capture":
+                evidence_dir = Path(browser_capture.evidence_dir)
+                evidence_dir.mkdir(parents=True, exist_ok=True)
+                for view_id in browser_capture.view_ids:
+                    for viewport_id in browser_capture.viewport_ids:
+                        filename = f"{view_id}__{viewport_id}__s00.png"
+                        content = b"\x89PNG\r\n\x1a\n" + f"{view_id}:{viewport_id}".encode("utf-8")
+                        (evidence_dir / filename).write_bytes(content)
+                        step_failed = (
+                            outcome == "journey_fail" and view_id != "V-0"
+                        ) or (
+                            outcome == "journey_mixed"
+                            and view_id != "V-0"
+                            and viewport_id == "mobile"
+                        )
+                        capture_rows.append(
+                            {
+                                "view_id": view_id, "viewport_id": viewport_id, "step": 0,
+                                "status": "step_failed" if step_failed else "passed",
+                                "error": "locator not found" if step_failed else None,
+                                "aria_snapshot": (
+                                    "- main" if outcome == "no_demo"
+                                    else f'- main "polished":\n  - gridcell "{literal}"' if outcome == "aria_changed"
+                                    else f'- main:\n  - gridcell "{literal}"'
+                                ),
+                                "aria_truncated": False, "focus": None, "layout": {}, "styles": [], "test_status": "passed",
+                                "screenshot": {"file": filename, "sha256": hashlib.sha256(content).hexdigest()},
+                            }
+                        )
+            captures = tuple(capture_rows)
+            build_scan = {
+                "rule": "R3", "output_dir": browser_capture.build_output_dir, "files_scanned": 1,
+                "literal_count": len(browser_capture.forbidden_build_literals),
+                "hits": [{"literal": literal, "files": ["apps/web/dist/assets/index.js"]}] if outcome == "r3" else [],
+            } if stage_id == "frontend_build" else None
+            stages.append(
+                VerificationStageResult(
+                    stage_id=stage_id,
+                    status="failed" if failed else "passed",
+                    argv=("npm", "run", stage_id),
+                    cwd=".",
+                    timeout_seconds=120,
+                    exit_code=1 if failed else 0,
+                    duration_seconds=0.01,
+                    stdout="",
+                    stderr=failing[2] if failed else "",
+                    reason=failing[2] if failed else f"Verification stage completed successfully: {stage_id}",
+                    failure_kind=failing[1] if failed else "",
+                    probe_results=probe_results,
+                    capture_results=captures,
+                    build_scan=build_scan,
+                )
+            )
+            stopped = stopped or failed
+        terminal = next((item for item in stages if item.status == "failed"), stages[-1])
+        return VerificationResult(
+            status="failed" if failing else "passed",
+            command="",
+            cwd=str(target_path),
+            exit_code=terminal.exit_code,
+            duration_seconds=0.1,
+            stdout="",
+            stderr=terminal.stderr,
+            reason=terminal.reason,
+            failure_kind=terminal.failure_kind,
+            planned_stage_ids=tuple(verification_policy.stage_ids),
+            executed_stage_ids=tuple(item.stage_id for item in stages),
+            stage_results=tuple(stages),
+        )
+
+
+class RegexModuleFacts:
+    """Test stand-in for the TypeScript AST module facts: double-quoted literals and import kinds."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def extract_module_facts(self, *, target_path: Path, source_paths: list[str], run_id: str | None = None):
+        self.calls += 1
+        facts = {}
+        for path in source_paths:
+            text = (target_path / path).read_text(encoding="utf-8")
+            references = [{"specifier": spec, "kind": "dynamic"} for spec in re.findall(r'import\(\s*"([^"]+)"', text)]
+            references += [
+                {"specifier": spec, "kind": "type_only" if kind else "static"}
+                for kind, spec in re.findall(r'(?:^|\n)\s*import\s+(type\s+)?[^;()]*?from\s*"([^"]+)"', text)
+            ]
+            specifiers = {item["specifier"] for item in references}
+            literals = [value for value in re.findall(r'"([^"]*)"', text) if value not in specifiers]
+            facts[path] = {"string_literals": list(dict.fromkeys(literals)), "module_references": references}
+        return facts
+
+
 def closure_code_blocker(prompt: str) -> str:
     contract = json.JSONDecoder().raw_decode(prompt)[0]["contract"]
     unit_id = contract["closure_units"][0]["unit_id"]
@@ -371,6 +547,30 @@ def closure_blocker_review(prompt: str) -> str:
                     "expected_change": "The provider returns seeded records.",
                 }
             ],
+        }
+    )
+
+
+def polish_result_blocker(prompt: str) -> str:
+    payload = json.loads(prompt)
+    unit_id = payload["contract"]["polish_units"][0]["unit_id"]
+    evidence_ref = payload["result_context"]["after_evidence"][0]["evidence_ref"]
+    return json.dumps(
+        {
+            "summary": "Visual hierarchy still misses the approved authority.",
+            "reviewed_unit_ids": [unit_id],
+            "findings": [
+                {
+                    "severity": "blocker",
+                    "category": "behavior",
+                    "unit_ids": [unit_id],
+                    "evidence_refs": [evidence_ref],
+                    "authority_refs": [],
+                    "issue": "The polished shell changes an approved interaction.",
+                    "expected_change": "Restore the interaction while keeping the bounded visual polish.",
+                }
+            ],
+            "observations": [],
         }
     )
 
@@ -2300,7 +2500,9 @@ class PhaseFourTest(unittest.TestCase):
 
         self.assertEqual(response["current_phase"], "qa_testing")
         self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "qa_tester_llm_failed")
+        # Unparsable output is inconclusive (L5.4.3): blocked, retryable, no repair-prompt call.
+        self.assertEqual(response["last_error"]["error_code"], "qa_tester_inconclusive")
+        self.assertIn("continue_run", response["allowed_next_actions"])
         self.assertIn("qa_tester_raw_response", response["latest_artifacts"])
         raw_path = self.repo_root / str(response["latest_artifacts"]["qa_tester_raw_response"])
         self.assertIn("cut off before scenarios", raw_path.read_text(encoding="utf-8"))
@@ -2367,7 +2569,8 @@ class PhaseFourTest(unittest.TestCase):
     def test_qa_step_review_second_agent_attempt_is_a_separate_ordinal(self) -> None:
         traced = self._create_phase4_traced_run()
         run_id = str(traced["run_id"])
-        llm = CountingQaLlm(responses=[InvalidQaLlm().complete(system="", prompt="")])
+        # Parseable but contract-invalid output is the only kind that gets a second attempt.
+        llm = CountingQaLlm(responses=['{"summary": "no scenarios", "test_files": [], "scenarios": []}'])
 
         first = self._qa_review_workflow(llm).continue_run(run_id=run_id)
         self.assertEqual(first["pending_step_review"]["call_id"], "qa-generation-0001-a01")
@@ -3107,6 +3310,1763 @@ class PhaseFourTest(unittest.TestCase):
         exchange_dir = self.store_run_dir(run_id) / "runtime_closure_execution" / "step_review" / "attempt_1"
         self.assertTrue((exchange_dir / "planner" / "exchange_runtime-closure-planner-0001-a01.json").is_file())
         self.assertTrue((exchange_dir / "validator" / "exchange_runtime-closure-validator-0001-a01.json").is_file())
+
+    # ---------------------------------------------------------------- L5.4.1B browser readiness
+
+    DEMO_PROVIDER = "apps/web/src/closure-provider-1.ts"
+    DEMO_LITERAL = "demo-closure-fixture-value"
+    DEMO_IMPORTER = "apps/web/src/ClosureEntry.tsx"
+
+    def _closed_run(self, *, static_import: bool, **settings: str) -> str:
+        """A fake run at runtime_closed with browser stages enforced; the demo provider holds one literal."""
+
+        run_id, runner = self._written_closure_run(SDLC_BROWSER_STAGES_MODE="enforce", **settings)
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_verified")
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closed")
+        worktree = self._closure_worktree(run_id)
+        (worktree / self.DEMO_PROVIDER).write_text(
+            f'export const closureProvider1 = {{ label: "{self.DEMO_LITERAL}" }};\n', encoding="utf-8"
+        )
+        if static_import:
+            self._write_static_importer(worktree)
+        return run_id
+
+    def _write_static_importer(self, worktree: Path) -> None:
+        (worktree / self.DEMO_IMPORTER).write_text(
+            'import { closureProvider1 } from "./closure-provider-1";\nimport { ClosurePanel } from "./ClosurePanel";\n'
+            "export function ClosureEntry() {\n  void closureProvider1;\n  return ClosurePanel();\n}\n",
+            encoding="utf-8",
+        )
+
+    def _browser_workflow(
+        self,
+        runner: BrowserVerificationRunnerStub,
+        *,
+        planner=None,
+        journey_validator=None,
+        **review,
+    ) -> PhaseFourWorkflow:
+        workflow = PhaseFourWorkflow(
+            self.settings, browser_stage_step_review={"enabled": True, **review} if review else None
+        )
+        workflow.verification_runner = runner
+        workflow.module_facts_extractor = RegexModuleFacts()
+        if planner is not None:
+            workflow.journey_planner = BrowserJourneyPlanner(planner)
+        if journey_validator is not None:
+            journey_validator.settings = self.settings
+            workflow.browser_qa_validator = BrowserQaValidator(journey_validator)
+        return workflow
+
+    def _browser_step(
+        self,
+        run_id: str,
+        runner: BrowserVerificationRunnerStub,
+        *,
+        planner=None,
+        journey_validator=None,
+    ) -> dict[str, object]:
+        return self._browser_workflow(
+            runner,
+            planner=planner,
+            journey_validator=journey_validator,
+        ).continue_run(run_id=run_id)
+
+    def _artifact(self, response: dict[str, object], key: str) -> dict[str, object]:
+        return json.loads((self.repo_root / str(response["latest_artifacts"][key])).read_text(encoding="utf-8"))
+
+    def test_browser_stages_off_keeps_the_qa_path_after_runtime_closed(self) -> None:
+        run_id, runner = self._written_closure_run()
+        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
+        self._closure_step(run_id, runner, validator=validator)
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closed")
+
+        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "qa_tested")
+        self.assertNotIn("browser_stages", PhaseOneWorkflow(self.settings).store.read_state(run_id))
+
+    def test_browser_readiness_without_static_importer_verifies_and_reaches_browser_ready(self) -> None:
+        run_id = self._closed_run(static_import=False)
+        snapshot = PhaseOneWorkflow(self.settings).store.read_state(run_id)["profile_snapshot"]
+        runner = BrowserVerificationRunnerStub()
+
+        written = self._browser_step(run_id, runner)
+        self.assertEqual(written["status"], "browser_readiness_written", written)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        pin = state["browser_stages"]
+        self.assertEqual(
+            {key: pin[key] for key in ("mode", "contract_version", "verification_policy_version", "demo_flag_env_key")},
+            {
+                "mode": "enforce",
+                "contract_version": "browser_stages_contract_v1",
+                "verification_policy_version": "browser_stage_policy_v1",
+                "demo_flag_env_key": "VITE_SDLC_DEMO_RUNTIME",
+            },
+        )
+        self.assertEqual([item["viewport_id"] for item in pin["viewports"]], ["desktop", "mobile"])
+        self.assertTrue(pin["readiness"]["developer_skipped"])
+        context = self._artifact(written, "browser_readiness_context")
+        self.assertEqual([item["path"] for item in context["demo_modules"]], [self.DEMO_PROVIDER])
+        self.assertEqual(context["demo_literals"], [self.DEMO_LITERAL])
+        self.assertEqual(context["write_scope"], [self.DEMO_PROVIDER])
+        self.assertEqual(context["static_importers"], [])
+
+        ready = self._browser_step(run_id, runner)
+        self.assertEqual(ready["status"], "browser_ready", ready)
+        self.assertIn("continue_run", ready["allowed_next_actions"])  # the journey stage follows
+        call = runner.calls[0]
+        self.assertEqual(call["stage_ids"][-3:], ["runtime_probe", "browser_capture", "cleanup"])
+        capture = call["browser_capture"]
+        self.assertEqual((capture.view_ids, capture.viewport_ids), (("V-0",), ("desktop", "mobile")))
+        self.assertEqual(capture.demo_flag_env_key, "VITE_SDLC_DEMO_RUNTIME")
+        self.assertEqual(capture.forbidden_build_literals, (self.DEMO_LITERAL,))
+        self.assertEqual(capture.build_output_dir, "apps/web/dist")
+        self.assertEqual(capture.stand_in_env_keys, call["runtime_probe"].stand_in_env_keys)
+        worktree = self._closure_worktree(run_id)
+        self.assertTrue((worktree / "tests/e2e/runtime-closure.probe.spec.ts").is_file())
+        self.assertIn('test(`${view.view_id}@${viewport.viewport_id}`', (worktree / "tests/e2e/sdlc-browser-capture.spec.ts").read_text(encoding="utf-8"))
+        manifest = self._artifact(ready, "browser_readiness_evidence_manifest")
+        self.assertEqual(manifest["schema_version"], "browser_evidence_v1")
+        self.assertEqual(len(manifest["records"]), 2)
+        self.assertTrue(ready["quality_reports"]["browser_readiness"]["ok"])
+        self.assertTrue(ready["quality_reports"]["browser_readiness"]["developer_skipped"])
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["profile_snapshot"], snapshot)  # legacy snapshot never rewritten (D10)
+        self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "browser_readiness_v1").exists())
+
+    def test_browser_readiness_static_importer_runs_developer_in_its_own_session(self) -> None:
+        run_id = self._closed_run(static_import=True)
+        runner = BrowserVerificationRunnerStub()
+
+        ready = self._browser_step(run_id, runner)
+        self.assertEqual(ready["status"], "browser_readiness_ready", ready)
+        context = self._artifact(ready, "browser_readiness_context")
+        self.assertEqual(context["static_importers"], [self.DEMO_IMPORTER])
+        self.assertEqual(context["write_scope"], sorted([self.DEMO_IMPORTER, self.DEMO_PROVIDER]))
+        packet = self._artifact(ready, "browser_readiness_work_packet")
+        self.assertEqual(packet["mode"], "browser_readiness")
+        self.assertEqual(packet["runtime_config_impact"]["status"], "not_required")
+        unit = packet["execution_units"][0]
+        self.assertTrue(unit["unit_id"].startswith("BR-"))
+        self.assertEqual(unit["write_paths"], context["write_scope"])
+        self.assertEqual(unit["closure_context"]["demo_flag"], {"env_key": "VITE_SDLC_DEMO_RUNTIME", "enabled_value": "1"})
+        self.assertIn("dynamic import()", " ".join(unit["closure_context"]["rules"]))
+        self.assertEqual(packet["output_contract"]["allowed_paths"], context["write_scope"])
+
+        written = self._browser_step(run_id, runner)
+        self.assertEqual(written["status"], "browser_readiness_written", written)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["developer_execution"]["mode"], "browser_readiness")
+        manifest = json.loads(
+            (self.store_run_dir(run_id) / "developer_execution" / "browser_readiness_v1" / "manifest.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(manifest["mode"], "browser_readiness")
+        # Closure output and frozen Plan files outside the scope are hash-bound baselines, never drift (P0-6).
+        baselines = {item["path"] for item in manifest["expected_dirty_files"]}
+        self.assertTrue(baselines)
+        self.assertFalse(baselines & set(context["write_scope"]))
+
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_ready")
+
+    def test_browser_readiness_r5_static_import_repairs_the_readiness_unit(self) -> None:
+        run_id = self._closed_run(static_import=True)
+        runner = BrowserVerificationRunnerStub()
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_ready")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+        self._write_static_importer(self._closure_worktree(run_id))  # the Developer left the static import
+
+        repair = self._browser_step(run_id, runner)
+        self.assertEqual(repair["status"], "browser_readiness_repair_needed", repair)
+        self.assertEqual(runner.calls, [])  # R5 fails before the suite runs
+        feedback = self._artifact(repair, "browser_readiness_repair_feedback")
+        unit_id = PhaseOneWorkflow(self.settings).store.read_state(run_id)["browser_stages"]["readiness"]["unit_id"]
+        findings = feedback["repair_objective"]["contract_findings"]
+        self.assertEqual([(item["source"], item["unit_ids"]) for item in findings], [("R5", [unit_id])])
+        self.assertEqual(findings[0]["paths"], [self.DEMO_IMPORTER])
+
+        repaired = self._browser_step(run_id, runner)
+        self.assertEqual(repaired["status"], "browser_readiness_written", repaired)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["readiness"], 1)
+        self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "browser_readiness_repair_v1").is_dir())
+
+    def test_browser_readiness_r3_and_r4_repair_until_the_limit_blocks(self) -> None:
+        run_id = self._closed_run(static_import=False, SDLC_BROWSER_READINESS_REPAIR_LIMIT="1")
+        runner = BrowserVerificationRunnerStub(["r3", "no_demo"])
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+
+        repair = self._browser_step(run_id, runner)
+        self.assertEqual(repair["status"], "browser_readiness_repair_needed", repair)
+        findings = self._artifact(repair, "browser_readiness_repair_feedback")["repair_objective"]["contract_findings"]
+        self.assertEqual(findings[0]["source"], "frontend_build")
+        self.assertIn(self.DEMO_LITERAL, findings[0]["issue"])
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+
+        blocked = self._browser_step(run_id, runner)  # R4: the flagged page shows no demo literal
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_readiness_repair_limit_exceeded")
+        self.assertIn("R4", blocked["last_error"]["message"])
+        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
+
+    def test_browser_readiness_environment_failure_blocks_without_counting_then_retries(self) -> None:
+        run_id = self._closed_run(static_import=False)
+        runner = BrowserVerificationRunnerStub(["env", "passed"])
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+
+        blocked = self._browser_step(run_id, runner)
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_readiness_environment_failed")
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["readiness"], 0)
+
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_ready")
+
+    def test_browser_readiness_outside_change_is_a_scope_conflict(self) -> None:
+        run_id = self._closed_run(static_import=False)
+        runner = BrowserVerificationRunnerStub()
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+        worktree = self._closure_worktree(run_id)
+        panel = worktree / "apps/web/src/ClosurePanel.tsx"
+        panel.write_text(panel.read_text(encoding="utf-8") + "// outside change\n", encoding="utf-8")
+
+        blocked = self._browser_step(run_id, runner)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_readiness_scope_conflict", blocked)
+        self.assertIn("ClosurePanel.tsx", blocked["last_error"]["message"])
+        self.assertEqual(blocked["allowed_next_actions"], ["get_status", "cancel_run"])
+        self.assertEqual(runner.calls, [])
+
+    def test_browser_readiness_blocks_without_a_runnable_scenario(self) -> None:
+        run_id = self._closed_run(static_import=False)
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        context = json.loads((self.repo_root / state["latest_artifacts"]["runtime_closure_context"]).read_text(encoding="utf-8"))
+        state["quality_reports"]["runtime_closure"]["blocked_scenario_ids"] = list(context["scenario_ids"])
+        store.write_state(state)
+
+        blocked = self._browser_step(run_id, BrowserVerificationRunnerStub())
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_stages_no_runnable_scenario", blocked)
+        self.assertNotIn("browser_stages", store.read_state(run_id))
+
+    # ---------------------------------------------------------------- L5.4.2 journey + baseline
+
+    def _ready_run(self, runner: BrowserVerificationRunnerStub, **settings: str) -> str:
+        run_id = self._closed_run(static_import=False, **settings)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_readiness_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "browser_ready")
+        return run_id
+
+    def test_browser_journey_candidates_include_transitive_dependencies_only(self) -> None:
+        packet = {
+            "execution_units": [
+                {"unit_id": "WU-WEB", "scenario_id": "SC-1", "depends_on": ["WU-API"]},
+                {"unit_id": "WU-API", "scenario_id": "", "depends_on": ["WU-DB"]},
+                {"unit_id": "WU-DB", "scenario_id": "", "depends_on": []},
+                {"unit_id": "WU-OTHER", "scenario_id": "SC-2", "depends_on": []},
+            ]
+        }
+
+        candidates = _scenario_candidate_units(packet, "SC-1")
+
+        self.assertEqual(
+            [item["unit_id"] for item in candidates],
+            ["WU-API", "WU-DB", "WU-WEB"],
+        )
+
+    @staticmethod
+    def _browser_journey_blocker(prompt: str, *, category: str = "implementation") -> str:
+        payload = json.loads(prompt)
+        views = payload["scenario"]["views"]
+        not_reachable = payload["scenario"]["not_reachable"]
+        first = views[0]
+        evidence = payload["review_context"]["evidence"]
+        first_ref = next(
+            item["evidence_ref"] for item in evidence if item["view_id"] == first["view_id"]
+        )
+        candidates = payload["scenario"]["candidate_units"]
+        selected = next(
+            (item for item in candidates if item.get("component_id") == "api"),
+            candidates[-1],
+        )
+        return json.dumps(
+            {
+                "summary": f"Fake journey {category} blocker.",
+                "reviewed_view_ids": [item["view_id"] for item in views],
+                "reviewed_not_reachable_obligation_ids": [
+                    item["obligation_id"] for item in not_reachable
+                ],
+                "view_evidence": [
+                    {
+                        "view_id": item["view_id"],
+                        "evidence_refs": [
+                            next(
+                                row["evidence_ref"]
+                                for row in evidence
+                                if row["view_id"] == item["view_id"]
+                            )
+                        ],
+                    }
+                    for item in views
+                ],
+                "obligation_verdicts": fake_journey_obligation_verdicts(views, evidence),
+                "not_reachable_verdicts": [
+                    {"obligation_id": item["obligation_id"], "verdict": "justified"}
+                    for item in not_reachable
+                ],
+                "findings": [
+                    {
+                        "severity": "blocker",
+                        "category": category,
+                        "view_ids": [first["view_id"]],
+                        "obligation_ids": [first["obligation_refs"][0]],
+                        "unit_ids": [selected["unit_id"]] if category == "implementation" else [],
+                        "evidence_refs": [first_ref],
+                        "issue": "The planned behavioral state is not observable.",
+                        "expected_change": "Restore the approved browser outcome.",
+                    }
+                ],
+                "observations": [],
+            }
+        )
+
+    def test_browser_journey_plans_typed_views_and_captures_the_baseline(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+
+        planned = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(planned["status"], "browser_journey_planned", planned)
+        self.assertEqual(planner.calls, 1)
+        prompt = json.loads(planner.prompts[0])
+        self.assertEqual(prompt["prompt_kind"], "Browser Journey Planner v1")
+        # The Planner reads the V-0 ARIA captured by readiness: text only, no image.
+        self.assertIn(self.DEMO_LITERAL, prompt["baseline_aria_snapshot"]["desktop"])
+        self.assertEqual(sorted(prompt["baseline_aria_snapshot"]), ["desktop", "mobile"])
+        self.assertNotIn("image", json.dumps(prompt).casefold().replace("img", ""))
+        rules = " ".join(prompt["rules"])
+        self.assertIn("locator and interaction evidence", rules)
+        self.assertIn("Never use it because current code", rules)
+        self.assertEqual(prompt["runnable_scenario_ids"], sorted(prompt["scenario_design_nodes"]))
+        plan = self._artifact(planned, "browser_journey_plan")
+        self.assertEqual(plan["schema_version"], "browser_journey_plan_v1")
+        self.assertEqual({view["scenario_id"] for view in plan["views"]}, set(prompt["runnable_scenario_ids"]))
+        for view in plan["views"]:
+            self.assertRegex(view["view_id"], r"^BV-[0-9a-f]{12}$")
+            self.assertEqual(view["steps"], [{"action": "goto", "path": "/"}])
+
+        captured = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(captured["status"], "browser_journey_captured", captured)
+        self.assertEqual(captured["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
+        call = runner.calls[-1]["browser_capture"]
+        self.assertEqual(call.view_ids, ("V-0", *(view["view_id"] for view in plan["views"])))
+        report = captured["quality_reports"]["browser_baseline"]
+        self.assertEqual((report["views"], report["step_failed"]), (len(plan["views"]), []))
+        self.assertEqual((report["ok"], report["status"]), (False, "pending_semantic_review"))
+        manifest = self._artifact(captured, "browser_baseline_evidence_manifest")
+        self.assertEqual(len(manifest["records"]), 2 * (1 + len(plan["views"])))
+        spec = (self._closure_worktree(run_id) / "tests/e2e/sdlc-browser-capture.spec.ts").read_text(encoding="utf-8")
+        self.assertIn(plan["views"][0]["view_id"], spec)
+
+        validated = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(validated["status"], "browser_baseline_captured", validated)
+        report = validated["quality_reports"]["browser_baseline"]
+        self.assertEqual((report["ok"], report["status"]), (True, "pass"))
+        reviews = self._artifact(validated, "browser_journey_reviews")
+        self.assertTrue(reviews["reviews"])
+        self.assertTrue(all(item["ok"] for item in reviews["reviews"]))
+
+    def test_browser_journey_defect_is_semantically_patched_then_rechecked(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "journey_fail", "passed"])
+        run_id = self._ready_run(runner, SDLC_BROWSER_JOURNEY_PATCH_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        blocked = False
+
+        def journey_defect_once(prompt: str) -> str:
+            nonlocal blocked
+            if not blocked:
+                blocked = True
+                return self._browser_journey_blocker(prompt, category="journey_defect")
+            return fake_browser_journey_review(prompt)
+
+        validator = ScriptedClosureLlm(default=journey_defect_once)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+
+        captured = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(captured["status"], "browser_journey_captured", captured)
+        patch = self._browser_step(run_id, runner, planner=planner, journey_validator=validator)
+        self.assertEqual(patch["status"], "browser_journey_patch_needed", patch)
+        failures = self._artifact(patch, "browser_journey_step_failures")["failures"]
+        self.assertTrue(failures)
+        self.assertEqual(failures[0]["error"], "locator not found")
+        self.assertIn("aria_at_failure", failures[0])
+
+        replanned = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(replanned["status"], "browser_journey_planned", replanned)
+        patch_prompt = json.loads(planner.prompts[-1])
+        self.assertEqual(patch_prompt["previous_round"]["step_failures"], failures)
+        self.assertIn("previous_output", patch_prompt["previous_round"])
+        scope = patch_prompt["previous_round"]["patch_scope"]
+        self.assertEqual(scope["affected_view_keys"], [failures[0]["view_key"]])
+        self.assertEqual(
+            scope["affected_obligation_ids"],
+            self._artifact(patch, "browser_journey_step_failures")["findings"][0]["obligation_ids"],
+        )
+        instruction = patch_prompt["previous_round"]["instruction"]
+        self.assertIn("real step error", instruction)
+        self.assertIn("passed", instruction)
+        self.assertIn("already semantically reviewed and accepted", instruction)
+        self.assertIn("complete edit scope", instruction)
+        self.assertIn("not the full plan", instruction)
+        self.assertIn("removed_view_keys", patch_prompt["previous_round"]["patch_output_schema"])
+        # The Planner resolves cited evidence against what the reviewed run really rendered.
+        self.assertEqual(
+            patch_prompt["previous_round"]["view_ids"][failures[0]["view_key"]], failures[0]["view_id"]
+        )
+        captured_refs = {
+            ref for item in patch_prompt["previous_round"]["captured_states"] for ref in item["evidence_refs"]
+        }
+        gap = patch_prompt["previous_round"]["planning_gaps"][0]
+        self.assertTrue(set(gap["evidence_refs"]) <= captured_refs)
+        self.assertEqual(gap["view_keys"], [failures[0]["view_key"]])
+        self.assertIn("not as a mandatory recipe", instruction)
+        self.assertIn("Attach `observe`", instruction)
+        self.assertIn("instead of inventing a fragile path", instruction)
+        self.assertEqual(self._artifact(replanned, "browser_journey_plan")["source"], "patch_1")
+
+        captured = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(captured["status"], "browser_journey_captured", captured)
+        validated = self._browser_step(run_id, runner, planner=planner, journey_validator=validator)
+        self.assertEqual(validated["status"], "browser_baseline_captured", validated)
+        self.assertEqual(validated["quality_reports"]["browser_baseline"]["journey_patch_iterations"], 1)
+        self.assertEqual(self._artifact(validated, "browser_journey_reviews")["attempt"], 2)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["qa"], 0)
+        self.assertEqual(planner.calls, 2)
+
+    def test_browser_journey_patch_keeps_passed_supporting_evidence_out_of_step_failures(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "journey_mixed"])
+        run_id = self._ready_run(runner, SDLC_BROWSER_JOURNEY_PATCH_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        blocked = False
+
+        def mixed_evidence_blocker(prompt: str) -> str:
+            nonlocal blocked
+            if blocked:
+                return fake_browser_journey_review(prompt)
+            blocked = True
+            payload = json.loads(prompt)
+            result = json.loads(self._browser_journey_blocker(prompt, category="journey_defect"))
+            view_id = payload["scenario"]["views"][0]["view_id"]
+            evidence = [
+                item
+                for item in payload["review_context"]["evidence"]
+                if item["view_id"] == view_id
+            ]
+            result["findings"][0]["evidence_refs"] = [
+                next(item["evidence_ref"] for item in evidence if item["viewport_id"] == "desktop"),
+                next(item["evidence_ref"] for item in evidence if item["viewport_id"] == "mobile"),
+            ]
+            return json.dumps(result)
+
+        validator = ScriptedClosureLlm(default=mixed_evidence_blocker)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+
+        patch = self._browser_step(run_id, runner, planner=planner, journey_validator=validator)
+        self.assertEqual(patch["status"], "browser_journey_patch_needed", patch)
+        feedback = self._artifact(patch, "browser_journey_step_failures")
+        self.assertEqual(len(feedback["failures"]), 1)
+        self.assertEqual(feedback["failures"][0]["viewport_id"], "mobile")
+        self.assertEqual(feedback["failures"][0]["error"], "locator not found")
+        self.assertEqual(len(feedback["planning_gaps"]), 1)
+        result_refs = feedback["findings"][0]["evidence_refs"]
+        self.assertEqual(feedback["planning_gaps"][0]["evidence_refs"], result_refs)
+        self.assertEqual(len(result_refs), 2)
+        self.assertEqual(feedback["planning_gaps"][0]["issue"], "The planned behavioral state is not observable.")
+
+    def test_browser_journey_patch_gate_rejects_changes_outside_feedback_scope(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "journey_fail"])
+        run_id = self._ready_run(runner, SDLC_BROWSER_JOURNEY_PATCH_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        packet_path = self.repo_root / state["latest_artifacts"]["developer_work_packet"]
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        next(item for item in packet["execution_units"] if item.get("scenario_id"))["ui_obligations"].append(
+            {
+                "id": "VDN-browser-qa:accessibility.1",
+                "summary": "The runnable browser outcome has an accessible name.",
+            }
+        )
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        def escape_scope(prompt: str) -> str:
+            payload = json.loads(prompt)
+            plan = json.loads(fake_browser_journey_plan(prompt))
+            affected = set(payload["previous_round"]["patch_scope"]["affected_obligation_ids"])
+            view = plan["views"][0]
+            obligation_id = next(item for item in view["obligation_refs"] if item not in affected)
+            view["obligation_refs"].remove(obligation_id)
+            plan["not_reachable"] = [{"obligation_id": obligation_id, "reason": "Reclassified."}]
+            return json.dumps(plan)
+
+        planner = ScriptedClosureLlm(
+            [fake_browser_journey_plan, escape_scope],
+            default=fake_browser_journey_plan,
+        )
+        blocked = False
+
+        def journey_defect_once(prompt: str) -> str:
+            nonlocal blocked
+            if not blocked:
+                blocked = True
+                return self._browser_journey_blocker(prompt, category="journey_defect")
+            return fake_browser_journey_review(prompt)
+
+        validator = ScriptedClosureLlm(default=journey_defect_once)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+        self.assertEqual(
+            self._browser_step(run_id, runner, planner=planner, journey_validator=validator)["status"],
+            "browser_journey_patch_needed",
+        )
+
+        replanned = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(replanned["status"], "browser_journey_planned", replanned)
+        self.assertEqual(planner.calls, 3)
+        repair = json.loads(planner.prompts[-1])["previous_round"]
+        self.assertTrue(any(issue["gate"] == "J7" for issue in repair["blocking_issues"]))
+        self.assertIn("rejected_output", repair)
+        self.assertEqual(
+            repair["previous_output"],
+            json.loads(planner.prompts[1])["previous_round"]["previous_output"],
+        )
+
+    def test_browser_journey_unjustified_not_reachable_is_planned_then_rechecked(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner, SDLC_BROWSER_JOURNEY_PATCH_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+
+        def hide_obligation(prompt: str) -> str:
+            plan = json.loads(fake_browser_journey_plan(prompt))
+            obligation_id = plan["views"][0]["obligation_refs"].pop()
+            plan["not_reachable"] = [
+                {"obligation_id": obligation_id, "reason": "The current source omits this behavior."}
+            ]
+            return json.dumps(plan)
+
+        planner = ScriptedClosureLlm([hide_obligation], default=fake_browser_journey_plan)
+        rejected = False
+
+        def reject_source_based_unreachable(prompt: str) -> str:
+            nonlocal rejected
+            payload = json.loads(prompt)
+            scenario = payload["scenario"]
+            not_reachable = scenario["not_reachable"]
+            if not_reachable and not rejected:
+                rejected = True
+                obligation_id = not_reachable[0]["obligation_id"]
+                evidence = payload["review_context"]["evidence"]
+                return json.dumps(
+                    {
+                        "summary": "The source-based not_reachable claim needs a journey.",
+                        "reviewed_view_ids": [item["view_id"] for item in scenario["views"]],
+                        "reviewed_not_reachable_obligation_ids": [obligation_id],
+                        "view_evidence": [
+                            {
+                                "view_id": item["view_id"],
+                                "evidence_refs": [
+                                    next(
+                                        row["evidence_ref"]
+                                        for row in evidence
+                                        if row["view_id"] == item["view_id"]
+                                    )
+                                ],
+                            }
+                            for item in scenario["views"]
+                        ],
+                        "obligation_verdicts": fake_journey_obligation_verdicts(scenario["views"], evidence),
+                        "not_reachable_verdicts": [
+                            {
+                                "obligation_id": obligation_id,
+                                "verdict": "needs_journey",
+                                "reason": "A typed wait on the rendered state exposes it.",
+                            }
+                        ],
+                        "findings": [],
+                        "observations": [],
+                    }
+                )
+            return fake_browser_journey_review(prompt)
+
+        validator = ScriptedClosureLlm(default=reject_source_based_unreachable)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+
+        patch = self._browser_step(run_id, runner, planner=planner, journey_validator=validator)
+        self.assertEqual(patch["status"], "browser_journey_patch_needed", patch)
+        feedback = self._artifact(patch, "browser_journey_step_failures")
+        self.assertEqual(feedback["failures"], [])
+        self.assertEqual(len(feedback["planning_gaps"]), 1)
+
+        replanned = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(replanned["status"], "browser_journey_planned", replanned)
+        patch_round = json.loads(planner.prompts[-1])["previous_round"]
+        self.assertEqual(patch_round["planning_gaps"], feedback["planning_gaps"])
+        self.assertEqual(self._artifact(replanned, "browser_journey_plan")["not_reachable"], [])
+
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+        validated = self._browser_step(run_id, runner, planner=planner, journey_validator=validator)
+        self.assertEqual(validated["status"], "browser_baseline_captured", validated)
+        self.assertEqual(planner.calls, 2)
+
+    def test_browser_journey_wrong_outcome_repairs_candidate_unit_before_polish(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "aria_changed"])
+        run_id = self._ready_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        blocked = False
+
+        def implementation_once(prompt: str) -> str:
+            nonlocal blocked
+            if not blocked:
+                blocked = True
+                # Both categories in one review: the code repair goes first, the re-review reports what is left.
+                result = json.loads(self._browser_journey_blocker(prompt))
+                result["findings"] += json.loads(
+                    self._browser_journey_blocker(prompt, category="journey_defect")
+                )["findings"]
+                return json.dumps(result)
+            return fake_browser_journey_review(prompt)
+
+        validator = ScriptedClosureLlm(default=implementation_once)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        captured = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(captured["status"], "browser_journey_captured", captured)
+        self.assertEqual(captured["quality_reports"]["browser_baseline"]["step_failed"], [])
+        self.assertEqual(captured["quality_reports"]["browser_baseline"]["observe_missed"], [])
+        baseline_verification = self._artifact(captured, "browser_journey_verification")
+        self.assertEqual(baseline_verification["source"], "baseline")
+        self.assertTrue(baseline_verification["probe_results"])
+
+        repair = self._browser_step(run_id, runner, journey_validator=validator)
+        self.assertEqual(repair["status"], "browser_journey_repair_needed", repair)
+        review_prompt = json.loads(validator.prompts[0])
+        candidate_ids = {
+            item["unit_id"] for item in review_prompt["scenario"]["candidate_units"]
+        }
+        feedback = self._artifact(repair, "browser_journey_repair_feedback")
+        findings = feedback["repair_objective"]["contract_findings"]
+        self.assertEqual([item["category"] for item in findings], ["implementation"])
+        selected = findings[0]["unit_ids"]
+        self.assertTrue(set(selected) <= candidate_ids)
+        self.assertTrue(candidate_ids)
+        # The Developer reads the cited capture itself: the typed steps that led to it and what the browser showed.
+        evidence = findings[0]["evidence"]
+        self.assertEqual([item["evidence_ref"] for item in evidence], findings[0]["evidence_refs"])
+        self.assertTrue(evidence[0]["evidence_ref"].startswith("baseline:"))
+        self.assertEqual(evidence[0]["steps"][0]["action"], "goto")
+        self.assertIn("aria_snapshot", evidence[0])
+        self.assertIn("`evidence`", feedback["required_action"])
+
+        written = self._browser_step(run_id, runner, journey_validator=validator)
+        self.assertEqual(written["status"], "browser_journey_repair_written", written)
+        self.assertTrue(
+            (self.store_run_dir(run_id) / "developer_execution" / "browser_journey_repair_v1").is_dir()
+        )
+        manifest = json.loads(
+            (
+                self.store_run_dir(run_id)
+                / "developer_execution"
+                / "browser_journey_repair_v1"
+                / "manifest.json"
+            ).read_text(encoding="utf-8")
+        )
+        authority = manifest["items"][0]["runtime_closure_authority"]
+        self.assertEqual(authority["schema_version"], "browser_repair_runtime_authority_v1")
+        self.assertTrue(authority["runtime_probes"])
+        self.assertTrue(authority["probe_observations"])
+        recaptured = self._browser_step(run_id, runner, journey_validator=validator)
+        self.assertEqual(recaptured["status"], "browser_journey_captured", recaptured)
+        validated = self._browser_step(run_id, runner, journey_validator=validator)
+        self.assertEqual(validated["status"], "browser_baseline_captured", validated)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["qa"], 1)
+        self.assertTrue(state["browser_stages"]["journey"]["verification"])
+        self.assertTrue(state["browser_stages"]["journey"]["regression"])
+
+    def test_browser_journey_review_inconclusive_blocks_without_repair(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+        validator = ScriptedClosureLlm(["", ""], default=fake_browser_journey_review)
+
+        blocked = self._browser_step(run_id, runner, journey_validator=validator)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_journey_review_inconclusive")
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        self.assertNotIn("browser_journey_repair_feedback", blocked["latest_artifacts"])
+        self.assertEqual(
+            PhaseOneWorkflow(self.settings).store.read_state(run_id)["browser_stages"]["repair_iterations"]["qa"],
+            0,
+        )
+        recovered = self._browser_step(
+            run_id,
+            runner,
+            journey_validator=ScriptedClosureLlm(default=fake_browser_journey_review),
+        )
+        self.assertEqual(recovered["status"], "browser_baseline_captured", recovered)
+        self.assertEqual(self._artifact(recovered, "browser_journey_reviews")["attempt"], 2)
+
+    def test_browser_journey_gate_issue_gets_a_repair_round_with_the_exact_issues(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+
+        def starts_without_goto(prompt: str) -> str:
+            plan = json.loads(fake_browser_journey_plan(prompt))
+            plan["views"][0]["steps"] = [{"action": "click", "role": "button", "name": "Open"}]
+            return json.dumps(plan)
+
+        planner = ScriptedClosureLlm([starts_without_goto], default=fake_browser_journey_plan)
+        planned = self._browser_step(run_id, runner, planner=planner)
+        self.assertEqual(planned["status"], "browser_journey_planned", planned)
+        self.assertEqual(planner.calls, 2)
+        repair = json.loads(planner.prompts[1])["previous_round"]
+        self.assertEqual([issue["gate"] for issue in repair["blocking_issues"]], ["J1"])
+        self.assertIn("must be `goto`", repair["blocking_issues"][0]["message"])
+        self.assertEqual(repair["previous_output"]["views"][0]["steps"][0]["action"], "click")
+        self.assertEqual(len(self._artifact(planned, "browser_journey_plan")["rounds"]), 2)
+
+    def test_browser_journey_inconclusive_output_blocks_then_retries_in_a_new_attempt(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        for bad in ("", ('{"views": [', "length"), "not json at all"):
+            with self.subTest(bad=bad):
+                planner = ScriptedClosureLlm([bad])
+                blocked = self._browser_step(run_id, runner, planner=planner)
+                self.assertEqual(blocked["status"], "blocked", blocked)
+                self.assertEqual(blocked["last_error"]["error_code"], "browser_journey_inconclusive")
+                self.assertIn("continue_run", blocked["allowed_next_actions"])
+                self.assertNotIn("browser_journey_plan", blocked["latest_artifacts"])
+        contract_broken_twice = ScriptedClosureLlm(['{"views": "x"}', '{"views": "y"}'])
+        blocked = self._browser_step(run_id, runner, planner=contract_broken_twice)
+        self.assertEqual((blocked["last_error"]["error_code"], contract_broken_twice.calls), ("browser_journey_inconclusive", 2))
+
+        planned = self._browser_step(run_id, runner, planner=ScriptedClosureLlm(default=fake_browser_journey_plan))
+        self.assertEqual(planned["status"], "browser_journey_planned", planned)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["journey"]["attempt"], 5)  # every retry opens a new attempt
+
+    def test_browser_journey_step_review_pauses_the_call_and_replays_it(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+
+        paused = self._browser_workflow(runner, planner=planner, review_input=True, review_output=True).continue_run(run_id=run_id)
+        for call_id, stage, calls in (
+            ("browser-journey-planner-0001-a01-input", "input", 0),
+            ("browser-journey-planner-0001-a01", "output", 1),
+        ):
+            self.assertEqual(paused["status"], "browser_stage_step_review_required", paused)
+            self.assertEqual((paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]), (call_id, stage))
+            self.assertEqual(planner.calls, calls)
+            paused = self._browser_workflow(runner, planner=planner, call_id=call_id, decision="approve").continue_browser_stage_step_review(run_id=run_id)
+
+        self.assertEqual(paused["status"], "browser_journey_planned", paused)
+        self.assertEqual(planner.calls, 1)
+        exchange = self.store_run_dir(run_id) / "browser_execution" / "step_review" / "journey" / "attempt_1" / "plan"
+        self.assertTrue((exchange / "exchange_browser-journey-planner-0001-a01.json").is_file())
+
+    def test_browser_journey_execution_review_pauses_input_and_output_with_images(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+        validator = ScriptedClosureLlm(default=fake_browser_journey_review)
+
+        def workflow(**review: object) -> PhaseFourWorkflow:
+            return self._browser_workflow(
+                runner,
+                journey_validator=validator,
+                **review,
+            )
+
+        paused = workflow(review_input=True, review_output=True).continue_run(run_id=run_id)
+        for call_id, stage, calls in (
+            ("browser-journey-validator-0001-a01-input", "input", 0),
+            ("browser-journey-validator-0001-a01", "output", 1),
+        ):
+            self.assertEqual(paused["status"], "browser_stage_step_review_required", paused)
+            self.assertEqual(
+                (paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]),
+                (call_id, stage),
+            )
+            self.assertEqual(validator.calls, calls)
+            paused = workflow(call_id=call_id, decision="approve").continue_browser_stage_step_review(
+                run_id=run_id
+            )
+
+        self.assertEqual(paused["status"], "browser_baseline_captured", paused)
+        self.assertTrue(validator.options[0]["images"])
+        exchange = (
+            self.store_run_dir(run_id)
+            / "browser_execution"
+            / "step_review"
+            / "journey_validation"
+            / "attempt_1"
+        )
+        self.assertTrue((exchange / "exchange_browser-journey-validator-0001-a01.json").is_file())
+
+    def test_browser_journey_step_review_replays_cached_scenario_before_the_next_one(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._ready_run(runner)
+        planner = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=planner)["status"], "browser_journey_captured")
+        validator = ScriptedClosureLlm(default=fake_browser_journey_review)
+        seed = self._browser_workflow(runner, journey_validator=validator)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        inputs, original = seed._browser_journey_review_tasks(
+            state=state,
+            run_id=run_id,
+            latest_artifacts=dict(state["latest_artifacts"]),
+        )
+        first = original[0]
+        second_scenario = {**first["scenario"], "scenario_id": "SC-2"}
+        second = {
+            **first,
+            "scenario": second_scenario,
+            "prompt": journey_execution_review_prompt(
+                scenario=second_scenario,
+                review_context=first["context"],
+                images=first["images"],
+            ),
+        }
+        tasks = [first, second]
+
+        def run(current: PhaseFourWorkflow, *, resume: bool) -> dict[str, object]:
+            with patch.object(current, "_browser_journey_review_tasks", return_value=(inputs, tasks)):
+                return (
+                    current.continue_browser_stage_step_review(run_id=run_id)
+                    if resume
+                    else current.continue_run(run_id=run_id)
+                )
+
+        paused = run(
+            self._browser_workflow(
+                runner,
+                journey_validator=validator,
+                review_input=True,
+                review_output=True,
+            ),
+            resume=False,
+        )
+        for call_id in (
+            "browser-journey-validator-0001-a01-input",
+            "browser-journey-validator-0001-a01",
+            "browser-journey-validator-0002-a01-input",
+            "browser-journey-validator-0002-a01",
+        ):
+            self.assertEqual(paused["pending_step_review"]["call_id"], call_id, paused)
+            paused = run(
+                self._browser_workflow(
+                    runner,
+                    journey_validator=validator,
+                    call_id=call_id,
+                    decision="approve",
+                ),
+                resume=True,
+            )
+
+        self.assertEqual(paused["status"], "browser_baseline_captured", paused)
+        self.assertEqual(validator.calls, 2)
+
+    # ---------------------------------------------------------------- L5.4.4 UI Polish contract + checkpoint 1
+
+    def _prepare_polish_authority(self, run_id: str) -> None:
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        packet_path = self.repo_root / str(state["latest_artifacts"]["developer_work_packet"])
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        unit = packet["execution_units"][0]
+        unit["component_id"] = "web"
+        unit["surfaces"] = sorted({*unit.get("surfaces", []), "ui"})
+        unit["design_node_ids"] = [*unit.get("design_node_ids", []), "VDN-POLISH"]
+        unit["write_paths"] = [*unit.get("write_paths", []), "apps/web/src/ClosurePanel.tsx"]
+        unit.setdefault("surface_contracts", []).append(
+            {
+                "design_node_id": "VDN-POLISH",
+                "surface": "ui",
+                "surface_contract": {
+                    "runtime_surface": {
+                        "entrypoint": "apps/web/src/ClosurePanel.tsx#ClosurePanel",
+                        "composition_path": ["apps/web/src/ClosurePanel.tsx#ClosurePanel"],
+                    },
+                    "experience_contract": {
+                        "visual_contract": {
+                            "style_target_policy": "new_stylesheet",
+                            "layout": [{"region": "main", "layer": "page", "content": "approved content"}],
+                        }
+                    },
+                },
+            }
+        )
+        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+        profile_path = self.store_run_dir(run_id) / "developer_execution" / "ui_visual_profiles_v1.json"
+        profile_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "developer_visual_profiles_v1",
+                    "profiles": {
+                        "web:apps/web": {
+                            "schema_version": "developer_visual_profile_v1",
+                            "app_scope_id": "web:apps/web",
+                            "tokens": {"primary": "#1D4ED8", "background": "#FFFFFF", "foreground": "#111827"},
+                            "typography": {"heading_stack": "system-ui", "body_stack": "system-ui"},
+                            "spacing": {"4": "1rem"},
+                            "constraints": ["Design wins."],
+                        }
+                    },
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
+
+    def _captured_polish_run(
+        self,
+        runner: BrowserVerificationRunnerStub,
+        **settings: str,
+    ) -> tuple[str, ScriptedClosureLlm]:
+        run_id = self._ready_run(runner, **settings)
+        journey = ScriptedClosureLlm(default=fake_browser_journey_plan)
+        self.assertEqual(self._browser_step(run_id, runner, planner=journey)["status"], "browser_journey_planned")
+        self.assertEqual(self._browser_step(run_id, runner, planner=journey)["status"], "browser_journey_captured")
+        self.assertEqual(self._browser_step(run_id, runner, planner=journey)["status"], "browser_baseline_captured")
+        self._prepare_polish_authority(run_id)
+        return run_id, journey
+
+    def _polish_step(
+        self,
+        run_id: str,
+        runner: BrowserVerificationRunnerStub,
+        *,
+        planner: ScriptedClosureLlm,
+        validator: ScriptedClosureLlm,
+    ) -> dict[str, object]:
+        planner.settings = self.settings
+        validator.settings = self.settings
+        workflow = self._browser_workflow(runner)
+        workflow.polish_planner = UiPolishPlanner(planner)
+        workflow.polish_validator = UiPolishValidator(validator)
+        return workflow.continue_run(run_id=run_id)
+
+    def test_ui_polish_fake_contract_waits_for_checkpoint_then_approves(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+        planner = ScriptedClosureLlm(default=fake_ui_polish_plan)
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+
+        waiting = self._polish_step(run_id, runner, planner=planner, validator=validator)
+
+        self.assertEqual(
+            waiting["status"],
+            "waiting_ui_polish_contract_review",
+            self._artifact(waiting, "ui_polish_contract_review"),
+        )
+        self.assertEqual((planner.calls, validator.calls), (1, 1))
+        self.assertTrue(planner.options[0]["images"])
+        self.assertTrue(validator.options[0]["images"])
+        self.assertTrue(planner.options[0]["accepts_images"])
+        contract = self._artifact(waiting, "ui_polish_contract")
+        self.assertEqual(contract["schema_version"], "ui_polish_contract_v1")
+        self.assertEqual(contract["polish_units"][0]["write_paths"], ["apps/web/src/ClosurePanel.tsx"])
+        checkpoint = (self.repo_root / waiting["latest_artifacts"]["ui_polish_contract_checkpoint"]).read_text(encoding="utf-8")
+        self.assertIn("/browser-evidence/browser_baseline_evidence_manifest/", checkpoint)
+        self.assertIn("baseline:V-0:desktop:s00", checkpoint)
+        with self.assertRaises(HarnessError) as not_continuable:
+            PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
+        self.assertEqual(not_continuable.exception.error_code, "run_not_continuable")
+
+        approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id,
+            checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"],
+        )
+        self.assertEqual(approved["status"], "ui_polish_ready", approved)
+        approved_state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(
+            approved_state["browser_stages"]["polish"]["approved_contract"],
+            waiting["latest_artifacts"]["ui_polish_contract"],
+        )
+
+    def test_ui_polish_default_fake_client_reaches_the_contract_checkpoint(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+
+        waiting = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(waiting["status"], "waiting_ui_polish_contract_review", waiting)
+        self.assertEqual(waiting["pending_checkpoint"]["type"], "ui_polish_contract_review")
+        self.assertIn("ui_polish_visual_profile", waiting["latest_artifacts"])
+
+    def test_ui_polish_gate_patch_uses_the_implementation_plan_limit(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+
+        def unknown_authority(prompt: str) -> str:
+            plan = json.loads(fake_ui_polish_plan(prompt))
+            plan["polish_units"][0]["authority_refs"] = ["not-a-token"]
+            return json.dumps(plan)
+
+        planner = ScriptedClosureLlm([unknown_authority], default=fake_ui_polish_plan)
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        waiting = self._polish_step(run_id, runner, planner=planner, validator=validator)
+
+        self.assertEqual(waiting["status"], "waiting_ui_polish_contract_review", waiting)
+        self.assertEqual((planner.calls, validator.calls), (2, 1))
+        repair = json.loads(planner.prompts[1])["previous_round"]
+        self.assertEqual([item["gate"] for item in repair["blocking_issues"]], ["U4"])
+        self.assertEqual(len(self._artifact(waiting, "ui_polish_contract_review")["rounds"]), 2)
+
+    def test_ui_polish_inconclusive_creates_no_checkpoint_and_retries_new_attempt(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+        blocked = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm([""]),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "ui_polish_inconclusive")
+        self.assertIsNone(blocked["pending_checkpoint"])
+        self.assertNotIn("ui_polish_contract", blocked["latest_artifacts"])
+
+        waiting = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        self.assertEqual(waiting["status"], "waiting_ui_polish_contract_review", waiting)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["polish"]["attempt"], 2)
+
+    def test_ui_polish_checkpoint_rejects_visual_profile_drift_u5(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+        waiting = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        profile = self.store_run_dir(run_id) / "developer_execution" / "ui_visual_profiles_v1.json"
+        profile.write_text(profile.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+
+        with self.assertRaises(HarnessError) as changed:
+            CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+        self.assertEqual(changed.exception.error_code, "ui_polish_profile_changed")
+        self.assertEqual(PhaseOneWorkflow(self.settings).store.read_state(run_id)["status"], waiting["status"])
+
+    def test_ui_polish_step_review_replays_planner_and_validator_with_images(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, _ = self._captured_polish_run(runner)
+        planner = ScriptedClosureLlm(default=fake_ui_polish_plan)
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        planner.settings = self.settings
+        validator.settings = self.settings
+
+        def workflow(**review: object) -> PhaseFourWorkflow:
+            current = self._browser_workflow(runner, **review)
+            current.polish_planner = UiPolishPlanner(planner)
+            current.polish_validator = UiPolishValidator(validator)
+            return current
+
+        paused = workflow(review_input=True, review_output=True).continue_run(run_id=run_id)
+        expected = (
+            ("browser-polish-planner-0001-a01-input", "input", 0, 0),
+            ("browser-polish-planner-0001-a01", "output", 1, 0),
+            ("browser-polish-validator-0001-a01-input", "input", 1, 0),
+            ("browser-polish-validator-0001-a01", "output", 1, 1),
+        )
+        for call_id, stage, planner_calls, validator_calls in expected:
+            self.assertEqual(paused["status"], "browser_stage_step_review_required", paused)
+            self.assertEqual((paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]), (call_id, stage))
+            self.assertEqual((planner.calls, validator.calls), (planner_calls, validator_calls))
+            paused = workflow(call_id=call_id, decision="approve").continue_browser_stage_step_review(run_id=run_id)
+
+        self.assertEqual(paused["status"], "waiting_ui_polish_contract_review", paused)
+        self.assertTrue(planner.options[0]["images"])
+        self.assertTrue(validator.options[0]["images"])
+        exchange = self.store_run_dir(run_id) / "browser_execution" / "step_review" / "polish" / "attempt_1"
+        self.assertTrue((exchange / "planner" / "exchange_browser-polish-planner-0001-a01.json").is_file())
+        self.assertTrue((exchange / "validator" / "exchange_browser-polish-validator-0001-a01.json").is_file())
+
+    def _approved_polish_run(self, runner: BrowserVerificationRunnerStub, **settings: str) -> str:
+        run_id, _ = self._captured_polish_run(runner, **settings)
+        waiting = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id,
+            checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"],
+        )
+        self.assertEqual(approved["status"], "ui_polish_ready")
+        return run_id
+
+    def test_ui_polish_executes_verifies_reviews_and_waits_for_result_approval(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._approved_polish_run(runner)
+
+        written = self._browser_step(run_id, runner)
+        self.assertEqual(written["status"], "ui_polish_written", written)
+        self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "ui_polish_v1").is_dir())
+        packet = self._artifact(written, "ui_polish_work_packet")
+        self.assertEqual(packet["mode"], "ui_polish")
+
+        verified = self._browser_step(run_id, runner)
+        self.assertEqual(verified["status"], "ui_polish_verified", verified)
+        verification = self._artifact(verified, "ui_polish_verification")
+        self.assertEqual(verification["baseline_regressions"], [])
+        self.assertTrue(verification["aria_diff"])
+        self.assertIn("browser_polish_evidence_manifest", verified["latest_artifacts"])
+
+        waiting_result = self._browser_step(run_id, runner)
+        self.assertEqual(waiting_result["status"], "waiting_ui_polish_review", waiting_result)
+        checkpoint = (self.repo_root / waiting_result["latest_artifacts"]["ui_polish_result_checkpoint"]).read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("browser_baseline_evidence_manifest", checkpoint)
+        self.assertIn("browser_polish_evidence_manifest", checkpoint)
+        self.assertIn("ARIA diff", checkpoint)
+
+        polished = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id,
+            checkpoint_id=waiting_result["pending_checkpoint"]["checkpoint_id"],
+        )
+        self.assertEqual(polished["status"], "ui_polished")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["polish"]["status"], "approved_result")
+
+    def _polished_run(self, runner: BrowserVerificationRunnerStub, **settings: str) -> str:
+        run_id = self._approved_polish_run(runner, **settings)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+        workflow = self._browser_workflow(runner)
+        workflow.polish_validator = UiPolishValidator(ScriptedClosureLlm(default=fake_ui_polish_review))
+        waiting = workflow.continue_run(run_id=run_id)
+        polished = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id,
+            checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"],
+        )
+        self.assertEqual(polished["status"], "ui_polished")
+        return run_id
+
+    def _browser_qa_step(
+        self,
+        run_id: str,
+        runner: BrowserVerificationRunnerStub,
+        validator: ScriptedClosureLlm,
+    ) -> dict[str, object]:
+        validator.settings = self.settings
+        workflow = self._browser_workflow(runner)
+        workflow.browser_qa_validator = BrowserQaValidator(validator)
+        return workflow.continue_run(run_id=run_id)
+
+    def _add_browser_qa_obligation(self, run_id: str) -> None:
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        path = self.repo_root / state["latest_artifacts"]["developer_work_packet"]
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        unit = next(item for item in packet["execution_units"] if item.get("scenario_id"))
+        unit["ui_obligations"] = [
+            {"id": "VDN-browser-qa:state.ready", "summary": "The runnable browser outcome is observable."}
+        ]
+        path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def test_browser_qa_passes_runnable_scenarios_and_writes_publication_compatibility(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        calls_before_qa = len(runner.calls)
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+
+        tested = self._browser_qa_step(run_id, runner, validator)
+
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertTrue(tested["quality_reports"]["qa_acceptance"]["ok"])
+        self.assertEqual(tested["quality_reports"]["qa_acceptance"]["mode"], "browser_qa_v1")
+        for key in ("browser_qa_reviews", "browser_qa_report", "qa_generated_tests", "qa_test_execution", "qa_test_report"):
+            self.assertTrue((self.repo_root / tested["latest_artifacts"][key]).is_file(), key)
+        generated = self._artifact(tested, "qa_generated_tests")
+        self.assertEqual(generated["mode"], "browser_qa_v1")
+        self.assertEqual(generated["test_files"][0]["path"], "tests/e2e/sdlc-browser-capture.spec.ts")
+        execution = self._artifact(tested, "qa_test_execution")
+        self.assertEqual((execution["mode"], execution["status"]), ("browser_qa_v1", "pass"))
+        self.assertEqual(
+            PhaseOneWorkflow(self.settings).store.read_state(run_id)["browser_stages"]["status"],
+            "browser_qa_passed",
+        )
+        self.assertGreaterEqual(validator.calls, 1)
+        publication = PhaseFourWorkflow(self.settings)._browser_publication_paths(
+            state=PhaseOneWorkflow(self.settings).store.read_state(run_id), run_id=run_id
+        )
+        self.assertIn("tests/e2e/sdlc-browser-capture.spec.ts", publication)
+        self.assertIn("apps/web/src/ClosurePanel.tsx", publication)
+        self.assertEqual(len(runner.calls), calls_before_qa)  # unchanged tree reuses the post-Polish capture
+
+    def test_browser_qa_recaptures_when_the_post_polish_worktree_changes(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        calls_before_qa = len(runner.calls)
+        worktree = self._closure_worktree(run_id)
+        changed = worktree / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
+
+        tested = self._browser_qa_step(
+            run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review)
+        )
+
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(len(runner.calls), calls_before_qa + 1)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["qa"]["evidence_source"], "qa_initial_capture")
+        verification = self._artifact(tested, "browser_qa_verification")
+        self.assertEqual(verification["source"], "worktree_changed_after_ui_polish_capture")
+
+    def test_browser_qa_reviews_three_runnable_scenarios_before_qa_tested(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        workflow = self._browser_workflow(runner)
+        workflow.browser_qa_validator = BrowserQaValidator(validator)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        inputs = workflow._browser_inputs(state=state, run_id=run_id)
+        manifest_ref = state["browser_stages"]["polish"]["after_manifest"]
+        verification_ref = state["browser_stages"]["polish"]["verification"]
+        workflow._set_qa(
+            state,
+            current_manifest=manifest_ref,
+            verification=verification_ref,
+            needs_regression=False,
+        )
+        workflow.store.write_state(state)
+        tasks = []
+        for scenario_id in ("SC-1", "SC-2", "SC-3"):
+            scenario = {"scenario_id": scenario_id, "obligations": []}
+            context = {"views": [], "evidence": [], "not_reachable": []}
+            tasks.append(
+                {
+                    "scenario": scenario,
+                    "context": context,
+                    "evidence_refs": set(),
+                    "ownership": {},
+                    "images": [],
+                    "prompt": browser_qa_review_prompt(
+                        scenario=scenario, review_context=context, images=[]
+                    ),
+                }
+            )
+        task_inputs = {
+            **inputs,
+            "plan": {"not_reachable": []},
+            "manifest": {},
+            "manifest_ref": manifest_ref,
+        }
+
+        with patch.object(workflow, "_browser_qa_tasks", return_value=(task_inputs, tasks)):
+            tested = workflow._continue_browser_qa_review(state=state, run_id=run_id)
+
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(tested["quality_reports"]["qa_acceptance"]["scenario_count"], 3)
+        self.assertEqual(validator.calls, 3)
+
+    def test_browser_qa_cache_rechecks_only_a_scenario_whose_prompt_changed(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        workflow = self._browser_workflow(runner)
+        workflow.browser_qa_validator = BrowserQaValidator(validator)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        inputs = workflow._browser_inputs(state=state, run_id=run_id)
+        manifest_ref = state["browser_stages"]["polish"]["after_manifest"]
+        workflow._set_qa(
+            state,
+            current_manifest=manifest_ref,
+            verification=state["browser_stages"]["polish"]["verification"],
+            needs_regression=False,
+        )
+
+        def task(scenario_id: str, *, revision: int = 1) -> dict[str, object]:
+            scenario = {"scenario_id": scenario_id, "obligations": []}
+            context = {"views": [], "evidence": [], "not_reachable": [], "revision": revision}
+            return {
+                "scenario": scenario,
+                "context": context,
+                "evidence_refs": set(),
+                "ownership": {},
+                "images": [],
+                "prompt": browser_qa_review_prompt(
+                    scenario=scenario, review_context=context, images=[]
+                ),
+            }
+
+        initial = [task("SC-1"), task("SC-2"), task("SC-3")]
+        changed = [task("SC-1", revision=2), task("SC-2"), task("SC-3")]
+        task_inputs = {
+            **inputs,
+            "plan": {"not_reachable": []},
+            "manifest": {},
+            "manifest_ref": manifest_ref,
+        }
+        with (
+            patch.object(workflow, "_browser_qa_tasks", side_effect=[(task_inputs, initial), (task_inputs, changed)]),
+            patch.object(workflow, "_close_browser_qa", return_value={"status": "held"}) as close,
+        ):
+            workflow._continue_browser_qa_review(state=state, run_id=run_id)
+            workflow._continue_browser_qa_review(state=state, run_id=run_id)
+
+        self.assertEqual(validator.calls, 4)
+        second_reviews = close.call_args_list[1].kwargs["reviews"]
+        self.assertEqual(
+            {review["scenario_id"]: review["cache_hit"] for review in second_reviews},
+            {"SC-1": False, "SC-2": True, "SC-3": True},
+        )
+
+    @staticmethod
+    def _browser_qa_blocker(prompt: str, *, category: str = "implementation") -> str:
+        payload = json.loads(prompt)
+        obligations = payload["scenario"]["obligations"]
+        first = obligations[0]
+        evidence = payload["review_context"]["evidence"][0]["evidence_ref"]
+        return json.dumps(
+            {
+                "summary": f"Fake {category} blocker.",
+                "reviewed_obligation_ids": [item["obligation_id"] for item in obligations],
+                "verdicts": [
+                    {
+                        "obligation_id": item["obligation_id"],
+                        "verdict": "violated" if item is first else "satisfied",
+                        "evidence_refs": [evidence],
+                    }
+                    for item in obligations
+                ],
+                "findings": [
+                    {
+                        "severity": "blocker",
+                        "category": category,
+                        "obligation_ids": [first["obligation_id"]],
+                        "unit_ids": [first["owner_unit_ids"][0]],
+                        "evidence_refs": [evidence],
+                        "issue": "The observed outcome is wrong.",
+                        "expected_change": "Restore the approved observable outcome.",
+                    }
+                ],
+                "observations": [],
+            }
+        )
+
+    def test_browser_qa_implementation_blocker_repairs_exact_unit_then_revalidates(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "passed", "aria_changed"])
+        run_id = self._polished_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        blocked = False
+
+        def implementation_once(prompt: str) -> str:
+            nonlocal blocked
+            if json.loads(prompt)["scenario"]["obligations"] and not blocked:
+                blocked = True
+                # Both categories in one review: the code repair goes first, as at the journey gate.
+                result = json.loads(self._browser_qa_blocker(prompt))
+                result["findings"] += json.loads(self._browser_qa_blocker(prompt, category="journey_defect"))[
+                    "findings"
+                ]
+                return json.dumps(result)
+            return fake_browser_qa_review(prompt)
+
+        validator = ScriptedClosureLlm(default=implementation_once)
+
+        repair = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(repair["status"], "browser_qa_repair_needed", repair)
+        feedback = self._artifact(repair, "browser_qa_repair_feedback")
+        findings = feedback["repair_objective"]["contract_findings"]
+        self.assertEqual([item["category"] for item in findings], ["implementation"])
+        selected = findings[0]["unit_ids"]
+        self.assertEqual(len(selected), 1)
+        evidence = findings[0]["evidence"]
+        self.assertEqual([item["evidence_ref"] for item in evidence], findings[0]["evidence_refs"])
+        self.assertTrue(evidence[0]["evidence_ref"].startswith("qa:"))
+        self.assertTrue(evidence[0]["steps"])
+        self.assertIn("aria_snapshot", evidence[0])
+        self.assertIn("`evidence`", feedback["required_action"])
+
+        written = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(written["status"], "browser_qa_written", written)
+        self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "browser_qa_repair_v1").is_dir())
+        verified = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(verified["status"], "browser_qa_verified", verified)
+        tested = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["qa"], 1)
+        self.assertTrue(state["browser_stages"]["qa"]["regression"])
+        self.assertEqual(state["browser_stages"]["qa"]["attempt"], 2)
+        self.assertGreaterEqual(validator.calls, 2)
+
+    def test_browser_qa_journey_defect_patches_without_consuming_code_repair(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "passed", "aria_changed"])
+        run_id = self._polished_run(runner)
+        self._add_browser_qa_obligation(run_id)
+        blocked = False
+
+        def journey_once(prompt: str) -> str:
+            nonlocal blocked
+            if json.loads(prompt)["scenario"]["obligations"] and not blocked:
+                blocked = True
+                return self._browser_qa_blocker(prompt, category="journey_defect")
+            return fake_browser_qa_review(prompt)
+
+        validator = ScriptedClosureLlm(default=journey_once)
+
+        patch_needed = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(patch_needed["status"], "browser_qa_journey_patch_needed", patch_needed)
+        captured = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(captured["status"], "browser_qa_verified", captured)
+        tested = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["journey_patch_iterations"], 1)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["qa"], 0)
+
+    def test_browser_qa_inconclusive_blocks_without_repair_or_checkpoint(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        validator = ScriptedClosureLlm(["", ""], default=fake_browser_qa_review)
+
+        blocked = self._browser_qa_step(run_id, runner, validator)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_inconclusive")
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        self.assertIsNone(blocked["pending_checkpoint"])
+        self.assertNotIn("browser_qa_repair_feedback", blocked["latest_artifacts"])
+
+    def test_browser_qa_repair_limit_blocks_before_developer(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="0")
+        self._add_browser_qa_obligation(run_id)
+        validator = ScriptedClosureLlm(default=self._browser_qa_blocker)
+
+        blocked = self._browser_qa_step(run_id, runner, validator)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
+        self.assertNotIn("browser_qa_repair_feedback", blocked["latest_artifacts"])
+
+    def test_browser_qa_uses_the_repair_budget_already_spent_before_polish(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="1")
+        self._add_browser_qa_obligation(run_id)
+        store = PhaseOneWorkflow(self.settings).store
+        state = store.read_state(run_id)
+        pin = state["browser_stages"]
+        pin["repair_iterations"] = {**pin["repair_iterations"], "qa": 1}
+        store.write_state(state)
+
+        blocked = self._browser_qa_step(
+            run_id,
+            runner,
+            ScriptedClosureLlm(default=self._browser_qa_blocker),
+        )
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
+        self.assertNotIn("browser_qa_repair_feedback", blocked["latest_artifacts"])
+
+    def test_browser_qa_step_review_replays_the_scenario_with_images(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        validator.settings = self.settings
+
+        def workflow(**review: object) -> PhaseFourWorkflow:
+            current = self._browser_workflow(runner, **review)
+            current.browser_qa_validator = BrowserQaValidator(validator)
+            return current
+
+        paused = workflow(review_input=True, review_output=True).continue_run(run_id=run_id)
+        for call_id, stage, calls in (
+            ("browser-qa-validator-0001-a01-input", "input", 0),
+            ("browser-qa-validator-0001-a01", "output", 1),
+        ):
+            self.assertEqual(paused["status"], "browser_stage_step_review_required", paused)
+            self.assertEqual(
+                (paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]),
+                (call_id, stage),
+            )
+            self.assertEqual(validator.calls, calls)
+            paused = workflow(call_id=call_id, decision="approve").continue_browser_stage_step_review(
+                run_id=run_id
+            )
+
+        self.assertEqual(paused["status"], "qa_tested", paused)
+        self.assertTrue(validator.options[0]["images"])
+
+    def test_browser_qa_step_review_replays_cached_scenario_before_the_next_one(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        validator.settings = self.settings
+        seed = self._browser_workflow(runner)
+        seed.browser_qa_validator = BrowserQaValidator(validator)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        inputs, original = seed._browser_qa_tasks(
+            state=state,
+            run_id=run_id,
+            latest_artifacts=dict(state["latest_artifacts"]),
+        )
+        first = original[0]
+        second_scenario = {**first["scenario"], "scenario_id": "SC-2"}
+        second = {
+            **first,
+            "scenario": second_scenario,
+            "prompt": browser_qa_review_prompt(
+                scenario=second_scenario,
+                review_context=first["context"],
+                images=first["images"],
+            ),
+        }
+        tasks = [first, second]
+
+        def workflow(**review: object) -> PhaseFourWorkflow:
+            current = self._browser_workflow(runner, **review)
+            current.browser_qa_validator = BrowserQaValidator(validator)
+            return current
+
+        def run(current: PhaseFourWorkflow, *, resume: bool) -> dict[str, object]:
+            with patch.object(current, "_browser_qa_tasks", return_value=(inputs, tasks)):
+                return (
+                    current.continue_browser_stage_step_review(run_id=run_id)
+                    if resume
+                    else current.continue_run(run_id=run_id)
+                )
+
+        paused = run(workflow(review_input=True, review_output=True), resume=False)
+        for call_id in (
+            "browser-qa-validator-0001-a01-input",
+            "browser-qa-validator-0001-a01",
+            "browser-qa-validator-0002-a01-input",
+            "browser-qa-validator-0002-a01",
+        ):
+            self.assertEqual(paused["pending_step_review"]["call_id"], call_id, paused)
+            paused = run(workflow(call_id=call_id, decision="approve"), resume=True)
+
+        self.assertEqual(paused["status"], "qa_tested", paused)
+        self.assertEqual(validator.calls, 2)
+
+    def test_ui_polish_scope_drift_blocks_before_the_suite(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        calls_before = len(runner.calls)
+        outside = self._closure_worktree(run_id) / "apps/web/src/ClosureEntry.tsx"
+        outside.write_text(outside.read_text(encoding="utf-8") + "// external drift\n", encoding="utf-8")
+
+        blocked = self._browser_step(run_id, runner)
+
+        self.assertEqual(blocked["last_error"]["error_code"], "ui_polish_scope_conflict", blocked)
+        self.assertEqual(len(runner.calls), calls_before)
+        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
+
+    def test_ui_polish_baseline_regression_routes_the_polish_unit_to_repair(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "journey_fail"])
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+
+        repair = self._browser_step(run_id, runner)
+
+        self.assertEqual(repair["status"], "ui_polish_repair_needed", repair)
+        feedback = self._artifact(repair, "ui_polish_repair_feedback")
+        unit_ids = [item["unit_id"] for item in self._artifact(repair, "ui_polish_contract")["polish_units"]]
+        self.assertEqual(feedback["repair_objective"]["contract_findings"][0]["unit_ids"], unit_ids)
+        repaired = self._browser_step(run_id, runner)
+        self.assertEqual(repaired["status"], "ui_polish_written", repaired)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["polish"], 1)
+        self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "ui_polish_repair_v1").is_dir())
+
+    def test_ui_polish_repair_limit_blocks_without_starting_a_repair_session(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "journey_fail"])
+        run_id = self._approved_polish_run(runner, SDLC_BROWSER_POLISH_REPAIR_LIMIT="0")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+
+        blocked = self._browser_step(run_id, runner)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "ui_polish_repair_limit_exceeded")
+        self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "ui_polish_repair_v1").exists())
+
+    def test_ui_polish_nonempty_aria_diff_reaches_result_validator(self) -> None:
+        runner = BrowserVerificationRunnerStub(["passed", "passed", "aria_changed"])
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        verified = self._browser_step(run_id, runner)
+        self.assertEqual(verified["status"], "ui_polish_verified", verified)
+        verification = self._artifact(verified, "ui_polish_verification")
+        self.assertTrue(any(item["status"] == "changed" for item in verification["aria_diff"]))
+
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        reviewed = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=validator,
+        )
+
+        self.assertEqual(reviewed["status"], "waiting_ui_polish_review", reviewed)
+        result_prompt = next(json.loads(prompt) for prompt in validator.prompts if "UI Polish Result Review" in prompt)
+        self.assertTrue(any(item["status"] == "changed" for item in result_prompt["result_context"]["aria_diff"]))
+
+    def test_ui_polish_result_blocker_repairs_exact_unit(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+        blocker = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=polish_result_blocker),
+        )
+        self.assertEqual(blocker["status"], "ui_polish_repair_needed", blocker)
+        feedback = self._artifact(blocker, "ui_polish_repair_feedback")
+        contract = self._artifact(blocker, "ui_polish_contract")
+        finding = feedback["repair_objective"]["contract_findings"][0]
+        self.assertEqual(finding["unit_ids"], [contract["polish_units"][0]["unit_id"]])
+        # The Developer reads the after-Polish capture the Validator cited, not only its paraphrase.
+        self.assertEqual([item["evidence_ref"] for item in finding["evidence"]], finding["evidence_refs"])
+        self.assertTrue(finding["evidence"][0]["evidence_ref"].startswith("after:"))
+        self.assertIn("aria_snapshot", finding["evidence"][0])
+
+    def test_ui_polish_result_inconclusive_has_no_checkpoint(self) -> None:
+        other_runner = BrowserVerificationRunnerStub()
+        other_run = self._approved_polish_run(other_runner)
+        self.assertEqual(self._browser_step(other_run, other_runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(other_run, other_runner)["status"], "ui_polish_verified")
+        blocked = self._polish_step(
+            other_run,
+            other_runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm([""]),
+        )
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "ui_polish_inconclusive")
+        self.assertIsNone(blocked["pending_checkpoint"])
+        self.assertNotIn("ui_polish_result_review", blocked["latest_artifacts"])
+        retried = self._polish_step(
+            other_run,
+            other_runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        self.assertEqual(retried["status"], "waiting_ui_polish_review", retried)
+        state = PhaseOneWorkflow(self.settings).store.read_state(other_run)
+        self.assertEqual(state["browser_stages"]["polish"]["result_review_attempt"], 2)
+
+    def test_ui_polish_result_step_review_replays_with_before_after_images(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+        validator = ScriptedClosureLlm(default=fake_ui_polish_review)
+        validator.settings = self.settings
+
+        def workflow(**review: object) -> PhaseFourWorkflow:
+            current = self._browser_workflow(runner, **review)
+            current.polish_validator = UiPolishValidator(validator)
+            return current
+
+        paused = workflow(review_input=True, review_output=True).continue_run(run_id=run_id)
+        for call_id, stage, calls in (
+            ("browser-polish-result-validator-0001-a01-input", "input", 0),
+            ("browser-polish-result-validator-0001-a01", "output", 1),
+        ):
+            self.assertEqual(paused["status"], "browser_stage_step_review_required", paused)
+            self.assertEqual((paused["pending_step_review"]["call_id"], paused["pending_step_review"]["review_stage"]), (call_id, stage))
+            self.assertEqual(validator.calls, calls)
+            paused = workflow(call_id=call_id, decision="approve").continue_browser_stage_step_review(run_id=run_id)
+
+        self.assertEqual(paused["status"], "waiting_ui_polish_review", paused)
+        labels = [item["label"] for item in validator.options[0]["images"]]
+        self.assertTrue(any(label.startswith("before:") for label in labels))
+        self.assertTrue(any(label.startswith("after:") for label in labels))
+        # Polish left ARIA unchanged, so the after evidence points at the before record instead of repeating it.
+        result_context = json.loads(validator.prompts[0])["result_context"]
+        after = result_context["after_evidence"]
+        self.assertTrue(after)
+        self.assertTrue(all("aria_snapshot" in item.get("same_as", {}) and "aria_snapshot" not in item for item in after))
+        self.assertEqual(sum("aria_snapshot" in item for item in result_context["before_evidence"]), 1)
+
+    def test_ui_polish_result_review_after_a_repair_round_opens_a_new_step_review_attempt(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._approved_polish_run(runner)
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+        validator = ScriptedClosureLlm([polish_result_blocker, fake_ui_polish_review])
+        validator.settings = self.settings
+
+        def reviewed(call_id: str = "", decision: str = "", **review: object) -> dict[str, object]:
+            current = self._browser_workflow(runner, call_id=call_id, decision=decision, **review)
+            current.polish_validator = UiPolishValidator(validator)
+            if not call_id:
+                return current.continue_run(run_id=run_id)
+            return current.continue_browser_stage_step_review(run_id=run_id)
+
+        def approve_both_review_steps() -> dict[str, object]:
+            paused = reviewed(review_input=True, review_output=True)
+            for call_id in ("browser-polish-result-validator-0001-a01-input", "browser-polish-result-validator-0001-a01"):
+                self.assertEqual(paused["pending_step_review"]["call_id"], call_id, paused)
+                paused = reviewed(call_id=call_id, decision="approve")
+            return paused
+
+        self.assertEqual(approve_both_review_steps()["status"], "ui_polish_repair_needed")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_written")
+        self.assertEqual(self._browser_step(run_id, runner)["status"], "ui_polish_verified")
+
+        # Before the fix the second review replayed attempt 1's approved exchange and blocked on step-review drift.
+        finished = approve_both_review_steps()
+
+        self.assertEqual(finished["status"], "waiting_ui_polish_review", finished)
+        self.assertEqual(validator.calls, 2)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["browser_stages"]["polish"]["result_review_attempt"], 2)
+        attempts = self.store_run_dir(run_id) / "browser_execution" / "step_review" / "polish_result"
+        self.assertEqual(sorted(path.name for path in attempts.iterdir()), ["attempt_1", "attempt_2"])
+
+    def test_browser_readiness_without_demo_fixture_in_the_browser_bundle_is_not_required(self) -> None:
+        run_id = self._closed_run(static_import=False)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        contract_path = self.repo_root / state["runtime_closure"]["approved_contract"]
+        contract = json.loads(contract_path.read_text(encoding="utf-8"))
+        for item in contract["runtime_inputs"]:
+            if item["resolution"]["kind"] == "approved_demo_fixture":
+                item["resolution"]["kind"] = "new_boundary"
+        contract_path.write_text(json.dumps(contract), encoding="utf-8")
+        runner = BrowserVerificationRunnerStub()
+
+        ready = self._browser_step(run_id, runner)
+        self.assertEqual(ready["status"], "browser_ready", ready)
+        self.assertEqual(ready["quality_reports"]["browser_readiness"]["status"], "not_required")
+        self.assertEqual(runner.calls, [])
 
     def _retired_java_code_trace_normalizes_boolean_and_notification_sequence_mappings(self) -> None:
         source_dir = self.target_repo / "src" / "main" / "java" / "com" / "sdlc" / "etour" / "heritage"

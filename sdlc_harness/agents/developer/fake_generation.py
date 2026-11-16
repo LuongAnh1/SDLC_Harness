@@ -20,9 +20,10 @@ def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, objec
             "Fake Developer generation requires the immutable project profile context.",
             run_id=str(work_packet.get("run_id") or "") or None,
         )
-    # Runtime-closure units name their providers as planned code targets; declare them so fake runs pass G14.
+    # Runtime-closure (and browser-readiness) units name their providers as planned code targets;
+    # declare them so fake runs keep every approved provider symbol.
     closure_symbols: dict[str, list[str]] = defaultdict(list)
-    if work_packet.get("mode") == "runtime_closure":
+    if work_packet.get("mode") in {"runtime_closure", "browser_readiness"}:
         for unit in _dict_items(work_packet.get("execution_units")):
             for target in _dict_items(unit.get("planned_code_targets")):
                 path, symbol = str(target.get("path") or ""), str(target.get("symbol") or "")
