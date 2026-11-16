@@ -87,6 +87,55 @@ function collectSymbols(ts, sourceFile) {
   return symbols;
 }
 
+// Opt-in (request.include_module_facts): value string literals and module references, so the
+// Harness can find demo values in a build and static imports of a demo module (L5.4 readiness).
+function collectModuleFacts(ts, sourceFile) {
+  const literals = [];
+  const seenLiterals = new Set();
+  const references = [];
+  const specifiers = new Set();
+
+  function reference(node, kind) {
+    if (node && (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node))) {
+      specifiers.add(node);
+      references.push({ specifier: node.text, kind });
+    }
+  }
+
+  function visit(node) {
+    if (ts.isImportDeclaration(node)) {
+      reference(node.moduleSpecifier, node.importClause && node.importClause.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      reference(node.moduleSpecifier, node.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+      reference(node.moduleReference.expression, node.isTypeOnly ? "type_only" : "static");
+    } else if (ts.isCallExpression(node) && node.arguments.length > 0) {
+      if (node.expression.kind === ts.SyntaxKind.ImportKeyword) {
+        reference(node.arguments[0], "dynamic");
+      } else if (ts.isIdentifier(node.expression) && node.expression.text === "require") {
+        reference(node.arguments[0], "static");
+      }
+    } else if (ts.isModuleDeclaration(node) && ts.isStringLiteral(node.name)) {
+      specifiers.add(node.name);
+    }
+    const parent = node.parent;
+    if (
+      (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) &&
+      !specifiers.has(node) &&
+      // Type positions are erased by the build; property names and directives are not values.
+      !(parent && (ts.isLiteralTypeNode(parent) || parent.name === node || ts.isExpressionStatement(parent))) &&
+      !seenLiterals.has(node.text)
+    ) {
+      seenLiterals.add(node.text);
+      literals.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  }
+
+  visit(sourceFile);
+  return { string_literals: literals, module_references: references };
+}
+
 let request;
 try {
   request = JSON.parse(fs.readFileSync(0, "utf8"));
@@ -131,6 +180,7 @@ for (const rawPath of request.files || []) {
       length: diagnostic.length ?? null,
     })),
     symbols: collectSymbols(ts, sourceFile),
+    ...(request.include_module_facts === true ? collectModuleFacts(ts, sourceFile) : {}),
   });
 }
 

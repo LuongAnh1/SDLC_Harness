@@ -17,6 +17,9 @@ from ...profiles import CodeTracePolicy
 TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v2"
 TYPESCRIPT_AST_REQUEST_VERSION = "typescript_ast_request_v1"
 DEFAULT_TYPESCRIPT_AST_TIMEOUT_SECONDS = 30
+# The helper only accepts this extractor id; module facts reuse it with an empty profile.
+MODULE_FACTS_EXTRACTOR_ID = "typescript_compiler_ast_v1"
+MODULE_REFERENCE_KINDS = {"static", "type_only", "dynamic"}
 MAX_EXTRACTOR_ERROR_CHARS = 4000
 _ALLOWED_SYMBOL_KINDS = {"interface", "class", "function", "method"}
 _ENV_ALLOWLIST = {
@@ -159,6 +162,91 @@ class TypeScriptAstExtractor:
                 files=(),
             )
 
+        request = {
+            "version": TYPESCRIPT_AST_REQUEST_VERSION,
+            "extractor_id": policy.symbol_extractor_id,
+            "profile": policy.metadata(),
+            "files": normalized,
+        }
+        return _validate_evidence(
+            self._run_helper(target_root=target_root, request=request, run_id=run_id),
+            expected_paths=normalized,
+            policy=policy,
+            run_id=run_id,
+        )
+
+    def extract_module_facts(
+        self,
+        *,
+        target_path: Path,
+        source_paths: list[str],
+        run_id: str | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """Value string literals and module references per file (browser readiness, L5.4).
+
+        Callers pass repository-relative paths they already scoped; the helper still refuses paths
+        that escape the target.
+        """
+
+        target_root = target_path.resolve()
+        paths = list(dict.fromkeys(path for path in source_paths if (target_root / path).is_file()))
+        if not paths:
+            return {}
+        payload = self._run_helper(
+            target_root=target_root,
+            request={
+                "version": TYPESCRIPT_AST_REQUEST_VERSION,
+                "extractor_id": MODULE_FACTS_EXTRACTOR_ID,
+                "profile": {},
+                "files": paths,
+                "include_module_facts": True,
+            },
+            run_id=run_id,
+        )
+        raw_files = payload.get("files") if isinstance(payload, dict) else None
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != TYPESCRIPT_AST_EVIDENCE_VERSION
+            or not isinstance(raw_files, list)
+            or [item.get("path") if isinstance(item, dict) else None for item in raw_files] != paths
+        ):
+            raise _invalid_evidence("Module facts do not match the request.", run_id=run_id)
+        facts: dict[str, dict[str, object]] = {}
+        for item in raw_files:
+            path = str(item["path"])
+            if item.get("diagnostics"):
+                raise HarnessError(
+                    "typescript_ast_parse_failed",
+                    f"TypeScript AST parser reported syntax diagnostics for {path}.",
+                    run_id=run_id,
+                )
+            literals = item.get("string_literals")
+            references = item.get("module_references")
+            if (
+                not isinstance(literals, list)
+                or not all(isinstance(value, str) for value in literals)
+                or not isinstance(references, list)
+                or not all(
+                    isinstance(ref, dict)
+                    and isinstance(ref.get("specifier"), str)
+                    and ref.get("kind") in MODULE_REFERENCE_KINDS
+                    for ref in references
+                )
+            ):
+                raise _invalid_evidence(f"Module facts schema is invalid for {path}.", run_id=run_id)
+            facts[path] = {
+                "string_literals": list(literals),
+                "module_references": [{"specifier": ref["specifier"], "kind": ref["kind"]} for ref in references],
+            }
+        return facts
+
+    def _run_helper(
+        self,
+        *,
+        target_root: Path,
+        request: dict[str, object],
+        run_id: str | None,
+    ) -> object:
         env = {key: value for key, value in os.environ.items() if key.casefold() in _ENV_ALLOWLIST}
         node = self._which("node", path=_environment_value(env, "PATH") or "")
         if not node:
@@ -168,12 +256,6 @@ class TypeScriptAstExtractor:
                 run_id=run_id,
             )
         helper_path = Path(__file__).with_name("typescript_ast_extractor.cjs")
-        request = {
-            "version": TYPESCRIPT_AST_REQUEST_VERSION,
-            "extractor_id": policy.symbol_extractor_id,
-            "profile": policy.metadata(),
-            "files": normalized,
-        }
         try:
             completed = self._run_process(
                 [node, str(helper_path)],
@@ -205,19 +287,13 @@ class TypeScriptAstExtractor:
                 run_id=run_id,
             )
         try:
-            payload = json.loads(completed.stdout or "")
+            return json.loads(completed.stdout or "")
         except (json.JSONDecodeError, TypeError) as exc:
             raise HarnessError(
                 "typescript_ast_extraction_failed",
                 "TypeScript AST extractor returned invalid JSON.",
                 run_id=run_id,
             ) from exc
-        return _validate_evidence(
-            payload,
-            expected_paths=normalized,
-            policy=policy,
-            run_id=run_id,
-        )
 
 
 def _validate_evidence(
