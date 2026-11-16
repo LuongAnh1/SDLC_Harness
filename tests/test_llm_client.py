@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 from io import BytesIO
 import json
@@ -186,6 +188,91 @@ class LlmClientPayloadTests(unittest.TestCase):
         self.assertNotIn("temperature", captured)
         self.assertEqual(captured_timeout, 300)
         self.assertEqual(completion.reasoning_content, "provider reasoning")
+
+    def test_multimodal_payload_uses_user_content_only_and_checks_hash(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            desktop = root / "desktop.png"
+            mobile = root / "mobile.png"
+            desktop.write_bytes(b"\x89PNG\r\n\x1a\ndesktop")
+            mobile.write_bytes(b"\x89PNG\r\n\x1a\nmobile")
+            images = [
+                {"label": "desktop", "path": str(desktop), "sha256": hashlib.sha256(desktop.read_bytes()).hexdigest()},
+                {"label": "mobile", "path": str(mobile), "sha256": hashlib.sha256(mobile.read_bytes()).hexdigest()},
+            ]
+            captured: dict[str, object] = {}
+
+            def fake_urlopen(request, *, timeout):
+                captured.update(json.loads(request.data.decode("utf-8")))
+                return _FakeResponse()
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                LlmClient(self._settings(root, mode="deepseek")).complete_with_metadata(
+                    system="validator",
+                    prompt="compare the captures",
+                    images=images,
+                    accepts_images=True,
+                    json_mode=True,
+                )
+
+        messages = captured["messages"]
+        self.assertEqual(messages[0], {"role": "system", "content": "validator"})
+        self.assertEqual(messages[1]["content"][0], {"type": "text", "text": "compare the captures"})
+        image_parts = messages[1]["content"][1:]
+        self.assertEqual(len(image_parts), 2)
+        self.assertEqual(
+            base64.b64decode(image_parts[0]["image_url"]["url"].removeprefix("data:image/png;base64,")),
+            b"\x89PNG\r\n\x1a\ndesktop",
+        )
+
+    def test_image_rejection_happens_before_provider_call(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = root / "capture.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nimage")
+            reference = {"label": "capture", "path": str(image), "sha256": "0" * 64}
+            client = LlmClient(self._settings(root, mode="deepseek"))
+            with patch("urllib.request.urlopen") as urlopen:
+                with self.assertRaises(HarnessError) as disabled:
+                    client.complete_with_metadata(system="validator", prompt="review", images=[reference])
+                self.assertEqual(disabled.exception.error_code, "llm_images_not_allowed")
+                with self.assertRaises(HarnessError) as mismatch:
+                    client.complete_with_metadata(
+                        system="validator", prompt="review", images=[reference], accepts_images=True
+                    )
+                self.assertEqual(mismatch.exception.error_code, "llm_image_hash_mismatch")
+            urlopen.assert_not_called()
+
+    def test_empty_images_keep_the_provider_request_byte_identical(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            requests: list[bytes] = []
+
+            def fake_urlopen(request, *, timeout):
+                requests.append(request.data)
+                return _FakeResponse()
+
+            with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+                client = LlmClient(self._settings(root, mode="deepseek"))
+                client.complete_with_metadata(system="system", prompt="prompt", json_mode=True)
+                client.complete_with_metadata(system="system", prompt="prompt", json_mode=True, images=[])
+
+        self.assertEqual(requests[0], requests[1])
+
+    def test_fake_mode_accepts_valid_images_without_putting_base64_in_output(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image = root / "capture.png"
+            image.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+            completion = LlmClient(self._settings(root, mode="fake")).complete_with_metadata(
+                system="system",
+                prompt="ordinary fake prompt",
+                images=[{"label": "capture", "path": str(image), "sha256": hashlib.sha256(image.read_bytes()).hexdigest()}],
+                accepts_images=True,
+            )
+
+        self.assertEqual(completion.finish_reason, "fake")
+        self.assertNotIn("base64", completion.content)
 
 
 class JsonUtilsTests(unittest.TestCase):

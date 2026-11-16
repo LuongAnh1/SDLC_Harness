@@ -54,6 +54,7 @@ class ReviewableLlmClient:
         error_prefix: str = "implementation_plan",
         label: str = "Implementation Plan",
         start_ordinal: int = 0,
+        carry_approved_output_notes: bool = True,
     ):
         self.base = base
         self.settings = getattr(base, "settings", None)
@@ -65,6 +66,7 @@ class ReviewableLlmClient:
         self.call_prefix = call_prefix
         self.error_prefix = error_prefix
         self.label = label
+        self.carry_approved_output_notes = carry_approved_output_notes
         self.cursor = max(0, start_ordinal)
         self.last_replay_kind = ""
         self.root = store.run_dir(run_id) / execution_dir
@@ -80,6 +82,7 @@ class ReviewableLlmClient:
         prompt: str,
         **request_options: object,
     ) -> LlmCompletion:
+        request_options = _normalized_request_options(request_options)
         result = self._complete(
             system=system,
             prompt=prompt,
@@ -131,11 +134,40 @@ class ReviewableLlmClient:
         self.last_replay_kind = ""
         self.cursor += 1
         ordinal = self.cursor
-        prompt_hash = _prompt_hash(system=system, prompt=prompt)
         session = self._read_session()
         calls = [item for item in session.get("calls", []) if isinstance(item, dict)]
         attempts = [item for item in calls if int(item.get("ordinal") or 0) == ordinal]
         latest = attempts[-1] if attempts else None
+        target_call = f"{self.call_prefix}-{ordinal:04d}"
+        guidance_rows = [
+            item
+            for item in calls
+            if self.carry_approved_output_notes
+            and item.get("status") == "approved"
+            and item.get("review_note_delivery") == "next_provider_call"
+            and (
+                item.get("review_note_delivered_to") == target_call
+                or (latest is None and not item.get("review_note_delivered_to"))
+            )
+            and str(item.get("review_note") or "").strip()
+        ]
+        if guidance_rows:
+            prompt = (
+                "Operator guidance attached to approved prior responses. Preserve the approved actions and "
+                "apply this guidance to the current decision:\n- "
+                + "\n- ".join(str(item["review_note"]).strip() for item in guidance_rows)
+                + f"\n\n{prompt}"
+            )
+            if latest is None:
+                for item in guidance_rows:
+                    item["review_note_delivered_to"] = target_call
+                    _write_json(self.root / f"exchange_{item['call_id']}.json", item)
+                self._write_session({**session, "calls": calls})
+        prompt_hash = _prompt_hash(
+            system=system,
+            prompt=prompt,
+            image_sha256=_image_sha256(request_options),
+        )
 
         if latest and str(latest.get("status") or "") in {"approved", "completed"}:
             if _resume_prompt_hash(latest, calls) != prompt_hash:
@@ -237,12 +269,24 @@ class ReviewableLlmClient:
                     ),
                     run_id=self.run_id,
                 )
+            note = str(self.review.get("note") or "").strip()
             pending["status"] = "input_approved"
             pending["input_review"] = {
                 "decision": "approve",
-                "note": str(self.review.get("note") or "").strip(),
+                "note": note,
+                "note_delivery": "provider_prompt" if note else "none",
                 "reviewed_at": utc_now_iso(),
             }
+            if note:
+                pending["prompt"] = (
+                    "Operator approved this input with guidance. Apply the guidance without expanding the approved "
+                    f"scope: {note}\n\n{prompt}"
+                )
+                pending["prompt_hash"] = _prompt_hash(
+                    system=system,
+                    prompt=str(pending["prompt"]),
+                    image_sha256=_image_sha256(request_options),
+                )
             self._write_session({**session, "calls": calls})
             _write_json(self.root / f"exchange_{pending['call_id']}.json", pending)
             return self._call_provider(
@@ -285,7 +329,11 @@ class ReviewableLlmClient:
             attempt=int(pending.get("attempt") or 1) + 1,
             system=system,
             prompt=amended,
-            prompt_hash=_prompt_hash(system=system, prompt=amended),
+            prompt_hash=_prompt_hash(
+                system=system,
+                prompt=amended,
+                image_sha256=_image_sha256(request_options),
+            ),
             resume_prompt_hash=prompt_hash,
             with_metadata=with_metadata,
             request_options=request_options,
@@ -327,6 +375,12 @@ class ReviewableLlmClient:
                     run_id=self.run_id,
                 )
             pending["status"] = "approved"
+            note = str(self.review.get("note") or "").strip()
+            if note:
+                pending["review_note"] = note
+                pending["review_note_delivery"] = (
+                    "next_provider_call" if self.carry_approved_output_notes else "audit_only"
+                )
             pending["reviewed_at"] = utc_now_iso()
             self._write_session({**session, "calls": calls})
             _write_json(self.root / f"exchange_{call_id}.json", pending)
@@ -358,7 +412,11 @@ class ReviewableLlmClient:
             attempt=int(pending.get("attempt") or 1) + 1,
             system=system,
             prompt=amended,
-            prompt_hash=_prompt_hash(system=system, prompt=amended),
+            prompt_hash=_prompt_hash(
+                system=system,
+                prompt=amended,
+                image_sha256=_image_sha256(request_options),
+            ),
             resume_prompt_hash=prompt_hash,
             with_metadata=with_metadata,
             request_options=request_options,
@@ -393,6 +451,7 @@ class ReviewableLlmClient:
             "raw_completion": "",
             "parsed_output": None,
             "request_options": options,
+            "images": list(options.get("images") or []),
             "finish_reason": "",
             "usage": {},
         }
@@ -431,7 +490,8 @@ class ReviewableLlmClient:
         system = str(exchange.get("system") or "")
         prompt = str(exchange.get("prompt") or "")
         self.last_replay_kind = "provider"
-        if with_metadata:
+        # A plain-text base client has no metadata; it then answers like `complete` (no finish_reason).
+        if with_metadata and callable(getattr(self.base, "complete_with_metadata", None)):
             completion = self.base.complete_with_metadata(system=system, prompt=prompt, **options)
             raw = str(completion.content or "")
             reasoning_content = str(completion.reasoning_content or "")
@@ -507,8 +567,44 @@ class ReviewableLlmClient:
         _write_json(self.session_path, session)
 
 
-def _prompt_hash(*, system: str, prompt: str) -> str:
-    return "sha256:" + hashlib.sha256(f"{system}\0{prompt}".encode("utf-8")).hexdigest()
+def _prompt_hash(*, system: str, prompt: str, image_sha256: tuple[str, ...] = ()) -> str:
+    payload = f"{system}\0{prompt}"
+    if image_sha256:
+        payload += "\0images\0" + "\0".join(image_sha256)
+    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _normalized_request_options(options: dict[str, object]) -> dict[str, object]:
+    normalized = dict(options)
+    raw_images = normalized.get("images")
+    if raw_images in (None, (), []):
+        normalized.pop("images", None)
+        return normalized
+    if not isinstance(raw_images, (list, tuple)):
+        raise HarnessError("llm_image_invalid", "LLM images must be a list of image references.")
+    images: list[dict[str, object]] = []
+    for index, raw in enumerate(raw_images, start=1):
+        if not isinstance(raw, dict):
+            raise HarnessError("llm_image_invalid", f"Image {index} must be an object.")
+        label = str(raw.get("label") or "").strip()
+        path = str(raw.get("path") or "").strip()
+        sha256 = str(raw.get("sha256") or "").strip().lower()
+        if not label or not path or len(sha256) != 64 or any(char not in "0123456789abcdef" for char in sha256):
+            raise HarnessError("llm_image_invalid", f"Image {index} needs label, path and a SHA-256 digest.")
+        try:
+            size = _filesystem_path(Path(path)).stat().st_size
+        except OSError as exc:
+            raise HarnessError("llm_image_invalid", f"Image {label!r} cannot be inspected: {exc}") from exc
+        images.append({"label": label, "path": path, "sha256": sha256, "bytes": size})
+    normalized["images"] = images
+    return normalized
+
+
+def _image_sha256(options: dict[str, object]) -> tuple[str, ...]:
+    images = options.get("images")
+    if not isinstance(images, (list, tuple)):
+        return ()
+    return tuple(str(item.get("sha256") or "") for item in images if isinstance(item, dict))
 
 
 def _resume_prompt_hash(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
@@ -142,13 +143,16 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
                     "review_input": True,
                     "call_id": input_pause.exception.progress["call_id"],
                     "decision": "approve",
+                    "note": "Keep the approved acceptance binding explicit.",
                 },
             )
             with self.assertRaises(LlmStepReviewRequired) as output_pause:
                 approved_input.complete(system="planner", prompt="build plan")
 
             self.assertEqual(output_pause.exception.progress["review_stage"], "output")
-            self.assertEqual(base.prompts, ["build plan"])
+            self.assertEqual(len(base.prompts), 1)
+            self.assertIn("Keep the approved acceptance binding explicit.", base.prompts[0])
+            self.assertTrue(base.prompts[0].endswith("build plan"))
 
             approved_output = ReviewableLlmClient(
                 base,
@@ -260,6 +264,76 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
             self.assertEqual(completion.content, exchange["raw_completion"])
             self.assertEqual(completion.reasoning_content, "private provider reasoning")
             self.assertEqual(completion.finish_reason, "stop")
+            self.assertEqual(len(base.prompts), 1)
+
+    def test_image_references_are_auditable_and_part_of_the_replay_key(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            first_image = root / "first.png"
+            second_image = root / "second.png"
+            first_image.write_bytes(b"\x89PNG\r\n\x1a\nfirst")
+            second_image.write_bytes(b"\x89PNG\r\n\x1a\nsecond")
+            first_ref = {
+                "label": "desktop",
+                "path": str(first_image),
+                "sha256": hashlib.sha256(first_image.read_bytes()).hexdigest(),
+            }
+            second_ref = {
+                "label": "desktop",
+                "path": str(second_image),
+                "sha256": hashlib.sha256(second_image.read_bytes()).hexdigest(),
+            }
+            base = _FakeClient(['{"ok":true}'])
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-images",
+                review={"review_input": True},
+            )
+            with self.assertRaises(LlmStepReviewRequired) as input_pause:
+                first.complete_with_metadata(
+                    system="validator", prompt="review", images=[first_ref], accepts_images=True
+                )
+
+            exchange_path = root / str(input_pause.exception.progress["exchange_path"])
+            serialized = exchange_path.read_text(encoding="utf-8")
+            exchange = json.loads(serialized)
+            self.assertNotIn("base64", serialized)
+            self.assertEqual(exchange["images"][0]["bytes"], first_image.stat().st_size)
+            self.assertEqual(exchange["images"], exchange["request_options"]["images"])
+
+            approved_input = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-images",
+                review={
+                    "review_input": True,
+                    "call_id": input_pause.exception.progress["call_id"],
+                    "decision": "approve",
+                },
+            )
+            with self.assertRaises(LlmStepReviewRequired) as output_pause:
+                approved_input.complete_with_metadata(
+                    system="validator", prompt="review", images=[first_ref], accepts_images=True
+                )
+            approved_output = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-images",
+                review={"call_id": output_pause.exception.progress["call_id"], "decision": "approve"},
+            )
+            self.assertEqual(
+                approved_output.complete_with_metadata(
+                    system="validator", prompt="review", images=[first_ref], accepts_images=True
+                ).content,
+                '{"ok":true}',
+            )
+            with self.assertRaises(HarnessError) as drift:
+                ReviewableLlmClient(base, store=store, run_id="run-images").complete_with_metadata(
+                    system="validator", prompt="review", images=[second_ref], accepts_images=True
+                )
+            self.assertEqual(drift.exception.error_code, "implementation_plan_step_review_drift")
             self.assertEqual(len(base.prompts), 1)
 
     def test_scoped_review_uses_design_validator_identity_and_storage(self) -> None:
@@ -440,6 +514,71 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
 
             self.assertEqual(drift.exception.error_code, "implementation_plan_step_review_drift")
             self.assertEqual(len(base.prompts), 1)
+
+    def test_approved_output_note_reaches_the_next_provider_call(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(['{"action":1}', '{"action":2}'])
+            first = ReviewableLlmClient(base, store=store, run_id="run-approve-note")
+            with self.assertRaises(LlmStepReviewRequired) as first_pause:
+                first.complete(system="developer", prompt="first decision")
+
+            resumed = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-approve-note",
+                review={
+                    "call_id": first_pause.exception.progress["call_id"],
+                    "decision": "approve",
+                    "note": "The direct probe is authoritative; do not infer status from the UI label.",
+                },
+            )
+            self.assertEqual(resumed.complete(system="developer", prompt="first decision"), '{"action":1}')
+            with self.assertRaises(LlmStepReviewRequired):
+                resumed.complete(system="developer", prompt="second decision")
+
+            self.assertIn("The direct probe is authoritative", base.prompts[-1])
+            self.assertTrue(base.prompts[-1].endswith("second decision"))
+
+    def test_approved_output_note_can_be_audit_only_for_independent_calls(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(['{"scenario":1}', '{"scenario":2}'])
+            first = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-audit-only-note",
+                carry_approved_output_notes=False,
+            )
+            with self.assertRaises(LlmStepReviewRequired) as first_pause:
+                first.complete(system="validator", prompt="scenario one")
+
+            resumed = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-audit-only-note",
+                review={
+                    "call_id": first_pause.exception.progress["call_id"],
+                    "decision": "approve",
+                    "note": "Scenario one routes to the API unit.",
+                },
+                carry_approved_output_notes=False,
+            )
+            self.assertEqual(resumed.complete(system="validator", prompt="scenario one"), '{"scenario":1}')
+            with self.assertRaises(LlmStepReviewRequired):
+                resumed.complete(system="validator", prompt="scenario two")
+
+            self.assertEqual(base.prompts[-1], "scenario two")
+            session = json.loads(
+                (
+                    store.run_dir("run-audit-only-note")
+                    / "implementation_plan_execution"
+                    / "step_review_session_v1.json"
+                ).read_text(encoding="utf-8")
+            )
+            self.assertEqual(session["calls"][0]["review_note_delivery"], "audit_only")
 
 
 if __name__ == "__main__":
