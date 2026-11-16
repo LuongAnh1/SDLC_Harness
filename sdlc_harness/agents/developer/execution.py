@@ -3116,12 +3116,15 @@ def _action_prompt(
     context_repair = str(manifest.get("mode") or "") == "implementation_repair"
     feedback_source = str(_dict_value(manifest.get("repair_feedback")).get("feedback_source") or "")
     unit_repair_context = _developer_repair_context(manifest.get("repair_feedback"), item=item)
-    # A Validator repair also runs the dependency closure of the cited units. When no finding is projected
-    # onto this unit, nothing authorizes a mutation unless one of its own required stages fails.
+    # A Validator or browser-stage repair also runs the dependency closure of the cited units. When no finding is
+    # projected onto this unit, nothing authorizes a mutation unless one of its own required stages fails.
     dependency_context_only = (
         unit_aware
-        and context_repair
-        and feedback_source == "validator_code_trace"
+        and repair_mode
+        and (
+            (context_repair and feedback_source == "validator_code_trace")
+            or _repair_feedback_unit_scoped(manifest.get("repair_feedback"))
+        )
         and not _dict_items(_dict_value(unit_repair_context.get("repair_objective")).get("contract_findings"))
         and not _dict_items(unit_repair_context.get("missing_links"))
     )
@@ -3761,6 +3764,17 @@ def _action_prompt(
     )
 
 
+def _repair_feedback_unit_scoped(value: object) -> bool:
+    """True when at least one finding or missing link names the exact units that own it."""
+
+    feedback = _dict_value(value)
+    rows = [
+        *_dict_items(_dict_value(feedback.get("repair_objective")).get("contract_findings")),
+        *_dict_items(feedback.get("missing_links")),
+    ]
+    return any(_string_items(row.get("unit_ids")) for row in rows)
+
+
 def _developer_repair_context(
     value: object,
     *,
@@ -3778,14 +3792,37 @@ def _developer_repair_context(
             if path in unit_paths
         ]
         feedback["developer_constraints"] = developer_constraints
-    if str(feedback.get("feedback_source") or "") != "validator_code_trace":
-        return feedback
-
     unit_id = str(item.get("id") or "")
 
     def assigned_to_unit(row: dict[str, object]) -> bool:
         unit_ids = _string_items(row.get("unit_ids"))
         return not unit_ids or unit_id in unit_ids
+
+    if str(feedback.get("feedback_source") or "") != "validator_code_trace":
+        if not _repair_feedback_unit_scoped(feedback):
+            return feedback
+        # Browser-stage and closure findings carry exact unit_ids: a dependency-closure unit sees only its own
+        # findings, never another unit's (r9 UI Polish repair, 2026-11-16).
+        repair_objective = dict(_dict_value(feedback.get("repair_objective")))
+        own_findings = [
+            dict(finding)
+            for finding in _dict_items(repair_objective.get("contract_findings"))
+            if assigned_to_unit(finding)
+        ]
+        repair_objective["contract_findings"] = own_findings
+        feedback["repair_objective"] = repair_objective
+        if "missing_links" in feedback:
+            feedback["missing_links"] = [
+                dict(link) for link in _dict_items(feedback.get("missing_links")) if assigned_to_unit(link)
+            ]
+        assignment = (
+            f"The repair feedback assigns {len(own_findings)} blocking finding(s) to unit {unit_id}. "
+            "Repair only those findings within this unit's write paths."
+            if own_findings
+            else f"The repair feedback assigns no finding to unit {unit_id}; preserve it as dependency context."
+        )
+        feedback["summary"] = f"{assignment} {str(feedback.get('summary') or '').strip()}".strip()
+        return feedback
 
     actionable_links = [
         dict(item)

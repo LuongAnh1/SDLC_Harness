@@ -1629,6 +1629,97 @@ class DeveloperToolLoopTest(unittest.TestCase):
             [excerpt.get("path") for excerpt in repair_hints.get("excerpts", [])],
         )
 
+    def test_browser_stage_repair_prompt_keeps_dependency_units_to_context(self) -> None:
+        # r9 UI Polish repair (2026-11-16): a dependency-closure unit received the cited unit's finding and
+        # proposed that unit's fix. Browser-stage findings carry exact unit_ids, like Code Validator findings.
+        packet = self.unit_packet()
+        finding = {
+            "severity": "blocker",
+            "category": "behavior",
+            "unit_ids": ["WU-002"],
+            "issue": "The focused control shows no ring.",
+            "expected_change": "Show the approved ring when the control is focused.",
+        }
+        feedback = {
+            "feedback_source": "ui_polish_result_review",
+            "summary": "UI Polish result review found 1 blocker(s).",
+            "required_action": "Repair only the cited UI Polish units inside the approved contract.",
+            "developer_constraints": {"allowed_paths": ["src/Main.java", "src/MainTest.java"]},
+            "repair_objective": {"objective_id": "repair:polish", "canonical_keys": [], "contract_findings": [finding]},
+            "plan_extensions": [],
+            "missing_links": [],
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unit_prompt_scope",
+            work_packet=packet,
+            target_path=self.repo,
+            mode="ui_polish_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        items = {item["id"]: item for item in manifest["items"]}
+
+        def context_for(unit_id: str) -> dict[str, object]:
+            prompt = _action_prompt(
+                item=items[unit_id],
+                manifest=manifest,
+                history=[],
+                target_path=self.repo,
+                max_write_chars=18000,
+                force_incremental=False,
+                action_index=1,
+                max_actions=24,
+                mutated=False,
+                context_window_tokens=128000,
+            )
+            return json.loads(prompt.split("Execution context:\n", 1)[1])
+
+        dependency = context_for("WU-001")
+        self.assertEqual(dependency["repair_feedback"]["repair_objective"]["contract_findings"], [])
+        self.assertIn("assigns no finding to unit WU-001", dependency["repair_feedback"]["summary"])
+        self.assertIn("plan_extensions", dependency["repair_feedback"])  # browser feedback keeps its own keys
+        self.assertIn("Validator assigned no finding to this unit", dependency["next_action"]["unit_strategy"])
+        self.assertTrue(
+            dependency["repair_progress"]["completion_rule"].startswith("No Validator finding is assigned to this unit.")
+        )
+
+        direct = context_for("WU-002")
+        self.assertEqual(direct["repair_feedback"]["repair_objective"]["contract_findings"], [finding])
+        self.assertIn("assigns 1 blocking finding(s) to unit WU-002", direct["repair_feedback"]["summary"])
+        self.assertNotIn("Validator assigned no finding to this unit", direct["next_action"]["unit_strategy"])
+
+    def test_browser_stage_repair_without_unit_scoped_findings_keeps_the_whole_feedback(self) -> None:
+        feedback = {
+            "feedback_source": "browser_journey_verification",
+            "summary": "Verification failed.",
+            "repair_objective": {"contract_findings": [{"issue": "Suite failed.", "expected_change": "Pass it."}]},
+        }
+        manifest = _build_manifest(
+            run_id="run_browser_unscoped",
+            work_packet=self.unit_packet(),
+            target_path=self.repo,
+            mode="browser_journey_repair",
+            repair_feedback=feedback,
+            repair_iteration=1,
+        )
+        item = next(item for item in manifest["items"] if item["id"] == "WU-001")
+        prompt = _action_prompt(
+            item=item,
+            manifest=manifest,
+            history=[],
+            target_path=self.repo,
+            max_write_chars=18000,
+            force_incremental=False,
+            action_index=1,
+            max_actions=24,
+            mutated=False,
+            context_window_tokens=128000,
+        )
+        context = json.loads(prompt.split("Execution context:\n", 1)[1])
+        self.assertEqual(context["repair_feedback"]["summary"], "Verification failed.")
+        self.assertEqual(len(context["repair_feedback"]["repair_objective"]["contract_findings"]), 1)
+        self.assertNotIn("Validator assigned no finding to this unit", context["next_action"]["unit_strategy"])
+
     def test_shared_finding_prompt_reports_what_an_earlier_unit_changed(self) -> None:
         packet = self.unit_packet()
         finding = {
