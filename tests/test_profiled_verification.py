@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,9 +31,17 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.agents.developer.closure_contract import CLOSURE_DEVELOPER_STAGE_IDS
-from sdlc_harness.profiles import RUNTIME_CLOSURE_STAGE_POLICY_VERSION, build_runtime_closure_stage_policy
+from sdlc_harness.profiles import (
+    BROWSER_STAGE_POLICY_VERSION,
+    RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+    browser_stage_facts,
+    build_browser_stage_policy,
+    build_runtime_closure_stage_policy,
+)
 from sdlc_harness.verification import (
+    BROWSER_CAPTURE_SPEC_PATH,
     RUNTIME_PROBE_SPEC_PATH,
+    BrowserCaptureRun,
     RuntimeProbeRun,
     VerificationResult,
     VerificationRunner,
@@ -41,9 +51,11 @@ from sdlc_harness.verification import (
     resolve_verification_stage_specs,
 )
 from sdlc_harness.verification.runner import (
+    _capture_screenshot,
     _playwright_verified_test_files,
     _run_bounded,
     _runtime_probe_outcomes,
+    _windows_io_path,
 )
 
 
@@ -1125,6 +1137,313 @@ class RuntimeClosureVerificationTest(unittest.TestCase):
 
         (self.target / RUNTIME_PROBE_SPEC_PATH).unlink()
         result, run = self.run_closure(None, RuntimeProbeRun(probe_ids=("RP-1",)))
+        self.assertEqual((result.status, result.failure_kind), ("failed", "policy"))
+        run.assert_not_called()
+
+    def test_playwright_failure_keeps_every_error_message(self) -> None:
+        report = probe_report(*[(f"RP-{index}", "failed", None) for index in range(1, 5)])
+        for index, spec in enumerate(report["suites"][0]["specs"], start=1):
+            spec["tests"][0]["results"][0]["error"] = {"message": f"\x1b[31mExpected 200\x1b[39m\n  Received {500 + index}"}
+        report_path = self.target / "results.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        _, error, kind = _playwright_verified_test_files(
+            report_path=report_path, target_root=self.target, selected_test_files=(RUNTIME_PROBE_SPEC_PATH,)
+        )
+        self.assertEqual(kind, "implementation")
+        self.assertIn("RP-1: failed: Expected 200 Received 501", error)
+        self.assertIn("RP-4: failed: Expected 200 Received 504", error)  # no longer only the first three
+        self.assertNotIn("\x1b", error)
+
+
+def capture_report(target: Path, captures: dict[str, list[dict[str, object]]], *, failed: tuple[str, ...] = ()):
+    """Playwright JSON for the Harness capture spec; writes each screenshot under test-results/."""
+
+    specs = []
+    for title, steps in captures.items():
+        attachments, annotations = [], []
+        for step in steps:
+            name = f"capture:{title.replace('@', ':')}:{step['step']}"
+            path = target / "test-results" / title.replace("@", "-") / f"{step['step']}.png"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(f"png {title} {step['step']}".encode("utf-8"))
+            attachments.append({"name": name, "path": str(path), "contentType": "image/png"})
+            view_id, viewport_id = title.split("@")
+            payload = {
+                "view_id": view_id,
+                "viewport_id": viewport_id,
+                "status": "passed",
+                "error": None,
+                "attachment": name,
+                "aria_snapshot": "- main",
+                "aria_truncated": False,
+                "focus": None,
+                "layout": {"viewport": {"width": 1, "height": 1}, "scroll_width": 1, "horizontal_overflow": False, "dialogs": []},
+                "styles": [],
+                **step,
+            }
+            annotations.append({"type": "browser_capture", "description": json.dumps(payload)})
+        status = "failed" if title in failed else "passed"
+        specs.append(
+            {
+                "title": title,
+                # Real reports repeat runtime annotations on the test and on its result.
+                "tests": [{"annotations": annotations, "results": [{"status": status, "attachments": attachments, "annotations": annotations}]}],
+            }
+        )
+    unexpected = len(failed)
+    return {"suites": [{"file": BROWSER_CAPTURE_SPEC_PATH, "specs": specs}], "stats": {"unexpected": unexpected}}
+
+
+class BrowserCaptureVerificationTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.target = Path(self.temp_dir.name) / "target"
+        self.evidence = Path(self.temp_dir.name) / "evidence"
+        self.target.mkdir()
+        (self.target / "package.json").write_text(json.dumps({"scripts": CLOSURE_SCRIPTS}), encoding="utf-8")
+        for path in (RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH):
+            spec = self.target / path
+            spec.parent.mkdir(parents=True, exist_ok=True)
+            spec.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        self.project = get_project_profile("typescript_fullstack_v1")
+        self.policy = build_browser_stage_policy(project=self.project)
+        self.facts = browser_stage_facts(self.project.profile_id)
+        self.packet = {
+            "run_id": "run_browser_capture_verification",
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "verification_stage_ids": list(self.policy.stage_ids),
+            "test_intents": [{"stage_id": "typecheck", "purpose": "Readiness changes type-check."}],
+            "qa_test_intents": [],
+        }
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
+
+    def capture(self, **overrides) -> BrowserCaptureRun:
+        values = {
+            "view_ids": ("V-0",),
+            "viewport_ids": ("desktop", "mobile"),
+            "stand_in_env_keys": ("ETOUR_BASE_URL",),
+            "demo_flag_env_key": self.facts.demo_flag_env_key,
+            "forbidden_build_literals": ("demo-operator-token",),
+            "build_output_dir": self.facts.build_output_dir,
+            "evidence_dir": self.evidence,
+        }
+        values.update(overrides)
+        return BrowserCaptureRun(**values)
+
+    def run_suite(self, capture, *, captures=None, build_text="console.log('production');", failed=()):
+        probe = probe_report(("RP-1", "passed", {"probe_id": "RP-1", "actual_status": 200}))
+        if captures is None:
+            captures = {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}]}
+
+        def fake_run(argv, **kwargs):
+            del kwargs
+            if "build:web" in argv:
+                bundle = self.target / self.facts.build_output_dir / "assets" / "index.js"
+                bundle.parent.mkdir(parents=True, exist_ok=True)
+                bundle.write_text(build_text, encoding="utf-8")
+            report = None
+            if RUNTIME_PROBE_SPEC_PATH in argv:
+                report = probe
+            elif BROWSER_CAPTURE_SPEC_PATH in argv:
+                report = capture_report(self.target, captures, failed=failed)
+            if report is not None:
+                path = self.target / "playwright-report/results.json"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(report), encoding="utf-8")
+            code = 1 if report is not None and report["stats"]["unexpected"] else 0
+            return subprocess.CompletedProcess(args=argv, returncode=code, stdout="", stderr="")
+
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner._run_bounded", side_effect=fake_run) as run,
+        ):
+            result = VerificationRunner().run(
+                target_path=self.target,
+                work_packet=self.packet,
+                verification_policy=self.policy,
+                runtime_probe=RuntimeProbeRun(probe_ids=("RP-1",), stand_in_env_keys=("ETOUR_BASE_URL",)),
+                browser_capture=capture,
+            )
+        return result, run
+
+    def stage(self, result, stage_id: str):
+        return next(item for item in result.stage_results if item.stage_id == stage_id)
+
+    def test_browser_policy_order_ownership_registry_and_facts(self) -> None:
+        self.assertEqual(self.policy.policy_version, BROWSER_STAGE_POLICY_VERSION)
+        closure = build_runtime_closure_stage_policy(project=self.project).stage_ids
+        self.assertEqual(self.policy.stage_ids, (*closure[:-1], "browser_capture", "cleanup"))
+        self.assertEqual(self.policy.owner_for_stage("browser_capture"), "harness_global")
+        self.assertNotIn("browser_capture", self.project.verification_stage_ids)  # catalog untouched
+        specs = {spec.stage_id: spec for spec in resolve_verification_stage_specs(self.policy)}
+        self.assertEqual(specs["browser_capture"].argv, ("npm", "run", "test:e2e"))
+        self.assertFalse(specs["browser_capture"].developer_selectable)
+        self.assertEqual(specs["browser_capture"].report_kind, "playwright")
+        self.assertIn("browser_capture", self.policy.prompt_context()["stage_capabilities"])
+        self.assertEqual(
+            (self.facts.demo_flag_env_key, self.facts.build_output_dir), ("VITE_SDLC_DEMO_RUNTIME", "apps/web/dist")
+        )
+        with self.assertRaises(HarnessError):
+            browser_stage_facts("unknown_profile")
+
+    def test_flag_reaches_only_browser_capture_and_evidence_is_copied_with_hashes(self) -> None:
+        network = [
+            {
+                "kind": "request_failed",
+                "method": "DELETE",
+                "path": "/records/demo",
+                "cross_origin": True,
+                "request_header_names": ["authorization", "content-type", "x-operator-id"],
+                "error": "net::ERR_FAILED",
+            }
+        ]
+        result, run = self.run_suite(
+            self.capture(),
+            captures={
+                "V-0@desktop": [{"step": 0, "network": network, "network_truncated": False}],
+                "V-0@mobile": [{"step": 0}],
+            },
+        )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertEqual(result.executed_stage_ids, self.policy.stage_ids)
+        calls = [call.args[0] for call in run.call_args_list]
+        capture_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH])].kwargs["env"]
+        probe_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH])].kwargs["env"]
+        self.assertEqual(capture_env["VITE_SDLC_DEMO_RUNTIME"], "1")
+        self.assertEqual(capture_env["ETOUR_BASE_URL"], probe_env["ETOUR_BASE_URL"])  # same stand-in port
+        self.assertEqual(capture_env["DATABASE_URL"], probe_env["DATABASE_URL"])  # same run-scoped database
+        self.assertEqual(capture_env["COMPOSE_PROJECT_NAME"], probe_env["COMPOSE_PROJECT_NAME"])
+        self.assertNotIn("VITE_SDLC_DEMO_RUNTIME", probe_env)  # probes run against the production build
+        for call in run.call_args_list:
+            if call.args[0] != ["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH]:
+                self.assertNotIn("VITE_SDLC_DEMO_RUNTIME", call.kwargs["env"])
+
+        build = self.stage(result, "frontend_build")
+        self.assertEqual(build.build_scan["hits"], [])
+        self.assertEqual(build.build_scan["files_scanned"], 1)
+        captures = self.stage(result, "browser_capture").capture_results
+        self.assertEqual([(item["view_id"], item["viewport_id"], item["step"]) for item in captures],
+                         [("V-0", "desktop", 0), ("V-0", "mobile", 0)])
+        self.assertEqual(captures[0]["network"], network)
+        for item in captures:
+            copied = self.evidence / item["screenshot"]["file"]
+            self.assertTrue(copied.is_file())
+            self.assertEqual(item["screenshot"]["sha256"], hashlib.sha256(copied.read_bytes()).hexdigest())
+        self.assertIn("capture_results", self.stage(result, "browser_capture").to_dict())
+
+    @unittest.skipUnless(os.name == "nt", "Windows MAX_PATH behavior")
+    def test_capture_copies_source_and_destination_beyond_max_path(self) -> None:
+        source = self.target / "test-results" / ("source-" + "x" * 90) / ("nested-" + "y" * 90) / "capture.png"
+        evidence = Path(self.temp_dir.name) / ("evidence-" + "a" * 90) / ("nested-" + "b" * 90)
+        source_io = _windows_io_path(source)
+        try:
+            source_io.parent.mkdir(parents=True, exist_ok=True)
+            source_io.write_bytes(b"long-path-png")
+            self.assertGreater(len(str(source.resolve())), 260)
+            self.assertGreater(len(str((evidence / "BV-0123456789ab__desktop__s00.png").resolve())), 260)
+
+            screenshot, error = _capture_screenshot(
+                {
+                    "view_id": "BV-0123456789ab",
+                    "viewport_id": "desktop",
+                    "step": 0,
+                    "attachment_path": str(source.resolve()),
+                },
+                target_root=self.target,
+                capture=self.capture(evidence_dir=evidence),
+            )
+
+            self.assertEqual(error, "")
+            self.assertIsNotNone(screenshot)
+            assert screenshot is not None
+            self.assertEqual(screenshot["sha256"], hashlib.sha256(b"long-path-png").hexdigest())
+            self.assertTrue(_windows_io_path(evidence / screenshot["file"]).is_file())
+        finally:
+            shutil.rmtree(_windows_io_path(self.target / "test-results"), ignore_errors=True)
+            shutil.rmtree(_windows_io_path(evidence.parent), ignore_errors=True)
+
+    def test_r3_demo_literal_in_production_build_fails_frontend_build(self) -> None:
+        result, run = self.run_suite(self.capture(), build_text='const token="demo-operator-token";')
+
+        build = self.stage(result, "frontend_build")
+        self.assertEqual((build.status, build.failure_kind), ("failed", "implementation"))
+        self.assertIn("demo-operator-token", build.reason)
+        self.assertEqual(build.build_scan["hits"], [{"literal": "demo-operator-token", "files": ["apps/web/dist/assets/index.js"]}])
+        calls = [call.args[0] for call in run.call_args_list]
+        self.assertNotIn(["npm", "run", "test:e2e", "--", BROWSER_CAPTURE_SPEC_PATH], calls)
+        self.assertEqual(calls[-1], ["npm", "run", "db:down"])  # cleanup still runs
+
+    def test_r3_without_build_output_is_a_policy_failure_and_no_literals_skip_the_scan(self) -> None:
+        result, _ = self.run_suite(self.capture(build_output_dir="apps/missing/dist"))
+        build = self.stage(result, "frontend_build")
+        self.assertEqual((build.status, build.failure_kind), ("failed", "policy"))
+
+        result, _ = self.run_suite(self.capture(forbidden_build_literals=()))
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertIsNone(self.stage(result, "frontend_build").build_scan)
+
+    def test_capture_report_missing_a_view_or_with_gaps_is_a_policy_failure(self) -> None:
+        for captures in (
+            {"V-0@desktop": [{"step": 0}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 1}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0, "status": "unknown"}]},
+            {"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}], "V-0@tablet": [{"step": 0}]},
+        ):
+            with self.subTest(captures=list(captures)):
+                result, _ = self.run_suite(self.capture(), captures=captures)
+                stage = self.stage(result, "browser_capture")
+                self.assertEqual((stage.status, stage.failure_kind), ("failed", "policy"), stage.reason)
+
+    def test_step_failed_capture_is_evidence_and_a_crashed_test_still_keeps_its_captures(self) -> None:
+        captures = {
+            "V-0@desktop": [{"step": 0}, {"step": 1, "status": "step_failed", "error": "locator \x1b[2mnot found\x1b[22m"}],
+            "V-0@mobile": [{"step": 0}],
+        }
+        result, _ = self.run_suite(self.capture(), captures=captures)
+        self.assertEqual(result.status, "passed", result.reason)
+        failed_step = self.stage(result, "browser_capture").capture_results[1]
+        self.assertEqual((failed_step["status"], failed_step["error"]), ("step_failed", "locator not found"))
+        self.assertNotIn("observe", failed_step)
+
+        # A missed observe is a passed step that carries its own outcome; an unknown status is dropped.
+        observed = {"V-0@desktop": [
+            {"step": 0, "observe": {"status": "missed", "error": "Timeout [2m5000ms[22m", "network_held": True}},
+            {"step": 1, "observe": {"status": "maybe"}},
+        ], "V-0@mobile": [{"step": 0}]}
+        result, _ = self.run_suite(self.capture(), captures=observed)
+        steps = self.stage(result, "browser_capture").capture_results
+        self.assertEqual(
+            (steps[0]["status"], steps[0]["observe"]),
+            ("passed", {"status": "missed", "error": "Timeout 5000ms", "network_held": True}),
+        )
+        self.assertNotIn("observe", steps[1])
+
+        result, _ = self.run_suite(self.capture(), captures=captures, failed=("V-0@mobile",))
+        stage = self.stage(result, "browser_capture")
+        self.assertEqual((stage.status, stage.failure_kind), ("failed", "implementation"))
+        self.assertEqual(len(stage.capture_results), 3)
+        self.assertEqual(stage.capture_results[-1]["test_status"], "failed")
+
+    def test_browser_capture_fails_closed_on_unsafe_inputs_and_missing_spec(self) -> None:
+        for capture in (
+            None,
+            self.capture(view_ids=()),
+            self.capture(view_ids=("V-0", "V-0")),
+            self.capture(view_ids=("not-a-view",)),
+            self.capture(viewport_ids=("Desktop",)),
+            self.capture(demo_flag_env_key="NODE_OPTIONS"),
+            self.capture(demo_flag_env_key="DATABASE_URL"),
+            self.capture(demo_flag_env_key="ETOUR_BASE_URL"),  # collides with a stand-in key
+        ):
+            with self.subTest(capture=capture), self.assertRaises(HarnessError) as caught:
+                self.run_suite(capture)
+            self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
+
+        (self.target / BROWSER_CAPTURE_SPEC_PATH).unlink()
+        result, run = self.run_suite(self.capture())
         self.assertEqual((result.status, result.failure_kind), ("failed", "policy"))
         run.assert_not_called()
 

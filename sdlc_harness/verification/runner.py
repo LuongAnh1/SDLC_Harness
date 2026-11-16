@@ -8,7 +8,7 @@ vào `test_report_v{n}.md`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import os
@@ -30,6 +30,7 @@ from ..profiles import (
     profiled_execution_field_paths,
 )
 from .registry import (
+    BROWSER_CAPTURE_SPEC_PATH,
     PROFILED_ENV_ALLOWLIST,
     PROFILED_FIXED_ENV,
     RUNTIME_PROBE_SPEC_PATH,
@@ -42,7 +43,14 @@ from .registry import (
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
 RUNTIME_PROBE_ANNOTATION_TYPE = "runtime_probe"
+BROWSER_CAPTURE_ANNOTATION_TYPE = "browser_capture"
+# Playwright failure text kept per failed result and in total, so a browser failure stays diagnosable.
+MAX_FAILURE_MESSAGE_CHARS = 600
+MAX_FAILURE_DETAIL_CHARS = 4000
 _PROBE_ID = re.compile(r"^RP-[1-9][0-9]*$")
+_VIEW_ID = re.compile(r"^(V-0|BV-[0-9a-f]{12})$")
+_VIEWPORT_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+_ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 _STAND_IN_ENV_KEY = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # Keys the runner owns; a contract-declared stand-in may never override them.
 _RESERVED_ENV_KEYS = {
@@ -64,6 +72,7 @@ _RUN_SCOPED_STAGE_IDS = {
     "service_health",
     "browser_e2e",
     "runtime_probe",
+    "browser_capture",
     "cleanup",
 }
 
@@ -74,6 +83,22 @@ class RuntimeProbeRun:
 
     probe_ids: tuple[str, ...]
     stand_in_env_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BrowserCaptureRun:
+    """What the browser_capture stage needs: view/viewport IDs and Harness-owned facts, no argv."""
+
+    view_ids: tuple[str, ...]
+    viewport_ids: tuple[str, ...]
+    stand_in_env_keys: tuple[str, ...] = ()
+    # Build-time flag set to "1" for this stage only; empty when the run has no demo module.
+    demo_flag_env_key: str = ""
+    # R3: none of these may appear in the production build that frontend_build produced.
+    forbidden_build_literals: tuple[str, ...] = ()
+    build_output_dir: str = ""
+    # Screenshots are copied here right after the stage; Playwright wipes test-results/ every run.
+    evidence_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -95,6 +120,8 @@ class VerificationStageResult:
     selected_test_files: tuple[str, ...] = ()
     verified_test_files: tuple[str, ...] = ()
     probe_results: tuple[dict[str, object], ...] = ()
+    capture_results: tuple[dict[str, object], ...] = ()
+    build_scan: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -115,6 +142,10 @@ class VerificationStageResult:
         }
         if self.probe_results:
             payload["probe_results"] = [dict(item) for item in self.probe_results]
+        if self.capture_results:
+            payload["capture_results"] = [dict(item) for item in self.capture_results]
+        if self.build_scan is not None:
+            payload["build_scan"] = dict(self.build_scan)
         return payload
 
 
@@ -179,6 +210,7 @@ class VerificationRunner:
         verification_policy: VerificationStagePolicy | None = None,
         qa_policy: QaTestPolicy | None = None,
         runtime_probe: RuntimeProbeRun | None = None,
+        browser_capture: BrowserCaptureRun | None = None,
     ) -> VerificationResult:
         """Run verification and publish bounded result metadata."""
 
@@ -189,6 +221,7 @@ class VerificationRunner:
             verification_policy=verification_policy,
             qa_policy=qa_policy,
             runtime_probe=runtime_probe,
+            browser_capture=browser_capture,
         )
         emit_current(
             category="verification",
@@ -279,6 +312,7 @@ class VerificationRunner:
         verification_policy: VerificationStagePolicy | None = None,
         qa_policy: QaTestPolicy | None = None,
         runtime_probe: RuntimeProbeRun | None = None,
+        browser_capture: BrowserCaptureRun | None = None,
     ) -> VerificationResult:
         """Chạy profile-owned stages và fail closed nếu thiếu snapshot policy."""
 
@@ -295,6 +329,7 @@ class VerificationRunner:
             verification_policy=verification_policy,
             qa_policy=qa_policy,
             runtime_probe=runtime_probe,
+            browser_capture=browser_capture,
         )
 
     def _run_profiled_stages(
@@ -308,15 +343,22 @@ class VerificationRunner:
         selected_stage_ids: tuple[str, ...] | None = None,
         developer_unit_scope: bool = False,
         runtime_probe: RuntimeProbeRun | None = None,
+        browser_capture: BrowserCaptureRun | None = None,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
         run_id = str(work_packet.get("run_id") or "") or None
         specs = resolve_verification_stage_specs(verification_policy, run_id=run_id)
-        probe_stage_planned = any(spec.stage_id == "runtime_probe" for spec in specs)
-        stand_in_env = (
-            _runtime_probe_stand_in_env(runtime_probe, run_id=run_id) if probe_stage_planned else {}
-        )
+        planned = {spec.stage_id for spec in specs}
+        # Harness-owned env reaches exactly one stage each; no other stage sees these keys.
+        stage_extra_env = {
+            "runtime_probe": (
+                _runtime_probe_stand_in_env(runtime_probe, run_id=run_id) if "runtime_probe" in planned else {}
+            ),
+            "browser_capture": (
+                _browser_capture_env(browser_capture, run_id=run_id) if "browser_capture" in planned else {}
+            ),
+        }
         if selected_stage_ids is not None:
             selected = set(selected_stage_ids)
             specs = tuple(spec for spec in specs if spec.stage_id in selected)
@@ -414,19 +456,17 @@ class VerificationRunner:
             env = _profiled_verification_env(
                 spec,
                 run_id=run_id,
-                # Stand-in URLs exist only for the probe stage; no other stage sees them.
-                extra_env=stand_in_env if spec.stage_id == "runtime_probe" else None,
+                extra_env=stage_extra_env.get(spec.stage_id) or None,
             )
-            if (
-                spec.stage_id == "runtime_probe"
-                and runtime_probe is not None
-                and runtime_probe.probe_ids
-                and not (target_root / RUNTIME_PROBE_SPEC_PATH).is_file()
-            ):
+            harness_spec = {
+                "runtime_probe": RUNTIME_PROBE_SPEC_PATH if runtime_probe is not None and runtime_probe.probe_ids else "",
+                "browser_capture": BROWSER_CAPTURE_SPEC_PATH,
+            }.get(spec.stage_id, "")
+            if harness_spec and not (target_root / harness_spec).is_file():
                 return _profiled_preflight_failure(
                     target_path=target_root,
                     planned_stage_ids=planned_stage_ids,
-                    reason=f"Harness runtime probe spec is missing: {RUNTIME_PROBE_SPEC_PATH}",
+                    reason=f"Harness-rendered spec is missing for {spec.stage_id}: {harness_spec}",
                     selected_test_files=selected_test_files,
                     failure_kind="policy",
                 )
@@ -465,6 +505,8 @@ class VerificationRunner:
                 continue
             if spec.stage_id == "runtime_probe":
                 stage_selected_files: tuple[str, ...] = (RUNTIME_PROBE_SPEC_PATH,)
+            elif spec.stage_id == "browser_capture":
+                stage_selected_files = (BROWSER_CAPTURE_SPEC_PATH,)
             elif spec.stage_id == "unit":
                 stage_selected_files = tuple(
                     path
@@ -522,7 +564,7 @@ class VerificationRunner:
                     *executable_reporter_args,
                     *stage_selected_files,
                 ]
-            elif stage_selected_files and spec.stage_id in {"browser_e2e", "runtime_probe"}:
+            elif stage_selected_files and spec.stage_id in {"browser_e2e", "runtime_probe", "browser_capture"}:
                 logical_argv = (*spec.argv, "--", *stage_selected_files)
                 executable_argv = [executable, *spec.argv[1:], "--", *stage_selected_files]
             start = time.monotonic()
@@ -594,6 +636,7 @@ class VerificationRunner:
                 report_error = ""
                 report_failure_kind = ""
                 probe_results: tuple[dict[str, object], ...] = ()
+                capture_results: tuple[dict[str, object], ...] = ()
                 if report_path is not None:
                     verified_test_files, report_error, report_failure_kind = _vitest_verified_test_files(
                         report_path=report_path,
@@ -615,6 +658,15 @@ class VerificationRunner:
                         if probe_error:
                             # A missing or duplicated probe is a Harness/policy fault, never a code defect.
                             report_error, report_failure_kind = probe_error, "policy"
+                    if spec.stage_id == "browser_capture" and browser_capture is not None:
+                        # Read and copy evidence even when a test failed: it is the failure's evidence.
+                        capture_results, capture_error = _browser_capture_outcomes(
+                            report_path=target_root / spec.report_path,
+                            target_root=target_root,
+                            capture=browser_capture,
+                        )
+                        if capture_error and not report_error:
+                            report_error, report_failure_kind = capture_error, "policy"
                 stage_passed = completed.returncode == 0 and not report_error
                 failure_kind = ""
                 if not stage_passed:
@@ -643,10 +695,19 @@ class VerificationRunner:
                     selected_test_files=stage_selected_files,
                     verified_test_files=verified_test_files,
                     probe_results=probe_results,
+                    capture_results=capture_results,
                 )
             finally:
                 if report_directory is not None:
                     report_directory.cleanup()
+            if (
+                spec.stage_id == "frontend_build"
+                and stage_result.status == "passed"
+                and "browser_capture" in planned
+                and browser_capture is not None
+            ):
+                # R3: the production build must not ship demo fixtures; later browser stages rebuild with the flag.
+                stage_result = _with_build_literal_scan(stage_result, target_root=target_root, capture=browser_capture)
             stage_results.append(stage_result)
             if stage_result.status != "passed":
                 first_failure = first_failure or stage_result
@@ -1025,7 +1086,8 @@ def _playwright_verified_test_files(
                         return "Playwright JSON report contains a result without status."
                     if status != "passed":
                         title = str(spec.get("title") or "unnamed browser assertion").strip()
-                        assertion_failures.append(f"{title}: {status}")
+                        message = _playwright_error_message(result)
+                        assertion_failures.append(f"{title}: {status}: {message}" if message else f"{title}: {status}")
 
         children = suite.get("suites", [])
         if not isinstance(children, list):
@@ -1057,7 +1119,7 @@ def _playwright_verified_test_files(
     stats = payload.get("stats") if isinstance(payload, dict) else None
     unexpected = stats.get("unexpected") if isinstance(stats, dict) else None
     if assertion_failures or (isinstance(unexpected, int) and unexpected > 0):
-        detail = " | ".join(assertion_failures[:3]) or f"{unexpected} unexpected result(s)"
+        detail = " | ".join(assertion_failures)[:MAX_FAILURE_DETAIL_CHARS] or f"{unexpected} unexpected result(s)"
         return ordered_reported, f"Playwright test failure: {detail}", "implementation"
     return ordered_reported, "", ""
 
@@ -1148,23 +1210,323 @@ def _runtime_probe_stand_in_env(runtime_probe: RuntimeProbeRun | None, *, run_id
             f"Runtime probe ids must be unique RP-<n> ids: {list(runtime_probe.probe_ids)}",
             run_id=run_id,
         )
-    env: dict[str, str] = {}
-    for key in runtime_probe.stand_in_env_keys:
-        folded = key.casefold()
-        if (
-            not _STAND_IN_ENV_KEY.fullmatch(key)
-            or folded in _RESERVED_ENV_KEYS
-            or folded.startswith(_RESERVED_ENV_PREFIXES)
-            or key in env
-        ):
+    return _stand_in_env(runtime_probe.stand_in_env_keys, run_id=run_id)
+
+
+def _browser_capture_env(capture: BrowserCaptureRun | None, *, run_id: str | None) -> dict[str, str]:
+    """Stand-in URLs (same values the probe stage gets) plus the demo build flag, for browser_capture only."""
+
+    if capture is None:
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            "The browser_capture stage requires the Harness-rendered view set.",
+            run_id=run_id,
+        )
+    for label, values, pattern in (
+        ("view", capture.view_ids, _VIEW_ID),
+        ("viewport", capture.viewport_ids, _VIEWPORT_ID),
+    ):
+        if not values or len(set(values)) != len(values) or any(not pattern.fullmatch(item) for item in values):
             raise HarnessError(
                 "verification_stage_policy_invalid",
-                f"Stand-in env key is reserved, duplicated or invalid: {key}",
+                f"Browser capture {label} ids must be unique and well-formed: {list(values)}",
                 run_id=run_id,
             )
+    env = _stand_in_env(capture.stand_in_env_keys, run_id=run_id)
+    if capture.demo_flag_env_key:
+        _require_harness_env_key(capture.demo_flag_env_key, taken=env, run_id=run_id)
+        env[capture.demo_flag_env_key] = "1"
+    return env
+
+
+def _stand_in_env(keys: tuple[str, ...], *, run_id: str | None) -> dict[str, str]:
+    """Run-scoped loopback URLs for approved stand-ins; keys come from the contract, values from Harness."""
+
+    env: dict[str, str] = {}
+    for key in keys:
+        _require_harness_env_key(key, taken=env, run_id=run_id)
         digest = hashlib.sha256(f"{run_id or ''}\0{key}".encode("utf-8")).hexdigest()
         env[key] = f"http://127.0.0.1:{40000 + int(digest[:8], 16) % 10000}"
     return env
+
+
+def _require_harness_env_key(key: str, *, taken: dict[str, str], run_id: str | None) -> None:
+    folded = key.casefold()
+    if (
+        not _STAND_IN_ENV_KEY.fullmatch(key)
+        or folded in _RESERVED_ENV_KEYS
+        or folded.startswith(_RESERVED_ENV_PREFIXES)
+        or key in taken
+    ):
+        raise HarnessError(
+            "verification_stage_policy_invalid",
+            f"Harness stage env key is reserved, duplicated or invalid: {key}",
+            run_id=run_id,
+        )
+
+
+def _browser_capture_outcomes(
+    *,
+    report_path: Path,
+    target_root: Path,
+    capture: BrowserCaptureRun,
+) -> tuple[tuple[dict[str, object], ...], str]:
+    """Per-step captures of the Harness capture spec; screenshots are copied out of test-results/."""
+
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return (), "Playwright JSON report is missing or invalid for the browser capture spec."
+    expected = [f"{view_id}@{viewport_id}" for view_id in capture.view_ids for viewport_id in capture.viewport_ids]
+    seen: dict[str, tuple[str, list[dict[str, object]]]] = {}
+    problems: list[str] = []
+
+    def visit(suite: object, inherited_file: str) -> None:
+        if not isinstance(suite, dict):
+            return
+        raw_file = str(suite.get("file") or inherited_file)
+        relative = ""
+        if raw_file:
+            relative = _playwright_report_relative_file(raw_file, payload=payload, target_root=target_root) or ""
+        for spec in suite.get("specs") or []:
+            if not isinstance(spec, dict) or relative != BROWSER_CAPTURE_SPEC_PATH:
+                continue
+            title = str(spec.get("title") or "").strip()
+            if title not in expected:
+                problems.append(f"unexpected test `{title}` in the capture spec")
+                continue
+            if title in seen:
+                problems.append(f"test `{title}` ran more than once")
+                continue
+            view_id, viewport_id = title.split("@", 1)
+            captures: dict[int, dict[str, object]] = {}
+            test_status = "passed"
+            for test in spec.get("tests") or []:
+                if not isinstance(test, dict):
+                    continue
+                annotations = list(test.get("annotations") or [])
+                attachments: dict[str, str] = {}
+                for result in test.get("results") or []:
+                    if not isinstance(result, dict):
+                        continue
+                    status = str(result.get("status") or "").strip().lower()
+                    if status != "passed":
+                        test_status = status or "unknown"
+                    annotations.extend(result.get("annotations") or [])
+                    for item in result.get("attachments") or []:
+                        if isinstance(item, dict) and item.get("name") and item.get("path"):
+                            attachments[str(item["name"])] = str(item["path"])
+                for annotation in annotations:
+                    if not isinstance(annotation, dict) or annotation.get("type") != BROWSER_CAPTURE_ANNOTATION_TYPE:
+                        continue
+                    try:
+                        parsed = json.loads(str(annotation.get("description") or ""))
+                    except json.JSONDecodeError:
+                        parsed = None
+                    step = parsed.get("step") if isinstance(parsed, dict) else None
+                    if (
+                        not isinstance(parsed, dict)
+                        or parsed.get("view_id") != view_id
+                        or parsed.get("viewport_id") != viewport_id
+                        or not isinstance(step, int)
+                        or isinstance(step, bool)
+                        or step < 0
+                        or parsed.get("status") not in {"passed", "step_failed"}
+                    ):
+                        problems.append(f"invalid capture annotation in `{title}`")
+                        continue
+                    # Playwright may report the same runtime annotation on the test and on its result.
+                    captures.setdefault(
+                        step,
+                        {
+                            **parsed,
+                            # Playwright call logs keep terminal colour codes even with NO_COLOR.
+                            "error": _ANSI_ESCAPE.sub("", parsed["error"]) if isinstance(parsed.get("error"), str) else None,
+                            "attachment_path": attachments.get(str(parsed.get("attachment") or ""), ""),
+                        },
+                    )
+            steps = sorted(captures)
+            if not steps:
+                problems.append(f"no capture for `{title}`")
+            elif steps != list(range(len(steps))):
+                problems.append(f"capture steps of `{title}` are not contiguous: {steps}")
+            seen[title] = (test_status, [captures[step] for step in steps])
+        for child in suite.get("suites") or []:
+            visit(child, raw_file)
+
+    suites = payload.get("suites") if isinstance(payload, dict) else None
+    for suite in suites if isinstance(suites, list) else []:
+        visit(suite, "")
+    missing = [title for title in expected if title not in seen]
+    if missing:
+        problems.append(f"no result for view/viewport pair(s) {missing}")
+
+    records: list[dict[str, object]] = []
+    for title in expected:
+        test_status, captures = seen.get(title, ("", []))
+        for item in captures:
+            screenshot, error = _capture_screenshot(item, target_root=target_root, capture=capture)
+            if error:
+                problems.append(error)
+            records.append(
+                {
+                    **{
+                        key: item.get(key)
+                        for key in (
+                            "view_id",
+                            "viewport_id",
+                            "step",
+                            "status",
+                            "error",
+                            "aria_snapshot",
+                            "aria_truncated",
+                            "focus",
+                            "layout",
+                            "styles",
+                            "network",
+                            "network_truncated",
+                        )
+                    },
+                    **_capture_observe(item.get("observe")),
+                    "test_status": test_status,
+                    "screenshot": screenshot,
+                }
+            )
+    if problems:
+        return tuple(records), "Browser capture report does not match the Harness view set: " + "; ".join(problems)
+    return tuple(records), ""
+
+
+def _capture_observe(value: object) -> dict[str, object]:
+    """Outcome of a step's `observe` locator; absent for a step without one."""
+
+    if not isinstance(value, dict) or value.get("status") not in {"observed", "missed"}:
+        return {}
+    error = value.get("error")
+    return {
+        "observe": {
+            "status": value["status"],
+            "error": _ANSI_ESCAPE.sub("", error) if isinstance(error, str) else None,
+            "network_held": value.get("network_held") is True,
+        }
+    }
+
+
+def _capture_screenshot(
+    item: dict[str, object],
+    *,
+    target_root: Path,
+    capture: BrowserCaptureRun,
+) -> tuple[dict[str, object] | None, str]:
+    label = f"{item.get('view_id')}@{item.get('viewport_id')} step {item.get('step')}"
+    raw = str(item.get("attachment_path") or "")
+    source = Path(raw) if raw else None
+    if source is not None and not source.is_absolute():
+        source = target_root / source
+    source_io = _windows_io_path(source) if source is not None else None
+    if source is None or not _is_within(source, target_root) or source_io is None or not source_io.is_file():
+        return None, f"capture {label} has no screenshot attachment inside the target"
+    if capture.evidence_dir is None:
+        return {
+            "file": source.resolve().relative_to(target_root.resolve()).as_posix(),
+            "sha256": _file_sha256(source_io),
+        }, ""
+    name = f"{item.get('view_id')}__{item.get('viewport_id')}__s{int(item.get('step') or 0):02d}.png"
+    destination = capture.evidence_dir / name
+    try:
+        _windows_io_path(capture.evidence_dir).mkdir(parents=True, exist_ok=True)
+        destination_io = _windows_io_path(destination)
+        shutil.copyfile(source_io, destination_io)
+    except OSError as exc:
+        return None, f"capture {label} screenshot could not be copied: {exc}"
+    return {"file": name, "sha256": _file_sha256(destination_io)}, ""
+
+
+def _with_build_literal_scan(
+    stage_result: VerificationStageResult,
+    *,
+    target_root: Path,
+    capture: BrowserCaptureRun,
+) -> VerificationStageResult:
+    """R3: fail frontend_build when its production output contains a Harness-extracted demo literal."""
+
+    literals = tuple(dict.fromkeys(item for item in capture.forbidden_build_literals if item))
+    if not literals:
+        return stage_result
+    output = target_root / capture.build_output_dir if capture.build_output_dir else None
+    files = (
+        sorted(path for path in output.rglob("*") if path.is_file())
+        if output is not None and _is_within(output, target_root) and output.is_dir()
+        else []
+    )
+    scan: dict[str, object] = {
+        "rule": "R3",
+        "output_dir": capture.build_output_dir,
+        "files_scanned": len(files),
+        "literal_count": len(literals),
+        "hits": [],
+    }
+    if not files:
+        return replace(
+            stage_result,
+            status="failed",
+            failure_kind="policy",
+            reason=f"R3 build scan found no production build output in `{capture.build_output_dir or '<unset>'}`.",
+            build_scan=scan,
+        )
+    hits: dict[str, list[str]] = {}
+    for path in files:
+        text = path.read_bytes().decode("utf-8", errors="replace")
+        for literal in literals:
+            if literal in text:
+                hits.setdefault(literal, []).append(path.resolve().relative_to(target_root.resolve()).as_posix())
+    scan["hits"] = [{"literal": literal, "files": hits[literal]} for literal in literals if literal in hits]
+    if not hits:
+        return replace(stage_result, build_scan=scan)
+    found = "; ".join(f"`{literal}` in {files}" for literal, files in hits.items())
+    return replace(
+        stage_result,
+        status="failed",
+        failure_kind="implementation",
+        reason=f"R3: the production build contains demo literal(s): {found}"[:MAX_FAILURE_DETAIL_CHARS],
+        build_scan=scan,
+    )
+
+
+def _playwright_error_message(result: dict[str, object]) -> str:
+    listed = result.get("errors")
+    errors = [result.get("error"), *(listed if isinstance(listed, list) else [])]
+    for error in errors:
+        if isinstance(error, dict) and str(error.get("message") or "").strip():
+            text = _ANSI_ESCAPE.sub("", str(error["message"]))
+            return " ".join(text.split())[:MAX_FAILURE_MESSAGE_CHARS]
+    return ""
+
+
+def _is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _windows_io_path(path: Path) -> Path:
+    """Use Win32 extended paths for generated evidence that can exceed MAX_PATH."""
+
+    resolved = path.resolve()
+    if os.name != "nt":
+        return resolved
+    raw = str(resolved)
+    if raw.startswith("\\\\?\\"):
+        return resolved
+    if raw.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + raw[2:])
+    return Path("\\\\?\\" + raw)
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _profiled_verification_env(

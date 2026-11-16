@@ -8,10 +8,11 @@ có thể thực thi; output của LLM hoặc Developer Work Packet không đư�
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from ..core.errors import HarnessError
 from ..profiles import (
+    BROWSER_STAGE_POLICY_VERSION,
     DEVELOPER_INTENT_STAGE_OWNER,
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
     RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
@@ -23,10 +24,13 @@ from ..profiles import (
 DEFAULT_STAGE_TIMEOUT_SECONDS = 120
 # The only spec the runtime_probe stage runs; Harness renders it from the approved closure contract.
 RUNTIME_PROBE_SPEC_PATH = "tests/e2e/runtime-closure.probe.spec.ts"
+# The only spec the browser_capture stage runs; Harness renders it from typed journey views.
+BROWSER_CAPTURE_SPEC_PATH = "tests/e2e/sdlc-browser-capture.spec.ts"
 _SUPPORTED_POLICY_VERSIONS = {
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
     RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
+    BROWSER_STAGE_POLICY_VERSION,
 }
 PROFILED_ENV_ALLOWLIST = (
     "PATH",
@@ -284,6 +288,17 @@ def _closure_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[Verificati
     return tuple(closure_spec(spec) for spec in specs)
 
 
+def _browser_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[VerificationStageSpec, ...]:
+    """Browser suite = closure suite plus browser_capture (same reviewed command) after runtime_probe."""
+
+    result: list[VerificationStageSpec] = []
+    for spec in _closure_specs(specs):
+        result.append(spec)
+        if spec.stage_id == "runtime_probe":
+            result.append(replace(spec, stage_id="browser_capture"))
+    return tuple(result)
+
+
 _STAGE_SPECS_BY_POLICY = {
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
@@ -293,6 +308,9 @@ _STAGE_SPECS_BY_POLICY = {
     },
     RUNTIME_CLOSURE_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": _closure_specs(_TYPESCRIPT_FULLSTACK_V2_SPECS),
+    },
+    BROWSER_STAGE_POLICY_VERSION: {
+        "typescript_fullstack_v1": _browser_specs(_TYPESCRIPT_FULLSTACK_V2_SPECS),
     },
 }
 
