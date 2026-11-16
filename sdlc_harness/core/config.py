@@ -33,6 +33,7 @@ class LlmCallProfile:
     thinking_effort: str
     max_tokens: int
     timeout_seconds: int
+    accepts_images: bool = False
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,12 @@ class Settings:
     designer_ui_contract_version: str
     uiux_skill_mode: str
     runtime_closure_mode: str
+    browser_stages_mode: str
+    browser_readiness_repair_limit: int
+    browser_polish_repair_limit: int
+    browser_qa_repair_limit: int
+    browser_journey_patch_limit: int
+    browser_max_images_per_call: int
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
     vertical_trace_mode: str
@@ -337,6 +344,7 @@ def _phase4_llm_profiles(
                 minimum=1,
                 maximum=1800,
             ),
+            accepts_images=bool(defaults.get("accepts_images", False)),
         )
     return profiles
 
@@ -351,12 +359,15 @@ def phase4_llm_call_options(
     profile = profiles.get(profile_name) if isinstance(profiles, dict) else None
     if not isinstance(profile, LlmCallProfile):
         return {"max_tokens": fallback_max_tokens}
-    return {
+    options: dict[str, object] = {
         "model": profile.model,
         "reasoning_effort": profile.thinking_effort,
         "max_tokens": profile.max_tokens,
         "timeout_seconds": profile.timeout_seconds,
     }
+    if profile.accepts_images:
+        options["accepts_images"] = True
+    return options
 
 
 def resolve_config(
@@ -463,6 +474,10 @@ def load_settings(
     runtime_closure_mode = merged.get("SDLC_RUNTIME_CLOSURE_MODE", "off").strip().lower() or "off"
     if runtime_closure_mode not in {"off", "enforce"}:
         runtime_closure_mode = "off"
+    # Only consulted at `runtime_closed`, which a run reaches only with closure enforced (L5.4).
+    browser_stages_mode = merged.get("SDLC_BROWSER_STAGES_MODE", "off").strip().lower() or "off"
+    if browser_stages_mode not in {"off", "enforce"}:
+        browser_stages_mode = "off"
     verification_policy_version = merged.get(
         "SDLC_VERIFICATION_POLICY_VERSION",
         "verification_stage_policy_v1",
@@ -568,6 +583,20 @@ def load_settings(
         designer_ui_contract_version=designer_ui_contract_version,
         uiux_skill_mode=uiux_skill_mode,
         runtime_closure_mode=runtime_closure_mode,
+        browser_stages_mode=browser_stages_mode,
+        browser_readiness_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_READINESS_REPAIR_LIMIT"), default=2, minimum=0
+        ),
+        browser_polish_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_POLISH_REPAIR_LIMIT"), default=2, minimum=0
+        ),
+        browser_qa_repair_limit=_int_value(
+            merged.get("SDLC_BROWSER_QA_REPAIR_LIMIT"), default=3, minimum=0
+        ),
+        browser_journey_patch_limit=_int_value(merged.get("SDLC_BROWSER_JOURNEY_PATCH_LIMIT"), default=2, minimum=0),
+        browser_max_images_per_call=_int_value(
+            merged.get("SDLC_BROWSER_MAX_IMAGES_PER_CALL"), default=12, minimum=1
+        ),
         uiux_skill_root=uiux_skill_root.resolve() if uiux_skill_root is not None else None,
         uiux_skill_timeout_seconds=_int_value(
             merged.get("SDLC_UIUX_SKILL_TIMEOUT_SECONDS"),
