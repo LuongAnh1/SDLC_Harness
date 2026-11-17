@@ -779,7 +779,7 @@ class PhaseFourRuntimeClosureCycle:
                 },
             }
             if classification["kind"] == "implementation":
-                return self._route_closure_repair(
+                return self._verification_repair("runtime_closure_verification")(
                     state=state,
                     run_id=run_id,
                     latest_artifacts=latest_artifacts,
@@ -798,16 +798,13 @@ class PhaseFourRuntimeClosureCycle:
             return self._block_runtime_closure(state=state, run_id=run_id, latest_artifacts=latest_artifacts, exc=exc)
 
         if classification["kind"] != "passed":
-            error_code = (
-                "runtime_closure_environment_failed"
-                if classification["kind"] == "environment"
-                else "runtime_closure_verification_policy_failed"
-            )
             return self._block_runtime_closure(
                 state=state,
                 run_id=run_id,
                 latest_artifacts=latest_artifacts,
-                exc=HarnessError(error_code, f"{classification['stage_id'] or 'verification'}: {result.reason}", run_id=run_id),
+                exc=self._verification_blocker(
+                    "runtime_closure_verification", classification, result.reason, run_id=run_id
+                ),
             )
         state.update(
             {

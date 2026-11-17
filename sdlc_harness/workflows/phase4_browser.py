@@ -699,8 +699,10 @@ class PhaseFourBrowserStagesCycle:
         run_id: str,
         latest_artifacts: dict[str, str],
         inputs: dict[str, object],
-        findings: list[dict[str, object]],
+        problems: list[dict[str, object]],
+        source: str,
     ) -> dict[str, object]:
+        findings = problems
         pin = _dict_value(state.get("browser_stages"))
         patches = _int_value(pin.get("journey_patch_iterations"))
         if patches >= self._repair_limit(state, "browser_journey_patch"):
@@ -730,6 +732,7 @@ class PhaseFourBrowserStagesCycle:
                 "run_id": run_id,
                 "plan": self._journey_pin(state).get("plan"),
                 "manifest": inputs["manifest_ref"],
+                "source": source,
                 "findings": findings,
                 "failures": failures,
                 "planning_gaps": planning_gaps,
@@ -1207,7 +1210,7 @@ class PhaseFourBrowserStagesCycle:
                 },
             }
             if classification["kind"] == "implementation":
-                return self._route_browser_readiness_repair(
+                return self._verification_repair("browser_readiness_verification")(
                     state=state, run_id=run_id, latest_artifacts=latest_artifacts, context=context, packet=packet,
                     unit_id=unit_id, source=str(classification.get("stage_id") or "verification"),
                     problems=_readiness_verification_problems(result, classification, probe_failures),
@@ -1215,12 +1218,8 @@ class PhaseFourBrowserStagesCycle:
                     extra={"verification": _verification_digest(result), "probe_failures": probe_failures},
                 )
             if classification["kind"] != "passed":
-                raise HarnessError(
-                    "browser_readiness_environment_failed"
-                    if classification["kind"] == "environment"
-                    else "browser_readiness_verification_policy_failed",
-                    f"{classification['stage_id'] or 'verification'}: {result.reason}",
-                    run_id=run_id,
+                raise self._verification_blocker(
+                    "browser_readiness_verification", classification, result.reason, run_id=run_id
                 )
             if r4:
                 return self._route_browser_readiness_repair(
@@ -2073,27 +2072,16 @@ class PhaseFourBrowserStagesCycle:
                 for review in reviews
                 for finding in _dict_items(review.get("blocking_findings"))
             ]
-            # Code before journey: a journey patched around wrong behavior is patched again after the repair, and
-            # the review that follows every repair reports the journey defects that are still open.
-            implementation = [item for item in blockers if item.get("category") == "implementation"]
-            if implementation:
-                return self._route_browser_journey_repair(
-                    state=state,
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    inputs=inputs,
-                    problems=implementation,
-                    source="browser_journey_review",
-                )
-            journey_defects = [item for item in blockers if item.get("category") == "journey_defect"]
-            if journey_defects:
-                return self._route_browser_journey_patch(
-                    state=state,
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    inputs=inputs,
-                    findings=journey_defects,
-                )
+            routed = self._route_review_blockers(
+                "browser_journey_review",
+                blockers,
+                state=state,
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                inputs=inputs,
+            )
+            if routed is not None:
+                return routed
             return self._close_browser_journey_review(
                 state=state,
                 run_id=run_id,
@@ -2127,8 +2115,10 @@ class PhaseFourBrowserStagesCycle:
         run_id: str,
         latest_artifacts: dict[str, str],
         inputs: dict[str, object],
-        findings: list[dict[str, object]],
+        problems: list[dict[str, object]],
+        source: str,
     ) -> dict[str, object]:
+        findings = problems
         pin = _dict_value(state.get("browser_stages"))
         patches = _int_value(pin.get("journey_patch_iterations"))
         if patches >= self._repair_limit(state, "browser_journey_patch"):
@@ -2158,6 +2148,7 @@ class PhaseFourBrowserStagesCycle:
                 "run_id": run_id,
                 "plan": self._journey_pin(state).get("plan"),
                 "manifest": inputs["manifest_ref"],
+                "source": source,
                 "findings": findings,
                 "failures": failures,
                 "planning_gaps": planning_gaps,
@@ -3002,7 +2993,7 @@ class PhaseFourBrowserStagesCycle:
             )
             latest_artifacts["ui_polish_verification"] = report_ref
             if suite["classification"]["kind"] == "implementation":
-                return self._route_ui_polish_repair(
+                return self._verification_repair("ui_polish_verification")(
                     state=state,
                     run_id=run_id,
                     latest_artifacts=latest_artifacts,
@@ -3013,12 +3004,8 @@ class PhaseFourBrowserStagesCycle:
                     summary=suite["result"].reason,
                 )
             if suite["classification"]["kind"] != "passed":
-                raise HarnessError(
-                    "ui_polish_environment_failed"
-                    if suite["classification"]["kind"] == "environment"
-                    else "ui_polish_verification_policy_failed",
-                    f"{suite['classification'].get('stage_id') or 'verification'}: {suite['result'].reason}",
-                    run_id=run_id,
+                raise self._verification_blocker(
+                    "ui_polish_verification", suite["classification"], suite["result"].reason, run_id=run_id
                 )
             if regressions:
                 return self._route_ui_polish_repair(
@@ -3741,7 +3728,7 @@ class PhaseFourBrowserStagesCycle:
             )
             if suite["classification"]["kind"] == "implementation":
                 unit_ids = _string_items(self._journey_pin(state).get("repair_unit_ids"))
-                return self._route_browser_journey_repair(
+                return self._verification_repair("browser_journey_verification")(
                     state=state,
                     run_id=run_id,
                     latest_artifacts=latest_artifacts,
@@ -3756,12 +3743,8 @@ class PhaseFourBrowserStagesCycle:
                     source="browser_journey_verification",
                 )
             if suite["classification"]["kind"] != "passed":
-                raise HarnessError(
-                    "browser_baseline_environment_failed"
-                    if suite["classification"]["kind"] == "environment"
-                    else "browser_journey_verification_policy_failed",
-                    f"{suite['classification'].get('stage_id') or 'verification'}: {suite['result'].reason}",
-                    run_id=run_id,
+                raise self._verification_blocker(
+                    "browser_journey_verification", suite["classification"], suite["result"].reason, run_id=run_id
                 )
         except HarnessError as exc:
             return self._block_browser_stage(
@@ -4069,7 +4052,7 @@ class PhaseFourBrowserStagesCycle:
             )
             if suite["classification"]["kind"] == "implementation":
                 unit_ids = _string_items(self._qa_pin(state).get("repair_unit_ids"))
-                return self._route_browser_qa_repair(
+                return self._verification_repair("browser_qa_verification")(
                     state=state,
                     run_id=run_id,
                     latest_artifacts=latest_artifacts,
@@ -4084,12 +4067,8 @@ class PhaseFourBrowserStagesCycle:
                     source="browser_qa_verification",
                 )
             if suite["classification"]["kind"] != "passed":
-                raise HarnessError(
-                    "browser_qa_environment_failed"
-                    if suite["classification"]["kind"] == "environment"
-                    else "browser_qa_verification_policy_failed",
-                    f"{suite['classification'].get('stage_id') or 'verification'}: {suite['result'].reason}",
-                    run_id=run_id,
+                raise self._verification_blocker(
+                    "browser_qa_verification", suite["classification"], suite["result"].reason, run_id=run_id
                 )
         except HarnessError as exc:
             return self._block_browser_stage(
@@ -4209,7 +4188,7 @@ class PhaseFourBrowserStagesCycle:
                 for path in _string_items(unit.get("write_paths"))
                 if path in changed
             )
-            return self._route_browser_qa_repair(
+            return self._verification_repair("browser_qa_initial_verification")(
                 state=state,
                 run_id=run_id,
                 latest_artifacts=latest_artifacts,
@@ -4227,12 +4206,8 @@ class PhaseFourBrowserStagesCycle:
                 source="browser_qa_initial_verification",
             )
         if suite["classification"]["kind"] != "passed":
-            raise HarnessError(
-                "browser_qa_environment_failed"
-                if suite["classification"]["kind"] == "environment"
-                else "browser_qa_verification_policy_failed",
-                f"{suite['classification'].get('stage_id') or 'verification'}: {suite['result'].reason}",
-                run_id=run_id,
+            raise self._verification_blocker(
+                "browser_qa_initial_verification", suite["classification"], suite["result"].reason, run_id=run_id
             )
         version = _next_closure_artifact_version(self.store, run_id, "browser_qa_verification")
         verification_ref = _write_closure_json(
@@ -4463,26 +4438,16 @@ class PhaseFourBrowserStagesCycle:
                 for review in reviews
                 for finding in _dict_items(review.get("blocking_findings"))
             ]
-            # Same order as the journey gate: code repair first, the re-review reports journey defects still open.
-            implementation = [item for item in blockers if item.get("category") == "implementation"]
-            if implementation:
-                return self._route_browser_qa_repair(
-                    state=state,
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    inputs=inputs,
-                    problems=implementation,
-                    source="browser_qa_review",
-                )
-            journey = [item for item in blockers if item.get("category") == "journey_defect"]
-            if journey:
-                return self._route_browser_qa_journey_patch(
-                    state=state,
-                    run_id=run_id,
-                    latest_artifacts=latest_artifacts,
-                    inputs=inputs,
-                    findings=journey,
-                )
+            routed = self._route_review_blockers(
+                "browser_qa_review",
+                blockers,
+                state=state,
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                inputs=inputs,
+            )
+            if routed is not None:
+                return routed
             return self._close_browser_qa(
                 state=state,
                 run_id=run_id,

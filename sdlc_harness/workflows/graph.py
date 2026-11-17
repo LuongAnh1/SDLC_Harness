@@ -372,6 +372,52 @@ REPAIR_BUDGETS = {
 }
 
 
+@dataclass(frozen=True)
+class VerificationRoute:
+    """Where a failed verification goes (G1.6b): code failures to the lane's repair, the rest blocks the run."""
+
+    repair: str  # route method for an `implementation` failure
+    environment_error: str  # retryable block for an `environment` failure
+    policy_error: str  # block for any other failure
+
+
+_BROWSER_QA_VERIFICATION = VerificationRoute(
+    "_route_browser_qa_repair", "browser_qa_environment_failed", "browser_qa_verification_policy_failed"
+)
+VERIFICATION_ROUTES = {
+    "runtime_closure_verification": VerificationRoute(
+        "_route_closure_repair", "runtime_closure_environment_failed", "runtime_closure_verification_policy_failed"
+    ),
+    "browser_readiness_verification": VerificationRoute(
+        "_route_browser_readiness_repair",
+        "browser_readiness_environment_failed",
+        "browser_readiness_verification_policy_failed",
+    ),
+    "browser_journey_verification": VerificationRoute(
+        "_route_browser_journey_repair", "browser_baseline_environment_failed", "browser_journey_verification_policy_failed"
+    ),
+    "ui_polish_verification": VerificationRoute(
+        "_route_ui_polish_repair", "ui_polish_environment_failed", "ui_polish_verification_policy_failed"
+    ),
+    "browser_qa_initial_verification": _BROWSER_QA_VERIFICATION,
+    "browser_qa_verification": _BROWSER_QA_VERIFICATION,
+}
+
+# Blocking findings of a semantic review, routed by the Validator's category; the first category with findings wins.
+# Code before journey: a journey patched around wrong behavior would be patched again after the repair, and the
+# review that follows every repair reports the journey defects still open.
+REVIEW_BLOCKER_ROUTES = {
+    "browser_journey_review": (
+        ("implementation", "_route_browser_journey_repair"),
+        ("journey_defect", "_route_browser_journey_patch"),
+    ),
+    "browser_qa_review": (
+        ("implementation", "_route_browser_qa_repair"),
+        ("journey_defect", "_route_browser_qa_journey_patch"),
+    ),
+}
+
+
 def node_for(status: str) -> Node | None:
     return NODES_BY_STATUS.get(status)
 

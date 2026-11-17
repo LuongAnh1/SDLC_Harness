@@ -349,6 +349,22 @@ class RewindTableTest(unittest.TestCase):
             self.assertIn(budget.setting, settings_fields, budget_id)
             self.assertIn(f'"{budget.error_code}"', source, budget_id)
 
+    def test_failure_routes_name_real_routes_and_are_the_only_place_their_errors_are_chosen(self) -> None:
+        from sdlc_harness.workflows.phase4_browser import _RETRYABLE_ERROR_CODES
+        from sdlc_harness.workflows.phase4_closure import _RETRYABLE_BLOCKS
+
+        source = "\n".join(path.read_text(encoding="utf-8") for path in (PACKAGE / "workflows").glob("phase4*.py"))
+        for name, route in graph.VERIFICATION_ROUTES.items():
+            self.assertTrue(callable(getattr(PhaseFourWorkflow, route.repair, None)), name)
+            self.assertNotIn(f'"{route.policy_error}"', source, name)  # chosen only by graph.VERIFICATION_ROUTES
+            if name.startswith("browser_") or name.startswith("ui_polish"):
+                self.assertIn(route.environment_error, _RETRYABLE_ERROR_CODES, name)
+        self.assertIn(("runtime_closure_environment_failed", "verifying"), _RETRYABLE_BLOCKS)
+        for review, routes in graph.REVIEW_BLOCKER_ROUTES.items():
+            self.assertEqual([category for category, _ in routes], ["implementation", "journey_defect"], review)
+            for _, route in routes:
+                self.assertTrue(callable(getattr(PhaseFourWorkflow, route, None)), route)
+
 
 if __name__ == "__main__":
     unittest.main()

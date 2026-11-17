@@ -75,7 +75,14 @@ from ..sync.github import (
 from ..verification import VerificationResult, VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
 from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
-from .graph import PHASE_FOUR, REPAIR_BUDGETS, continue_handler, node_for
+from .graph import (
+    PHASE_FOUR,
+    REPAIR_BUDGETS,
+    REVIEW_BLOCKER_ROUTES,
+    VERIFICATION_ROUTES,
+    continue_handler,
+    node_for,
+)
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -671,6 +678,40 @@ class _PhaseFourCore:
             budget.error_code == error_code and self._repair_used(state, budget_id) < self._repair_limit(state, budget_id)
             for budget_id, budget in REPAIR_BUDGETS.items()
         )
+
+    # ------------------------------------------------------------------ failure routing (graph, G1.6b)
+
+    def _verification_repair(self, source: str):
+        """The lane repair route an `implementation` failure of this verification goes to."""
+
+        return getattr(self, VERIFICATION_ROUTES[source].repair)
+
+    @staticmethod
+    def _verification_blocker(
+        source: str, classification: dict[str, object], reason: str, *, run_id: str
+    ) -> HarnessError:
+        """The block for a failure that is not the code's: retryable for the environment, final otherwise."""
+
+        route = VERIFICATION_ROUTES[source]
+        return HarnessError(
+            route.environment_error if classification.get("kind") == "environment" else route.policy_error,
+            f"{classification.get('stage_id') or 'verification'}: {reason}",
+            run_id=run_id,
+        )
+
+    def _route_review_blockers(
+        self,
+        review: str,
+        blockers: list[dict[str, object]],
+        **arguments: object,
+    ) -> dict[str, object] | None:
+        """Route the first category with blocking findings (graph.REVIEW_BLOCKER_ROUTES order); None when clean."""
+
+        for category, route in REVIEW_BLOCKER_ROUTES[review]:
+            problems = [item for item in blockers if item.get("category") == category]
+            if problems:
+                return getattr(self, route)(problems=problems, source=review, **arguments)
+        return None
 
     def adjust_budget(self, *, run_id: str, budget_id: str, limit: int, reason: str) -> dict[str, object]:
         """Owner action (G1.6): set one repair budget's limit for this run; replaces hand-edited limit recoveries."""
