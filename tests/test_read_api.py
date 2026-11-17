@@ -536,7 +536,7 @@ class HttpReadApiTests(ReadApiFixture):
         self.assertEqual(status, 200)
         self.assertEqual(schema["version"], "dashboard_schema_v1")
         self.assertEqual(set(schema["actions"]), set(ACTION_SPECS))
-        self.assertEqual(len(schema["workflow"]["nodes"]), 8)
+        self.assertEqual(len(schema["workflow"]["nodes"]), 12)
 
     def test_browser_evidence_route_returns_png_bytes_and_requires_auth(self) -> None:
         content, _ = self.install_browser_evidence()

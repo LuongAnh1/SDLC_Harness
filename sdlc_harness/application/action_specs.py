@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.config import Settings
+from ..workflows.graph import dashboard_workflow
 
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
@@ -119,50 +120,6 @@ OVERRIDE_SETTINGS = {
 }
 
 
-WORKFLOW_NODES = (
-    {"id": "requirement", "label": "Requirement"},
-    {"id": "design", "label": "Design"},
-    {"id": "plan", "label": "Implementation Plan"},
-    {"id": "developer", "label": "Developer"},
-    {"id": "verification", "label": "Verification"},
-    {"id": "validator", "label": "Validator"},
-    {"id": "qa", "label": "QA"},
-    {"id": "review", "label": "Draft PR / Review"},
-)
-
-PHASE_NODES = {
-    "requirement_drafting": "requirement",
-    "requirement_clarification": "requirement",
-    "waiting_requirement_clarification_continue": "requirement",
-    "waiting_requirement_approval": "requirement",
-    "design_drafting": "design",
-    "design_revalidating": "design",
-    "design_validating": "design",
-    "design_repairing": "design",
-    "design_review": "design",
-    "implementation_planning": "plan",
-    "implementation_plan_revalidating": "plan",
-    "implementation_plan_validating": "plan",
-    "implementation_plan_repairing": "plan",
-    "implementation_preparing": "developer",
-    "implementation_writing": "developer",
-    "implementation_repair": "developer",
-    "qa_repair": "developer",
-    "implementation_testing": "verification",
-    "qa_testing": "qa",
-    "code_review_publishing": "review",
-    "code_review_syncing": "review",
-    "code_review": "review",
-    "code_review_approval": "review",
-    "code_review_approved": "review",
-}
-
-STATUS_NODES = {
-    "implementation_tested": "validator",
-    "implementation_traced": "qa",
-}
-
-
 def public_dashboard_schema(settings: Settings) -> dict[str, object]:
     """Return safe declarative metadata consumed by the browser dashboard."""
 
@@ -183,9 +140,7 @@ def public_dashboard_schema(settings: Settings) -> dict[str, object]:
         },
         "actions": actions,
         "workflow": {
-            "nodes": [dict(node) for node in WORKFLOW_NODES],
-            "phase_nodes": dict(PHASE_NODES),
-            "status_nodes": dict(STATUS_NODES),
+            **dashboard_workflow(),
             "repair_defaults": {
                 "design": settings.design_repair_limit,
                 "plan": settings.implementation_plan_repair_limit,

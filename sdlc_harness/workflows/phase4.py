@@ -74,6 +74,7 @@ from ..sync.github import (
 from ..verification import VerificationResult, VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
 from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
+from .graph import PHASE_FOUR, continue_handler, node_for
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -604,137 +605,56 @@ class _PhaseFourCore:
                 run_id=run_id,
             )
 
+    # ------------------------------------------------------------------ graph predicates (workflows/graph.py)
+
+    @staticmethod
+    def _execution_mode(state: dict[str, object]) -> str:
+        return str(_dict_value(state.get("developer_execution")).get("mode") or "")
+
+    def _runtime_closure_repair_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "runtime_closure_repair"
+
+    def _qa_repair_mode(self, state: dict[str, object]) -> bool:
+        return str(state.get("current_phase")) == "qa_repair" or self._execution_mode(state) == "qa_repair"
+
+    def _implementation_repair_mode(self, state: dict[str, object]) -> bool:
+        return (
+            self._execution_mode(state) == "implementation_repair"
+            or str(state.get("current_phase")) == "implementation_repair"
+        )
+
+    def _implementation_repair_execution_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "implementation_repair"
+
+    def _developer_act_mode(self, state: dict[str, object]) -> bool:
+        return self._execution_mode(state) == "developer_act"
+
+    def _developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return developer_execution_retry_allowed(state)
+
+    def _developer_transport_retry_allowed(self, state: dict[str, object]) -> bool:
+        return developer_transport_retry_allowed(state)
+
+    def _closure_developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return self._runtime_closure_execution_active(state) and (
+            self._developer_retry_allowed(state) or self._developer_transport_retry_allowed(state)
+        )
+
+    def _browser_developer_retry_allowed(self, state: dict[str, object]) -> bool:
+        return self._browser_execution_active(state) and (
+            self._developer_retry_allowed(state) or self._developer_transport_retry_allowed(state)
+        )
+
     def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
         """Dispatch một transition khi caller đang giữ per-run workspace lock."""
 
         state = self.store.read_state(run_id)
         self._require_frozen_llm_mode(state, run_id=run_id)
-        status = str(state.get("status"))
-        if status == "implementation_ready":
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status in {"implementation_executing", "implementation_paused"}:
-            execution = _dict_value(state.get("developer_execution"))
-            if self._browser_execution_active(state):
-                return self._continue_browser_developer(state=state, run_id=run_id)
-            if execution.get("mode") == "runtime_closure_repair":
-                return self._continue_runtime_closure_repair(state=state, run_id=run_id)
-            if self._runtime_closure_execution_active(state):
-                return self._continue_runtime_closure_act(state=state, run_id=run_id)
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "implementation_repair" or str(state.get("current_phase")) == "implementation_repair":
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "blocked" and self._qa_generation_retry_allowed(state):
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "blocked" and self._runtime_closure_retry_allowed(state):
-            return self._resume_runtime_closure_stage(state=state, run_id=run_id)
-        if (
-            status == "blocked"
-            and self._runtime_closure_execution_active(state)
-            and (developer_execution_retry_allowed(state) or developer_transport_retry_allowed(state))
-        ):
-            if _dict_value(state.get("developer_execution")).get("mode") == "runtime_closure_repair":
-                return self._continue_runtime_closure_repair(state=state, run_id=run_id)
-            return self._continue_runtime_closure_act(state=state, run_id=run_id)
-        if status == "blocked" and self._browser_retry_stage(state):
-            return self._resume_browser_stage(state=state, run_id=run_id)
-        if self._final_verification_retry_allowed(state):
-            return self._continue_final_verification(state=state, run_id=run_id)
-        if (
-            status == "blocked"
-            and self._browser_execution_active(state)
-            and (developer_execution_retry_allowed(state) or developer_transport_retry_allowed(state))
-        ):
-            return self._continue_browser_developer(state=state, run_id=run_id)
-        if status == "blocked" and developer_execution_retry_allowed(state):
-            execution = _dict_value(state.get("developer_execution"))
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "developer_act":
-                return self._continue_developer_act(state=state, run_id=run_id)
-            return self._continue_implementation_repair(state=state, run_id=run_id)
-        if status == "blocked" and developer_transport_retry_allowed(state):
-            execution = _dict_value(state.get("developer_execution"))
-            if str(state.get("current_phase")) == "qa_repair" or execution.get("mode") == "qa_repair":
-                return self._continue_qa_repair(state=state, run_id=run_id)
-            if execution.get("mode") == "implementation_repair":
-                return self._continue_implementation_repair(state=state, run_id=run_id)
-            return self._continue_developer_act(state=state, run_id=run_id)
-        if status == "implementation_written":
-            return self._continue_verification(state=state, run_id=run_id)
-        if status == "implementation_tested":
-            return self._continue_code_trace(state=state, run_id=run_id)
-        if status == "implementation_traced":
-            if self._runtime_closure_enforced(state):
-                return self._continue_runtime_closure_planning(state=state, run_id=run_id)
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "runtime_closure_ready":
-            return self._continue_runtime_closure_act(state=state, run_id=run_id)
-        if status == "runtime_closure_written":
-            return self._continue_runtime_closure_verification(state=state, run_id=run_id)
-        if status == "runtime_closure_verified":
-            return self._continue_runtime_closure_review(state=state, run_id=run_id)
-        if status == "runtime_closure_repair_needed":
-            return self._continue_runtime_closure_repair(state=state, run_id=run_id)
-        if status == "runtime_closed":
-            if self._browser_stages_enforced(state):
-                return self._continue_browser_readiness(state=state, run_id=run_id)
-            return self._continue_qa_test(state=state, run_id=run_id)
-        if status == "browser_readiness_ready":
-            return self._continue_browser_readiness_act(state=state, run_id=run_id)
-        if status == "browser_readiness_written":
-            return self._continue_browser_readiness_verification(state=state, run_id=run_id)
-        if status == "browser_readiness_repair_needed":
-            return self._continue_browser_readiness_repair(state=state, run_id=run_id)
-        if status == "browser_ready":
-            return self._continue_browser_journey_planning(state=state, run_id=run_id)
-        if status == "browser_journey_planned":
-            return self._continue_browser_baseline_capture(state=state, run_id=run_id)
-        if status == "browser_journey_captured":
-            return self._continue_browser_journey_review(state=state, run_id=run_id)
-        if status == "browser_journey_patch_needed":
-            return self._continue_browser_journey_patch(state=state, run_id=run_id)
-        if status == "browser_journey_repair_needed":
-            return self._continue_browser_journey_repair(state=state, run_id=run_id)
-        if status == "browser_journey_repair_written":
-            return self._continue_browser_journey_repair_verification(state=state, run_id=run_id)
-        if status == "browser_baseline_captured":
-            return self._continue_ui_polish_planning(state=state, run_id=run_id)
-        if status == "ui_polish_ready":
-            return self._continue_ui_polish_act(state=state, run_id=run_id)
-        if status == "ui_polish_written":
-            return self._continue_ui_polish_verification(state=state, run_id=run_id)
-        if status == "ui_polish_verified":
-            return self._continue_ui_polish_review(state=state, run_id=run_id)
-        if status == "ui_polish_repair_needed":
-            return self._continue_ui_polish_repair(state=state, run_id=run_id)
-        if status == "ui_polished":
-            return self._continue_browser_qa_review(state=state, run_id=run_id)
-        if status == "browser_qa_journey_patch_needed":
-            return self._continue_browser_qa_journey_patch(state=state, run_id=run_id)
-        if status == "browser_qa_repair_needed":
-            return self._continue_browser_qa_repair(state=state, run_id=run_id)
-        if status == "browser_qa_written":
-            return self._continue_browser_qa_verification(state=state, run_id=run_id)
-        if status == "browser_qa_verified":
-            return self._continue_browser_qa_review(state=state, run_id=run_id)
-        if status == "implementation_repair_needed":
-            return self._continue_implementation_repair(state=state, run_id=run_id)
-        if status == "qa_repair_needed":
-            return self._continue_qa_repair(state=state, run_id=run_id)
-        if status == "qa_tested" and self._documentation_closure_enforced(state):
-            return self._continue_documentation_closure(state=state, run_id=run_id)
-        if status == "documentation_approved":
-            return self._continue_final_verification(state=state, run_id=run_id)
-        if status == "final_verification_passed":
-            return self._continue_publication_preview(state=state, run_id=run_id)
-        if status == "publication_approved":
-            return self._continue_approved_publication(state=state, run_id=run_id)
-        if status in {"qa_tested", "code_review_publish_failed"}:
-            return self._continue_code_review_publish(state=state, run_id=run_id)
-        if status == "code_review_published":
-            return self._continue_code_review_sync(state=state, run_id=run_id)
+        node = node_for(str(state.get("status") or ""))
+        # The route table lives in workflows/graph.py; other phases continue through the application service.
+        handler = continue_handler(self, state) if node is not None and node.workflow == PHASE_FOUR else ""
+        if handler:
+            return getattr(self, handler)(state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",

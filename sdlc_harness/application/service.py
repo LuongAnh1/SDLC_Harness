@@ -21,6 +21,7 @@ from ..sources.jira import jira_source_ref_for
 from ..storage.runtime import RuntimeStore
 from ..workspaces.manager import RunWorkspaceManager
 from ..workflows.approval import CheckpointApprovalWorkflow
+from ..workflows.graph import PHASE_FOUR, PHASE_ONE, PHASE_THREE, PHASE_TWO, node_for
 from ..workflows.phase1 import PhaseOneWorkflow
 from ..workflows.phase2 import PhaseTwoWorkflow
 from ..workflows.phase3 import PhaseThreeWorkflow
@@ -28,23 +29,6 @@ from ..workflows.phase4 import PhaseFourWorkflow
 from ..workflows.target_repo import TargetRepoPreparationWorkflow
 from ..workflows.workspace_adoption import WorkspaceAdoptionWorkflow
 from ..workflows.workspace_cleanup import WorkspaceCleanupWorkflow
-
-# Paused Phase 4 status -> (PhaseFourWorkflow review argument, resume method).
-_PHASE4_STEP_REVIEW_RESUMES = {
-    "implementation_validation_step_review_required": (
-        "code_validation_step_review",
-        "continue_code_validation_step_review",
-    ),
-    "qa_step_review_required": ("qa_step_review", "continue_qa_step_review"),
-    "runtime_closure_step_review_required": (
-        "runtime_closure_step_review",
-        "continue_runtime_closure_step_review",
-    ),
-    "browser_stage_step_review_required": (
-        "browser_stage_step_review",
-        "continue_browser_stage_step_review",
-    ),
-}
 
 
 class ApplicationService:
@@ -255,55 +239,32 @@ class ApplicationService:
             run_id = self._required_text(command, "run_id")
             phase_one = PhaseOneWorkflow(settings)
             state = phase_one.store.read_state(run_id)
-            if str(state.get("status") or "") in {
-                "requirement_drafting",
-                "requirement_paused",
-            }:
-                return phase_one.continue_requirement_run(run_id=run_id)
-            if str(state.get("status") or "") == "repo_discovery_paused":
-                return PhaseTwoWorkflow(settings).continue_repo_discovery(run_id=run_id)
-            if str(state.get("status") or "") == "design_paused":
-                review: dict[str, object] = {}
-                for argument_name, review_key in (
-                    ("step_review_call_id", "call_id"),
-                    ("step_review_decision", "decision"),
-                    ("step_review_note", "note"),
-                ):
-                    value = self._optional_text(command, argument_name)
-                    if value is not None:
-                        review[review_key] = value
-                return PhaseTwoWorkflow(
-                    settings,
-                    designer_step_review={"enabled": True, **review} if review else None,
-                ).continue_design(run_id=run_id)
-            if str(state.get("status") or "") == "implementation_plan_step_review_required":
-                review: dict[str, object] = {"enabled": True}
-                for argument_name, review_key in (
-                    ("step_review_call_id", "call_id"),
-                    ("step_review_decision", "decision"),
-                    ("step_review_note", "note"),
-                ):
-                    value = self._optional_text(command, argument_name)
-                    if value is not None:
-                        review[review_key] = value
-                return PhaseThreeWorkflow(
-                    settings,
-                    plan_step_review=review,
-                ).continue_implementation_plan_step_review(run_id=run_id)
-            phase4_resume = _PHASE4_STEP_REVIEW_RESUMES.get(str(state.get("status") or ""))
-            if phase4_resume is not None:
-                review_argument, resume_method = phase4_resume
-                review = {"enabled": True}
-                for argument_name, review_key in (
-                    ("step_review_call_id", "call_id"),
-                    ("step_review_decision", "decision"),
-                    ("step_review_note", "note"),
-                ):
-                    value = self._optional_text(command, argument_name)
-                    if value is not None:
-                        review[review_key] = value
-                workflow = PhaseFourWorkflow(settings, **{review_argument: review})
-                return getattr(workflow, resume_method)(run_id=run_id)
+            node = node_for(str(state.get("status") or ""))
+            review: dict[str, object] = {}
+            for argument_name, review_key in (
+                ("step_review_call_id", "call_id"),
+                ("step_review_decision", "decision"),
+                ("step_review_note", "note"),
+            ):
+                value = self._optional_text(command, argument_name)
+                if value is not None:
+                    review[review_key] = value
+            # Built per call so the classes are looked up at dispatch time.
+            workflows = {
+                PHASE_ONE: PhaseOneWorkflow,
+                PHASE_TWO: PhaseTwoWorkflow,
+                PHASE_THREE: PhaseThreeWorkflow,
+                PHASE_FOUR: PhaseFourWorkflow,
+            }
+            if node is not None and node.step_review is not None:
+                pause = node.step_review
+                enabled = {"enabled": True, **review} if pause.always_enabled or review else None
+                return getattr(workflows[pause.workflow](settings, **{pause.argument: enabled}), pause.method)(
+                    run_id=run_id
+                )
+            if node is not None and node.workflow != PHASE_FOUR and node.continue_routes:
+                workflow = phase_one if node.workflow == PHASE_ONE else workflows[node.workflow](settings)
+                return getattr(workflow, node.continue_routes[0].handler)(run_id=run_id)
             developer_review: dict[str, object] = {}
             review_all = bool(command.arguments.get("step_review"))
             if review_all or bool(command.arguments.get("step_review_input")):
