@@ -639,6 +639,8 @@ class _PhaseFourCore:
             return self._continue_runtime_closure_act(state=state, run_id=run_id)
         if status == "blocked" and self._browser_retry_stage(state):
             return self._resume_browser_stage(state=state, run_id=run_id)
+        if self._final_verification_retry_allowed(state):
+            return self._continue_final_verification(state=state, run_id=run_id)
         if (
             status == "blocked"
             and self._browser_execution_active(state)
@@ -721,6 +723,14 @@ class _PhaseFourCore:
             return self._continue_implementation_repair(state=state, run_id=run_id)
         if status == "qa_repair_needed":
             return self._continue_qa_repair(state=state, run_id=run_id)
+        if status == "qa_tested" and self._documentation_closure_enforced(state):
+            return self._continue_documentation_closure(state=state, run_id=run_id)
+        if status == "documentation_approved":
+            return self._continue_final_verification(state=state, run_id=run_id)
+        if status == "final_verification_passed":
+            return self._continue_publication_preview(state=state, run_id=run_id)
+        if status == "publication_approved":
+            return self._continue_approved_publication(state=state, run_id=run_id)
         if status in {"qa_tested", "code_review_publish_failed"}:
             return self._continue_code_review_publish(state=state, run_id=run_id)
         if status == "code_review_published":
@@ -2509,6 +2519,8 @@ def _implementation_repair_feedback(
 
 from .phase4_browser import PhaseFourBrowserStagesCycle
 from .phase4_closure import PhaseFourRuntimeClosureCycle
+from .phase4_documentation import PhaseFourDocumentationCycle
+from .phase4_final_verification import PhaseFourFinalVerificationCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
 from .phase4_qa import PhaseFourQaCycle
@@ -2516,6 +2528,8 @@ from .phase4_qa import PhaseFourQaCycle
 
 class PhaseFourWorkflow(
     PhaseFourPublicationCycle,
+    PhaseFourFinalVerificationCycle,
+    PhaseFourDocumentationCycle,
     PhaseFourBrowserStagesCycle,
     PhaseFourRuntimeClosureCycle,
     PhaseFourQaCycle,

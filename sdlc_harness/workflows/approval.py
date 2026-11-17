@@ -53,6 +53,16 @@ class CheckpointApprovalWorkflow:
                 run_id=run_id,
                 checkpoint_id=checkpoint_id,
             )
+        if status == "waiting_documentation_review":
+            return PhaseFourWorkflow(self.settings).approve_documentation_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
+        if status == "publication_previewed":
+            return PhaseFourWorkflow(self.settings).approve_publication_checkpoint(
+                run_id=run_id,
+                checkpoint_id=checkpoint_id,
+            )
         if status == "code_review_ready":
             return PhaseFourWorkflow(self.settings).approve_code_review_checkpoint(
                 run_id=run_id,

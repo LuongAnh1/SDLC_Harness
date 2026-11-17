@@ -79,6 +79,7 @@ class Settings:
     uiux_skill_mode: str
     runtime_closure_mode: str
     browser_stages_mode: str
+    documentation_closure_mode: str
     browser_readiness_repair_limit: int
     browser_polish_repair_limit: int
     browser_qa_repair_limit: int
@@ -478,6 +479,10 @@ def load_settings(
     browser_stages_mode = merged.get("SDLC_BROWSER_STAGES_MODE", "off").strip().lower() or "off"
     if browser_stages_mode not in {"off", "enforce"}:
         browser_stages_mode = "off"
+    # Only consulted at `qa_tested` of a run whose browser stages passed (L5.5).
+    documentation_closure_mode = merged.get("SDLC_DOCUMENTATION_CLOSURE_MODE", "off").strip().lower() or "off"
+    if documentation_closure_mode not in {"off", "enforce"}:
+        documentation_closure_mode = "off"
     verification_policy_version = merged.get(
         "SDLC_VERIFICATION_POLICY_VERSION",
         "verification_stage_policy_v1",
@@ -584,6 +589,7 @@ def load_settings(
         uiux_skill_mode=uiux_skill_mode,
         runtime_closure_mode=runtime_closure_mode,
         browser_stages_mode=browser_stages_mode,
+        documentation_closure_mode=documentation_closure_mode,
         browser_readiness_repair_limit=_int_value(
             merged.get("SDLC_BROWSER_READINESS_REPAIR_LIMIT"), default=2, minimum=0
         ),

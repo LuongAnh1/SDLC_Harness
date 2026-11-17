@@ -60,6 +60,7 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.verification import VerificationResult, VerificationRunner, VerificationStageResult
+from sdlc_harness.verification.registry import BROWSER_CAPTURE_SPEC_PATH, RUNTIME_PROBE_SPEC_PATH
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase4 import (
@@ -68,7 +69,7 @@ from sdlc_harness.workflows.phase4 import (
     _verification_repair_feedback,
     _verification_attempt_count,
 )
-from sdlc_harness.workflows.phase4_browser import _scenario_candidate_units
+from sdlc_harness.workflows.phase4_browser import _scenario_candidate_units, _worktree_fingerprint
 from sdlc_harness.workflows.phase4_publication import _code_validation_verification_evidence
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import (
@@ -619,6 +620,105 @@ class MissingRequirementQaLlm:
                     }
                 ],
                 "risks": [],
+            }
+        )
+
+
+class FinalVerificationRunnerStub(BrowserVerificationRunnerStub):
+    """Browser stub plus the L5.5.3 CI-parity suite (`verification_stage_policy_v2`) and the demo-flag build."""
+
+    def __init__(self, final_outcomes: list[str] | None = None):
+        super().__init__()
+        self.final_outcomes = list(final_outcomes or [])
+        self.final_calls: list[dict[str, object]] = []
+        self.demo_calls: list[dict[str, object]] = []
+
+    def run(self, *, target_path: Path, work_packet: dict[str, object], verification_policy=None, **kwargs):
+        if verification_policy is None or verification_policy.policy_version != "verification_stage_policy_v2":
+            return super().run(target_path=target_path, work_packet=work_packet, verification_policy=verification_policy, **kwargs)
+        self.final_calls.append(
+            {
+                "target_path": target_path,
+                "run_id": work_packet["run_id"],
+                "kwargs": sorted(kwargs),
+                "harness_specs": [
+                    path for path in (RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH) if (target_path / path).exists()
+                ],
+                "readme": (target_path / "README.md").read_text(encoding="utf-8") if (target_path / "README.md").is_file() else "",
+            }
+        )
+        outcome = self.final_outcomes.pop(0) if self.final_outcomes else "passed"
+        return self._suite(target_path, verification_policy.stage_ids, failing_stage="database_ready" if outcome == "env" else "")
+
+    def run_demo_flag_stage(self, *, target_path: Path, work_packet, verification_policy, stage_id: str, demo_flag_env_key: str):
+        self.demo_calls.append({"target_path": target_path, "stage_id": stage_id, "key": demo_flag_env_key})
+        return self._suite(target_path, (stage_id,), failing_stage="")
+
+    @staticmethod
+    def _suite(target_path: Path, stage_ids, *, failing_stage: str) -> VerificationResult:
+        stages = tuple(
+            VerificationStageResult(
+                stage_id=stage_id,
+                status="failed" if stage_id == failing_stage else "passed",
+                argv=("npm", "run", stage_id),
+                cwd=".",
+                timeout_seconds=120,
+                exit_code=1 if stage_id == failing_stage else 0,
+                duration_seconds=0.01,
+                stdout="",
+                stderr="",
+                reason="docker unavailable" if stage_id == failing_stage else "ok",
+                failure_kind="environment" if stage_id == failing_stage else "",
+            )
+            for stage_id in stage_ids
+        )
+        failed = next((item for item in stages if item.status == "failed"), None)
+        return VerificationResult(
+            status="failed" if failed else "passed",
+            command="fake final verification",
+            cwd=str(target_path),
+            exit_code=1 if failed else 0,
+            duration_seconds=0.01,
+            stdout="",
+            stderr="",
+            reason=failed.reason if failed else "ok",
+            failure_kind=failed.failure_kind if failed else "",
+            planned_stage_ids=tuple(stage_ids),
+            executed_stage_ids=tuple(stage_ids),
+            stage_results=stages,
+        )
+
+
+class PreviewRecordingPublisher:
+    """L5.5 D7: records the dry-run preview and the real publish separately."""
+
+    def __init__(self) -> None:
+        self.previews: list[dict[str, object]] = []
+        self.publishes: list[dict[str, object]] = []
+
+    def preview(self, **kwargs: object) -> dict[str, object]:
+        self.previews.append(dict(kwargs))
+        return {
+            "version": "github_publication_preview_v1",
+            "repository": kwargs["repository"],
+            "branch": kwargs["branch"],
+            "base_branch": kwargs["base_branch"],
+            "publication_paths": list(kwargs["publication_paths"]),
+            "evidence_only_paths": list(kwargs["evidence_only_paths"]),
+            "staged_paths": ["README.md"],
+            "existing_run_commit": "",
+        }
+
+    def publish(self, **kwargs: object):
+        from sdlc_harness.sync.github import GitHubCodeReviewResult
+
+        self.publishes.append(dict(kwargs))
+        return GitHubCodeReviewResult(
+            {
+                "version": "github_code_review_v1",
+                "status": "published",
+                "commit": {"operation": "created", "sha": "abc123"},
+                "pull_request": {"number": 7, "url": "https://github.com/example/target/pull/7", "isDraft": True},
             }
         )
 
@@ -4738,6 +4838,269 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(tested["status"], "qa_tested", tested)
         self.assertEqual(tested["quality_reports"]["qa_acceptance"]["scenario_count"], 3)
         self.assertEqual(validator.calls, 3)
+
+    def _documented_run(self, runner: BrowserVerificationRunnerStub, readme: bytes) -> tuple[str, dict[str, object]]:
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        (self._closure_worktree(run_id) / "README.md").write_bytes(readme)
+        return run_id, self._browser_workflow(runner).continue_run(run_id=run_id)
+
+    def test_documentation_closure_writes_only_the_harness_section_and_waits_for_the_owner(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        # A stale section, as left by a draft killed before its state write, is replaced, not duplicated.
+        owner_text = b"# Target\r\n\r\nOwner text.\r\n"
+        stale = owner_text + b"\r\n<!-- sdlc-harness:run-doc begin -->\r\nold\r\n<!-- sdlc-harness:run-doc end -->\r\n"
+        run_id, waiting = self._documented_run(runner, stale)
+        calls_after_qa = len(runner.calls)
+
+        self.assertEqual(waiting["status"], "waiting_documentation_review", waiting)
+        self.assertEqual(waiting["pending_checkpoint"]["type"], "documentation_closure_review")
+        self.assertEqual(len(runner.calls), calls_after_qa)
+        readme = (self._closure_worktree(run_id) / "README.md").read_bytes()
+        self.assertTrue(readme.startswith(owner_text))
+        self.assertEqual(readme.count(b"sdlc-harness:run-doc begin"), 1)
+        self.assertNotIn(b"\nold\r\n", readme)
+        self.assertEqual(readme.replace(b"\r\n", b"").count(b"\n"), 0)
+        artifact = self._artifact(waiting, "documentation_closure")
+        self.assertEqual(artifact["gates"]["issues"], [])
+        stage_ids = {item["stage_id"] for item in artifact["context"]["commands"]}
+        self.assertTrue(stage_ids)
+        self.assertFalse(stage_ids & {"runtime_probe", "browser_capture"})
+        self.assertIn("## Diff", (self.repo_root / waiting["pending_checkpoint"]["artifact_path"]).read_text(encoding="utf-8"))
+
+        approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+
+        self.assertEqual(approved["status"], "documentation_approved", approved)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["documentation_closure"]["mode"], "enforce")
+        self.assertEqual(state["documentation_closure"]["status"], "approved")
+        paths, evidence_only = self._publication_manifest(run_id, approved)
+        self.assertIn("README.md", paths)
+        self.assertEqual(
+            evidence_only, ["tests/e2e/runtime-closure.probe.spec.ts", "tests/e2e/sdlc-browser-capture.spec.ts"]
+        )
+        self.assertFalse(set(paths) & set(evidence_only))
+
+    def _publication_manifest(self, run_id: str, response: dict[str, object]) -> tuple[list[str], list[str]]:
+        return PhaseFourWorkflow(self.settings)._code_review_publication_manifest(
+            state=PhaseOneWorkflow(self.settings).store.read_state(run_id),
+            run_id=run_id,
+            work_packet=self._artifact(response, "developer_work_packet"),
+            qa_generated=self._artifact(response, "qa_generated_tests"),
+        )
+
+    def test_documentation_closure_approval_refuses_a_readme_edited_after_drafting(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id, waiting = self._documented_run(runner, b"# Target\n")
+        readme = self._closure_worktree(run_id) / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"edited\n")
+
+        with self.assertRaises(HarnessError) as raised:
+            CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+                run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+            )
+
+        self.assertEqual(raised.exception.error_code, "documentation_changed")
+        self.assertEqual(PhaseOneWorkflow(self.settings).store.read_state(run_id)["status"], "waiting_documentation_review")
+
+    def _documentation_approved_run(self, runner: FinalVerificationRunnerStub) -> str:
+        run_id, waiting = self._documented_run(runner, b"# Target\n")
+        approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        self.assertEqual(approved["status"], "documentation_approved", approved)
+        self._scope_closure_fixture_files(run_id)
+        return run_id
+
+    def _scope_closure_fixture_files(self, run_id: str) -> None:
+        # The closure fixture writes these as the Developer's own files; a real packet lists them in its scope.
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        path = self.repo_root / state["latest_artifacts"]["developer_work_packet"]
+        packet = json.loads(path.read_text(encoding="utf-8"))
+        packet["output_contract"]["allowed_paths"] = sorted(
+            {*packet["output_contract"]["allowed_paths"], "apps/api/src/feed-client.ts", self.DEMO_IMPORTER}
+        )
+        path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def test_final_verification_runs_ci_suite_on_the_publication_tree_and_the_documented_demo_build(self) -> None:
+        runner = FinalVerificationRunnerStub()
+        run_id = self._documentation_approved_run(runner)
+        worktree = self._closure_worktree(run_id)
+
+        passed = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(passed["status"], "final_verification_passed", passed)
+        call = runner.final_calls[0]
+        self.assertNotEqual(call["target_path"], worktree)
+        self.assertEqual(call["harness_specs"], [])  # Harness specs stay out of the published tree (D4)
+        self.assertIn("sdlc-harness:run-doc begin", call["readme"])
+        self.assertEqual(call["run_id"], f"{run_id}-final")
+        self.assertNotIn("runtime_probe", call["kwargs"])
+        self.assertNotIn("browser_capture", call["kwargs"])
+        self.assertFalse(call["target_path"].exists())  # the temporary tree is removed
+        self.assertTrue((worktree / BROWSER_CAPTURE_SPEC_PATH).is_file())  # the run worktree keeps its evidence
+        report = self._artifact(passed, "final_verification")
+        self.assertEqual((report["f1"]["ok"], report["f2"]["ok"], report["f3"]["ok"]), (True, True, True))
+        self.assertEqual(report["f3"]["not_run_in_f2"], [])
+        documentation = self._artifact(passed, "documentation_closure")
+        demo = [item for item in documentation["context"]["env"] if item["source"] == "demo_flag"]
+        self.assertEqual(len(demo), 1)
+        self.assertEqual(
+            report["f3"]["demo_build"]["env"], {demo[0]["name"]: "1"}
+        )
+        self.assertEqual(
+            [(item["stage_id"], item["key"]) for item in runner.demo_calls],
+            [("frontend_build", item["name"]) for item in demo],
+        )
+
+    def test_final_verification_passes_after_a_browser_qa_repair_round(self) -> None:
+        # r9 (2026-11-17): the QA repair verification is F1's source and must carry a worktree fingerprint.
+        runner = FinalVerificationRunnerStub()
+        runner.outcomes = ["passed", "passed", "passed", "repo_e2e"]
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], "browser_qa_repair_needed")
+        self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], "browser_qa_written")
+        self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], "browser_qa_verified")
+        self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], "qa_tested")
+        waiting = self._browser_workflow(runner).continue_run(run_id=run_id)
+        self.assertEqual(waiting["status"], "waiting_documentation_review", waiting)
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        self._scope_closure_fixture_files(run_id)
+
+        passed = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(passed["status"], "final_verification_passed", passed)
+        report = self._artifact(passed, "final_verification")
+        self.assertTrue(report["f1"]["source_verification"].endswith(".json"))
+        self.assertIn("browser_qa_verification", report["f1"]["source_verification"])
+
+    def test_final_verification_blocks_when_the_worktree_changed_after_verification(self) -> None:
+        runner = FinalVerificationRunnerStub()
+        run_id = self._documentation_approved_run(runner)
+        changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// after approval\n", encoding="utf-8")
+
+        blocked = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "final_verification_failed")
+        self.assertIn(self.DEMO_IMPORTER, blocked["last_error"]["message"])
+        self.assertEqual(runner.final_calls, [])
+        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
+
+    def test_final_verification_blocks_changes_outside_the_publication_manifest(self) -> None:
+        runner = FinalVerificationRunnerStub()
+        run_id = self._documentation_approved_run(runner)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        verification = self.repo_root / state["browser_stages"]["qa"]["verification"]
+        payload = json.loads(verification.read_text(encoding="utf-8"))
+        (self._closure_worktree(run_id) / "notes.txt").write_text("not owned by the run\n", encoding="utf-8")
+        # Same fingerprint as the stray file, so only the manifest check can catch it.
+        payload["worktree_fingerprint"] = _worktree_fingerprint(self._closure_worktree(run_id))
+        verification.write_text(json.dumps(payload), encoding="utf-8")
+
+        blocked = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertIn("notes.txt", blocked["last_error"]["message"])
+        self.assertEqual(runner.final_calls, [])
+
+    def test_final_verification_retries_an_environment_failure(self) -> None:
+        runner = FinalVerificationRunnerStub(final_outcomes=["env"])
+        run_id = self._documentation_approved_run(runner)
+
+        blocked = self._browser_workflow(runner).continue_run(run_id=run_id)
+        self.assertEqual(blocked["last_error"]["error_code"], "final_verification_environment_failed", blocked)
+        self.assertIn("continue_run", blocked["allowed_next_actions"])
+        self.assertFalse(runner.final_calls[0]["target_path"].exists())
+
+        passed = self._browser_workflow(runner).continue_run(run_id=run_id)
+
+        self.assertEqual(passed["status"], "final_verification_passed", passed)
+        self.assertEqual(len(runner.final_calls), 2)
+
+    def _previewed_run(self, runner: FinalVerificationRunnerStub, publisher: PreviewRecordingPublisher) -> tuple[str, dict[str, object]]:
+        run_id = self._documentation_approved_run(runner)
+        self.assertEqual(self._browser_workflow(runner).continue_run(run_id=run_id)["status"], "final_verification_passed")
+        workflow = self._browser_workflow(runner)
+        workflow.github_publisher = publisher
+        with self._github_repository():
+            return run_id, workflow.continue_run(run_id=run_id)
+
+    def _github_repository(self):
+        # The fixture's origin is a local bare repository, not a GitHub remote.
+        return patch("sdlc_harness.workflows.phase4_publication.github_repository_from_remote", return_value="example/target")
+
+    def test_publication_preview_waits_for_the_owner_then_publishes_the_previewed_manifest(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, previewed = self._previewed_run(runner, publisher)
+
+        self.assertEqual(previewed["status"], "publication_previewed", previewed)
+        self.assertEqual(previewed["pending_checkpoint"]["type"], "publication_preview")
+        self.assertEqual((len(publisher.previews), len(publisher.publishes)), (1, 0))
+        preview = publisher.previews[0]
+        self.assertIn("README.md", preview["publication_paths"])
+        self.assertEqual(preview["evidence_only_paths"], [RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH])
+        body = (self.repo_root / previewed["pending_checkpoint"]["artifact_path"]).read_text(encoding="utf-8")
+        for heading in ("## Runtime Closure", "## UI Polish", "## Browser QA", "## Documentation Closure", "## Final Verification"):
+            self.assertIn(heading, body)
+        self.assertIn(f"`{BROWSER_CAPTURE_SPEC_PATH}` stays out of this PR", body)
+
+        approved = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=previewed["pending_checkpoint"]["checkpoint_id"]
+        )
+        self.assertEqual(approved["status"], "publication_approved", approved)
+        self.assertEqual(len(publisher.publishes), 0)
+        workflow = self._browser_workflow(runner)
+        workflow.github_publisher = publisher
+        with self._github_repository():
+            published = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(published["status"], "code_review_published", published)
+        call = publisher.publishes[0]
+        self.assertEqual(call["publication_paths"], preview["publication_paths"])
+        self.assertEqual(call["evidence_only_paths"], preview["evidence_only_paths"])
+        self.assertEqual((self.repo_root / published["latest_artifacts"]["github_pr_body"]).read_text(encoding="utf-8"), body)
+
+    def test_approved_publication_refuses_a_tree_changed_after_final_verification(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, previewed = self._previewed_run(runner, publisher)
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=previewed["pending_checkpoint"]["checkpoint_id"]
+        )
+        changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// after preview\n", encoding="utf-8")
+        workflow = self._browser_workflow(runner)
+        workflow.github_publisher = publisher
+
+        with self._github_repository():
+            blocked = workflow.continue_run(run_id=run_id)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "publication_tree_changed")
+        self.assertEqual(publisher.publishes, [])
+
+    def test_documentation_closure_off_keeps_qa_tested_on_the_publication_path(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+
+        self.assertEqual(state["status"], "qa_tested")
+        self.assertNotIn("documentation_closure", state)
+        self.assertFalse(self._browser_workflow(runner)._documentation_closure_enforced(state))
+        paths, evidence_only = self._publication_manifest(run_id, tested)
+        self.assertEqual(evidence_only, [])
+        self.assertIn("tests/e2e/sdlc-browser-capture.spec.ts", paths)
+        self.assertNotIn("README.md", paths)
 
     def test_browser_qa_cache_rechecks_only_a_scenario_whose_prompt_changed(self) -> None:
         runner = BrowserVerificationRunnerStub()

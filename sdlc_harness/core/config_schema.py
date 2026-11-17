@@ -468,6 +468,15 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 options=("off", "enforce"),
             ),
             _field(
+                "SDLC_DOCUMENTATION_CLOSURE_MODE",
+                "Documentation closure mode",
+                "enum",
+                "off",
+                "Off đi thẳng publication cũ sau qa_tested; enforce đưa run có browser stage qua Documentation Closure "
+                "và Final Verification trước publication (pin theo run).",
+                options=("off", "enforce"),
+            ),
+            _field(
                 "SDLC_BROWSER_READINESS_REPAIR_LIMIT",
                 "Browser readiness repair limit",
                 "integer",
