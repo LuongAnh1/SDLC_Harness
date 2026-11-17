@@ -3011,24 +3011,28 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertTrue(resumed.exception.progress["pending_step_review"]["call_id"].endswith("-0002-a01"))
         self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
 
-    def test_step_review_prompt_drift_preserves_approved_worktree_for_rejection(self) -> None:
+    def test_step_review_prompt_change_supersedes_the_pending_call_and_keeps_the_approved_write(self) -> None:
+        # G1.5: approving an exchange whose prompt changed no longer fails with developer_step_review_drift; the
+        # call is asked again with the current prompt and paused for its own review.
         packet = self.unit_packet()
         packet["execution_units"] = [packet["execution_units"][0]]
+        complete_unit = action(
+            "execution.complete_unit",
+            {
+                "summary": "implementation complete",
+                "path_dispositions": [
+                    {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                ],
+            },
+        )
         llm = ScriptedLlm(
             [
                 action(
                     "repo.write_file",
                     {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"},
                 ),
-                action(
-                    "execution.complete_unit",
-                    {
-                        "summary": "implementation complete",
-                        "path_dispositions": [
-                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
-                        ],
-                    },
-                ),
+                complete_unit,
+                complete_unit,
             ]
         )
 
@@ -3070,7 +3074,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         working_state_path.write_text(json.dumps(working_state), encoding="utf-8")
 
-        with self.assertRaises(DeveloperExecutionError) as drift:
+        with self.assertRaises(DeveloperExecutionError) as changed:
             self.executor(
                 llm,
                 step_review={
@@ -3084,11 +3088,14 @@ class DeveloperToolLoopTest(unittest.TestCase):
                 target_path=self.repo,
             )
 
-        self.assertEqual(drift.exception.error_code, "developer_step_review_drift")
-        self.assertTrue(drift.exception.retriable)
+        self.assertEqual(changed.exception.error_code, "developer_step_review_required")
+        replacement = changed.exception.progress["pending_step_review"]
+        self.assertEqual(replacement["call_id"], second_pending["call_id"].replace("-a01", "-a02"))
+        self.assertIn("Regenerate safely.", llm.prompts[-1])
+        self.assertEqual(len(llm.prompts), 3)
         self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
-        journal = json.loads((self.root / drift.exception.journal_path).read_text(encoding="utf-8"))
-        self.assertEqual(journal["items"][0]["status"], "review_required")
+        superseded = json.loads((self.root / second_pending["exchange_path"]).read_text(encoding="utf-8"))
+        self.assertEqual((superseded["status"], superseded["superseded_reason"]), ("superseded", "input_changed"))
 
     def test_operator_recovery_restores_only_hash_bound_approved_mutations(self) -> None:
         packet = self.unit_packet()

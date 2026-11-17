@@ -169,23 +169,37 @@ class ReviewableLlmClient:
             image_sha256=_image_sha256(request_options),
         )
 
+        # G1.5: an exchange is bound to its input. When the input changed (a Harness fix, a newer upstream
+        # artifact), the stored exchange is never replayed or approved: it is superseded and the call is asked
+        # again under the same review rules, so a stale output can never answer a new input. A rejection keeps its
+        # own path, which already rebuilds the call from the current prompt and carries the owner's note.
+        if (
+            latest
+            and str(latest.get("status") or "") in _INPUT_BOUND_STATUSES
+            and _resume_prompt_hash(latest, calls) != prompt_hash
+            and not self._rejects(latest)
+        ):
+            supersedes = _supersede_for_input_change(latest, calls=calls, prompt=prompt, prompt_hash=prompt_hash)
+            _write_json(self.root / f"exchange_{latest['call_id']}.json", latest)
+            self._write_session({**session, "calls": calls})
+            return self._prepare_exchange(
+                session=session,
+                calls=calls,
+                ordinal=ordinal,
+                attempt=len(attempts) + 1,
+                system=system,
+                prompt=prompt,
+                prompt_hash=prompt_hash,
+                with_metadata=with_metadata,
+                request_options=request_options,
+                supersedes=supersedes,
+            )
+
         if latest and str(latest.get("status") or "") in {"approved", "completed"}:
-            if _resume_prompt_hash(latest, calls) != prompt_hash:
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    f"Approved exchange {latest.get('call_id')} no longer matches the {self.label} prompt.",
-                    run_id=self.run_id,
-                )
             self.last_replay_kind = "approved"
             return _replay_completion(latest, with_metadata=with_metadata)
 
         if latest and str(latest.get("status") or "") == "input_approved":
-            if _resume_prompt_hash(latest, calls) != prompt_hash:
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    f"Approved input {latest.get('input_review_call_id')} no longer matches the {self.label} prompt.",
-                    run_id=self.run_id,
-                )
             return self._call_provider(
                 session=session,
                 calls=calls,
@@ -251,24 +265,6 @@ class ReviewableLlmClient:
         if str(self.review.get("call_id") or "") != review_call_id or decision not in {"approve", "reject"}:
             self._raise_pending(pending)
         if decision == "approve":
-            if _resume_prompt_hash(pending, calls) != prompt_hash:
-                stored_prompt = str(pending.get("prompt") or "")
-                first_difference = next(
-                    (
-                        index
-                        for index, (stored, current) in enumerate(zip(stored_prompt, prompt))
-                        if stored != current
-                    ),
-                    min(len(stored_prompt), len(prompt)),
-                )
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    (
-                        f"Pending input {review_call_id} no longer matches the {self.label} prompt "
-                        f"(stored={len(stored_prompt)}, current={len(prompt)}, first_difference={first_difference})."
-                    ),
-                    run_id=self.run_id,
-                )
             note = str(self.review.get("note") or "").strip()
             pending["status"] = "input_approved"
             pending["input_review"] = {
@@ -356,24 +352,6 @@ class ReviewableLlmClient:
         if str(self.review.get("call_id") or "") != call_id or decision not in {"approve", "reject"}:
             self._raise_pending(pending)
         if decision == "approve":
-            if _resume_prompt_hash(pending, calls) != prompt_hash:
-                stored_prompt = str(pending.get("prompt") or "")
-                first_difference = next(
-                    (
-                        index
-                        for index, (stored, current) in enumerate(zip(stored_prompt, prompt))
-                        if stored != current
-                    ),
-                    min(len(stored_prompt), len(prompt)),
-                )
-                raise HarnessError(
-                    f"{self.error_prefix}_step_review_drift",
-                    (
-                        f"Pending exchange {call_id} no longer matches the {self.label} prompt "
-                        f"(stored={len(stored_prompt)}, current={len(prompt)}, first_difference={first_difference})."
-                    ),
-                    run_id=self.run_id,
-                )
             pending["status"] = "approved"
             note = str(self.review.get("note") or "").strip()
             if note:
@@ -435,10 +413,11 @@ class ReviewableLlmClient:
         resume_prompt_hash: str = "",
         with_metadata: bool = False,
         request_options: dict[str, object] | None = None,
+        supersedes: dict[str, object] | None = None,
     ) -> str | LlmCompletion:
         options = dict(request_options or {})
         call_id = f"{self.call_prefix}-{ordinal:04d}-a{attempt:02d}"
-        exchange = {
+        exchange: dict[str, object] = {
             "call_id": call_id,
             "ordinal": ordinal,
             "attempt": attempt,
@@ -455,6 +434,8 @@ class ReviewableLlmClient:
             "finish_reason": "",
             "usage": {},
         }
+        if supersedes:
+            exchange["supersedes"] = supersedes
         if self.review_input:
             exchange["input_review_call_id"] = f"{call_id}-input"
             calls.append(exchange)
@@ -530,6 +511,17 @@ class ReviewableLlmClient:
             review_stage="output",
         )
 
+    def _rejects(self, exchange: dict[str, object]) -> bool:
+        """True when this call's review decision rejects `exchange`'s pending input or output."""
+
+        status = str(exchange.get("status") or "")
+        reviewed = exchange.get("input_review_call_id") if status == "input_pending" else exchange.get("call_id")
+        return (
+            status in {"input_pending", "pending"}
+            and str(self.review.get("decision") or "") == "reject"
+            and str(self.review.get("call_id") or "") == str(reviewed or "")
+        )
+
     def _raise_pending(self, pending: dict[str, object]) -> None:
         review_stage = "input" if str(pending.get("status") or "") == "input_pending" else "output"
         exchange_call_id = str(pending.get("call_id") or "")
@@ -565,6 +557,46 @@ class ReviewableLlmClient:
     def _write_session(self, session: dict[str, object]) -> None:
         session["updated_at"] = utc_now_iso()
         _write_json(self.session_path, session)
+
+
+# Statuses whose stored input still decides what happens next (replay, provider call or a pending review).
+_INPUT_BOUND_STATUSES = frozenset({"approved", "completed", "input_approved", "input_pending", "pending"})
+
+
+def _supersede_for_input_change(
+    exchange: dict[str, object],
+    *,
+    calls: list[dict[str, object]],
+    prompt: str,
+    prompt_hash: str,
+) -> dict[str, object]:
+    """Mark `exchange` superseded by a changed input; return what the replacing exchange records about it."""
+
+    stored = str(exchange.get("prompt") or "")
+    first_difference = next(
+        (index for index, (before, after) in enumerate(zip(stored, prompt)) if before != after),
+        min(len(stored), len(prompt)),
+    )
+    previous_status = str(exchange.get("status") or "")
+    previous_hash = _resume_prompt_hash(exchange, calls)
+    exchange.update(
+        {
+            "status": "superseded",
+            "superseded_from_status": previous_status,
+            "superseded_at": utc_now_iso(),
+            "superseded_reason": "input_changed",
+            "superseded_by_prompt_hash": prompt_hash,
+        }
+    )
+    return {
+        "call_id": str(exchange.get("call_id") or ""),
+        "status": previous_status,
+        "reason": "input_changed",
+        "prompt_hash": previous_hash,
+        "previous_length": len(stored),
+        "length": len(prompt),
+        "first_difference": first_difference,
+    }
 
 
 def _prompt_hash(*, system: str, prompt: str, image_sha256: tuple[str, ...] = ()) -> str:

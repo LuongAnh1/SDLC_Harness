@@ -329,12 +329,15 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
                 ).content,
                 '{"ok":true}',
             )
-            with self.assertRaises(HarnessError) as drift:
-                ReviewableLlmClient(base, store=store, run_id="run-images").complete_with_metadata(
-                    system="validator", prompt="review", images=[second_ref], accepts_images=True
-                )
-            self.assertEqual(drift.exception.error_code, "implementation_plan_step_review_drift")
+            # G1.5: another image is another input; the approved answer is superseded, never replayed.
+            with self.assertRaises(LlmStepReviewRequired) as changed:
+                ReviewableLlmClient(
+                    base, store=store, run_id="run-images", review={"review_input": True}
+                ).complete_with_metadata(system="validator", prompt="review", images=[second_ref], accepts_images=True)
+            self.assertEqual(changed.exception.progress["call_id"], "implementation-plan-0001-a02-input")
             self.assertEqual(len(base.prompts), 1)
+            old = json.loads(exchange_path.read_text(encoding="utf-8"))
+            self.assertEqual((old["status"], old["superseded_reason"]), ("superseded", "input_changed"))
 
     def test_scoped_review_uses_design_validator_identity_and_storage(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -491,11 +494,12 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
             )
             self.assertTrue(session["calls"][0]["replacement_prompt_hash"].startswith("sha256:"))
 
-    def test_approval_still_fails_closed_after_prompt_change(self) -> None:
+    def test_approving_an_outdated_exchange_opens_a_new_one_for_the_changed_prompt(self) -> None:
+        # G1.5: the approval names the old input; the changed prompt gets its own exchange and its own review.
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
-            base = _FakeClient(['{"plan":"old"}'])
+            base = _FakeClient(['{"plan":"old"}', '{"plan":"new"}'])
             first = ReviewableLlmClient(base, store=store, run_id="run-drift-approve")
             with self.assertRaises(LlmStepReviewRequired) as paused:
                 first.complete(system="planner", prompt="old prompt")
@@ -509,11 +513,56 @@ class PhaseThreeStepReviewTest(unittest.TestCase):
                     "decision": "approve",
                 },
             )
-            with self.assertRaises(HarnessError) as drift:
+            with self.assertRaises(LlmStepReviewRequired) as changed:
                 resumed.complete(system="planner", prompt="new prompt")
 
-            self.assertEqual(drift.exception.error_code, "implementation_plan_step_review_drift")
-            self.assertEqual(len(base.prompts), 1)
+            self.assertEqual(changed.exception.progress["call_id"], "implementation-plan-0001-a02")
+            self.assertEqual(base.prompts, ["old prompt", "new prompt"])
+            execution = store.run_dir("run-drift-approve") / "implementation_plan_execution"
+            old = json.loads((execution / "exchange_implementation-plan-0001-a01.json").read_text(encoding="utf-8"))
+            new = json.loads((execution / "exchange_implementation-plan-0001-a02.json").read_text(encoding="utf-8"))
+            self.assertEqual((old["status"], old["superseded_from_status"]), ("superseded", "pending"))
+            self.assertEqual(new["supersedes"]["call_id"], "implementation-plan-0001-a01")
+            self.assertEqual((new["supersedes"]["reason"], new["supersedes"]["first_difference"]), ("input_changed", 0))
+
+            # The new exchange is approved on its own and then replays without another provider call.
+            approved = ReviewableLlmClient(
+                base,
+                store=store,
+                run_id="run-drift-approve",
+                review={"call_id": "implementation-plan-0001-a02", "decision": "approve"},
+            )
+            self.assertEqual(approved.complete(system="planner", prompt="new prompt"), '{"plan":"new"}')
+            replay = ReviewableLlmClient(base, store=store, run_id="run-drift-approve")
+            self.assertEqual(replay.complete(system="planner", prompt="new prompt"), '{"plan":"new"}')
+            self.assertEqual(len(base.prompts), 2)
+
+    def test_an_approved_exchange_whose_input_changed_is_asked_again_under_input_review(self) -> None:
+        # The r9 group-A recoveries (prompt or contract changed mid-run) without a recovery: no provider call
+        # runs until the owner approves the new input.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
+            base = _FakeClient(['{"plan":"old"}'])
+            review = {"review_input": True}
+            with self.assertRaises(LlmStepReviewRequired) as input_pause:
+                ReviewableLlmClient(base, store=store, run_id="run-changed", review=review).complete(system="s", prompt="v1")
+            with self.assertRaises(LlmStepReviewRequired) as output_pause:
+                ReviewableLlmClient(
+                    base, store=store, run_id="run-changed",
+                    review={**review, "call_id": input_pause.exception.progress["call_id"], "decision": "approve"},
+                ).complete(system="s", prompt="v1")
+            ReviewableLlmClient(
+                base, store=store, run_id="run-changed",
+                review={**review, "call_id": output_pause.exception.progress["call_id"], "decision": "approve"},
+            ).complete(system="s", prompt="v1")
+
+            with self.assertRaises(LlmStepReviewRequired) as changed:
+                ReviewableLlmClient(base, store=store, run_id="run-changed", review=review).complete(system="s", prompt="v2")
+
+            self.assertEqual(changed.exception.progress["review_stage"], "input")
+            self.assertEqual(changed.exception.progress["call_id"], "implementation-plan-0001-a02-input")
+            self.assertEqual(base.prompts, ["v1"])
 
     def test_approved_output_note_reaches_the_next_provider_call(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
