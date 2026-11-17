@@ -1544,6 +1544,7 @@ def _vertical_snapshot_binding(
                 target_path=Path(str(getattr(workspace, "worktree_path", ""))),
                 landscape=landscape,
                 project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
+                verification_policy_version=str(profile.get("verification_policy_version") or ""),
             ),
             "requirement_reference_ids": sorted(
                 str(item.get("id"))

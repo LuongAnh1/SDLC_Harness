@@ -51,6 +51,7 @@ from tests._support import GitRepositoryTemplate, populate_typescript_target
 from sdlc_harness.agents.designer.ui_context import build_ui_repo_context, chain_path_to, required_props
 from sdlc_harness.agents.designer.uiux import RUNTIME_SURFACE_BINDING_VERSION
 from sdlc_harness.core.config import load_settings
+from sdlc_harness.profiles import VERIFICATION_STAGE_POLICY_VERSION
 from sdlc_harness.core.errors import HarnessError
 
 MAIN = """import { StrictMode, useState } from "react";
@@ -192,6 +193,51 @@ class UiRepoContextTest(unittest.TestCase):
                 project_profile_id="typescript_fullstack_v1",
             )
         self.assertIsNone(context)
+
+    def test_reads_http_clients_per_file_dom_directive_and_pinned_stage_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp)
+            write_web_shell(target)
+            web = target / "apps/web/src"
+            (web / "api.ts").write_text(
+                'import axios from "axios";\n'
+                'const http = axios.create({ baseURL: "/api" });\n'
+                "export async function getArticles() { return (await axios.get(`articles?limit=10`)).data; }\n"
+                'export async function getTags() { return (await http.get("tags")).data; }\n',
+                encoding="utf-8",
+            )
+            # A package default import used with a non-literal argument is not an HTTP client.
+            (web / "format.ts").write_text(
+                'import _ from "lodash";\nexport async function title(value: object) { return _.get(value, "title"); }\n',
+                encoding="utf-8",
+            )
+            (web / "AppShell.test.tsx").write_text(
+                '// @vitest-environment jsdom\nimport { it } from "vitest";\nit("renders", () => {});\n',
+                encoding="utf-8",
+            )
+            legacy = build_ui_repo_context(
+                target_path=target, landscape=LANDSCAPE, project_profile_id="typescript_fullstack_v1"
+            )
+            pinned = build_ui_repo_context(
+                target_path=target,
+                landscape=LANDSCAPE,
+                project_profile_id="typescript_fullstack_v1",
+                verification_policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+            )
+
+        assert legacy is not None and pinned is not None
+        self.assertEqual(
+            [item["ref"] for item in legacy["data_clients"]],
+            ["apps/web/src/api.ts#getArticles", "apps/web/src/api.ts#getTags"],
+        )
+        verification = legacy["verification"]
+        self.assertEqual(verification["unit_environment"], "node")
+        self.assertTrue(verification["dom_capable"])
+        self.assertEqual(verification["dom_test_directive"], "// @vitest-environment jsdom")
+        self.assertEqual(verification["active_stage_ids"], ["typecheck", "unit"])
+        self.assertFalse(verification["browser_stage_active"])
+        self.assertIn("browser_e2e", pinned["verification"]["active_stage_ids"])
+        self.assertTrue(pinned["verification"]["browser_stage_active"])
 
 
 class UiContractPinTest(unittest.TestCase):

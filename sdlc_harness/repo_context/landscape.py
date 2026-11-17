@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import posixpath
 import re
 from typing import Callable
 
@@ -46,6 +47,22 @@ _FASTIFY_ROUTE = re.compile(
     r"\b(?:app|server|fastify)\.(get|post|put|patch|delete|options|head)"
     r"\s*\(\s*([^,\n]+)"
 )
+# Any receiver (app, router, plugin instance) registering a literal "/..." path is an HTTP route.
+_LITERAL_ROUTE = re.compile(
+    r"\b[A-Za-z_$][A-Za-z0-9_$]*\.(get|post|put|patch|delete|options|head)"
+    r"\s*\(\s*([\"'`])(/[^\"'`\n]*)\2"
+)
+# A router module mounted under a prefix: `x.use("/p", router)`, `x.route("/p", router)`
+# or `x.register(plugin, { prefix: "/p" })`.
+_MOUNT_PATH_FIRST = re.compile(
+    r"\.(?:use|route)\s*\(\s*([\"'`])(/[^\"'`\n]*)\1\s*,\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[,)]"
+)
+_MOUNT_PREFIX_OPTION = re.compile(
+    r"\.register\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*,\s*\{[^}]*?\bprefix\s*:\s*([\"'`])(/[^\"'`\n]*)\2"
+)
+# The clause excludes quotes so a side-effect import (`import "./x"`) never swallows the next statement.
+_RELATIVE_IMPORT = re.compile(r"import\s+(?:type\s+)?([^;\"'`]*?)\s*from\s*[\"'](\.{1,2}/[^\"']+)[\"']")
+_MAX_MOUNT_DEPTH = 8
 _PRISMA_MODEL = re.compile(r"(?m)^\s*model\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 _PRISMA_OPERATION = re.compile(
     r"\b(?:prisma|client)\.([A-Za-z_$][A-Za-z0-9_$]*)\."
@@ -172,6 +189,7 @@ def build_repo_landscape(
                 )
 
     anchors: list[dict[str, object]] = []
+    api_sources: dict[str, str] = {}
     inspected_file_count = 0
     inspected_bytes = 0
     inspection_truncated = False
@@ -195,9 +213,12 @@ def build_repo_landscape(
                 anchors.append(_anchor(symbol_kind, component_id, relative, symbol=symbol))
             if component_id == "web" and Path(relative).name in {"main.ts", "main.tsx"}:
                 anchors.append(_anchor("ui_entrypoint", component_id, relative, symbol=Path(relative).stem))
-            if component_id == "api":
+            if component_id == "api" and kind != "test":
+                api_sources[relative] = text
                 for method, expression in _FASTIFY_ROUTE.findall(text):
                     route = " ".join(expression.strip().strip("; ").split())[:160]
+                    if route[:1] in {'"', "'", "`"}:
+                        continue  # literal paths are read by _literal_route_anchors, which adds mount prefixes
                     anchors.append(_anchor("api_route", component_id, relative, symbol=f"{method.upper()} {route}"))
             if component_id == "database":
                 for model, operation in _PRISMA_OPERATION.findall(text):
@@ -206,6 +227,7 @@ def build_repo_landscape(
             for model in sorted(set(_PRISMA_MODEL.findall(text))):
                 anchors.append(_anchor("data_model", component_id, relative, symbol=model))
 
+    anchors.extend(_literal_route_anchors(api_sources, component_id="api"))
     anchors = _dedupe_anchors(anchors)
     codegraph = _codegraph_enrichment(
         root=root,
@@ -349,6 +371,90 @@ def _anchor(kind: str, component_id: str, path: str, *, symbol: str = "") -> dic
 def _dedupe_anchors(anchors: list[dict[str, object]]) -> list[dict[str, object]]:
     unique = {str(item["anchor_id"]): item for item in anchors}
     return [unique[key] for key in sorted(unique)]
+
+
+def _literal_route_anchors(sources: dict[str, str], *, component_id: str) -> list[dict[str, object]]:
+    """Route anchors for literal paths, prefixed by every mount of the module that registers them."""
+
+    edges: list[tuple[str, str, str]] = []
+    for path, text in sources.items():
+        imports = _relative_import_targets(path, text, sources)
+        mounts = [(prefix, name) for _, prefix, name in _MOUNT_PATH_FIRST.findall(text)]
+        mounts += [(prefix, name) for name, _, prefix in _MOUNT_PREFIX_OPTION.findall(text)]
+        for prefix, name in mounts:
+            child = imports.get(name)
+            if child and child != path:
+                edges.append((path, child, prefix))
+    prefixes = _mount_prefixes(sources, edges)
+    anchors: list[dict[str, object]] = []
+    for path, text in sources.items():
+        for method, quote, route in _LITERAL_ROUTE.findall(text):
+            for prefix in prefixes[path]:
+                full = _join_route(prefix, route)[:160]
+                anchors.append(_anchor("api_route", component_id, path, symbol=f"{method.upper()} {quote}{full}{quote}"))
+    return anchors
+
+
+def _relative_import_targets(path: str, text: str, sources: dict[str, str]) -> dict[str, str]:
+    """Local binding name -> repo path of the relative module it comes from (only modules in ``sources``)."""
+
+    targets: dict[str, str] = {}
+    base = posixpath.dirname(path)
+    for clause, spec in _RELATIVE_IMPORT.findall(text):
+        stem = posixpath.normpath(posixpath.join(base, spec))
+        stem = re.sub(r"\.(?:m?js|cjs)$", "", stem)  # ESM TypeScript imports "./x.js" for "./x.ts"
+        target = next(
+            (
+                candidate
+                for candidate in (stem, f"{stem}.ts", f"{stem}.tsx", f"{stem}.mts", f"{stem}/index.ts")
+                if candidate in sources
+            ),
+            "",
+        )
+        if not target:
+            continue
+        default, _, named = clause.partition("{")
+        names = [default.strip().strip(",").strip()]
+        names += [item.strip().partition(" as ")[2].strip() or item.strip() for item in named.rstrip("}").split(",")]
+        for name in names:
+            name = name.removeprefix("type ").removeprefix("* as ").strip()
+            if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
+                targets[name] = target
+    return targets
+
+
+def _mount_prefixes(files: dict[str, str], edges: list[tuple[str, str, str]]) -> dict[str, tuple[str, ...]]:
+    incoming: dict[str, list[tuple[str, str]]] = {}
+    for parent, child, prefix in edges:
+        incoming.setdefault(child, []).append((parent, prefix))
+    resolved: dict[str, tuple[str, ...]] = {}
+
+    def resolve(path: str, seen: frozenset[str]) -> tuple[str, ...]:
+        if path in resolved:
+            return resolved[path]
+        if path not in incoming or path in seen or len(seen) >= _MAX_MOUNT_DEPTH:
+            return ("",)
+        result = tuple(
+            sorted(
+                {
+                    _join_route(parent_prefix, prefix)
+                    for parent, prefix in incoming[path]
+                    for parent_prefix in resolve(parent, seen | {path})
+                }
+            )
+        )
+        resolved[path] = result
+        return result
+
+    return {path: resolve(path, frozenset()) for path in files}
+
+
+def _join_route(prefix: str, route: str) -> str:
+    if prefix in {"", "/"}:
+        return route or "/"
+    if route in {"", "/"}:
+        return prefix.rstrip("/") or "/"
+    return f"{prefix.rstrip('/')}/{route.lstrip('/')}"
 
 
 def _scenario_matches(requirement: dict[str, object], anchors: list[dict[str, object]]) -> list[dict[str, object]]:

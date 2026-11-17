@@ -124,6 +124,59 @@ def test_builds_deterministic_landscape_with_cross_layer_anchors(tmp_path: Path)
     assert first["summary"]["unmatched_surface_count"] == 0
 
 
+def test_api_routes_carry_the_prefix_of_every_router_mount(tmp_path: Path) -> None:
+    root, snapshot, workspace = _target(tmp_path)
+    api = root / "apps/api/src"
+    (api / "routes").mkdir()
+    (api / "app.ts").write_text(
+        'import articles from "./routes/articles.js";\n'
+        'import { userRoutes as users } from "./routes/users";\n'
+        "export function createApp() {}\n"
+        'app.get("/health", async () => ({}));\n'
+        "app.get(HEALTH_ENDPOINT, health);\n"
+        'app.use("/api/articles", articles);\n'
+        'app.register(users, { prefix: "/api/users" });\n',
+        encoding="utf-8",
+    )
+    (api / "routes/articles.ts").write_text(
+        'import comments from "./comments";\n'
+        "const router = Router();\n"
+        'router.get("/", list);\n'
+        "router.put('/:slug', update);\n"
+        'router.use("/:slug/comments", comments);\n'
+        "export default router;\n",
+        encoding="utf-8",
+    )
+    (api / "routes/comments.ts").write_text(
+        'const router = Router();\nrouter.delete("/:id", remove);\nexport default router;\n',
+        encoding="utf-8",
+    )
+    (api / "routes/users.ts").write_text(
+        'export async function userRoutes(fastify) {\n  fastify.post("/login", login);\n}\n',
+        encoding="utf-8",
+    )
+    # Request calls in tests are not route registrations.
+    (api / "routes/articles.test.ts").write_text('agent.get("/not-a-route");\n', encoding="utf-8")
+
+    payload = build_repo_landscape(
+        run_id=RUN_ID,
+        target_path=root,
+        workspace=workspace,
+        snapshot=snapshot,
+        requirement_model=_requirement(),
+    )
+
+    routes = sorted((item["path"], item["symbol"]) for item in payload["anchors"] if item["kind"] == "api_route")
+    assert routes == [
+        ("apps/api/src/app.ts", 'GET "/health"'),
+        ("apps/api/src/app.ts", "GET HEALTH_ENDPOINT"),
+        ("apps/api/src/routes/articles.ts", 'GET "/api/articles"'),
+        ("apps/api/src/routes/articles.ts", "PUT '/api/articles/:slug'"),
+        ("apps/api/src/routes/comments.ts", 'DELETE "/api/articles/:slug/comments/:id"'),
+        ("apps/api/src/routes/users.ts", 'POST "/api/users/login"'),
+    ]
+
+
 def test_uses_existing_codegraph_only_as_bounded_enrichment(tmp_path: Path) -> None:
     root, snapshot, workspace = _target(tmp_path)
     (root / ".codegraph").mkdir()
