@@ -76,6 +76,7 @@ from ..verification import VerificationResult, VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
 from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
 from .graph import (
+    LLM_CALL_BUDGET,
     PHASE_FOUR,
     REPAIR_BUDGETS,
     REVIEW_BLOCKER_ROUTES,
@@ -716,10 +717,10 @@ class _PhaseFourCore:
     def adjust_budget(self, *, run_id: str, budget_id: str, limit: int, reason: str) -> dict[str, object]:
         """Owner action (G1.6): set one repair budget's limit for this run; replaces hand-edited limit recoveries."""
 
-        if budget_id not in REPAIR_BUDGETS:
+        if budget_id not in REPAIR_BUDGETS and budget_id != LLM_CALL_BUDGET:
             raise HarnessError(
                 "budget_not_supported",
-                f"Unknown repair budget {budget_id!r}; supported: {sorted(REPAIR_BUDGETS)}.",
+                f"Unknown budget {budget_id!r}; supported: {sorted([*REPAIR_BUDGETS, LLM_CALL_BUDGET])}.",
                 run_id=run_id,
             )
         if not str(reason or "").strip():
@@ -729,8 +730,11 @@ class _PhaseFourCore:
         with self.workspace_manager.locked_workspace(run_id):
             state = self.store.read_state(run_id)
             self._require_frozen_llm_mode(state, run_id=run_id)
-            previous = self._repair_limit(state, budget_id)
-            used = self._repair_used(state, budget_id)
+            if budget_id == LLM_CALL_BUDGET:
+                calls = self._llm_call_budget(state, run_id=run_id)
+                previous, used = int(calls["ceiling"]), int(calls["used"])
+            else:
+                previous, used = self._repair_limit(state, budget_id), self._repair_used(state, budget_id)
             adjusted_at = utc_now_iso()
             state["repair_budgets"] = {
                 **_dict_value(state.get("repair_budgets")),
@@ -2576,6 +2580,7 @@ def _implementation_repair_feedback(
 
 
 
+from .phase4_automation import PhaseFourAutomation
 from .phase4_browser import PhaseFourBrowserStagesCycle
 from .phase4_browser_journey import PhaseFourBrowserJourneyCycle
 from .phase4_browser_polish import PhaseFourUiPolishCycle
@@ -2591,6 +2596,7 @@ from .phase4_rewind import PhaseFourRewind
 
 
 class PhaseFourWorkflow(
+    PhaseFourAutomation,
     PhaseFourRewind,
     PhaseFourPublicationCycle,
     PhaseFourFinalVerificationCycle,

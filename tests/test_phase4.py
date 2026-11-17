@@ -5519,6 +5519,175 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
         self.assertNotIn("browser_qa_repair_feedback", blocked["latest_artifacts"])
 
+    def test_run_until_checkpoint_steps_through_machine_work_and_stops_for_the_owner(self) -> None:
+        # U1.1: one owner action per checkpoint instead of one continue_run per step.
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
+        self.assertEqual(tested["status"], "qa_tested", tested)
+
+        waiting = self._browser_workflow(runner).run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual(waiting["status"], "waiting_documentation_review", waiting)
+        self.assertEqual(
+            {key: waiting["automation"][key] for key in ("mode", "stop_reason", "steps", "path")},
+            {
+                "mode": "run_until_checkpoint",
+                "stop_reason": "owner_checkpoint",
+                "steps": 1,
+                "path": ["qa_tested", "waiting_documentation_review"],
+            },
+        )
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        self._scope_closure_fixture_files(run_id)
+        workflow = self._browser_workflow(runner)
+        workflow.github_publisher = publisher
+
+        with self._github_repository():
+            limited = workflow.run_until_checkpoint(run_id=run_id, max_steps=1)
+            previewed = workflow.run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual((limited["status"], limited["automation"]["stop_reason"]), ("final_verification_passed", "step_limit"))
+        self.assertEqual(previewed["status"], "publication_previewed", previewed)
+        self.assertEqual(
+            (previewed["automation"]["stop_reason"], previewed["automation"]["path"]),
+            ("owner_checkpoint", ["final_verification_passed", "publication_previewed"]),
+        )
+        self.assertEqual(publisher.publishes, [])  # the owner still approves the publication
+
+    def test_run_until_checkpoint_stops_at_the_llm_call_ceiling_and_the_owner_raises_it(self) -> None:
+        # U1.2 (owner option A): the ceiling is the sum of per-component caps; the owner can set it per run.
+        runner = FinalVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        self.assertEqual(
+            self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))["status"],
+            "qa_tested",
+        )
+        publisher = PreviewRecordingPublisher()
+
+        def workflow_spending(calls_per_step: int) -> PhaseFourWorkflow:
+            # Each step spends provider calls on the shared LlmClient, as Developer and agents do.
+            workflow = self._browser_workflow(runner)
+            workflow.github_publisher = publisher
+            step = workflow._continue_run_locked
+
+            def spending_step(*, run_id: str) -> dict[str, object]:
+                workflow.llm_client.provider_calls += calls_per_step
+                return step(run_id=run_id)
+
+            workflow._continue_run_locked = spending_step
+            return workflow
+
+        workflow = workflow_spending(7)
+        workflow.adjust_budget(run_id=run_id, budget_id="llm_calls", limit=0, reason="owner: stop before any step")
+        stopped = workflow.run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual((stopped["status"], stopped["automation"]["stop_reason"]), ("qa_tested", "llm_call_ceiling"))
+        calls = stopped["automation"]["llm_calls"]
+        self.assertEqual((calls["used"], calls["ceiling"]), (0, 0))
+        self.assertGreater(calls["computed"], 0)
+        recovery = workflow.store.read_state(run_id)["recoveries"][-1]
+        self.assertEqual((recovery["budget_id"], recovery["previous_limit"], recovery["used"]), ("llm_calls", calls["computed"], 0))
+
+        workflow.adjust_budget(run_id=run_id, budget_id="llm_calls", limit=10, reason="owner: allow 10 calls")
+        waiting = workflow_spending(7).run_until_checkpoint(run_id=run_id)
+        self.assertEqual(waiting["status"], "waiting_documentation_review", waiting)
+        self.assertEqual(workflow.store.read_state(run_id)["automation"]["llm_calls_used"], 7)
+        CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
+            run_id=run_id, checkpoint_id=waiting["pending_checkpoint"]["checkpoint_id"]
+        )
+        self._scope_closure_fixture_files(run_id)
+
+        with self._github_repository():
+            capped = workflow_spending(7).run_until_checkpoint(run_id=run_id)
+
+        # 7 + 7 calls passed the ceiling of 10 after Final Verification: the run stops before the preview.
+        self.assertEqual((capped["status"], capped["automation"]["stop_reason"]), ("final_verification_passed", "llm_call_ceiling"))
+        self.assertEqual(capped["automation"]["llm_calls"]["used"], 14)
+        self.assertEqual(publisher.previews, [])
+
+    def test_llm_call_ceiling_grows_with_the_units_and_scenarios_of_the_use_case(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        workflow = self._browser_workflow(runner)
+        state = workflow.store.read_state(run_id)
+        base = workflow._llm_call_components(state, run_id=run_id)
+        packet_path = self.repo_root / state["latest_artifacts"]["developer_work_packet"]
+        packet = json.loads(packet_path.read_text(encoding="utf-8"))
+        units = packet["execution_units"]
+        scenarios = len({unit.get("scenario_id") for unit in units} - {None, ""}) or 1
+        doubled = [*units, *({**unit, "unit_id": f"{unit['unit_id']}-copy", "scenario_id": f"{unit.get('scenario_id')}-copy"} for unit in units)]
+        bigger = packet_path.with_name("developer_work_packet_bigger.json")
+        bigger.write_text(json.dumps({**packet, "execution_units": doubled}), encoding="utf-8")
+
+        grown = workflow._llm_call_components(
+            {**state, "latest_artifacts": {**state["latest_artifacts"], "developer_work_packet": workflow.store.relative(bigger)}},
+            run_id=run_id,
+        )
+
+        for component in ("developer_implementation", "developer_browser_repair"):
+            self.assertEqual(grown[component], 2 * base[component], component)
+        for component in ("journey_review", "browser_qa_review"):
+            self.assertEqual(grown[component], base[component] * 2 * scenarios // scenarios, component)
+        self.assertEqual(grown["code_validation"], base["code_validation"])  # a per-pass budget, not per unit
+
+    def test_run_until_checkpoint_needs_the_owner_to_turn_configured_per_call_review_off(self) -> None:
+        # U1.3 (owner Q3): configured per-call review is never dropped silently; the owner turns it off per run.
+        runner = FinalVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        self.assertEqual(
+            self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))["status"],
+            "qa_tested",
+        )
+        workflow = self._browser_workflow(runner)
+        # As with SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED=1 in the runtime config.
+        workflow.code_validation_step_review = {"enabled": True, "review_input": True, "review_output": True}
+
+        refused = workflow.run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual(
+            (refused["status"], refused["automation"]["stop_reason"], refused["automation"]["steps"]),
+            ("qa_tested", "step_review_enabled", 0),
+        )
+        with self.assertRaises(HarnessError) as missing:
+            workflow.set_step_review(run_id=run_id, enabled=False, reason=" ")
+        self.assertEqual(missing.exception.error_code, "step_review_reason_required")
+
+        workflow.set_step_review(run_id=run_id, enabled=False, reason="owner: unattended until the README checkpoint")
+        resumed = workflow.run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual(
+            (resumed["status"], resumed["automation"]["stop_reason"]), ("waiting_documentation_review", "owner_checkpoint")
+        )
+        self.assertEqual(workflow.code_validation_step_review, {"enabled": False})
+        recovery = workflow.store.read_state(run_id)["recoveries"][-1]
+        self.assertEqual(
+            {key: recovery[key] for key in ("code", "previous_enabled", "enabled")},
+            {"code": "set_step_review", "previous_enabled": None, "enabled": False},
+        )
+
+    def test_run_until_checkpoint_stops_at_a_block_and_never_retries_it(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="0")
+        self._add_browser_qa_obligation(run_id)
+        validator = ScriptedClosureLlm(default=self._browser_qa_blocker)
+        validator.settings = self.settings
+        workflow = self._browser_workflow(runner)
+        workflow.browser_qa_validator = BrowserQaValidator(validator)
+
+        blocked = workflow.run_until_checkpoint(run_id=run_id)
+        again = workflow.run_until_checkpoint(run_id=run_id)
+
+        self.assertEqual(blocked["status"], "blocked", blocked)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
+        self.assertEqual((blocked["automation"]["stop_reason"], blocked["automation"]["steps"]), ("blocked", 1))
+        self.assertEqual((again["automation"]["stop_reason"], again["automation"]["steps"]), ("blocked", 0))
+        with self.assertRaises(HarnessError) as invalid:
+            workflow.run_until_checkpoint(run_id=run_id, max_steps=0)
+        self.assertEqual(invalid.exception.error_code, "automation_max_steps_invalid")
+
     def test_adjust_budget_lets_a_run_blocked_by_a_spent_budget_rerun_the_step_that_hit_it(self) -> None:
         # G1.6: replaces the r9 recovery owner_approved_journey_patch_limit with one owner action.
         runner = BrowserVerificationRunnerStub()

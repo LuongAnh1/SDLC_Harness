@@ -110,6 +110,19 @@ def build_parser() -> argparse.ArgumentParser:
     rewind_run.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
     rewind_run.add_argument("--runtime-root", default=None)
 
+    run_until_checkpoint = subparsers.add_parser("run-until-checkpoint")
+    run_until_checkpoint.add_argument("--run-id", required=True)
+    run_until_checkpoint.add_argument("--max-steps", default=None)
+    run_until_checkpoint.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    run_until_checkpoint.add_argument("--runtime-root", default=None)
+
+    set_step_review = subparsers.add_parser("set-step-review")
+    set_step_review.add_argument("--run-id", required=True)
+    set_step_review.add_argument("--enabled", required=True, choices=["true", "false"])
+    set_step_review.add_argument("--reason", required=True)
+    set_step_review.add_argument("--llm-mode", choices=["fake", "deepseek", "openai_compatible"], default=None)
+    set_step_review.add_argument("--runtime-root", default=None)
+
     adjust_budget = subparsers.add_parser("adjust-budget")
     adjust_budget.add_argument("--run-id", required=True)
     adjust_budget.add_argument("--budget-id", required=True)
@@ -221,6 +234,8 @@ _COMMAND_ARGUMENTS: dict[str, tuple[str, ...]] = {
     "restart-design": ("run_id",),
     "rewind-run": ("run_id", "node", "reason"),
     "adjust-budget": ("run_id", "budget_id", "limit", "reason"),
+    "run-until-checkpoint": ("run_id", "max_steps"),
+    "set-step-review": ("run_id", "enabled", "reason"),
     "revalidate-requirement": ("run_id",),
     "clarify-more": ("run_id",),
     "approve-checkpoint": ("run_id", "checkpoint_id"),

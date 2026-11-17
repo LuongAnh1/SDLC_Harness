@@ -185,6 +185,8 @@ class LlmClient:
             "total_tokens": 0,
         }
         self._usage_reported_calls = 0
+        # Logical provider calls this client started (transport retries of one call count once); U1.2 reads it.
+        self.provider_calls = 0
 
     def usage_summary(self) -> dict[str, object]:
         """Return aggregate provider usage without retaining prompts or completions."""
@@ -262,6 +264,7 @@ class LlmClient:
             "json_mode": json_mode,
             "reasoning_effort": selected_effort or None,
         }
+        self.provider_calls += 1
         emit_current(
             category="llm",
             event_type="llm_call_started",

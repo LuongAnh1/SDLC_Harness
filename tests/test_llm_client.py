@@ -61,6 +61,15 @@ class LlmClientPayloadTests(unittest.TestCase):
             },
         )
 
+    def test_provider_calls_count_each_logical_call_once(self) -> None:
+        # U1.2: unattended mode reads this counter to charge the run's LLM call ceiling.
+        with TemporaryDirectory() as temp_dir:
+            client = LlmClient(self._settings(Path(temp_dir), mode="fake"))
+            self.assertEqual(client.provider_calls, 0)
+            client.complete(system="s", prompt="first")
+            client.complete_with_metadata(system="s", prompt="second")
+            self.assertEqual(client.provider_calls, 2)
+
     def test_incomplete_read_twice_then_success_retries_three_times(self) -> None:
         with TemporaryDirectory() as temp_dir:
             client = LlmClient(self._settings(Path(temp_dir), mode="deepseek"))

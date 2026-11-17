@@ -35,6 +35,10 @@ KINDS = (
 )
 
 
+# Kinds whose next step is machine work; unattended mode (U1) only steps through these.
+AUTOMATED_KINDS = frozenset({"deterministic", "generate", "evaluate", "agent"})
+
+
 @dataclass(frozen=True)
 class Route:
     handler: str
@@ -416,6 +420,10 @@ REVIEW_BLOCKER_ROUTES = {
         ("journey_defect", "_route_browser_qa_journey_patch"),
     ),
 }
+
+
+# The run's LLM call ceiling in unattended mode (U1.2); `adjust_budget` sets it like a repair budget.
+LLM_CALL_BUDGET = "llm_calls"
 
 
 def node_for(status: str) -> Node | None:

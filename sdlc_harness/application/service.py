@@ -101,6 +101,8 @@ class ApplicationService:
             "cleanup-run-workspace",
             "rewind-run",
             "adjust-budget",
+            "run-until-checkpoint",
+            "set-step-review",
         }:
             run_id = self._required_text(command, "run_id")
             with store.run_lock(run_id):
@@ -307,6 +309,23 @@ class ApplicationService:
         if name == "restart-design":
             return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "run-until-checkpoint":
+            raw_steps = self._optional_text(command, "max_steps")
+            if raw_steps is not None and not raw_steps.strip().isdigit():
+                raise HarnessError("automation_max_steps_invalid", "max_steps must be a whole number of steps.")
+            return PhaseFourWorkflow(settings).run_until_checkpoint(
+                run_id=self._required_text(command, "run_id"),
+                max_steps=int(raw_steps) if raw_steps is not None else None,
+            )
+        if name == "set-step-review":
+            raw_enabled = self._required_text(command, "enabled").strip().lower()
+            if raw_enabled not in {"true", "false"}:
+                raise HarnessError("step_review_enabled_invalid", "enabled must be true or false.")
+            return PhaseFourWorkflow(settings).set_step_review(
+                run_id=self._required_text(command, "run_id"),
+                enabled=raw_enabled == "true",
+                reason=self._required_text(command, "reason"),
             )
         if name == "adjust-budget":
             raw_limit = self._required_text(command, "limit")

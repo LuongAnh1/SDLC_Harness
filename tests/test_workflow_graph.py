@@ -342,6 +342,12 @@ class RewindTableTest(unittest.TestCase):
         for stage in graph.REWIND_STAGES:
             self.assertTrue(callable(getattr(PhaseFourWorkflow, f"_rewind_{stage}", None)), stage)
 
+    def test_unattended_mode_can_step_every_phase4_machine_node(self) -> None:
+        self.assertLessEqual(graph.AUTOMATED_KINDS, set(graph.KINDS))
+        for node in graph.NODES:
+            if node.workflow == graph.PHASE_FOUR and node.kind in graph.AUTOMATED_KINDS:
+                self.assertTrue(node.continue_routes, node.status)
+
     def test_every_repair_budget_names_a_setting_and_an_error_the_workflows_raise(self) -> None:
         settings_fields = set(Settings.__annotations__)
         source ="\n".join(path.read_text(encoding="utf-8") for path in (PACKAGE / "workflows").glob("phase4*.py"))

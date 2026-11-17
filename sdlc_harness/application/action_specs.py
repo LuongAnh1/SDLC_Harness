@@ -93,6 +93,20 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": {"implementation_repair_limit"},
         "confirmation": "standard",
     },
+    "run_until_checkpoint": {
+        "command": "run-until-checkpoint",
+        "required": set(),
+        "optional": {"max_steps"},
+        "overrides": set(),
+        "confirmation": "standard",
+    },
+    "set_step_review": {
+        "command": "set-step-review",
+        "required": {"enabled", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "rewind_run": {
         "command": "rewind-run",
         "required": {"node", "reason"},
