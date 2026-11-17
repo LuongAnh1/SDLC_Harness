@@ -16,6 +16,7 @@ import re
 from uuid import uuid4
 
 from ..core.errors import HarnessError
+from .artifact_index import index_artifact_changes
 from .locks import RuntimeActionLock
 from .runtime_readme import ensure_runtime_readme
 
@@ -156,6 +157,14 @@ class RuntimeStore:
             run_dir.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise HarnessError("runtime_write_failed", str(exc), run_id=run_id) from exc
+        # Index first: a crash in between leaves an index line for an unreferenced file, never a pointer without one.
+        index_artifact_changes(
+            run_dir=run_dir,
+            repo_root=self.repo_root,
+            state=state,
+            previous=previous,
+            written_at=utc_now_iso(),
+        )
         self._write_json(self.state_path(run_id), state)
         self._record_state_events(state=state, previous=previous)
 

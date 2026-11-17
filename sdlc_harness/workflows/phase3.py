@@ -55,6 +55,7 @@ from ..repo_context import (
     discover_profile_source_files,
     validate_repo_landscape,
 )
+from ..storage.artifact_index import record_read
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
@@ -1304,6 +1305,7 @@ def _optional_artifacts(artifact_paths: dict[str, str], *keys: str) -> dict[str,
 
 
 def _read_json_artifact(path: Path, *, run_id: str) -> dict[str, object]:
+    record_read(path)
     try:
         parsed = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:

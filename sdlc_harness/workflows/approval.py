@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from ..core.config import Settings
 from ..core.errors import HarnessError
+from ..storage.artifact_index import artifact_scope
 from ..storage.runtime import RuntimeStore
 from .graph import APPROVAL_REFUSALS, PHASE_FOUR, PHASE_THREE, PHASE_TWO, approval_for
 from .phase2 import PhaseTwoWorkflow
@@ -34,4 +37,11 @@ class CheckpointApprovalWorkflow:
             )
         workflows = {PHASE_TWO: PhaseTwoWorkflow, PHASE_THREE: PhaseThreeWorkflow, PHASE_FOUR: PhaseFourWorkflow}
         workflow = workflows[approval.workflow](self.settings)
-        return getattr(workflow, approval.method)(run_id=run_id, checkpoint_id=checkpoint_id)
+        # Only Phase 4 reads go through the recorded helpers; elsewhere `inputs` stays null (not tracked).
+        scope = (
+            artifact_scope(run_id, node=status, handler=approval.method, repo_root=self.store.repo_root)
+            if approval.workflow == PHASE_FOUR
+            else nullcontext()
+        )
+        with scope:
+            return getattr(workflow, approval.method)(run_id=run_id, checkpoint_id=checkpoint_id)

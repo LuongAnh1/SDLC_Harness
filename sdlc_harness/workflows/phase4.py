@@ -66,6 +66,7 @@ from ..profiles import (
     verification_stage_policy_from_snapshot,
 )
 from ..repo_context import CodeGraphContextProvider
+from ..storage.artifact_index import artifact_scope, record_read
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync.github import (
     GitHubCodeReviewApprover,
@@ -654,12 +655,33 @@ class _PhaseFourCore:
         # The route table lives in workflows/graph.py; other phases continue through the application service.
         handler = continue_handler(self, state) if node is not None and node.workflow == PHASE_FOUR else ""
         if handler:
-            return getattr(self, handler)(state=state, run_id=run_id)
+            return self._dispatch(handler, state=state, run_id=run_id)
         raise HarnessError(
             "run_not_continuable",
             f"Run is not ready for the next Phase 4 step: {run_id}",
             run_id=run_id,
         )
+
+    def _dispatch(self, handler: str, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        """Run one graph handler; artifacts it indexes record this node, its reads and the worktree (G1.3)."""
+
+        worktree: list[Path] = []
+
+        def fingerprint() -> dict[str, object]:
+            from .phase4_browser import _worktree_fingerprint  # phase4_browser imports this module
+
+            if not worktree:
+                worktree.append(Path(self.workspace_manager.resolve(run_id).worktree_path))
+            return _worktree_fingerprint(worktree[0])
+
+        with artifact_scope(
+            run_id,
+            node=str(state.get("status") or ""),
+            handler=handler,
+            repo_root=self.store.repo_root,
+            fingerprint=fingerprint,
+        ):
+            return getattr(self, handler)(state=state, run_id=run_id)
 
 
 
@@ -762,6 +784,7 @@ class _PhaseFourCore:
                 f"Approved Phase 4 input artifact does not exist: {relative_path}",
                 run_id=run_id,
             )
+        record_read(path)
         return path
 
     def _workspace_target_info(

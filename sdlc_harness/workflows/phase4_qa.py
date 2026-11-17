@@ -928,7 +928,7 @@ class PhaseFourQaCycle:
             self.qa_step_review = {**pinned, **decision, "enabled": True}
             state["pending_step_review"] = None
             # Status stays qa_step_review_required until QA writes its outcome or pauses again.
-            return self._continue_qa_test(state=state, run_id=run_id)
+            return self._dispatch("_continue_qa_test", state=state, run_id=run_id)
 
 
 def _runtime_closure_closed(state: dict[str, object]) -> bool:

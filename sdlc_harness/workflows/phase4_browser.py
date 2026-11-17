@@ -4880,18 +4880,18 @@ class PhaseFourBrowserStagesCycle:
             resume_status = str(_dict_value(state.get("browser_stage_resume")).get("status") or "")
             state.update({"pending_step_review": None, "browser_stage_resume": None, "status": resume_status})
             if resume_status == "browser_journey_patch_needed":
-                return self._continue_browser_journey_patch(state=state, run_id=run_id)
+                return self._dispatch("_continue_browser_journey_patch", state=state, run_id=run_id)
             if resume_status == "browser_journey_captured":
-                return self._continue_browser_journey_review(state=state, run_id=run_id)
+                return self._dispatch("_continue_browser_journey_review", state=state, run_id=run_id)
             if resume_status == "browser_baseline_captured":
-                return self._continue_ui_polish_planning(state=state, run_id=run_id)
+                return self._dispatch("_continue_ui_polish_planning", state=state, run_id=run_id)
             if resume_status == "ui_polish_verified":
-                return self._continue_ui_polish_review(state=state, run_id=run_id)
+                return self._dispatch("_continue_ui_polish_review", state=state, run_id=run_id)
             if resume_status == "browser_qa_journey_patch_needed":
-                return self._continue_browser_qa_journey_patch(state=state, run_id=run_id)
+                return self._dispatch("_continue_browser_qa_journey_patch", state=state, run_id=run_id)
             if resume_status in {"ui_polished", "browser_qa_verified"}:
-                return self._continue_browser_qa_review(state=state, run_id=run_id)
-            return self._continue_browser_journey_planning(state=state, run_id=run_id)
+                return self._dispatch("_continue_browser_qa_review", state=state, run_id=run_id)
+            return self._dispatch("_continue_browser_journey_planning", state=state, run_id=run_id)
 
     # ------------------------------------------------------------------ terminal states
 

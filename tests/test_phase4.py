@@ -59,6 +59,7 @@ from sdlc_harness.profiles import (
     get_language_profile,
     get_project_profile,
 )
+from sdlc_harness.storage.artifact_index import read_artifact_index, sha256_file
 from sdlc_harness.verification import VerificationResult, VerificationRunner, VerificationStageResult
 from sdlc_harness.verification.registry import BROWSER_CAPTURE_SPEC_PATH, RUNTIME_PROBE_SPEC_PATH
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
@@ -5069,6 +5070,37 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(call["publication_paths"], preview["publication_paths"])
         self.assertEqual(call["evidence_only_paths"], preview["evidence_only_paths"])
         self.assertEqual((self.repo_root / published["latest_artifacts"]["github_pr_body"]).read_text(encoding="utf-8"), body)
+
+    def test_every_phase4_artifact_records_its_node_inputs_and_worktree(self) -> None:
+        # G1.3: the artifact index says which node wrote each artifact, from which inputs, on which tree.
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, previewed = self._previewed_run(runner, publisher)
+        entries = read_artifact_index(self.settings.runtime_root / "runs" / run_id)
+
+        self.assertLessEqual(set(previewed["latest_artifacts"].values()), {entry["ref"] for entry in entries})
+        start = next(
+            index for index, entry in enumerate(entries) if entry["handler"] == "approve_implementation_plan_checkpoint"
+        )
+        # Phase 1-3 writes are indexed but their reads are not tracked yet: null, never an empty list.
+        self.assertTrue(all(entry["handler"] is None and entry["inputs"] is None for entry in entries[:start]))
+        for entry in entries[start:]:
+            self.assertTrue(entry["node"] and entry["handler"], entry)
+            self.assertIsInstance(entry["inputs"], list, entry)
+            self.assertNotIn(entry["ref"], [item["ref"] for item in entry["inputs"]])
+            if entry["handler"].startswith("_continue"):
+                self.assertTrue(str(entry["worktree_fingerprint"]["sha256"]).startswith("sha256:"), entry)
+
+        latest = {entry["key"]: entry for entry in entries}
+        final, preview = latest["final_verification"], latest["publication_preview"]
+        self.assertEqual((final["node"], final["handler"]), ("documentation_approved", "_continue_final_verification"))
+        self.assertIn("documentation_closure", [item.get("key") for item in final["inputs"]])
+        self.assertIn("final_verification", [item.get("key") for item in preview["inputs"]])
+        for item in preview["inputs"]:
+            self.assertEqual(item["sha256"], sha256_file(self.repo_root / item["ref"]), item)
+        tree = _worktree_fingerprint(self._closure_worktree(run_id))["sha256"]
+        self.assertEqual(
+            (final["worktree_fingerprint"]["sha256"], preview["worktree_fingerprint"]["sha256"]), (tree, tree)
+        )
 
     def test_approved_publication_refuses_a_tree_changed_after_final_verification(self) -> None:
         runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()

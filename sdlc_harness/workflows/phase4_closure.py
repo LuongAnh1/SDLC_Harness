@@ -435,8 +435,8 @@ class PhaseFourRuntimeClosureCycle:
             state["runtime_closure_resume"] = None
             if resume_status == "runtime_closure_verified":
                 state["status"] = resume_status
-                return self._continue_runtime_closure_review(state=state, run_id=run_id)
-            return self._continue_runtime_closure_planning(state=state, run_id=run_id)
+                return self._dispatch("_continue_runtime_closure_review", state=state, run_id=run_id)
+            return self._dispatch("_continue_runtime_closure_planning", state=state, run_id=run_id)
 
     def _block_runtime_closure(
         self,
