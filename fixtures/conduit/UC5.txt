@@ -1,0 +1,26 @@
+Use case name: EditOwnComment
+Description: The author of a comment can correct its text in place on the article page. Everyone can see that the comment was edited.
+Participating Actors:
+- Commenter: a signed-in user who wrote the comment.
+- Other User: a signed-in user who did not write the comment.
+- Visitor: a person who is not signed in.
+Entry conditions: The Commenter is signed in and has written a comment on an article.
+Flow of events User System:
+1. The Commenter opens the article.
+2. The system shows the Commenter's comment with an action to edit it.
+3. The Commenter chooses to edit the comment.
+4. The system replaces the comment text with an edit box containing the current text, puts the keyboard focus in it, and offers to save or cancel.
+5. The Commenter changes the text and saves.
+6. The system saves the new text, shows the comment again with the new text and a mark that it was edited, and returns the keyboard focus to the comment's edit action.
+Alternative flows:
+A1. The Commenter cancels, or presses Escape in the edit box. The system shows the original text unchanged and returns the focus to the edit action.
+A2. The Commenter empties the text and saves. The system refuses, shows an error message next to the edit box, and keeps the comment unchanged.
+A3. An Other User sees the comment without the edit action. An edit request they send directly to the API is refused as forbidden (HTTP 403) and the comment stays unchanged.
+A4. A Visitor sends an edit request without signing in. The system refuses it as unauthenticated (HTTP 401).
+A5. An edit request names a comment or an article that does not exist. The system answers that it was not found (HTTP 404).
+Exit conditions:
+- Every reader sees the new text and the edited mark.
+- Refused edits leave the comment text unchanged.
+Quality requirements:
+- While a save is in progress, the save action cannot be triggered again.
+- Editing one comment never changes another comment on the same article.

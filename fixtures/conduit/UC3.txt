@@ -1,0 +1,23 @@
+Use case name: EditArticleTitleAndTags
+Description: The author can change the title and the tags of an existing article. A new title gives the article a new address derived from that title, and the tags shown everywhere follow the edit.
+Participating Actors:
+- Author: a signed-in user who wrote the article.
+Entry conditions: The Author is signed in and the article has at least one tag, at least one comment and at least one favorite.
+Flow of events User System:
+1. The Author opens one of their own articles and chooses to edit it.
+2. The system shows the editor filled with the current title, description, body and tags.
+3. The Author changes the title, removes one tag, adds a new tag and publishes the change.
+4. The system saves the change, gives the article a new address derived from the new title, and shows the updated article at that new address with the new tags.
+5. The Author returns to the home page.
+6. The system lists the article with its new title and new tags; the popular tags include the new tag.
+Alternative flows:
+A1. The Author changes only the body. The system keeps the title, the address and the tags unchanged.
+A2. The Author removes every tag. The system saves the article without tags.
+A3. Somebody opens the article's previous address. The system answers that the article was not found.
+A4. The Author gives the article a title that another article already uses. The system refuses the change, tells the Author that the title is already taken, and the article stays unchanged.
+A5. An edit request sent directly to the API without a tag list keeps the existing tags; one with an empty tag list removes all tags; one whose tag list is not a list of words is refused as invalid (HTTP 422) and changes nothing.
+Exit conditions:
+- The article keeps its comments, its favorites and its author after the title and address change.
+- The tags of the article are exactly the ones the Author left in the editor.
+Quality requirements:
+- After a successful save the browser address bar shows the new article address, so reloading the page shows the same article.

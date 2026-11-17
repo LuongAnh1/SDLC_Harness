@@ -1,0 +1,26 @@
+Use case name: RestrictArticleChangesToAuthor
+Description: Only the author of an article can edit or delete it. Other signed-in users and visitors can still read the article, follow its author and favorite it, but they cannot change or remove it.
+Participating Actors:
+- Author: a signed-in user who wrote the article.
+- Other User: a signed-in user who did not write the article.
+- Visitor: a person who is not signed in.
+Entry conditions: The article exists. The Author is signed in.
+Flow of events User System:
+1. The Author opens one of their own articles.
+2. The system shows the article together with the actions to edit and to delete it.
+3. The Author chooses to edit the article, changes its title, description or body, and publishes the change.
+4. The system saves the change and shows the updated article.
+5. The Author chooses to delete the article.
+6. The system deletes the article together with its comments, returns the Author to the home page, and the article no longer appears in any feed or profile list.
+Alternative flows:
+A1. An Other User opens the article. The system shows the article without the edit and delete actions; the follow and favorite actions stay available.
+A2. An Other User opens the editor address of the article directly. The system does not let them change the article and tells them that only the author can edit it.
+A3. An Other User sends an edit or delete request for the article directly to the API. The system refuses the request as forbidden (HTTP 403) with an error message, and the article stays unchanged.
+A4. A Visitor sends an edit or delete request without signing in. The system refuses the request as unauthenticated (HTTP 401), and the article stays unchanged.
+A5. Anyone sends an edit or delete request for an article that does not exist. The system answers that the article was not found (HTTP 404).
+Exit conditions:
+- The Author's change or deletion is visible to every user.
+- Every refused attempt leaves the article, its comments and its favorites unchanged, and the user is told that the action is not allowed.
+Quality requirements:
+- The ownership check is enforced by the server for every edit and delete request; hiding the actions in the web page is not enough on its own.
+- While an edit or delete request is in progress, its action cannot be triggered again, to avoid duplicate submissions.

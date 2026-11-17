@@ -73,6 +73,15 @@ class PhaseOneTest(unittest.TestCase):
         self.assertIsNone(source.revision)
         self.assertIn("DeleteCulturalHeritage", source.text)
 
+    def test_fixture_loader_reads_every_conduit_use_case(self) -> None:
+        names = sorted(path.stem for path in (self.repo_root / "fixtures" / "conduit").glob("UC*.txt"))
+        self.assertEqual(names, ["UC1", "UC2", "UC3", "UC4", "UC5"])
+        for name in names:
+            source = load_use_case(dataset="conduit", use_case=name, repo_root=self.repo_root)
+            self.assertEqual(source.source_ref, f"dataset_use_case:conduit:{name}")
+            self.assertEqual(source.locator, f"fixtures/conduit/{name}.txt")
+            self.assertTrue(source.text.startswith("Use case name: "))
+
     def test_fixture_loader_rejects_unsupported_dataset(self) -> None:
         with self.assertRaises(HarnessError) as ctx:
             load_use_case(dataset="unknown", use_case="UC1", repo_root=self.repo_root)

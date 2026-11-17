@@ -1,0 +1,26 @@
+Use case name: SaveArticleAsDraft
+Description: An author can save an article as a draft, keep working on it privately, and publish it later. Drafts are visible only to their author.
+Participating Actors:
+- Author: a signed-in user who writes articles.
+- Other User: a signed-in user who did not write the draft.
+- Visitor: a person who is not signed in.
+Entry conditions: The Author is signed in.
+Flow of events User System:
+1. The Author writes a new article in the editor and chooses to save it as a draft instead of publishing it.
+2. The system saves the article as a draft and shows it with a clear mark that it is a draft and not yet published.
+3. The Author opens their profile.
+4. The system shows a list of the Author's drafts next to their published articles; the published list does not contain the draft.
+5. The Author opens the draft, changes it and saves it again as a draft.
+6. The system keeps it as a draft with the changes.
+7. The Author chooses to publish the draft.
+8. The system publishes it: the article leaves the drafts list, appears in the global feed, in the personal feed of the Author's followers, in its tag filters and in the Author's published articles, dated at the moment of publishing.
+Alternative flows:
+A1. An Other User or a Visitor browses the global feed, a personal feed, tag filters, profiles or popular tags. The system never shows the draft or a tag used only by drafts.
+A2. An Other User or a Visitor opens the draft's address directly, or tries to favorite or comment on it. The system answers that the article was not found.
+A3. The Author deletes a draft. The system removes it without it ever being published.
+A4. A published article cannot be turned back into a draft.
+Exit conditions:
+- A draft is visible to its author only, until the author publishes it.
+- Every article that existed before this feature stays published.
+Quality requirements:
+- The demo data contains exactly one draft written by the demo user alice, also after the demo data is loaded several times.
