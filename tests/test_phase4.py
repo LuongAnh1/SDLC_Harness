@@ -5102,6 +5102,185 @@ class PhaseFourTest(unittest.TestCase):
             (final["worktree_fingerprint"]["sha256"], preview["worktree_fingerprint"]["sha256"]), (tree, tree)
         )
 
+    def test_rewind_to_browser_qa_restarts_qa_and_puts_the_original_readme_back(self) -> None:
+        # G1.4: the generic form of the r9 recoveries browser_qa_restart_repository_e2e / ..._fingerprint_rerun.
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, _ = self._previewed_run(runner, publisher)
+        workflow = self._browser_workflow(runner)
+        before = workflow.store.read_state(run_id)
+        readme = self._closure_worktree(run_id) / "README.md"
+        documentation = json.loads((self.repo_root / before["documentation_closure"]["artifact"]).read_text(encoding="utf-8"))
+
+        rewound = workflow.rewind_run(run_id=run_id, node="ui_polished", reason="owner: rerun Browser QA")
+
+        self.assertEqual(rewound["status"], "ui_polished", rewound)
+        state = workflow.store.read_state(run_id)
+        qa = before["browser_stages"]["qa"]
+        self.assertEqual(
+            state["browser_stages"]["qa"],
+            {"status": "ready", "attempt": int(qa.get("attempt") or 1) + 1, **({"reviews": qa["reviews"]} if qa.get("reviews") else {})},
+        )
+        self.assertEqual(state["browser_stages"]["status"], "ui_polished")
+        self.assertEqual(state["browser_stages"]["polish"], before["browser_stages"]["polish"])
+        self.assertEqual(
+            state["documentation_closure"],
+            {key: before["documentation_closure"][key] for key in ("mode", "contract_version", "pinned_at")},
+        )
+        self.assertNotIn("final_verification", state)
+        self.assertEqual(readme.read_bytes(), b"# Target\n")
+        self.assertEqual("sha256:" + hashlib.sha256(readme.read_bytes()).hexdigest(), documentation["readme_sha256_before"])
+        for key in ("browser_qa_reviews", "documentation_closure", "final_verification", "github_pr_body", "publication_preview"):
+            self.assertNotIn(key, state["latest_artifacts"])
+        for key in ("ui_polish_contract", "browser_journey_plan", "code_change_report", "developer_work_packet"):
+            self.assertEqual(state["latest_artifacts"][key], before["latest_artifacts"][key])
+        recovery = state["recoveries"][-1]
+        self.assertEqual((recovery["code"], recovery["node"], recovery["from_status"]), ("rewind", "ui_polished", "publication_previewed"))
+        self.assertEqual(recovery["restored_paths"], ["README.md"])
+        self.assertEqual(json.loads((self.repo_root / recovery["state_backup"]).read_text(encoding="utf-8")), before)
+        removed = [entry for entry in read_artifact_index(self.store_run_dir(run_id)) if entry["handler"] == "rewind_run"]
+        self.assertEqual({entry["key"] for entry in removed}, set(recovery["dropped_latest_artifacts"]))
+        self.assertTrue(all(entry["ref"] is None and entry["node"] == "rewind" for entry in removed))
+
+        # The run goes on from the rewound node with the current Harness, through a fresh documentation draft.
+        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(self._browser_workflow(runner).continue_run(run_id=run_id)["status"], "waiting_documentation_review")
+
+    def test_rewind_to_ui_polish_restores_the_polish_baseline_and_moves_its_sessions_aside(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, _ = self._previewed_run(runner, publisher)
+        workflow = self._browser_workflow(runner)
+        before = workflow.store.read_state(run_id)
+        polish = before["browser_stages"]["polish"]
+        baseline = json.loads((self.repo_root / polish["source_baseline"]).read_text(encoding="utf-8"))["files"]
+        worktree = self._closure_worktree(run_id)
+
+        workflow.rewind_run(run_id=run_id, node="browser_baseline_captured", reason="owner: polish again")
+
+        state = workflow.store.read_state(run_id)
+        self.assertEqual(state["status"], "browser_baseline_captured")
+        self.assertEqual(state["browser_stages"]["status"], "baseline_captured")
+        self.assertEqual(
+            state["browser_stages"]["polish"],
+            {"status": "restarted", "attempt": int(polish.get("attempt") or 1) + 1,
+             **({"result_review_attempt": polish["result_review_attempt"]} if "result_review_attempt" in polish else {})},
+        )
+        self.assertEqual(state["browser_stages"]["repair_iterations"]["polish"], 0)
+        self.assertEqual(state["browser_stages"]["journey"], before["browser_stages"]["journey"])
+        for item in baseline:
+            file = worktree / item["path"]
+            self.assertEqual(hashlib.sha256(file.read_bytes()).hexdigest() if file.is_file() else None, item["sha256"])
+        recovery = state["recoveries"][-1]
+        self.assertEqual(sorted(recovery["restored_paths"]), sorted({*(item["path"] for item in baseline), "README.md"}))
+        self.assertEqual(
+            recovery["superseded_session_dirs"],
+            {"developer_execution/ui_polish_v1": "developer_execution/ui_polish_v1.superseded-rewind"},
+        )
+        self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "ui_polish_v1").exists())
+        self.assertFalse([key for key in state["latest_artifacts"] if key.startswith("ui_polish_")])
+
+        waiting = self._polish_step(
+            run_id,
+            runner,
+            planner=ScriptedClosureLlm(default=fake_ui_polish_plan),
+            validator=ScriptedClosureLlm(default=fake_ui_polish_review),
+        )
+        self.assertEqual(waiting["status"], "waiting_ui_polish_contract_review", waiting)
+
+    def test_rewind_to_journey_planning_restarts_every_later_browser_stage(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, _ = self._previewed_run(runner, publisher)
+        workflow = self._browser_workflow(runner)
+        journey = workflow.store.read_state(run_id)["browser_stages"]["journey"]
+
+        workflow.rewind_run(run_id=run_id, node="browser_ready", reason="owner: plan the journeys again")
+
+        state = workflow.store.read_state(run_id)
+        self.assertEqual((state["status"], state["current_phase"]), ("browser_ready", "browser_readiness"))
+        browser = state["browser_stages"]
+        kept = {key: journey[key] for key in ("review_attempt", "repair_unit_ids", "repair_paths") if key in journey}
+        self.assertEqual(browser["journey"], {**kept, "status": "ready", "attempt": int(journey.get("attempt") or 1) + 1})
+        self.assertEqual((browser["polish"]["status"], browser["qa"]["status"]), ("restarted", "ready"))
+        self.assertIn("browser_readiness_verification", state["latest_artifacts"])
+        self.assertFalse([key for key in state["latest_artifacts"] if key.startswith(("browser_journey_", "browser_baseline_"))])
+        # Polish and QA ran only on the abandoned branch: they are no longer ancestors of the current status.
+        with self.assertRaises(HarnessError) as raised:
+            workflow.rewind_run(run_id=run_id, node="ui_polished", reason="owner: jump ahead")
+        self.assertEqual(raised.exception.error_code, "rewind_target_not_reached")
+
+    def test_rewind_to_the_browser_qa_repair_verification_reruns_it_inside_the_qa_stage(self) -> None:
+        # G1.4: the generic form of the r9 recovery browser_qa_verification_fingerprint_rerun.
+        runner = FinalVerificationRunnerStub()
+        runner.outcomes = ["passed", "passed", "passed", "repo_e2e"]
+        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+        for expected in ("browser_qa_repair_needed", "browser_qa_written", "browser_qa_verified", "qa_tested"):
+            self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], expected)
+        self.assertEqual(self._browser_workflow(runner).continue_run(run_id=run_id)["status"], "waiting_documentation_review")
+        workflow = self._browser_workflow(runner)
+        before = workflow.store.read_state(run_id)
+        repaired_code = changed.read_bytes()
+
+        workflow.rewind_run(run_id=run_id, node="browser_qa_written", reason="owner: rerun the QA repair verification")
+
+        state = workflow.store.read_state(run_id)
+        self.assertEqual(state["status"], "browser_qa_written")
+        self.assertEqual(state["browser_stages"]["qa"], {**before["browser_stages"]["qa"], "status": "written"})
+        self.assertNotIn("browser_qa_verification", state["latest_artifacts"])
+        self.assertEqual(state["latest_artifacts"]["code_change_report"], before["latest_artifacts"]["code_change_report"])
+        self.assertEqual(changed.read_bytes(), repaired_code)  # the QA repair stays in the worktree
+        # The fixture has no README: Documentation Closure created it, so the rewind removes it.
+        self.assertFalse((self._closure_worktree(run_id) / "README.md").exists())
+        self.assertEqual(state["recoveries"][-1]["restored_paths"], ["README.md"])
+        self.assertEqual(self._browser_qa_step(run_id, runner, validator)["status"], "browser_qa_verified")
+
+    def test_rewind_refuses_unknown_targets_untracked_nodes_and_changed_harness_files(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, _ = self._previewed_run(runner, publisher)
+        workflow = self._browser_workflow(runner)
+        before = workflow.store.read_state(run_id)
+        readme = self._closure_worktree(run_id) / "README.md"
+        readme.write_bytes(readme.read_bytes() + b"owner edit\n")
+
+        for node, reason, error_code in (
+            ("implementation_ready", "x", "rewind_target_not_supported"),
+            ("ui_polished", " ", "rewind_reason_required"),
+            # This run never repaired Browser QA, so the index has no step of browser_qa_written.
+            ("browser_qa_written", "x", "rewind_target_not_reached"),
+            ("ui_polished", "x", "rewind_worktree_changed"),
+        ):
+            with self.subTest(node=node, error=error_code), self.assertRaises(HarnessError) as raised:
+                workflow.rewind_run(run_id=run_id, node=node, reason=reason)
+            self.assertEqual(raised.exception.error_code, error_code)
+
+        self.assertEqual(workflow.store.read_state(run_id), before)
+        self.assertTrue(readme.read_bytes().endswith(b"owner edit\n"))
+        self.assertFalse((self.store_run_dir(run_id) / "audit").exists())
+
+    def test_rewind_run_is_an_owner_action_of_the_cli(self) -> None:
+        runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
+        run_id, _ = self._previewed_run(runner, publisher)
+        stdout = io.StringIO()
+        env = {"SDLC_TARGET_REPO_PATH": str(self.target_repo), "SDLC_TARGET_REPO_REMOTE": self.remote_url}
+
+        with patch.dict("os.environ", env), contextlib.redirect_stdout(stdout):
+            code = cli_main(
+                ["rewind-run", "--run-id", run_id, "--node", "documentation_approved", "--reason", "owner: rerun F1-F3",
+                 "--llm-mode", "fake", "--runtime-root", str(self.runtime_root)]
+            )
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual((code, payload["status"]), (0, "documentation_approved"), payload)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["documentation_closure"]["status"], "approved")
+        self.assertNotIn("final_verification", state)
+        self.assertEqual(
+            sorted(state["recoveries"][-1]["dropped_latest_artifacts"]),
+            ["final_verification", "github_pr_body", "publication_preview"],
+        )
+
     def test_approved_publication_refuses_a_tree_changed_after_final_verification(self) -> None:
         runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
         run_id, previewed = self._previewed_run(runner, publisher)

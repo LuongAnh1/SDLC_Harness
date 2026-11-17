@@ -315,6 +315,28 @@ PHASE_STAGES = {
 }
 
 
+@dataclass(frozen=True)
+class RewindTarget:
+    """A node `rewind_run` can send a run back to: the stage it resets first and how (G1.4)."""
+
+    stage: str
+    reset: str = "restart"  # "restart": back to the stage entry; "rerun": repeat this node inside the stage
+    browser_status: str = ""  # `browser_stages.status` the node expects, for browser nodes
+
+
+# Phase 4 stages that own state, in pipeline order. Rewinding to a stage also restarts every later stage.
+REWIND_STAGES = ("journey", "polish", "qa", "documentation", "final_verification", "publication")
+
+REWIND_TARGETS = {
+    "browser_ready": RewindTarget("journey", browser_status="browser_ready"),
+    "browser_baseline_captured": RewindTarget("polish", browser_status="baseline_captured"),
+    "ui_polished": RewindTarget("qa", browser_status="ui_polished"),
+    "browser_qa_written": RewindTarget("qa", reset="rerun", browser_status="browser_qa_written"),
+    "qa_tested": RewindTarget("documentation"),
+    "documentation_approved": RewindTarget("final_verification"),
+}
+
+
 def node_for(status: str) -> Node | None:
     return NODES_BY_STATUS.get(status)
 

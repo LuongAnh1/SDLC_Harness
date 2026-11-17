@@ -330,5 +330,18 @@ class WorkflowGraphParityTest(unittest.TestCase):
             self.assertEqual(got, expected, node.status)
 
 
+class RewindTableTest(unittest.TestCase):
+    def test_every_rewind_target_is_a_continuable_phase4_node_and_every_stage_has_a_hook(self) -> None:
+        for status, target in graph.REWIND_TARGETS.items():
+            node = graph.node_for(status)
+            self.assertIsNotNone(node, status)
+            self.assertEqual(node.workflow, graph.PHASE_FOUR, status)
+            self.assertTrue(node.continue_routes, status)  # continue_run runs the node again after the rewind
+            self.assertIn(target.stage, graph.REWIND_STAGES, status)
+            self.assertIn(target.reset, ("restart", "rerun"), status)
+        for stage in graph.REWIND_STAGES:
+            self.assertTrue(callable(getattr(PhaseFourWorkflow, f"_rewind_{stage}", None)), stage)
+
+
 if __name__ == "__main__":
     unittest.main()

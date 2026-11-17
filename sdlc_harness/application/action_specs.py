@@ -93,6 +93,13 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": {"implementation_repair_limit"},
         "confirmation": "standard",
     },
+    "rewind_run": {
+        "command": "rewind-run",
+        "required": {"node", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "adopt_run_workspace": {
         "command": "adopt-run-workspace",
         "required": set(),

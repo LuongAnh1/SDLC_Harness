@@ -11,7 +11,7 @@ driver recoveries) carries `inputs: null`, meaning "not tracked", never "no inpu
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -85,7 +85,11 @@ def index_artifact_changes(
     previous: dict[str, object] | None,
     written_at: str,
 ) -> None:
-    """Append one index line per `latest_artifacts` key whose ref changed in this state write."""
+    """Append one index line per `latest_artifacts` key whose ref changed in this state write.
+
+    A key that disappears gets a line with `ref: null`, so replaying the index rebuilds `latest_artifacts` at any
+    earlier point (`artifacts_at`).
+    """
 
     current = state.get("latest_artifacts")
     current = current if isinstance(current, dict) else {}
@@ -93,8 +97,13 @@ def index_artifact_changes(
     before = before if isinstance(before, dict) else {}
     # shortcut: a rewrite under the same ref is not indexed; every Phase 4 writer versions its filename
     # (r9: 113 of 114 keys) except raw LLM responses, which nothing consumes.
-    changed = [
+    changed: list[tuple[str, str | None]] = [
         (key, ref) for key, ref in current.items() if isinstance(ref, str) and ref and before.get(key) != ref
+    ]
+    changed += [
+        (key, None)
+        for key, ref in before.items()
+        if isinstance(ref, str) and ref and not (isinstance(current.get(key), str) and current.get(key))
     ]
     if not changed:
         return
@@ -109,13 +118,13 @@ def index_artifact_changes(
     }
     lines = []
     for key, ref in changed:
-        path = repo_root / ref
+        path = repo_root / ref if ref else None
         line: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "key": key,
             "ref": ref,
-            "sha256": sha256_file(path) if path.is_file() else None,
-            "version": _version(ref),
+            "sha256": sha256_file(path) if path is not None and path.is_file() else None,
+            "version": _version(ref) if ref else None,
             "node": scope.node if scope is not None else None,
             "handler": scope.handler if scope is not None else None,
             "transition": transition,
@@ -128,6 +137,8 @@ def index_artifact_changes(
             ],
             "written_at": written_at,
         }
+        if ref is None:
+            line["previous_ref"] = before[key]
         if fingerprint is not None:
             line["worktree_fingerprint"] = fingerprint
         lines.append(json.dumps(line, ensure_ascii=False, sort_keys=True))
@@ -171,6 +182,40 @@ def read_artifact_index(run_dir: Path) -> list[dict[str, object]]:
                 break
             raise HarnessError("state_corrupted", f"{INDEX_FILENAME} line {number} is not valid JSON") from exc
     return entries
+
+
+def artifacts_at(entries: list[dict[str, object]], position: int) -> dict[str, str]:
+    """The indexed part of `latest_artifacts` just before `entries[position]` was written."""
+
+    artifacts: dict[str, str] = {}
+    for entry in entries[:position]:
+        key, ref = str(entry.get("key") or ""), entry.get("ref")
+        if isinstance(ref, str) and ref:
+            artifacts[key] = ref
+        else:
+            artifacts.pop(key, None)
+    return artifacts
+
+
+def last_visit(
+    entries: list[dict[str, object]],
+    node: str,
+    *,
+    excluded: Sequence[tuple[int, int]] = (),
+) -> int | None:
+    """Position of the first line of the last contiguous run of lines that `node` wrote, if any.
+
+    `excluded` holds `[start, end)` ranges a rewind cut off: lines there belong to an abandoned branch of the run,
+    so a node visited only there is not an ancestor of the current status.
+    """
+
+    line = [index for index in range(len(entries)) if not any(start <= index < end for start, end in excluded)]
+    last = next((at for at in range(len(line) - 1, -1, -1) if entries[line[at]].get("node") == node), None)
+    if last is None:
+        return None
+    while last > 0 and entries[line[last - 1]].get("node") == node:
+        last -= 1
+    return line[last]
 
 
 def _version(ref: str) -> int | None:

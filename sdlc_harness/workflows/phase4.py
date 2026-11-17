@@ -2467,9 +2467,11 @@ from .phase4_final_verification import PhaseFourFinalVerificationCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
 from .phase4_qa import PhaseFourQaCycle
+from .phase4_rewind import PhaseFourRewind
 
 
 class PhaseFourWorkflow(
+    PhaseFourRewind,
     PhaseFourPublicationCycle,
     PhaseFourFinalVerificationCycle,
     PhaseFourDocumentationCycle,

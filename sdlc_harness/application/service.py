@@ -99,6 +99,7 @@ class ApplicationService:
             "answer-clarification",
             "adopt-run-workspace",
             "cleanup-run-workspace",
+            "rewind-run",
         }:
             run_id = self._required_text(command, "run_id")
             with store.run_lock(run_id):
@@ -305,6 +306,12 @@ class ApplicationService:
         if name == "restart-design":
             return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "rewind-run":
+            return PhaseFourWorkflow(settings).rewind_run(
+                run_id=self._required_text(command, "run_id"),
+                node=self._required_text(command, "node"),
+                reason=self._required_text(command, "reason"),
             )
         if name == "revalidate-requirement":
             return PhaseOneWorkflow(settings).revalidate_requirement(

@@ -153,8 +153,10 @@ quyền khóa nằm ở handle của tiến trình.
   của bước Phase 4 đang chạy, `inputs` (artifact bước đó đã đọc, kèm sha256 lúc đọc) và
   `worktree_fingerprint`. Ghi ngoài một bước Phase 4 (Phase 1-3, recovery tay) có `inputs: null`,
   nghĩa là chưa theo dõi, không phải "không có đầu vào".
-- **Đầu vào cho:** kiểm tra artifact mất hiệu lực và `rewind`; run cũ chỉ có dòng cho con trỏ đổi
-  sau khi nâng cấp.
+- Con trỏ bị bỏ khỏi `latest_artifacts` cũng có một dòng (`ref: null`, `previous_ref`), nên đọc lại index
+  dựng được `latest_artifacts` ở bất kỳ thời điểm nào trước đó.
+- **Đầu vào cho:** action owner `rewind_run` (tìm lần ghé gần nhất của node đích, bỏ con trỏ ghi từ đó);
+  run cũ chỉ có dòng cho con trỏ đổi sau khi nâng cấp, nên chưa rewind được về bước chạy trước đó.
 - **Phục hồi:** dòng cuối ghi dở do crash bị bỏ qua khi đọc và bị cắt trước lần ghi kế tiếp.
 
 ### `runs/<run_id>/events.jsonl`

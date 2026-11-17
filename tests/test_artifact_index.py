@@ -8,7 +8,9 @@ import unittest
 
 from sdlc_harness.storage.artifact_index import (
     artifact_scope,
+    artifacts_at,
     index_path,
+    last_visit,
     read_artifact_index,
     record_read,
     sha256_file,
@@ -75,6 +77,26 @@ class ArtifactIndexTest(unittest.TestCase):
             self._write("planned", {"plan": plan})
 
         self.assertIsNone(self._entries()[0]["inputs"])
+
+    def test_replaying_the_index_rebuilds_pointers_and_finds_the_last_visit_of_a_node(self) -> None:
+        plan, report_1, report_2 = (self._artifact(f"{name}.json", "{}") for name in ("plan_v1", "report_v1", "report_v2"))
+        for node, latest in (
+            ("planning", {"plan": plan}),
+            ("verifying", {"plan": plan, "report": report_1}),
+            ("reviewing", {"plan": plan}),  # the report pointer is dropped
+            ("verifying", {"plan": plan, "report": report_2}),
+        ):
+            with artifact_scope(RUN_ID, node=node, handler="_h", repo_root=self.root):
+                self._write(node, latest)
+        entries = self._entries()
+
+        self.assertEqual((entries[2]["key"], entries[2]["ref"], entries[2]["previous_ref"]), ("report", None, report_1))
+        self.assertEqual(last_visit(entries, "verifying"), 3)
+        self.assertEqual(last_visit(entries, "verifying", excluded=[(3, 4)]), 1)  # line 3 is an abandoned branch
+        self.assertIsNone(last_visit(entries, "reviewing", excluded=[(2, 4)]))
+        self.assertIsNone(last_visit(entries, "publishing"))
+        self.assertEqual(artifacts_at(entries, 2), {"plan": plan, "report": report_1})
+        self.assertEqual(artifacts_at(entries, 3), {"plan": plan})
 
     def test_a_torn_last_line_is_skipped_and_dropped_before_the_next_append(self) -> None:
         self._write("planned", {"plan": self._artifact("plan_v1.json", "{}")})
