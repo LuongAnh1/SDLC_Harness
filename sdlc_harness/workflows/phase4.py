@@ -2577,6 +2577,10 @@ def _implementation_repair_feedback(
 
 
 from .phase4_browser import PhaseFourBrowserStagesCycle
+from .phase4_browser_journey import PhaseFourBrowserJourneyCycle
+from .phase4_browser_polish import PhaseFourUiPolishCycle
+from .phase4_browser_qa import PhaseFourBrowserQaCycle
+from .phase4_browser_readiness import PhaseFourBrowserReadinessCycle
 from .phase4_closure import PhaseFourRuntimeClosureCycle
 from .phase4_documentation import PhaseFourDocumentationCycle
 from .phase4_final_verification import PhaseFourFinalVerificationCycle
@@ -2591,6 +2595,10 @@ class PhaseFourWorkflow(
     PhaseFourPublicationCycle,
     PhaseFourFinalVerificationCycle,
     PhaseFourDocumentationCycle,
+    PhaseFourBrowserQaCycle,
+    PhaseFourUiPolishCycle,
+    PhaseFourBrowserJourneyCycle,
+    PhaseFourBrowserReadinessCycle,
     PhaseFourBrowserStagesCycle,
     PhaseFourRuntimeClosureCycle,
     PhaseFourQaCycle,
