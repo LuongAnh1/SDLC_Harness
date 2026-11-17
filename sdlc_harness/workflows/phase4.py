@@ -75,7 +75,7 @@ from ..sync.github import (
 from ..verification import VerificationResult, VerificationRunner
 from ..workspaces import RunWorkspaceManager, RunWorkspaceRecord
 from .phase3 import _dict_value, _issue_key_from_state, _read_json_artifact, _string_dict, _target_source_files
-from .graph import PHASE_FOUR, continue_handler, node_for
+from .graph import PHASE_FOUR, REPAIR_BUDGETS, continue_handler, node_for
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -645,6 +645,81 @@ class _PhaseFourCore:
         return self._browser_execution_active(state) and (
             self._developer_retry_allowed(state) or self._developer_transport_retry_allowed(state)
         )
+
+    # ------------------------------------------------------------------ repair budgets (graph.REPAIR_BUDGETS)
+
+    def _repair_limit(self, state: dict[str, object], budget_id: str) -> int:
+        """The owner's per-run limit when `adjust_budget` set one, else the configured default."""
+
+        override = _dict_value(_dict_value(state.get("repair_budgets")).get(budget_id))
+        if "limit" in override:
+            return max(0, _int_value(override.get("limit")))
+        return max(0, int(getattr(self.settings, REPAIR_BUDGETS[budget_id].setting)))
+
+    @staticmethod
+    def _repair_used(state: dict[str, object], budget_id: str) -> int:
+        value: object = state
+        for key in REPAIR_BUDGETS[budget_id].counter:
+            value = _dict_value(value).get(key)
+        return _int_value(value)
+
+    def _spent_budget_has_room(self, state: dict[str, object]) -> bool:
+        """True when the run is blocked by a spent repair budget that the owner has since raised."""
+
+        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
+        return any(
+            budget.error_code == error_code and self._repair_used(state, budget_id) < self._repair_limit(state, budget_id)
+            for budget_id, budget in REPAIR_BUDGETS.items()
+        )
+
+    def adjust_budget(self, *, run_id: str, budget_id: str, limit: int, reason: str) -> dict[str, object]:
+        """Owner action (G1.6): set one repair budget's limit for this run; replaces hand-edited limit recoveries."""
+
+        if budget_id not in REPAIR_BUDGETS:
+            raise HarnessError(
+                "budget_not_supported",
+                f"Unknown repair budget {budget_id!r}; supported: {sorted(REPAIR_BUDGETS)}.",
+                run_id=run_id,
+            )
+        if not str(reason or "").strip():
+            raise HarnessError("budget_reason_required", "A budget change needs the owner's reason.", run_id=run_id)
+        if int(limit) < 0:
+            raise HarnessError("budget_limit_invalid", "A repair budget limit cannot be negative.", run_id=run_id)
+        with self.workspace_manager.locked_workspace(run_id):
+            state = self.store.read_state(run_id)
+            self._require_frozen_llm_mode(state, run_id=run_id)
+            previous = self._repair_limit(state, budget_id)
+            used = self._repair_used(state, budget_id)
+            adjusted_at = utc_now_iso()
+            state["repair_budgets"] = {
+                **_dict_value(state.get("repair_budgets")),
+                budget_id: {"limit": int(limit), "reason": reason, "adjusted_at": adjusted_at},
+            }
+            state.setdefault("recoveries", []).append(
+                {
+                    "code": "adjust_budget",
+                    "budget_id": budget_id,
+                    "previous_limit": previous,
+                    "limit": int(limit),
+                    "used": used,
+                    "reason": reason,
+                    "recovered_at": adjusted_at,
+                }
+            )
+            update: dict[str, object] = {"updated_at": adjusted_at}
+            if str(state.get("status") or "") == "blocked" and self._spent_budget_has_room(state):
+                update.update(
+                    {
+                        "allowed_next_actions": ["continue_run", "get_status", "cancel_run"],
+                        "summary_for_user": (
+                            f"Anh đã nâng ngân sách {budget_id} lên {int(limit)} (đã dùng {used}); "
+                            "continue_run sẽ chạy lại bước đã dừng."
+                        ),
+                    }
+                )
+            state.update(update)
+            self.store.write_state(state)
+            return self._status_response(state, created_new_run=False)
 
     def _continue_run_locked(self, *, run_id: str) -> dict[str, object]:
         """Dispatch một transition khi caller đang giữ per-run workspace lock."""

@@ -100,6 +100,13 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "overrides": set(),
         "confirmation": "confirm",
     },
+    "adjust_budget": {
+        "command": "adjust-budget",
+        "required": {"budget_id", "limit", "reason"},
+        "optional": set(),
+        "overrides": set(),
+        "confirmation": "confirm",
+    },
     "adopt_run_workspace": {
         "command": "adopt-run-workspace",
         "required": set(),

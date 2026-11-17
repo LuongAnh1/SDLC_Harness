@@ -110,6 +110,9 @@ class PhaseFourRuntimeClosureCycle:
         if str(state.get("current_phase") or "") != "runtime_closure":
             return ""
         blocked_from = str(_dict_value(state.get("runtime_closure")).get("blocked_from") or "planning")
+        # A spent repair budget the owner raised with `adjust_budget` reruns the step that hit it.
+        if blocked_from in {"verifying", "reviewing"} and self._spent_budget_has_room(state):
+            return blocked_from
         return _RETRYABLE_BLOCKS.get((error_code, blocked_from), "")
 
     def _runtime_closure_retry_allowed(self, state: dict[str, object]) -> bool:
@@ -854,7 +857,7 @@ class PhaseFourRuntimeClosureCycle:
             )
         pin = _dict_value(state.get("runtime_closure"))
         iterations = _int_value(pin.get("repair_iterations"))
-        if iterations >= max(0, int(self.settings.implementation_repair_limit)):
+        if iterations >= self._repair_limit(state, "runtime_closure_repair"):
             raise HarnessError(
                 "runtime_closure_repair_limit_exceeded",
                 f"Runtime closure repair limit reached ({iterations}) with an open {source} failure: {summary}",

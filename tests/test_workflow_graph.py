@@ -19,7 +19,7 @@ from sdlc_harness.agents.tester.qa import QA_STATUSES
 from sdlc_harness.application.action_specs import public_dashboard_schema
 from sdlc_harness.application.commands import ApplicationCommand
 from sdlc_harness.application.service import ApplicationService
-from sdlc_harness.core.config import load_settings
+from sdlc_harness.core.config import Settings, load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.workflows import graph
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
@@ -341,6 +341,13 @@ class RewindTableTest(unittest.TestCase):
             self.assertIn(target.reset, ("restart", "rerun"), status)
         for stage in graph.REWIND_STAGES:
             self.assertTrue(callable(getattr(PhaseFourWorkflow, f"_rewind_{stage}", None)), stage)
+
+    def test_every_repair_budget_names_a_setting_and_an_error_the_workflows_raise(self) -> None:
+        settings_fields = set(Settings.__annotations__)
+        source ="\n".join(path.read_text(encoding="utf-8") for path in (PACKAGE / "workflows").glob("phase4*.py"))
+        for budget_id, budget in graph.REPAIR_BUDGETS.items():
+            self.assertIn(budget.setting, settings_fields, budget_id)
+            self.assertIn(f'"{budget.error_code}"', source, budget_id)
 
 
 if __name__ == "__main__":

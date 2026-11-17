@@ -100,6 +100,7 @@ class ApplicationService:
             "adopt-run-workspace",
             "cleanup-run-workspace",
             "rewind-run",
+            "adjust-budget",
         }:
             run_id = self._required_text(command, "run_id")
             with store.run_lock(run_id):
@@ -306,6 +307,16 @@ class ApplicationService:
         if name == "restart-design":
             return PhaseTwoWorkflow(settings).restart_design(
                 run_id=self._required_text(command, "run_id")
+            )
+        if name == "adjust-budget":
+            raw_limit = self._required_text(command, "limit")
+            if not raw_limit.strip().isdigit():
+                raise HarnessError("budget_limit_invalid", "limit must be a whole number of repair rounds.")
+            return PhaseFourWorkflow(settings).adjust_budget(
+                run_id=self._required_text(command, "run_id"),
+                budget_id=self._required_text(command, "budget_id"),
+                limit=int(raw_limit),
+                reason=self._required_text(command, "reason"),
             )
         if name == "rewind-run":
             return PhaseFourWorkflow(settings).rewind_run(

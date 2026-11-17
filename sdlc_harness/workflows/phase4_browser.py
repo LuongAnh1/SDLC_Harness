@@ -431,7 +431,9 @@ class PhaseFourBrowserStagesCycle:
             _QA_PHASE,
         }:
             return ""
-        if str(_dict_value(state.get("last_error")).get("error_code") or "") not in _RETRYABLE_ERROR_CODES:
+        error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
+        # A spent repair budget the owner raised with `adjust_budget` reruns the step that hit it.
+        if error_code not in _RETRYABLE_ERROR_CODES and not self._spent_budget_has_room(state):
             return ""
         return str(_dict_value(state.get("browser_stages")).get("blocked_from") or "deriving")
 
@@ -701,7 +703,7 @@ class PhaseFourBrowserStagesCycle:
     ) -> dict[str, object]:
         pin = _dict_value(state.get("browser_stages"))
         patches = _int_value(pin.get("journey_patch_iterations"))
-        if patches >= max(0, int(self.settings.browser_journey_patch_limit)):
+        if patches >= self._repair_limit(state, "browser_journey_patch"):
             raise HarnessError(
                 "browser_journey_patch_limit_exceeded",
                 f"Browser journey patch limit reached ({patches}) with an open journey defect.",
@@ -1259,7 +1261,7 @@ class PhaseFourBrowserStagesCycle:
 
         pin = _dict_value(state.get("browser_stages"))
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("readiness"))
-        if iterations >= max(0, int(self.settings.browser_readiness_repair_limit)):
+        if iterations >= self._repair_limit(state, "browser_readiness_repair"):
             raise HarnessError(
                 "browser_readiness_repair_limit_exceeded",
                 f"Browser readiness repair limit reached ({iterations}) with an open {source} failure: {summary}",
@@ -2129,7 +2131,7 @@ class PhaseFourBrowserStagesCycle:
     ) -> dict[str, object]:
         pin = _dict_value(state.get("browser_stages"))
         patches = _int_value(pin.get("journey_patch_iterations"))
-        if patches >= max(0, int(self.settings.browser_journey_patch_limit)):
+        if patches >= self._repair_limit(state, "browser_journey_patch"):
             raise HarnessError(
                 "browser_journey_patch_limit_exceeded",
                 f"Browser journey patch limit reached ({patches}) with an open journey defect.",
@@ -3372,7 +3374,7 @@ class PhaseFourBrowserStagesCycle:
     ) -> dict[str, object]:
         pin = _dict_value(state.get("browser_stages"))
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("polish"))
-        if iterations >= max(0, int(self.settings.browser_polish_repair_limit)):
+        if iterations >= self._repair_limit(state, "browser_polish_repair"):
             raise HarnessError(
                 "ui_polish_repair_limit_exceeded",
                 f"UI Polish repair limit reached ({iterations}) with an open {source} failure: {summary}",
@@ -3476,7 +3478,7 @@ class PhaseFourBrowserStagesCycle:
     ) -> dict[str, object]:
         pin = _dict_value(state.get("browser_stages"))
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("qa"))
-        if iterations >= max(0, int(self.settings.browser_qa_repair_limit)):
+        if iterations >= self._repair_limit(state, "browser_qa_repair"):
             raise HarnessError(
                 "browser_qa_repair_limit_exceeded",
                 f"Shared browser behavior repair limit reached ({iterations}) with an open {source} blocker.",
@@ -3806,7 +3808,7 @@ class PhaseFourBrowserStagesCycle:
     ) -> dict[str, object]:
         pin = _dict_value(state.get("browser_stages"))
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("qa"))
-        if iterations >= max(0, int(self.settings.browser_qa_repair_limit)):
+        if iterations >= self._repair_limit(state, "browser_qa_repair"):
             raise HarnessError(
                 "browser_qa_repair_limit_exceeded",
                 f"Browser QA repair limit reached ({iterations}) with an open {source} blocker.",

@@ -3181,6 +3181,23 @@ class PhaseFourTest(unittest.TestCase):
         blocked = self._closure_step(run_id, runner)
         self.assertEqual(blocked["last_error"]["error_code"], "runtime_closure_repair_limit_exceeded", blocked)
 
+    def test_adjust_budget_reopens_a_runtime_closure_blocked_by_its_repair_limit(self) -> None:
+        run_id, runner = self._written_closure_run(
+            outcomes=["probe_fail", "probe_fail", "probe_fail"], SDLC_IMPLEMENTATION_REPAIR_LIMIT="1"
+        )
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_repair_needed")
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_written")
+        self.assertEqual(self._closure_step(run_id, runner)["last_error"]["error_code"], "runtime_closure_repair_limit_exceeded")
+
+        PhaseFourWorkflow(self.settings).adjust_budget(
+            run_id=run_id, budget_id="runtime_closure_repair", limit=2, reason="owner: one more closure repair"
+        )
+
+        # The closure verification reruns, finds the failure again and now has budget for a second repair.
+        self.assertEqual(self._closure_step(run_id, runner)["status"], "runtime_closure_repair_needed")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["runtime_closure"]["repair_iterations"], 1)
+
     def test_runtime_closure_code_review_blocker_repairs_and_frozen_conflict_blocks(self) -> None:
         run_id, runner = self._written_closure_run()
         validator = ScriptedClosureLlm([closure_code_blocker, closure_code_frozen_conflict])
@@ -5501,6 +5518,44 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(blocked["status"], "blocked", blocked)
         self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
         self.assertNotIn("browser_qa_repair_feedback", blocked["latest_artifacts"])
+
+    def test_adjust_budget_lets_a_run_blocked_by_a_spent_budget_rerun_the_step_that_hit_it(self) -> None:
+        # G1.6: replaces the r9 recovery owner_approved_journey_patch_limit with one owner action.
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner, SDLC_BROWSER_QA_REPAIR_LIMIT="0")
+        self._add_browser_qa_obligation(run_id)
+        validator = ScriptedClosureLlm(default=self._browser_qa_blocker)
+        blocked = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(blocked["last_error"]["error_code"], "browser_qa_repair_limit_exceeded")
+        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
+        workflow = self._browser_workflow(runner)
+        with self.assertRaises(HarnessError) as stuck:
+            workflow.continue_run(run_id=run_id)
+        self.assertEqual(stuck.exception.error_code, "run_not_continuable")
+        for budget_id, limit, reason, error_code in (
+            ("browser_typo", 1, "x", "budget_not_supported"),
+            ("browser_qa_repair", 1, " ", "budget_reason_required"),
+            ("browser_qa_repair", -1, "x", "budget_limit_invalid"),
+        ):
+            with self.subTest(error=error_code), self.assertRaises(HarnessError) as refused:
+                workflow.adjust_budget(run_id=run_id, budget_id=budget_id, limit=limit, reason=reason)
+            self.assertEqual(refused.exception.error_code, error_code)
+
+        adjusted = workflow.adjust_budget(
+            run_id=run_id, budget_id="browser_qa_repair", limit=1, reason="owner: one more QA repair round"
+        )
+
+        self.assertEqual(adjusted["status"], "blocked")
+        self.assertIn("continue_run", adjusted["allowed_next_actions"])
+        state = workflow.store.read_state(run_id)
+        self.assertEqual(state["repair_budgets"]["browser_qa_repair"]["limit"], 1)
+        self.assertEqual(
+            {key: state["recoveries"][-1][key] for key in ("code", "budget_id", "previous_limit", "limit", "used")},
+            {"code": "adjust_budget", "budget_id": "browser_qa_repair", "previous_limit": 0, "limit": 1, "used": 0},
+        )
+        resumed = self._browser_qa_step(run_id, runner, validator)
+        self.assertEqual(resumed["status"], "browser_qa_repair_needed", resumed)
+        self.assertIn("browser_qa_repair_feedback", resumed["latest_artifacts"])
 
     def test_browser_qa_uses_the_repair_budget_already_spent_before_polish(self) -> None:
         runner = BrowserVerificationRunnerStub()

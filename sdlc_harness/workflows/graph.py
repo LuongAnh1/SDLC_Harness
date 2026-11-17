@@ -337,6 +337,41 @@ REWIND_TARGETS = {
 }
 
 
+@dataclass(frozen=True)
+class RepairBudget:
+    """A Phase 4 repair budget: its default limit, where the run counts rounds, the block a spent budget raises."""
+
+    setting: str
+    counter: tuple[str, ...]
+    error_code: str
+
+
+# The owner can raise these per run with `adjust_budget` (G1.6); a run blocked by a spent budget then continues
+# from the step that hit it. Phase 4 implementation and QA repairs keep their existing owner paths
+# (`continue_run` overrides, `revalidate_implementation`).
+REPAIR_BUDGETS = {
+    # Runtime closure repairs share the implementation repair limit, not its counter.
+    "runtime_closure_repair": RepairBudget(
+        "implementation_repair_limit", ("runtime_closure", "repair_iterations"), "runtime_closure_repair_limit_exceeded"
+    ),
+    "browser_readiness_repair": RepairBudget(
+        "browser_readiness_repair_limit",
+        ("browser_stages", "repair_iterations", "readiness"),
+        "browser_readiness_repair_limit_exceeded",
+    ),
+    "browser_polish_repair": RepairBudget(
+        "browser_polish_repair_limit", ("browser_stages", "repair_iterations", "polish"), "ui_polish_repair_limit_exceeded"
+    ),
+    # Journey code repairs and Browser QA code repairs spend this one shared budget.
+    "browser_qa_repair": RepairBudget(
+        "browser_qa_repair_limit", ("browser_stages", "repair_iterations", "qa"), "browser_qa_repair_limit_exceeded"
+    ),
+    "browser_journey_patch": RepairBudget(
+        "browser_journey_patch_limit", ("browser_stages", "journey_patch_iterations"), "browser_journey_patch_limit_exceeded"
+    ),
+}
+
+
 def node_for(status: str) -> Node | None:
     return NODES_BY_STATUS.get(status)
 
