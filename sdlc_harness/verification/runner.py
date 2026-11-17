@@ -31,6 +31,7 @@ from ..profiles import (
 )
 from .registry import (
     BROWSER_CAPTURE_SPEC_PATH,
+    REPOSITORY_E2E_ROOT,
     PROFILED_ENV_ALLOWLIST,
     PROFILED_FIXED_ENV,
     RUNTIME_PROBE_SPEC_PATH,
@@ -71,6 +72,7 @@ _RUN_SCOPED_STAGE_IDS = {
     "api_database_integration",
     "service_health",
     "browser_e2e",
+    "repository_e2e",
     "runtime_probe",
     "browser_capture",
     "cleanup",
@@ -122,6 +124,8 @@ class VerificationStageResult:
     probe_results: tuple[dict[str, object], ...] = ()
     capture_results: tuple[dict[str, object], ...] = ()
     build_scan: dict[str, object] | None = None
+    # Env the stage ran with, by source; names only except reviewed constants (L5.5.1, Documentation Closure).
+    env_keys: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -146,6 +150,8 @@ class VerificationStageResult:
             payload["capture_results"] = [dict(item) for item in self.capture_results]
         if self.build_scan is not None:
             payload["build_scan"] = dict(self.build_scan)
+        if self.env_keys is not None:
+            payload["env_keys"] = dict(self.env_keys)
         return payload
 
 
@@ -241,6 +247,36 @@ class VerificationRunner:
             },
         )
         return result
+
+    def run_demo_flag_stage(
+        self,
+        *,
+        target_path: Path,
+        work_packet: dict[str, object],
+        verification_policy: VerificationStagePolicy,
+        stage_id: str,
+        demo_flag_env_key: str,
+    ) -> VerificationResult:
+        """Rerun one reviewed stage with the Harness demo flag set to "1" (L5.5.3 F3: the documented demo build).
+
+        Only the flag is added; argv, cwd and every other env still come from the registry.
+        """
+
+        if stage_id not in verification_policy.stage_ids:
+            raise HarnessError(
+                "verification_stage_policy_invalid",
+                f"Demo-flag stage is not in the verification policy: {stage_id}",
+                run_id=str(work_packet.get("run_id") or "") or None,
+            )
+        return self._run_profiled_stages(
+            target_path=target_path,
+            work_packet=work_packet,
+            required_test_files=None,
+            verification_policy=verification_policy,
+            qa_policy=None,
+            selected_stage_ids=(stage_id,),
+            demo_flag_stage=(stage_id, demo_flag_env_key),
+        )
 
     def run_stage(
         self,
@@ -344,6 +380,7 @@ class VerificationRunner:
         developer_unit_scope: bool = False,
         runtime_probe: RuntimeProbeRun | None = None,
         browser_capture: BrowserCaptureRun | None = None,
+        demo_flag_stage: tuple[str, str] | None = None,
     ) -> VerificationResult:
         """Chạy ordered smoke suite bằng registry, không đọc executable data từ packet."""
 
@@ -359,6 +396,12 @@ class VerificationRunner:
                 _browser_capture_env(browser_capture, run_id=run_id) if "browser_capture" in planned else {}
             ),
         }
+        constant_keys = {browser_capture.demo_flag_env_key} if browser_capture is not None else set()
+        if demo_flag_stage is not None:
+            demo_stage_id, demo_key = demo_flag_stage
+            _require_harness_env_key(demo_key, taken=stage_extra_env.get(demo_stage_id) or {}, run_id=run_id)
+            stage_extra_env[demo_stage_id] = {**(stage_extra_env.get(demo_stage_id) or {}), demo_key: "1"}
+            constant_keys.add(demo_key)
         if selected_stage_ids is not None:
             selected = set(selected_stage_ids)
             specs = tuple(spec for spec in specs if spec.stage_id in selected)
@@ -480,6 +523,15 @@ class VerificationRunner:
                     failure_kind="environment",
                 )
             prepared.append((spec, stage_cwd, executable, env))
+        env_keys_by_stage = {
+            spec.stage_id: _stage_env_keys(
+                spec,
+                run_id=run_id,
+                extra_env=stage_extra_env.get(spec.stage_id) or {},
+                constant_keys=constant_keys,
+            )
+            for spec, _, _, _ in prepared
+        }
 
         stage_results: list[VerificationStageResult] = []
         first_failure: VerificationStageResult | None = None
@@ -503,8 +555,27 @@ class VerificationRunner:
                     )
                 )
                 continue
+            if spec.stage_id == "repository_e2e" and not _repository_e2e_specs(target_root):
+                stage_results.append(
+                    VerificationStageResult(
+                        stage_id=spec.stage_id,
+                        status="passed",
+                        argv=(),
+                        cwd=spec.cwd,
+                        timeout_seconds=spec.timeout_seconds,
+                        exit_code=None,
+                        duration_seconds=0.0,
+                        stdout="",
+                        stderr="",
+                        reason="The repository has no Playwright spec of its own.",
+                        env_keys=env_keys_by_stage[spec.stage_id],
+                    )
+                )
+                continue
             if spec.stage_id == "runtime_probe":
                 stage_selected_files: tuple[str, ...] = (RUNTIME_PROBE_SPEC_PATH,)
+            elif spec.stage_id == "repository_e2e":
+                stage_selected_files = _repository_e2e_specs(target_root)
             elif spec.stage_id == "browser_capture":
                 stage_selected_files = (BROWSER_CAPTURE_SPEC_PATH,)
             elif spec.stage_id == "unit":
@@ -564,7 +635,7 @@ class VerificationRunner:
                     *executable_reporter_args,
                     *stage_selected_files,
                 ]
-            elif stage_selected_files and spec.stage_id in {"browser_e2e", "runtime_probe", "browser_capture"}:
+            elif stage_selected_files and spec.stage_id in {"browser_e2e", "repository_e2e", "runtime_probe", "browser_capture"}:
                 logical_argv = (*spec.argv, "--", *stage_selected_files)
                 executable_argv = [executable, *spec.argv[1:], "--", *stage_selected_files]
             start = time.monotonic()
@@ -708,6 +779,7 @@ class VerificationRunner:
             ):
                 # R3: the production build must not ship demo fixtures; later browser stages rebuild with the flag.
                 stage_result = _with_build_literal_scan(stage_result, target_root=target_root, capture=browser_capture)
+            stage_result = replace(stage_result, env_keys=env_keys_by_stage[spec.stage_id])
             stage_results.append(stage_result)
             if stage_result.status != "passed":
                 first_failure = first_failure or stage_result
@@ -1511,6 +1583,26 @@ def _is_within(path: Path, root: Path) -> bool:
     return True
 
 
+def _repository_e2e_specs(target_root: Path) -> tuple[str, ...]:
+    """The repository's own Playwright specs: what CI runs, without the two Harness-rendered specs.
+
+    shortcut: mirrors the profile's playwright.config (`testDir: tests/e2e`, `testMatch: **/*.spec.ts`);
+    read them from the repository once repo discovery exists (weakness backlog item 2).
+    """
+
+    root = target_root / REPOSITORY_E2E_ROOT
+    if not root.is_dir():
+        return ()
+    harness_specs = {RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH}
+    return tuple(
+        sorted(
+            path
+            for path in (item.relative_to(target_root).as_posix() for item in root.rglob("*.spec.ts"))
+            if path not in harness_specs and "node_modules" not in path.split("/")
+        )
+    )
+
+
 def _windows_io_path(path: Path) -> Path:
     """Use Win32 extended paths for generated evidence that can exceed MAX_PATH."""
 
@@ -1540,24 +1632,51 @@ def _profiled_verification_env(
     env.update(dict(spec.fixed_env))
     env.update(extra_env or {})
     if run_id and getattr(spec, "stage_id", "") in _RUN_SCOPED_STAGE_IDS:
-        digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
-        port = 50000 + (int(digest[:8], 16) % 10000)
-        env.update(
-            {
-                "COMPOSE_PROJECT_NAME": f"sdlc_{digest[:10]}",
-                "SDLC_POSTGRES_PORT": str(port),
-                # Compose reads these to create the database DATABASE_URL names; without them it
-                # falls back to the target's own defaults and authentication fails.
-                "POSTGRES_USER": _RUN_DATABASE_USER,
-                "POSTGRES_PASSWORD": _RUN_DATABASE_PASSWORD,
-                "POSTGRES_DB": _RUN_DATABASE_NAME,
-                "DATABASE_URL": (
-                    f"postgresql://{_RUN_DATABASE_USER}:{_RUN_DATABASE_PASSWORD}"
-                    f"@127.0.0.1:{port}/{_RUN_DATABASE_NAME}"
-                ),
-            }
-        )
+        env.update(_run_scoped_env(run_id))
     return env
+
+
+def _run_scoped_env(run_id: str) -> dict[str, str]:
+    """Per-run database isolation for the run-scoped stages."""
+
+    digest = hashlib.sha256(run_id.encode("utf-8")).hexdigest()
+    port = 50000 + (int(digest[:8], 16) % 10000)
+    return {
+        "COMPOSE_PROJECT_NAME": f"sdlc_{digest[:10]}",
+        "SDLC_POSTGRES_PORT": str(port),
+        # Compose reads these to create the database DATABASE_URL names; without them it
+        # falls back to the target's own defaults and authentication fails.
+        "POSTGRES_USER": _RUN_DATABASE_USER,
+        "POSTGRES_PASSWORD": _RUN_DATABASE_PASSWORD,
+        "POSTGRES_DB": _RUN_DATABASE_NAME,
+        "DATABASE_URL": (
+            f"postgresql://{_RUN_DATABASE_USER}:{_RUN_DATABASE_PASSWORD}"
+            f"@127.0.0.1:{port}/{_RUN_DATABASE_NAME}"
+        ),
+    }
+
+
+def _stage_env_keys(
+    spec: VerificationStageSpec,
+    *,
+    run_id: str | None,
+    extra_env: dict[str, str],
+    constant_keys: set[str],
+) -> dict[str, object]:
+    """Which env a stage ran with, by source. Values are kept only for reviewed constants: the spec's fixed
+    env and Harness flags whose value is fixed in code (the demo flag is always "1"); every other value may be
+    machine-specific or secret."""
+
+    allowed = {key.casefold() for key in spec.inherited_env_keys}
+    return {
+        "inherited": sorted(key for key in os.environ if key.casefold() in allowed),
+        "fixed": dict(spec.fixed_env),
+        "run_scoped": (
+            sorted(_run_scoped_env(run_id)) if run_id and spec.stage_id in _RUN_SCOPED_STAGE_IDS else []
+        ),
+        "harness": sorted(extra_env),
+        "harness_constants": {key: extra_env[key] for key in sorted(extra_env) if key in constant_keys},
+    }
 
 
 def _environment_value(env: dict[str, str], key: str) -> str:

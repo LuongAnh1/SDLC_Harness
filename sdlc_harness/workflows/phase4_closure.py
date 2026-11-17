@@ -1513,7 +1513,7 @@ class _ClosureRepository:
 
 _HARNESS_OWNED_PATHS = {".env.example", RUNTIME_PROBE_SPEC_PATH}
 # Stages that boot the services through the Playwright webServer (L5.3 probe, L5.4 browser capture).
-_SERVICE_STAGE_IDS = {"runtime_probe", "browser_capture"}
+_SERVICE_STAGE_IDS = {"runtime_probe", "browser_capture", "repository_e2e"}
 _PROBE_SERVICE_MARKER = re.compile(r"\[(api|web)\]")
 
 

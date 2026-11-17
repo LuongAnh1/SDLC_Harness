@@ -387,7 +387,7 @@ class BrowserVerificationRunnerStub:
         self.closure = ClosureVerificationRunnerStub()
 
     def run(self, *, target_path: Path, work_packet: dict[str, object], verification_policy=None, runtime_probe=None, browser_capture=None, **kwargs):
-        if verification_policy is None or verification_policy.policy_version != "browser_stage_policy_v1":
+        if verification_policy is None or verification_policy.policy_version != "browser_stage_policy_v2":
             return self.closure.run(
                 target_path=target_path, work_packet=work_packet, verification_policy=verification_policy,
                 runtime_probe=runtime_probe, **kwargs,
@@ -400,6 +400,11 @@ class BrowserVerificationRunnerStub:
         failing = {
             "env": ("database_ready", "environment", "Error: port is already allocated"),
             "r3": ("frontend_build", "implementation", f"R3: the production build contains demo literal(s): `{literal}`"),
+            "repo_e2e": (
+                "repository_e2e",
+                "implementation",
+                "Error: strict mode violation: getByRole('status') resolved to 2 elements",
+            ),
         }.get(outcome)
         stages: list[VerificationStageResult] = []
         stopped = False
@@ -3400,7 +3405,7 @@ class PhaseFourTest(unittest.TestCase):
             {
                 "mode": "enforce",
                 "contract_version": "browser_stages_contract_v1",
-                "verification_policy_version": "browser_stage_policy_v1",
+                "verification_policy_version": "browser_stage_policy_v2",
                 "demo_flag_env_key": "VITE_SDLC_DEMO_RUNTIME",
             },
         )
@@ -4650,6 +4655,43 @@ class PhaseFourTest(unittest.TestCase):
         verification = self._artifact(tested, "browser_qa_verification")
         self.assertEqual(verification["source"], "worktree_changed_after_ui_polish_capture")
 
+    def test_browser_qa_initial_repository_e2e_failure_goes_to_qa_repair(self) -> None:
+        # L5.5.6: a change after Polish that breaks the repository's own e2e specs reaches the Developer.
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
+        changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
+        runner.outcomes = ["repo_e2e"]
+        validator = ScriptedClosureLlm(default=fake_browser_qa_review)
+
+        routed = self._browser_qa_step(run_id, runner, validator)
+
+        self.assertEqual(routed["status"], "browser_qa_repair_needed", routed)
+        self.assertEqual(validator.calls, 0)
+        feedback = self._artifact(routed, "browser_qa_repair_feedback")
+        finding = feedback["repair_objective"]["contract_findings"][0]
+        self.assertEqual(finding["source"], "repository_e2e")
+        self.assertIn("strict mode violation", finding["stage_output"]["stderr"])
+        self.assertTrue(finding["unit_ids"])
+        self.assertTrue(set(finding["paths"]) <= set(feedback["developer_constraints"]["allowed_paths"]))
+
+    def test_browser_qa_recaptures_when_the_post_polish_capture_ran_an_older_suite(self) -> None:
+        runner = BrowserVerificationRunnerStub()
+        run_id = self._polished_run(runner)
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        verification = self.repo_root / state["browser_stages"]["polish"]["verification"]
+        payload = json.loads(verification.read_text(encoding="utf-8"))
+        digest = payload.get("verification") if isinstance(payload.get("verification"), dict) else payload
+        digest["executed_stage_ids"] = [item for item in digest["executed_stage_ids"] if item != "repository_e2e"]
+        verification.write_text(json.dumps(payload), encoding="utf-8")
+        calls_before_qa = len(runner.calls)
+
+        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
+
+        self.assertEqual(tested["status"], "qa_tested", tested)
+        self.assertEqual(len(runner.calls), calls_before_qa + 1)
+        self.assertIn("repository_e2e", runner.calls[-1]["stage_ids"])
+
     def test_browser_qa_reviews_three_runnable_scenarios_before_qa_tested(self) -> None:
         runner = BrowserVerificationRunnerStub()
         run_id = self._polished_run(runner)
@@ -4821,6 +4863,13 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue((self.store_run_dir(run_id) / "developer_execution" / "browser_qa_repair_v1").is_dir())
         verified = self._browser_qa_step(run_id, runner, validator)
         self.assertEqual(verified["status"], "browser_qa_verified", verified)
+        # Final Verification F1 compares against this fingerprint (L5.5.6).
+        fingerprint = self._artifact(verified, "browser_qa_verification")["worktree_fingerprint"]
+        self.assertTrue(fingerprint["files"])
+        self.assertEqual(
+            PhaseOneWorkflow(self.settings).store.read_state(run_id)["browser_stages"]["qa"]["evidence_tree_hash"],
+            fingerprint["sha256"],
+        )
         tested = self._browser_qa_step(run_id, runner, validator)
         self.assertEqual(tested["status"], "qa_tested", tested)
         state = PhaseOneWorkflow(self.settings).store.read_state(run_id)

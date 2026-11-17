@@ -1248,6 +1248,16 @@ class BrowserCaptureVerificationTest(unittest.TestCase):
                 report = probe
             elif BROWSER_CAPTURE_SPEC_PATH in argv:
                 report = capture_report(self.target, captures, failed=failed)
+            elif "--" in argv:
+                # repository_e2e: the repository's own specs, one passing test each.
+                own = argv[argv.index("--") + 1:]
+                report = {
+                    "suites": [
+                        {"file": path, "specs": [{"title": path, "tests": [{"results": [{"status": "passed"}]}]}]}
+                        for path in own
+                    ],
+                    "stats": {"unexpected": 0},
+                }
             if report is not None:
                 path = self.target / "playwright-report/results.json"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -1274,7 +1284,10 @@ class BrowserCaptureVerificationTest(unittest.TestCase):
     def test_browser_policy_order_ownership_registry_and_facts(self) -> None:
         self.assertEqual(self.policy.policy_version, BROWSER_STAGE_POLICY_VERSION)
         closure = build_runtime_closure_stage_policy(project=self.project).stage_ids
-        self.assertEqual(self.policy.stage_ids, (*closure[:-1], "browser_capture", "cleanup"))
+        self.assertEqual(
+            self.policy.stage_ids, (*closure[:-2], "repository_e2e", "runtime_probe", "browser_capture", "cleanup")
+        )
+        self.assertEqual(self.policy.owner_for_stage("repository_e2e"), "harness_global")
         self.assertEqual(self.policy.owner_for_stage("browser_capture"), "harness_global")
         self.assertNotIn("browser_capture", self.project.verification_stage_ids)  # catalog untouched
         specs = {spec.stage_id: spec for spec in resolve_verification_stage_specs(self.policy)}
@@ -1333,6 +1346,96 @@ class BrowserCaptureVerificationTest(unittest.TestCase):
             self.assertTrue(copied.is_file())
             self.assertEqual(item["screenshot"]["sha256"], hashlib.sha256(copied.read_bytes()).hexdigest())
         self.assertIn("capture_results", self.stage(result, "browser_capture").to_dict())
+
+    def test_stage_results_record_env_names_by_source_without_secret_values(self) -> None:
+        # L5.5.1: Documentation Closure may only cite env a passed stage really ran with.
+        result, run = self.run_suite(
+            self.capture(),
+            captures={"V-0@desktop": [{"step": 0}], "V-0@mobile": [{"step": 0}]},
+        )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        capture = self.stage(result, "browser_capture").env_keys
+        probe = self.stage(result, "runtime_probe").env_keys
+        typecheck = self.stage(result, "typecheck").env_keys
+        self.assertEqual(capture["harness"], ["ETOUR_BASE_URL", "VITE_SDLC_DEMO_RUNTIME"])
+        self.assertEqual(capture["harness_constants"], {"VITE_SDLC_DEMO_RUNTIME": "1"})
+        self.assertEqual(probe["harness"], ["ETOUR_BASE_URL"])
+        self.assertEqual(probe["harness_constants"], {})
+        self.assertIn("DATABASE_URL", probe["run_scoped"])
+        self.assertEqual((typecheck["harness"], typecheck["run_scoped"]), ([], []))
+        self.assertEqual(typecheck["fixed"], {"CI": "1", "NO_COLOR": "1", "FORCE_COLOR": "0"})
+        # Names only: no run-scoped or stand-in value (database password, loopback port) reaches the evidence.
+        encoded = json.dumps([stage.to_dict()["env_keys"] for stage in result.stage_results])
+        calls = [call.args[0] for call in run.call_args_list]
+        probe_env = run.call_args_list[calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH])].kwargs["env"]
+        for key in ("DATABASE_URL", "ETOUR_BASE_URL", "POSTGRES_PASSWORD"):
+            self.assertNotIn(probe_env[key], encoded)
+
+    def test_demo_flag_stage_runs_only_the_reviewed_stage_with_the_flag(self) -> None:
+        # L5.5.3 F3: the documented demo build reruns the reviewed command with only the demo flag added.
+        policy = build_verification_stage_policy_version(
+            project=self.project, policy_version=VERIFICATION_STAGE_POLICY_VERSION
+        )
+        packet = {**self.packet, "verification_stage_ids": list(policy.stage_ids)}
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch(
+                "sdlc_harness.verification.runner._run_bounded",
+                side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(argv, 0, "", ""),
+            ) as run,
+        ):
+            result = VerificationRunner().run_demo_flag_stage(
+                target_path=self.target,
+                work_packet=packet,
+                verification_policy=policy,
+                stage_id="frontend_build",
+                demo_flag_env_key=self.facts.demo_flag_env_key,
+            )
+            with self.assertRaises(HarnessError):
+                VerificationRunner().run_demo_flag_stage(
+                    target_path=self.target,
+                    work_packet=packet,
+                    verification_policy=policy,
+                    stage_id="frontend_build",
+                    demo_flag_env_key="PATH",
+                )
+
+        self.assertEqual(result.status, "passed", result.reason)
+        self.assertEqual([item.stage_id for item in result.stage_results], ["frontend_build"])
+        self.assertEqual([call.args[0] for call in run.call_args_list], [["npm", "run", "build:web"]])
+        env = run.call_args_list[0].kwargs["env"]
+        self.assertEqual(env[self.facts.demo_flag_env_key], "1")
+        self.assertNotIn("ETOUR_BASE_URL", env)
+        self.assertEqual(
+            result.stage_results[0].env_keys["harness_constants"], {self.facts.demo_flag_env_key: "1"}
+        )
+
+    def test_repository_e2e_runs_the_repositorys_own_specs_as_ci_does(self) -> None:
+        # L5.5.6: the target's own Playwright specs, without the Harness specs, the stand-in or the demo flag.
+        own = self.target / "tests/e2e/health.spec.ts"
+        own.write_text('import { test } from "@playwright/test";\n', encoding="utf-8")
+        result, run = self.run_suite(self.capture())
+
+        self.assertEqual(result.status, "passed", result.reason)
+        calls = [call.args[0] for call in run.call_args_list]
+        command = ["npm", "run", "test:e2e", "--", "tests/e2e/health.spec.ts"]
+        self.assertIn(command, calls)
+        self.assertLess(calls.index(command), calls.index(["npm", "run", "test:e2e", "--", RUNTIME_PROBE_SPEC_PATH]))
+        env = run.call_args_list[calls.index(command)].kwargs["env"]
+        self.assertNotIn("ETOUR_BASE_URL", env)
+        self.assertNotIn(self.facts.demo_flag_env_key, env)
+        self.assertIn("DATABASE_URL", env)  # same isolated database as the rest of the suite
+        stage = self.stage(result, "repository_e2e")
+        self.assertEqual(stage.env_keys["harness"], [])
+
+    def test_repository_e2e_passes_when_the_repository_has_no_spec_of_its_own(self) -> None:
+        result, run = self.run_suite(self.capture())
+
+        self.assertEqual(result.status, "passed", result.reason)
+        stage = self.stage(result, "repository_e2e")
+        self.assertEqual((stage.status, stage.argv), ("passed", ()))
+        self.assertNotIn(["npm", "run", "test:e2e"], [call.args[0][:3] + call.args[0][4:] for call in run.call_args_list])
 
     @unittest.skipUnless(os.name == "nt", "Windows MAX_PATH behavior")
     def test_capture_copies_source_and_destination_beyond_max_path(self) -> None:

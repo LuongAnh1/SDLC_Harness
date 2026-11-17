@@ -26,6 +26,8 @@ DEFAULT_STAGE_TIMEOUT_SECONDS = 120
 RUNTIME_PROBE_SPEC_PATH = "tests/e2e/runtime-closure.probe.spec.ts"
 # The only spec the browser_capture stage runs; Harness renders it from typed journey views.
 BROWSER_CAPTURE_SPEC_PATH = "tests/e2e/sdlc-browser-capture.spec.ts"
+# Where repository_e2e finds the repository's own Playwright specs (profile playwright.config `testDir`).
+REPOSITORY_E2E_ROOT = "tests/e2e"
 _SUPPORTED_POLICY_VERSIONS = {
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
@@ -289,10 +291,16 @@ def _closure_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[Verificati
 
 
 def _browser_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[VerificationStageSpec, ...]:
-    """Browser suite = closure suite plus browser_capture (same reviewed command) after runtime_probe."""
+    """Browser suite = closure suite plus browser_capture (same reviewed command) after runtime_probe.
+
+    repository_e2e (same reviewed command) runs the repository's own specs before runtime_probe, on the freshly
+    seeded database CI would see; the runner leaves out the Harness-rendered specs.
+    """
 
     result: list[VerificationStageSpec] = []
     for spec in _closure_specs(specs):
+        if spec.stage_id == "runtime_probe":
+            result.append(replace(spec, stage_id="repository_e2e"))
         result.append(spec)
         if spec.stage_id == "runtime_probe":
             result.append(replace(spec, stage_id="browser_capture"))

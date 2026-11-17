@@ -300,6 +300,21 @@ _FINDING_EVIDENCE_FIELDS = ("status", "error", "observe", "focus", "layout", "ne
 _POLISH_FINDING_EVIDENCE_FIELDS = (*_FINDING_EVIDENCE_FIELDS, "styles", "contrast")
 
 
+def _suite_failure_problem(suite: dict[str, object]) -> dict[str, object]:
+    """A failed verification stage as a repair problem, with the stage's own bounded output as evidence."""
+
+    stage_id = str(suite["classification"].get("stage_id") or "")
+    stage = suite["stages"].get(stage_id)
+    problem: dict[str, object] = {"source": stage_id or "verification", "issue": suite["result"].reason}
+    if stage is not None and (stage.stdout or stage.stderr):
+        problem["stage_output"] = {
+            "argv": list(stage.argv),
+            "stdout": _bounded_diagnostic(stage.stdout),
+            "stderr": _bounded_diagnostic(stage.stderr),
+        }
+    return problem
+
+
 def _findings_with_evidence(
     findings: list[dict[str, object]],
     *,
@@ -1304,7 +1319,7 @@ class PhaseFourBrowserStagesCycle:
         demo_literals: list[str],
         stage: str,
     ) -> dict[str, object]:
-        """Render both Harness specs, run browser_stage_policy_v1 and write the evidence manifest."""
+        """Render both Harness specs, run the browser stage policy and write the evidence manifest."""
 
         target_path: Path = inputs["target_path"]
         contract = inputs["contract"]
@@ -3707,6 +3722,8 @@ class PhaseFourBrowserStagesCycle:
                     "run_id": run_id,
                     "source": "implementation_repair",
                     "repair_iteration": iteration,
+                    # Final Verification F1 proves the published tree is this verified tree (L5.5.6).
+                    "worktree_fingerprint": _worktree_fingerprint(inputs["target_path"]),
                     "manifest": suite["manifest_ref"],
                     "classification": suite["classification"],
                     "verification": _verification_digest(suite["result"]),
@@ -3729,9 +3746,8 @@ class PhaseFourBrowserStagesCycle:
                     inputs=inputs,
                     problems=[
                         {
-                            "source": str(suite["classification"].get("stage_id") or "verification"),
+                            **_suite_failure_problem(suite),
                             "unit_ids": unit_ids,
-                            "issue": suite["result"].reason,
                             "expected_change": "Restore the approved full suite, probes and browser capture.",
                         }
                     ],
@@ -4034,6 +4050,8 @@ class PhaseFourBrowserStagesCycle:
                     "run_id": run_id,
                     "source": "implementation_repair",
                     "repair_iteration": iteration,
+                    # Final Verification F1 proves the published tree is this verified tree (L5.5.6).
+                    "worktree_fingerprint": _worktree_fingerprint(inputs["target_path"]),
                     "manifest": suite["manifest_ref"],
                     "classification": suite["classification"],
                     "verification": _verification_digest(suite["result"]),
@@ -4056,9 +4074,8 @@ class PhaseFourBrowserStagesCycle:
                     inputs=inputs,
                     problems=[
                         {
-                            "source": str(suite["classification"].get("stage_id") or "verification"),
+                            **_suite_failure_problem(suite),
                             "unit_ids": unit_ids,
-                            "issue": suite["result"].reason,
                             "expected_change": "Restore the approved full suite, probes and browser capture.",
                         }
                     ],
@@ -4086,6 +4103,7 @@ class PhaseFourBrowserStagesCycle:
             status="verified",
             current_manifest=suite["manifest_ref"],
             verification=verification_ref,
+            evidence_tree_hash=_worktree_fingerprint(inputs["target_path"]).get("sha256"),
             needs_regression=True,
         )
         pin = _dict_value(state.get("browser_stages"))
@@ -4147,7 +4165,15 @@ class PhaseFourBrowserStagesCycle:
         )
         captured = _dict_value(verification.get("worktree_fingerprint"))
         current = _worktree_fingerprint(inputs["target_path"])
-        if captured.get("sha256") and captured.get("sha256") == current.get("sha256"):
+        policy = build_browser_stage_policy(project=get_project_profile(inputs["planning_policy"].project_profile_id))
+        captured_stages = tuple(
+            _string_items((_dict_value(verification.get("verification")) or verification).get("executed_stage_ids"))
+        )
+        if (
+            captured.get("sha256")
+            and captured.get("sha256") == current.get("sha256")
+            and captured_stages == policy.stage_ids
+        ):
             latest_artifacts["browser_qa_evidence_manifest"] = manifest_ref
             self._set_qa(
                 state,
@@ -4172,6 +4198,32 @@ class PhaseFourBrowserStagesCycle:
             demo_literals=self._readiness_literals(state, run_id=run_id),
             stage="qa_initial",
         )
+        if suite["classification"]["kind"] == "implementation":
+            # No review has cited a unit yet: the owners of every changed path get the finding (mechanical).
+            changed = set(worktree_dirty_paths(inputs["target_path"]))
+            owned = sorted(
+                path
+                for unit in _dict_items(inputs["frozen_packet"].get("execution_units"))
+                for path in _string_items(unit.get("write_paths"))
+                if path in changed
+            )
+            return self._route_browser_qa_repair(
+                state=state,
+                run_id=run_id,
+                latest_artifacts=latest_artifacts,
+                inputs=inputs,
+                problems=[
+                    {
+                        **_suite_failure_problem(suite),
+                        "paths": sorted(set(owned)),
+                        "expected_change": (
+                            "Make this verification stage pass again by changing the cited units' code. Tests the "
+                            "repository already had stay unchanged, and every approved outcome stays as it is."
+                        ),
+                    }
+                ],
+                source="browser_qa_initial_verification",
+            )
         if suite["classification"]["kind"] != "passed":
             raise HarnessError(
                 "browser_qa_environment_failed"
@@ -4328,9 +4380,11 @@ class PhaseFourBrowserStagesCycle:
         self._set_qa(state, status="reviewing", attempt=attempt)
         self.store.write_state(state)
         try:
-            self._ensure_browser_qa_evidence(
+            routed = self._ensure_browser_qa_evidence(
                 state=state, run_id=run_id, latest_artifacts=latest_artifacts
             )
+            if routed is not None:
+                return routed
             inputs, tasks = self._browser_qa_tasks(
                 state=state, run_id=run_id, latest_artifacts=latest_artifacts
             )

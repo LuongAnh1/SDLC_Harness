@@ -23,10 +23,15 @@ VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v2"
 # Pinned per run in state.runtime_closure, never in profile_snapshot (L5.3).
 RUNTIME_CLOSURE_STAGE_POLICY_VERSION = "runtime_closure_stage_policy_v1"
 # Pinned per run in state.browser_stages, never in profile_snapshot (L5.4).
-BROWSER_STAGE_POLICY_VERSION = "browser_stage_policy_v1"
+# v2 (L5.5.6) adds repository_e2e: the target's own Playwright specs, run as CI runs them.
+BROWSER_STAGE_POLICY_VERSION = "browser_stage_policy_v2"
 # Harness-owned stages that execute a catalog stage's reviewed command; the target's
 # protected profile manifest only lists catalog stages, so it stays unchanged.
-_CATALOG_STAGE_ALIASES = {"runtime_probe": "browser_e2e", "browser_capture": "browser_e2e"}
+_CATALOG_STAGE_ALIASES = {
+    "runtime_probe": "browser_e2e",
+    "browser_capture": "browser_e2e",
+    "repository_e2e": "browser_e2e",
+}
 LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
 PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
 PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VERSION
@@ -75,6 +80,7 @@ _ACTIVE_STAGE_IDS_BY_POLICY = {
             "api_database_integration",
             "frontend_build",
             "service_health",
+            "repository_e2e",
             "runtime_probe",
             "browser_capture",
             "cleanup",
@@ -126,6 +132,7 @@ _STAGE_OWNERS_BY_POLICY = {
             "api_database_integration": HARNESS_GLOBAL_STAGE_OWNER,
             "frontend_build": HARNESS_GLOBAL_STAGE_OWNER,
             "service_health": HARNESS_GLOBAL_STAGE_OWNER,
+            "repository_e2e": HARNESS_GLOBAL_STAGE_OWNER,
             "runtime_probe": HARNESS_GLOBAL_STAGE_OWNER,
             "browser_capture": HARNESS_GLOBAL_STAGE_OWNER,
             "cleanup": HARNESS_GLOBAL_STAGE_OWNER,
@@ -151,6 +158,9 @@ _STAGE_CAPABILITIES_BY_PROJECT = {
         "frontend_build": "Builds the Vite frontend and therefore observes imports, stylesheets and production bundling.",
         "service_health": "Validates the protected web/API runtime bootstrap before browser execution.",
         "browser_e2e": "Runs Playwright Chromium and observes DOM interaction, focus, keyboard, CSS and viewport layout.",
+        "repository_e2e": "Runs the target repository's own Playwright specs (every spec except the two the Harness "
+        "renders) exactly as CI does: production build, no demo flag, no stand-in. Catches changes that break the "
+        "repository's existing end-to-end tests.",
         "runtime_probe": "Boots the target's API and web services through its Playwright webServer and sends the "
         "approved request-only HTTP probes; proves each service answers with the expected status and, optionally, "
         "a JSON array of at least N items. Observes no DOM, focus, CSS or layout.",
