@@ -220,6 +220,44 @@ class GitHubCodeReviewPublisher:
     def __init__(self, gh_runner: GhRunner | None = None):
         self._gh_runner = gh_runner or _run_gh
 
+    def preview(
+        self,
+        *,
+        target_path: Path,
+        expected_remote: str,
+        repository: str,
+        branch: str,
+        base_branch: str,
+        run_id: str,
+        publication_paths: list[str],
+        evidence_only_paths: list[str] | None = None,
+    ) -> dict[str, object]:
+        """What `publish` would stage, with the same checks; no git add/commit/push and no `gh` (L5.5 D7)."""
+
+        self._validate_repo(target_path, expected_remote=expected_remote, branch=branch, run_id=run_id)
+        allowed = set(publication_paths)
+        evidence_only = set(evidence_only_paths or ()) - allowed
+        changed_paths = _changed_paths(target_path) - evidence_only
+        unexpected = sorted(path for path in changed_paths if path not in allowed)
+        if unexpected:
+            raise GitHubPublishError(
+                "github_publish_unexpected_changes",
+                "Target repo has changed files outside the publication manifest: " + ", ".join(unexpected),
+                run_id=run_id,
+            )
+        return {
+            "version": "github_publication_preview_v1",
+            "repository": repository,
+            "remote": expected_remote,
+            "branch": branch,
+            "base_branch": base_branch,
+            "run_id": run_id,
+            "publication_paths": sorted(allowed),
+            "evidence_only_paths": sorted(evidence_only),
+            "staged_paths": sorted(changed_paths),
+            "existing_run_commit": _find_run_commit(target_path, run_id=run_id),
+        }
+
     def publish(
         self,
         *,
@@ -233,8 +271,13 @@ class GitHubCodeReviewPublisher:
         publication_paths: list[str],
         pr_title: str,
         pr_body_path: Path,
+        evidence_only_paths: list[str] | None = None,
     ) -> GitHubCodeReviewResult:
-        """Publish đúng file trong manifest và giữ đủ evidence cho retry."""
+        """Publish đúng file trong manifest và giữ đủ evidence cho retry.
+
+        ``evidence_only_paths`` may stay changed in the worktree without being committed (Harness-rendered
+        specs, L5.5 D4); every other change outside the manifest still fails closed.
+        """
 
         progress: dict[str, object] = {
             "version": "github_code_review_v1",
@@ -254,7 +297,10 @@ class GitHubCodeReviewPublisher:
         }
         try:
             self._validate_repo(target_path, expected_remote=expected_remote, branch=branch, run_id=run_id)
-            changed_paths = _changed_paths(target_path)
+            evidence_only = set(evidence_only_paths or ()) - set(progress["publication_paths"])
+            if evidence_only:
+                progress["evidence_only_paths"] = sorted(evidence_only)
+            changed_paths = _changed_paths(target_path) - evidence_only
             allowed = set(progress["publication_paths"])
             unexpected = sorted(path for path in changed_paths if path not in allowed)
             if unexpected:
