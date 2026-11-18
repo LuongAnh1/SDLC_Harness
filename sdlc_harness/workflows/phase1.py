@@ -157,6 +157,30 @@ class PhaseOneWorkflow:
             )
         )
 
+    def _clarification_updater_for(
+        self,
+        *,
+        run_id: str,
+        question_id: str,
+        revision: int,
+    ) -> RequirementClarificationUpdater:
+        if not bool(self.requirement_step_review.get("enabled")):
+            return self.clarification_updater
+        # One exchange directory per question and model revision: a re-asked question gets fresh exchanges.
+        label = f"{question_id.lower()}-r{revision}"
+        return RequirementClarificationUpdater(
+            ReviewableLlmClient(
+                self.llm_client,
+                store=self.store,
+                run_id=run_id,
+                review=self.requirement_step_review,
+                call_prefix=f"requirement-clarification-{label}",
+                execution_dir=f"requirement_execution/clarification_{label}_step_review",
+                error_prefix="requirement_clarification",
+                label=f"Requirement Clarification {question_id}",
+            )
+        )
+
     def start_or_get_run(self, *, dataset: str, use_case: str, requested_by: str) -> dict[str, object]:
         """Tạo run mới hoặc trả active run hiện tại cho cùng source_ref."""
 
@@ -842,7 +866,8 @@ class PhaseOneWorkflow:
             )
         resolved_answer = resolve_clarification_answer(current_question, answer)
         source_text_by_id = read_requirement_source_texts(store=self.store, run_id=run_id, model=model)
-        result = self.clarification_updater.apply(
+        updater = self._clarification_updater_for(run_id=run_id, question_id=question_id, revision=model.revision)
+        result = updater.apply(
             source_text_by_id=source_text_by_id,
             model=model,
             question_id=question_id,

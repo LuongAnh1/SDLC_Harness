@@ -19,6 +19,7 @@ Source ref: `{{SOURCE_REF}}`
 - Keep normal success steps in `flows.main`, optional branches in `flows.alternatives`, and source-mentioned error/cancellation/interruption behavior in `flows.exceptions`.
 - Use stable IDs with these prefixes: `UC-`, `GOAL-`, `ACT-`, `PRE-`, `MF-`, `AF-`, `EF-`, `POST-`, `BR-`, `AC-`, `QR-`, `ASM-`, `Q-`, `E-`, `SC-`.
 - Each open question must include `category`, `proposed_disposition`, boolean `proposed_blocking`, `affects`, `depends_on`, `status="open"`, `answer_guidance`, `answer_mode`, `options`, `recommended_option`, `suggested_answer`, `why_it_is_safe`, `impact`, `uncertainty`, `reversible`, and `evidence_refs`.
+- A question's `affects` lists every requirement whose text or pass/fail result its answer can change, including an explicit rule or acceptance criterion that restates a source clause the answer could narrow.
 - For `answer_mode="short"`, return `options=[]` and `recommended_option=null`.
 - For `answer_mode="multiple_choice"`, return 2-5 option objects shaped as `{"key":"stable_key","answer":"User-facing answer","implication":"Optional impact"}`. Keys must be unique, `recommended_option` must be null or reference one option key, and bare string options are invalid.
 - Set `proposed_disposition` to `human_required`, `agent_default`, or `deferred_to_design`.

@@ -31,6 +31,7 @@ from sdlc_harness.core.config import LlmCallProfile, load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import build_parser, main as cli_main
 from sdlc_harness.llm.client import LlmCompletion
+from sdlc_harness.llm.step_review import LlmStepReviewRequired
 from sdlc_harness.sources.fixtures import UseCaseSource, source_provenance_entry
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
@@ -275,6 +276,9 @@ class RequirementClarificationV2Test(unittest.TestCase):
         self.assertEqual(result.final_report.blocking_question_ids, ["Q-1", "Q-2", "Q-3"])
         self.assertEqual(result.model.provenance_ledger, original.provenance_ledger)
         self.assertEqual(result.model.source, original.source)
+        prompt = str(client.calls[0]["prompt"])
+        self.assertIn('"related_updates": [', prompt)
+        self.assertIn("also check every other requirement in the canonical model against the answer", prompt)
 
     def test_accepted_answer_resolves_a_clarification_required_surface(self) -> None:
         payload = deepcopy(self.payload)
@@ -409,6 +413,110 @@ class RequirementClarificationV2Test(unittest.TestCase):
         )
         self.assertEqual(result.attempts[0].parse_status, "invalid_update")
         self.assertEqual(result.attempts[1].purpose, "repair")
+
+    def test_accepted_answer_also_corrects_a_contradicting_requirement_outside_affects(self) -> None:
+        # Conduit UC1: an answer narrowed a rule that an explicit criterion outside `affects` still restated.
+        proposal = self.accepted_q4()
+        reason = "AC-2 stored any valid data; the answer now rejects duplicates by normalized name and location."
+        proposal["related_updates"] = [
+            {
+                "requirement_id": "AC-2",
+                "fields": {"text": "After valid, non-duplicate data is confirmed, the system stores the new heritage."},
+                "reason": reason,
+            }
+        ]
+        result = RequirementClarificationUpdater(ScriptedClient([proposal])).apply(
+            source_text_by_id={"SRC-1": self.source_text},
+            model=self.refinement_result().model,
+            question_id="Q-4",
+            answer="Use normalized heritage name and location.",
+            answered_by="owner",
+        )
+
+        self.assertTrue(result.final_report.ok, result.final_report.issues)
+        criterion = next(item for item in result.model.to_dict()["acceptance_criteria"] if item["id"] == "AC-2")
+        self.assertIn("non-duplicate", criterion["text"])
+        self.assertEqual((criterion["status"], criterion["decision_ref"]), ("human_decision", "D-1"))
+        self.assertEqual(result.decision["affected_requirement_ids"], ["BR-1", "AC-1", "AC-2"])
+        self.assertEqual(result.decision["related_updates"], [{"requirement_id": "AC-2", "reason": reason}])
+
+    def test_related_updates_are_checked_mechanically(self) -> None:
+        related = {"requirement_id": "AC-2", "fields": {"text": "changed"}, "reason": "Conflicts with the answer."}
+        cases = (
+            ({**self.accepted_q4(), "related_updates": [{**related, "requirement_id": "BR-1"}]}, "never an affects ID"),
+            ({**self.accepted_q4(), "related_updates": [related, related]}, "each other requirement once"),
+            ({**self.accepted_q4(), "related_updates": [{**related, "reason": " "}]}, "needs a reason"),
+            (
+                {
+                    "resolution": "insufficient",
+                    "follow_up_text": "Which identity fields?",
+                    "updates": [],
+                    "surface_updates": [],
+                    "related_updates": [related],
+                },
+                "must not mutate",
+            ),
+        )
+        for proposal, message in cases:
+            with self.subTest(message=message), self.assertRaises(HarnessError) as raised:
+                RequirementClarificationUpdater(ScriptedClient([proposal, proposal])).apply(
+                    source_text_by_id={"SRC-1": self.source_text},
+                    model=self.refinement_result().model,
+                    question_id="Q-4",
+                    answer="Use normalized heritage name and location.",
+                    answered_by="owner",
+                )
+            self.assertIn(message, raised.exception.message)
+
+    def test_step_review_pauses_the_answer_update_before_anything_is_written(self) -> None:
+        with TemporaryDirectory() as directory:
+            template = GitRepositoryTemplate(populate_typescript_target)
+            self.addCleanup(template.close)
+            topology = template.materialize(Path(directory) / "target-fixture")
+            settings = load_settings(
+                root=self.root,
+                runtime_root=Path(directory) / ".runtime",
+                overrides={
+                    "SDLC_LLM_MODE": "fake",
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+                    "SDLC_TARGET_REPO_PATH": str(topology.canonical),
+                    "SDLC_TARGET_REPO_REMOTE": str(topology.remote.resolve()),
+                    "SDLC_TARGET_WORKTREE_ROOT": str(Path(directory) / "worktrees"),
+                },
+            )
+            workflow = PhaseOneWorkflow(settings)
+            workflow.refiner_v2 = StubV2Refiner(self)
+            run_id = str(workflow.start_or_get_run(dataset="eTour", use_case="UC2", requested_by="owner")["run_id"])
+            client = ScriptedClient([self.accepted_q4()])
+            review = {"enabled": True, "review_input": True, "review_output": True}
+
+            def answer(**decision: str) -> dict[str, object]:
+                reviewed = PhaseOneWorkflow(settings, requirement_step_review={**review, **decision})
+                reviewed.llm_client = client
+                return reviewed.answer_clarification(
+                    run_id=run_id,
+                    question_id="Q-4",
+                    answer="Use normalized heritage name and location.",
+                    answered_by="owner",
+                )
+
+            with self.assertRaises(LlmStepReviewRequired) as before_call:
+                answer()
+            self.assertTrue(before_call.exception.progress["call_id"].endswith("-input"))
+            self.assertEqual(client.calls, [])
+            state = workflow.store.read_state(run_id)
+            self.assertEqual(state["status"], "waiting_requirement_clarification")
+            self.assertTrue(str(state["latest_artifacts"]["requirement_model"]).endswith("_r1.json"))
+
+            with self.assertRaises(LlmStepReviewRequired) as after_call:
+                answer(call_id=before_call.exception.progress["call_id"], decision="approve")
+            self.assertEqual(len(client.calls), 1)
+
+            updated = answer(call_id=after_call.exception.progress["call_id"], decision="approve")
+            self.assertEqual(updated["pending_checkpoint"]["current_question"]["id"], "Q-1")
+            self.assertTrue(str(updated["latest_artifacts"]["requirement_model"]).endswith("_r2.json"))
+            self.assertEqual(len(client.calls), 1)
 
     def test_wrong_question_and_empty_answer_fail_with_stable_errors(self) -> None:
         updater = RequirementClarificationUpdater(ScriptedClient([]))

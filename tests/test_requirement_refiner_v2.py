@@ -271,6 +271,7 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             # Same source boundary as the coverage reviewer: no questions about unmentioned validation or mechanisms.
             self.assertIn("Apply this test only to a decision that the source introduces", prompts[2])
             self.assertIn("how the system stores or compares identities belongs to Design", prompts[2])
+            self.assertIn("A question's `affects` lists every requirement whose text or pass/fail result", prompts[2])
             self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])
