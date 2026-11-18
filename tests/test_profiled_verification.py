@@ -84,6 +84,10 @@ class RunBoundedTest(unittest.TestCase):
         self.assertIn("started", caught.exception.output or "")
 
 
+# Package scripts of the Harness-owned v2 stages (database, build, health, e2e, cleanup).
+V2_HARNESS_SCRIPTS = ("db:up", "db:migrate", "db:seed", "db:smoke", "build:web", "verify:bootstrap", "test:e2e", "db:down")
+
+
 class ProfiledVerificationTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -94,6 +98,7 @@ class ProfiledVerificationTest(unittest.TestCase):
                     "scripts": {
                         "typecheck": "tsc --noEmit",
                         "test:unit": "vitest run",
+                        **{script: "node -e 0" for script in V2_HARNESS_SCRIPTS},
                     }
                 }
             ),
@@ -105,7 +110,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.packet = {
             "run_id": "run_profiled_verification",
             "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-            "verification_stage_ids": ["typecheck", "unit"],
+            "verification_stage_ids": list(self.policy.stage_ids),
             "test_intents": [
                 {"stage_id": "typecheck", "purpose": "Check TypeScript contracts."},
                 {"stage_id": "unit", "purpose": "Run unit tests."},
@@ -114,6 +119,9 @@ class ProfiledVerificationTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
+
+    def _stage_calls(self) -> int:
+        return sum(1 + len(spec.additional_argv) for spec in resolve_verification_stage_specs(self.policy))
 
     def _unit_packet(self, *paths: str) -> dict[str, object]:
         return {**self.packet, "output_contract": {"allowed_paths": list(paths)}}
@@ -130,12 +138,13 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         self.assertEqual(preparations[1].argv, ("npm", "run", "db:generate"))
         specs = resolve_verification_stage_specs(self.policy)
-        self.assertEqual([item.stage_id for item in specs], ["typecheck", "unit"])
-        self.assertEqual(specs[0].argv, ("npm", "run", "typecheck"))
-        self.assertEqual(specs[1].argv, ("npm", "run", "test:unit"))
-        self.assertEqual(specs[1].required_test_framework, "vitest")
+        self.assertEqual([item.stage_id for item in specs], list(self.policy.stage_ids))
+        by_id = {item.stage_id: item for item in specs}
+        self.assertEqual(by_id["typecheck"].argv, ("npm", "run", "typecheck"))
+        self.assertEqual(by_id["unit"].argv, ("npm", "run", "test:unit"))
+        self.assertEqual(by_id["unit"].required_test_framework, "vitest")
         self.assertEqual(
-            specs[1].machine_reporter_args,
+            by_id["unit"].machine_reporter_args,
             ("--reporter=json", "--outputFile={report_path}"),
         )
 
@@ -187,9 +196,9 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual(first.status, "passed")
         self.assertEqual(first.preparation_results[0].reason, "Verification preparation completed successfully.")
         self.assertIn("current inputs", second.preparation_results[0].reason)
-        self.assertEqual(run.call_count, 5)
+        self.assertEqual(run.call_count, 1 + 2 * self._stage_calls())
         self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
-        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "typecheck"])
+        self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "db:up"])
         marker = self.target / "node_modules" / ".sdlc-harness-dependency-setup.json"
         self.assertTrue(marker.is_file())
 
@@ -230,10 +239,12 @@ class ProfiledVerificationTest(unittest.TestCase):
             [item.stage_id for item in first.preparation_results],
             ["dependency_setup", "generated_source_setup"],
         )
-        self.assertEqual(run.call_count, 9)
+        stage_calls = self._stage_calls()
+        # first: ci + generate + stages; second: stages; third: generate (schema changed) + stages
+        self.assertEqual(run.call_count, 3 + 3 * stage_calls)
         self.assertEqual(run.call_args_list[0].args[0], ["npm", "ci"])
         self.assertEqual(run.call_args_list[1].args[0], ["npm", "run", "db:generate"])
-        self.assertEqual(run.call_args_list[6].args[0], ["npm", "run", "db:generate"])
+        self.assertEqual(run.call_args_list[2 + 2 * stage_calls].args[0], ["npm", "run", "db:generate"])
         marker = self.target / "node_modules" / ".sdlc-harness-generated-source-setup.json"
         self.assertTrue(marker.is_file())
 
@@ -367,17 +378,23 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "passed")
-        self.assertEqual(result.planned_stage_ids, ("typecheck", "unit"))
-        self.assertEqual(result.executed_stage_ids, ("typecheck", "unit"))
-        self.assertEqual([item.stage_id for item in result.stage_results], ["typecheck", "unit"])
-        self.assertEqual(run.call_count, 2)
+        specs = resolve_verification_stage_specs(self.policy)
+        self.assertEqual(result.planned_stage_ids, self.policy.stage_ids)
+        self.assertEqual(result.executed_stage_ids, self.policy.stage_ids)
+        self.assertEqual([item.stage_id for item in result.stage_results], list(self.policy.stage_ids))
+        self.assertEqual(run.call_count, self._stage_calls())
         self.assertEqual(which.call_args_list[0].kwargs["path"], "safe-path")
-        self.assertEqual(run.call_args_list[0].args[0], ["C:/npm.cmd", "run", "typecheck"])
-        self.assertEqual(run.call_args_list[1].args[0], ["C:/npm.cmd", "run", "test:unit"])
+        argvs = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(argvs[0], ["C:/npm.cmd", "run", "db:up"])
+        self.assertIn(["C:/npm.cmd", "run", "typecheck"], argvs)
+        self.assertIn(["C:/npm.cmd", "run", "test:unit"], argvs)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in run.call_args_list],
+            [spec.timeout_seconds for spec in specs for _ in range(1 + len(spec.additional_argv))],
+        )
         for call in run.call_args_list:
             # shell=False is fixed inside _run_bounded (see RunBoundedTest).
             self.assertEqual(call.kwargs["cwd"], str(self.target.resolve()))
-            self.assertEqual(call.kwargs["timeout"], 120)
             self.assertEqual(call.kwargs["env"]["CI"], "1")
             self.assertNotIn("NODE_OPTIONS", call.kwargs["env"])
             self.assertNotIn("SDLC_SECRET", call.kwargs["env"])
@@ -414,9 +431,9 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertEqual(result.stderr, "type error")
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_records_timeout_and_stops(self) -> None:
         timeout = subprocess.TimeoutExpired(cmd=["npm"], timeout=120, output="partial", stderr="slow")
@@ -431,9 +448,9 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertTrue(result.timed_out)
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertIn("partial", result.stdout)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_records_process_start_failure(self) -> None:
         with (
@@ -450,9 +467,9 @@ class ProfiledVerificationTest(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "failed")
-        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+        self.assertEqual(result.executed_stage_ids, ("database_ready", "cleanup"))
         self.assertIn("executable disappeared", result.stderr)
-        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_count, 2)
 
     def test_runner_fails_preflight_when_script_or_npm_is_missing(self) -> None:
         (self.target / "package.json").write_text(
@@ -465,11 +482,13 @@ class ProfiledVerificationTest(unittest.TestCase):
                 work_packet=self.packet,
                 verification_policy=self.policy,
             )
-        self.assertIn("test:unit", missing_script.reason)
+        self.assertIn("db:up", missing_script.reason)
         run.assert_not_called()
 
         (self.target / "package.json").write_text(
-            json.dumps({"scripts": {"typecheck": "tsc", "test:unit": "vitest run"}}),
+            json.dumps(
+                {"scripts": {"typecheck": "tsc", "test:unit": "vitest run", **{name: "node -e 0" for name in V2_HARNESS_SCRIPTS}}}
+            ),
             encoding="utf-8",
         )
         with (
@@ -873,8 +892,8 @@ class RuntimeClosureVerificationTest(unittest.TestCase):
         self.assertFalse(specs["runtime_probe"].developer_selectable)
         self.assertTrue(specs["cleanup"].always_run)
         self.assertIn("runtime_probe", self.policy.prompt_context()["stage_capabilities"])
-        # The legacy snapshot policy is unchanged.
-        self.assertEqual(build_verification_stage_policy(project=self.project).stage_ids, ("typecheck", "unit"))
+        # The implementation verification suite keeps browser_e2e where the closure suite has runtime_probe.
+        self.assertIn("browser_e2e", build_verification_stage_policy(project=self.project).stage_ids)
 
     def test_runtime_probe_runs_only_the_harness_spec_with_run_scoped_stand_in_env(self) -> None:
         report = probe_report(

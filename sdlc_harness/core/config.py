@@ -79,7 +79,6 @@ class Settings:
     browser_max_images_per_call: int
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
-    verification_policy_version: str
     implementation_plan_repair_limit: int
     implementation_plan_step_review_enabled: bool
     implementation_plan_step_review_input_enabled: bool
@@ -444,15 +443,6 @@ def load_settings(
     if llm_thinking_mode not in {"disabled", "enabled"}:
         llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    verification_policy_version = merged.get(
-        "SDLC_VERIFICATION_POLICY_VERSION",
-        "verification_stage_policy_v1",
-    ).strip()
-    if verification_policy_version not in {
-        "verification_stage_policy_v1",
-        "verification_stage_policy_v2",
-    }:
-        verification_policy_version = "verification_stage_policy_v1"
     uiux_skill_root_raw = merged.get("SDLC_UIUX_SKILL_ROOT", "").strip()
     uiux_skill_root = Path(uiux_skill_root_raw).expanduser() if uiux_skill_root_raw else None
     if uiux_skill_root is not None and not uiux_skill_root.is_absolute():
@@ -558,7 +548,6 @@ def load_settings(
             minimum=1,
             maximum=300,
         ),
-        verification_policy_version=verification_policy_version,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=4, minimum=0),
         implementation_plan_step_review_enabled=_bool_value(
             merged.get("SDLC_IMPLEMENTATION_PLAN_STEP_REVIEW_ENABLED")

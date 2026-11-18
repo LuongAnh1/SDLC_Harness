@@ -237,7 +237,7 @@ class ApplicationReadServiceTests(ReadApiFixture):
 
         expected = {
             "classification": "profiled",
-            "snapshot_version": "profile_snapshot_v1",
+            "snapshot_version": "profile_snapshot_v2",
             "project_profile_id": "typescript_fullstack_v1",
             "language_profile_id": "typescript_v1",
         }

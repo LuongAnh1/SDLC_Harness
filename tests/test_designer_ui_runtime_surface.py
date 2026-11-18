@@ -160,7 +160,7 @@ class UiRepoContextTest(unittest.TestCase):
         self.assertEqual(context["styles"]["convention"], "none")
         self.assertFalse(context["auth"]["present"])
         self.assertFalse(context["verification"]["dom_capable"])
-        self.assertFalse(context["verification"]["browser_stage_active"])
+        self.assertTrue(context["verification"]["browser_stage_active"])
         self.assertTrue(all(ref.startswith("repo:apps/web/src/") for ref in context["evidence_refs"]))
         # Inline object prop types are parsed too.
         self.assertEqual(required_props(context, "apps/web/src/Banner.tsx#Banner"), ["text"])
@@ -233,8 +233,9 @@ class UiRepoContextTest(unittest.TestCase):
         self.assertEqual(verification["unit_environment"], "node")
         self.assertTrue(verification["dom_capable"])
         self.assertEqual(verification["dom_test_directive"], "// @vitest-environment jsdom")
-        self.assertEqual(verification["active_stage_ids"], ["typecheck", "unit"])
-        self.assertFalse(verification["browser_stage_active"])
+        # No pinned policy means the current suite.
+        self.assertEqual(verification["active_stage_ids"], pinned["verification"]["active_stage_ids"])
+        self.assertTrue(verification["browser_stage_active"])
         self.assertIn("browser_e2e", pinned["verification"]["active_stage_ids"])
         self.assertTrue(pinned["verification"]["browser_stage_active"])
 

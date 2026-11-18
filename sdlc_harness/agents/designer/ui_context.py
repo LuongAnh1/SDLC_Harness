@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 
 from ...profiles import (
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+    VERIFICATION_STAGE_POLICY_VERSION,
     build_verification_stage_policy_version,
     get_project_profile,
 )
@@ -63,7 +63,7 @@ def build_ui_repo_context(
 ) -> dict[str, object] | None:
     """Return the UI baseline, or None when the frozen landscape has no web component.
 
-    ``verification_policy_version`` is the run's pinned stage policy; empty means the legacy policy.
+    ``verification_policy_version`` is the run's pinned stage policy; empty means the current policy.
     """
 
     web = next(
@@ -202,7 +202,7 @@ def build_ui_repo_context(
     stage_ids = list(
         build_verification_stage_policy_version(
             project=get_project_profile(project_profile_id),
-            policy_version=verification_policy_version or LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+            policy_version=verification_policy_version or VERIFICATION_STAGE_POLICY_VERSION,
         ).stage_ids
     )
     unit_environment = ""

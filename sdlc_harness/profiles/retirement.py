@@ -165,4 +165,8 @@ def retired_contract_pins(state: Mapping[str, object]) -> list[str]:
         pin = state.get(lane)
         if isinstance(pin, Mapping) and pin.get("mode") not in (None, "enforce"):
             retired.append(f"{lane}.mode")
+    # profile_snapshot_v1 pins the typecheck/unit-only verification suite (retired 2026-11-18).
+    snapshot = state.get("profile_snapshot")
+    if isinstance(snapshot, Mapping) and snapshot.get("version") != "profile_snapshot_v2":
+        retired.append("profile_snapshot.version")
     return retired

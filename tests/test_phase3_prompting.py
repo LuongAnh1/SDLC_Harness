@@ -90,7 +90,7 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
 
     assert '"prompt_directive_id": "typescript_prompt_v1"' in prompt
     assert "TypeScript" in prompt
-    assert '"policy_version": "verification_stage_policy_v1"' in prompt
+    assert '"policy_version": "verification_stage_policy_v2"' in prompt
     assert "Work-unit identity, membership, dependency, order, runtime_bindings, requirement_refs" in prompt
     assert "Do not invent a new business component or work unit" in prompt
     assert "A `typecheck` intent targets a non-test source" in prompt

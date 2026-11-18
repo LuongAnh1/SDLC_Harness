@@ -84,7 +84,17 @@ class ProfileRegistryTests(unittest.TestCase):
         self.assertEqual(project.verification_stage_ids[-1], "cleanup")
         self.assertEqual(
             build_verification_stage_policy(project=project).stage_ids,
-            ("typecheck", "unit"),
+            (
+                "database_ready",
+                "migrate_and_seed",
+                "typecheck",
+                "unit",
+                "api_database_integration",
+                "frontend_build",
+                "service_health",
+                "browser_e2e",
+                "cleanup",
+            ),
         )
         self.assertIn(".sdlc/target-profile.json", project.required_paths)
         self.assertEqual(
@@ -244,7 +254,7 @@ class ProfileRegistryTests(unittest.TestCase):
         cases: tuple[object, ...] = (
             [],
             {},
-            {**snapshot, "version": "profile_snapshot_v2"},
+            {**snapshot, "version": "profile_snapshot_v1"},
             {**snapshot, "target_remote": ""},
             {**snapshot, "target_base_branch": " main "},
         )
@@ -284,7 +294,7 @@ class ProfileRegistryTests(unittest.TestCase):
             profile_status_metadata({"run_id": "run_profile", "profile_snapshot": snapshot.to_dict()}),
             {
                 "classification": "profiled",
-                "snapshot_version": "profile_snapshot_v1",
+                "snapshot_version": "profile_snapshot_v2",
                 "project_profile_id": "typescript_fullstack_v1",
                 "language_profile_id": "typescript_v1",
             },
@@ -332,6 +342,11 @@ class ProfileRegistryTests(unittest.TestCase):
             retired_contract_pins({**current, "browser_stages": {"mode": "off"}, "documentation_closure": {}}),
             ["browser_stages.mode"],
         )
+        self.assertEqual(
+            retired_contract_pins({**current, "profile_snapshot": {"version": "profile_snapshot_v1"}}),
+            ["profile_snapshot.version"],
+        )
+        self.assertEqual(retired_contract_pins({**current, "profile_snapshot": {"version": "profile_snapshot_v2"}}), [])
 
     def test_profiled_paused_design_advertises_restart_for_persisted_runs(self) -> None:
         state = {

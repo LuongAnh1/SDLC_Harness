@@ -724,7 +724,7 @@ class PhaseOneTest(unittest.TestCase):
         self.assertEqual(context.exception.error_code, "test_stop")
         snapshot = observed["profile_snapshot"]
         self.assertIsInstance(snapshot, dict)
-        self.assertEqual(snapshot["version"], "profile_snapshot_v1")
+        self.assertEqual(snapshot["version"], "profile_snapshot_v2")
         self.assertEqual(snapshot["project_profile_id"], "typescript_fullstack_v1")
         self.assertEqual(snapshot["language_profile_id"], "typescript_v1")
         self.assertEqual(snapshot["target_remote"], "https://github.com/example/typescript-target.git")
@@ -748,7 +748,7 @@ class PhaseOneTest(unittest.TestCase):
             response["execution_profile"],
             {
                 "classification": "profiled",
-                "snapshot_version": "profile_snapshot_v1",
+                "snapshot_version": "profile_snapshot_v2",
                 "project_profile_id": "typescript_fullstack_v1",
                 "language_profile_id": "typescript_v1",
             },

@@ -927,7 +927,6 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
     """Developer.plan giả lập để test Smart Developer không gọi API thật."""
 
     typescript = '"prompt_directive_id": "typescript_prompt_v1"' in prompt
-    stage_only = '"policy_version": "verification_stage_policy_v1"' in prompt
     service_path = (
         "apps/api/src/DeleteCulturalHeritageService.ts"
         if typescript
@@ -993,19 +992,6 @@ def fake_developer_implementation_plan(prompt: str = "") -> str:
             "design_mappings": [],
             "test_intents": (
                 [
-                    {
-                        "scope": "unit_or_service",
-                        "intent": "Validate delete success, cancel, connection interruption, and duplicate submission prevention.",
-                        "stage_id": "unit",
-                    },
-                    {
-                        "scope": "regression",
-                        "intent": "Run profile-owned static verification after Phase 4 code changes.",
-                        "stage_id": "typecheck",
-                    },
-                ]
-                if stage_only
-                else [
                     {
                         "scope": "unit_or_service",
                         "intent": "Validate delete success, cancel, connection interruption, and duplicate submission prevention.",

@@ -1937,8 +1937,10 @@ def test_r9_ui_obligations_must_each_be_tested_or_declared_unverified() -> None:
         planning_policy=planning,
     )
     issues = _r9_rule_issues(complete, units)
-    assert not any(f"{unit_id} leaves UI obligations" in issue for issue in issues)
+    assert not any(f"{unit_id} leaves UI obligations neither tested" in issue for issue in issues)
     assert any(f"{unit_id} references unknown UI obligations" in issue for issue in issues)
+    # The active suite has browser_e2e: an obligation may not be declared unverified.
+    assert any(f"{unit_id} declares UI obligations unverified while browser QA is active" in issue for issue in issues)
     merged = next(u for u in complete if u["unit_id"] == unit_id)
     assert merged["test_intents"][0]["obligation_refs"] == sorted(sc1[:-1])
     assert merged["ui_obligations"] == by_name["SC-1/web"]["ui_obligations"]

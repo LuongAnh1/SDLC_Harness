@@ -18,7 +18,6 @@ if TYPE_CHECKING:
     from .snapshot import ProfileSnapshotV1
 
 
-LEGACY_VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v1"
 VERIFICATION_STAGE_POLICY_VERSION = "verification_stage_policy_v2"
 # Pinned per run in state.runtime_closure, never in profile_snapshot (L5.3).
 RUNTIME_CLOSURE_STAGE_POLICY_VERSION = "runtime_closure_stage_policy_v1"
@@ -35,9 +34,6 @@ _CATALOG_STAGE_ALIASES = {
 COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v5"
 UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v3"
 _ACTIVE_STAGE_IDS_BY_POLICY = {
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
-        "typescript_fullstack_v1": ("typecheck", "unit"),
-    },
     VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": (
             "database_ready",
@@ -84,12 +80,6 @@ DEVELOPER_INTENT_STAGE_OWNER = "developer_intent"
 QA_INTENT_STAGE_OWNER = "qa_intent"
 HARNESS_GLOBAL_STAGE_OWNER = "harness_global"
 _STAGE_OWNERS_BY_POLICY = {
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
-        "typescript_fullstack_v1": {
-            "typecheck": DEVELOPER_INTENT_STAGE_OWNER,
-            "unit": DEVELOPER_INTENT_STAGE_OWNER,
-        },
-    },
     VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": {
             "database_ready": HARNESS_GLOBAL_STAGE_OWNER,
@@ -320,7 +310,7 @@ def build_verification_stage_policy(*, project: ProjectProfile) -> VerificationS
 
     return build_verification_stage_policy_version(
         project=project,
-        policy_version=LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
+        policy_version=VERIFICATION_STAGE_POLICY_VERSION,
     )
 
 
@@ -412,7 +402,7 @@ def verification_stage_policy_from_snapshot(
             project=project,
             policy_version=str(
                 getattr(snapshot, "verification_policy_version", "")
-                or LEGACY_VERIFICATION_STAGE_POLICY_VERSION
+                or VERIFICATION_STAGE_POLICY_VERSION
             ),
         )
     except HarnessError as exc:

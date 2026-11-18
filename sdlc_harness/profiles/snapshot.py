@@ -12,9 +12,10 @@ from .registry import get_language_profile, get_project_profile
 
 
 PROFILE_SNAPSHOT_STATE_KEY = "profile_snapshot"
+# v1 (typecheck/unit verification) stays readable only: runs pinned to it are retired.
 LEGACY_PROFILE_SNAPSHOT_VERSION = "profile_snapshot_v1"
-PROFILE_SNAPSHOT_VERSION = LEGACY_PROFILE_SNAPSHOT_VERSION
 FULLSTACK_PROFILE_SNAPSHOT_VERSION = "profile_snapshot_v2"
+PROFILE_SNAPSHOT_VERSION = FULLSTACK_PROFILE_SNAPSHOT_VERSION
 LEGACY_VERIFICATION_POLICY_VERSION = "verification_stage_policy_v1"
 FULLSTACK_VERIFICATION_POLICY_VERSION = "verification_stage_policy_v2"
 LEGACY_QA_POLICY_VERSION = "qa_test_policy_v1"
@@ -43,8 +44,8 @@ class ProfileSnapshotV1:
     language_profile_schema: str
     target_remote: str
     target_base_branch: str
-    verification_policy_version: str = LEGACY_VERIFICATION_POLICY_VERSION
-    qa_policy_version: str = LEGACY_QA_POLICY_VERSION
+    verification_policy_version: str = FULLSTACK_VERIFICATION_POLICY_VERSION
+    qa_policy_version: str = BROWSER_QA_POLICY_VERSION
     target_manifest_schema: str | None = None
     target_manifest_digest: str | None = None
     base_sha: str | None = None
@@ -360,8 +361,8 @@ def build_profile_snapshot(
     project_profile_id: str,
     target_remote: str,
     target_base_branch: str,
-    verification_policy_version: str = LEGACY_VERIFICATION_POLICY_VERSION,
-    qa_policy_version: str = LEGACY_QA_POLICY_VERSION,
+    verification_policy_version: str = FULLSTACK_VERIFICATION_POLICY_VERSION,
+    qa_policy_version: str = BROWSER_QA_POLICY_VERSION,
 ) -> ProfileSnapshotV1:
     """Resolve registry identity once and freeze it for a newly created run."""
 

@@ -14,7 +14,6 @@ from ..core.errors import HarnessError
 from ..profiles import (
     BROWSER_STAGE_POLICY_VERSION,
     DEVELOPER_INTENT_STAGE_OWNER,
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
     RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
     VerificationStagePolicy,
@@ -29,7 +28,6 @@ BROWSER_CAPTURE_SPEC_PATH = "tests/e2e/sdlc-browser-capture.spec.ts"
 # Where repository_e2e finds the repository's own Playwright specs (profile playwright.config `testDir`).
 REPOSITORY_E2E_ROOT = "tests/e2e"
 _SUPPORTED_POLICY_VERSIONS = {
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
     RUNTIME_CLOSURE_STAGE_POLICY_VERSION,
     BROWSER_STAGE_POLICY_VERSION,
@@ -308,9 +306,6 @@ def _browser_specs(specs: tuple[VerificationStageSpec, ...]) -> tuple[Verificati
 
 
 _STAGE_SPECS_BY_POLICY = {
-    LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
-        "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V1_SPECS,
-    },
     VERIFICATION_STAGE_POLICY_VERSION: {
         "typescript_fullstack_v1": _TYPESCRIPT_FULLSTACK_V2_SPECS,
     },

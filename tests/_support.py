@@ -42,6 +42,10 @@ def populate_typescript_target(target: Path) -> None:
         "scripts": {
             "typecheck": "node -e \"process.exit(0)\"",
             "test:unit": "node scripts/fake-vitest.cjs",
+            **{
+                script: "node -e \"process.exit(0)\""
+                for script in ("db:up", "db:migrate", "db:seed", "db:smoke", "build:web", "verify:bootstrap", "test:e2e", "db:down")
+            },
         },
     }
     lock = {
