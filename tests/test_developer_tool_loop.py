@@ -3047,6 +3047,185 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertTrue(resumed.exception.progress["pending_step_review"]["call_id"].endswith("-0002-a01"))
         self.assertEqual((self.repo / "src/Main.java").read_text(encoding="utf-8"), "class Main {}\n")
 
+    def _one_unit_failure(self, run_id: str, failure: BaseException | LlmCompletion) -> DeveloperExecutionError:
+        # One successful write, then the next LLM call fails (raises) or returns the given completion.
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+
+        class FailsAfterWrite(ScriptedLlm):
+            def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+                if self.responses:
+                    return super().complete_with_metadata(**kwargs)
+                if isinstance(failure, BaseException):
+                    raise failure
+                return failure
+
+        llm = FailsAfterWrite(
+            [action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"})]
+        )
+        with self.assertRaises(DeveloperExecutionError) as raised:
+            self.executor(llm).execute(run_id=run_id, work_packet=packet, target_path=self.repo)
+        return raised.exception
+
+    def _journal_status(self, error: DeveloperExecutionError) -> tuple[str, str, bool]:
+        journal = json.loads((self.root / error.journal_path).read_text(encoding="utf-8"))
+        entry = journal["items"][0]
+        return journal["status"], entry["status"], "rolled_back_at" in entry
+
+    def test_invalid_action_output_rolls_back_the_unit_once_the_retry_budget_is_spent(self) -> None:
+        error = self._one_unit_failure("run_invalid", LlmCompletion(content="not json", finish_reason="stop", usage={}))
+
+        self.assertEqual((error.error_code, error.retriable), ("developer_action_invalid", True))
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("paused", "pending", True))
+
+    def test_non_transport_llm_error_rolls_back_and_blocks_the_unit(self) -> None:
+        error = self._one_unit_failure("run_provider", HarnessError("llm_response_invalid", "provider refused"))
+
+        self.assertEqual((error.error_code, error.retriable), ("llm_response_invalid", False))
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("blocked", "pending", True))
+
+    def test_workspace_os_error_rolls_back_and_pauses_the_unit(self) -> None:
+        error = self._one_unit_failure("run_os_error", OSError("disk full"))
+
+        self.assertEqual((error.error_code, error.retriable), ("developer_tool_failed", True))
+        self.assertIn("disk full", error.message)
+        self.assertFalse((self.repo / "src/Main.java").exists())
+        self.assertEqual(self._journal_status(error), ("paused", "pending", True))
+
+    def test_legacy_tool_name_is_rejected_and_embedded_action_is_normalized(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        write = {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}
+        llm = ScriptedLlm(
+            [
+                LlmCompletion(
+                    content=json.dumps({"action": "write_file", "arguments": write}),
+                    finish_reason="stop",
+                    usage={},
+                ),
+                LlmCompletion(
+                    content="Writing the file now: " + json.dumps({"action": "repo.write_file", "arguments": write}),
+                    finish_reason="stop",
+                    usage={},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "path_dispositions": [
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}
+                        ],
+                    },
+                ),
+            ]
+        )
+        progress_calls: list[dict[str, object]] = []
+
+        result = self.executor(llm).execute(
+            run_id="run_legacy_tool",
+            work_packet=packet,
+            target_path=self.repo,
+            on_progress=lambda progress, _manifest, _journal: progress_calls.append(progress),
+        )
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertIn("developer_unit_legacy_tool_not_allowed", llm.prompts[1])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        actions = journal["items"][0]["actions"]
+        self.assertNotIn("tool_action", actions[0])
+        self.assertEqual(actions[1]["parse_normalization"], "extracted_single_embedded_json_action")
+        self.assertEqual([call["completed_unit_ids"] for call in progress_calls], [["WU-001"]])
+
+    def test_invalid_completion_dispositions_are_skipped_without_blocking_a_mutated_unit(self) -> None:
+        packet = self.unit_packet()
+        packet["execution_units"] = [packet["execution_units"][0]]
+        llm = ScriptedLlm(
+            [
+                action("repo.write_file", {"path": "src/Main.java", "expected_sha256": "", "content": "class Main {}"}),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "implementation complete",
+                        "unchanged_paths": [{"path": "src/Main.java", "reason": ""}],
+                        "path_dispositions": [
+                            {"path": "src/Other.java", "status": "not_required", "reason": "Outside the unit."},
+                            {"path": "src/Main.java", "status": "mutated", "reason": "Implemented."},
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(run_id="run_invalid_dispositions", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        self.assertEqual(
+            journal["items"][0]["path_dispositions"],
+            {"src/Main.java": {"status": "mutated", "reason": "Implemented."}},
+        )
+        self.assertEqual(journal["items"][0]["unchanged_paths"], [])
+
+    def test_completion_gate_rejects_diagnostic_markers_then_a_runtime_config_mismatch(self) -> None:
+        packet = self.unit_packet()
+        unit = packet["execution_units"][0]
+        packet["execution_units"] = [unit]
+        unit["runtime_config_changes"] = [
+            {
+                "kind": "env_var",
+                "unit_id": "WU-001",
+                "name": "MAIN_URL",
+                "default": "http://127.0.0.1:8090",
+                "read_by": "src/Main.java",
+                "purpose": "Configure the main endpoint.",
+            }
+        ]
+        diagnostic = "// SDLC_DIAGNOSTIC_INSTRUMENTATION\nclass Main {}"
+        plain = "class Main {}"
+        configured = 'class Main { String url = process.env.MAIN_URL ?? "http://127.0.0.1:8090"; }'
+
+        source = self.repo / "src/Main.java"
+
+        def write(content: str):
+            # Built when the LLM is called, so the overwrite cites the current file hash.
+            def response() -> LlmCompletion:
+                expected = hashlib.sha256(source.read_bytes()).hexdigest() if source.is_file() else ""
+                return action("repo.write_file", {"path": "src/Main.java", "expected_sha256": expected, "content": content})
+
+            return response
+
+        class LazyLlm(ScriptedLlm):
+            def complete_with_metadata(self, **kwargs: object) -> LlmCompletion:
+                completion = super().complete_with_metadata(**kwargs)
+                return completion() if callable(completion) else completion
+
+        complete = action(
+            "execution.complete_unit",
+            {
+                "summary": "implementation complete",
+                "path_dispositions": [{"path": "src/Main.java", "status": "mutated", "reason": "Implemented."}],
+            },
+        )
+        llm = LazyLlm([write(diagnostic), complete, write(plain), complete, write(configured), complete])
+
+        result = self.executor(llm).execute(run_id="run_completion_gates", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-001"])
+        self.assertIn("timeout_diagnostic_cleanup_required", llm.prompts[2])
+        self.assertIn("developer_runtime_config_contract_mismatch", llm.prompts[4])
+        journal = json.loads((self.root / result.journal_path).read_text(encoding="utf-8"))
+        gates = [row["completion_gate"] for row in journal["items"][0]["actions"] if "completion_gate" in row]
+        self.assertEqual(
+            [(gate["status"], gate.get("reason", gate.get("error"))) for gate in gates],
+            [
+                ("rejected", "timeout_diagnostic_cleanup_required"),
+                ("rejected", "runtime_config_contract_mismatch"),
+                ("passed", None),
+            ],
+        )
+
     def test_step_review_prompt_change_supersedes_the_pending_call_and_keeps_the_approved_write(self) -> None:
         # G1.5: approving an exchange whose prompt changed no longer fails with developer_step_review_drift; the
         # call is asked again with the current prompt and paused for its own review.
