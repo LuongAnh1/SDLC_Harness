@@ -23,7 +23,7 @@ from ..agents.developer import (
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION_V2,
+    GRAPH_VERSION,
     design_bundle_findings,
     validate_vertical_design_graph,
 )
@@ -900,7 +900,7 @@ class PhaseThreeWorkflow:
 
         contract_version = resolve_implementation_plan_contract(state)
         if (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION_V2
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION
             and contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
         ):
             raise HarnessError(

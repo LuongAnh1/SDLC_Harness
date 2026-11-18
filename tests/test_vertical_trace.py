@@ -128,7 +128,7 @@ class VerticalTraceTest(unittest.TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(first["schema_version"], VERTICAL_TRACE_GRAPH_VERSION)
-        result = validate_vertical_trace_coverage(first, mode="shadow")
+        result = validate_vertical_trace_coverage(first, mode="enforce")
         self.assertTrue(result.ok)
         self.assertEqual(result.coverage["required_surface_count"], result.coverage["covered_surface_count"])
         main_web = next(
@@ -191,7 +191,7 @@ class VerticalTraceTest(unittest.TestCase):
     def test_unknown_requirement_and_not_applicable_design_are_blocked(self) -> None:
         design = self._design_graph(unknown_ref=True, include_not_applicable=("SC-2", "api"))
         graph = build_vertical_trace_graph(requirement_model=self.model, design_graph=design)
-        categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="shadow").blocking_findings}
+        categories = {item.category for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings}
 
         self.assertIn("unknown_requirement_ref", categories)
         self.assertIn("not_applicable_surface_designed", categories)
@@ -344,7 +344,7 @@ class VerticalTraceTest(unittest.TestCase):
 
         finding = next(
             item
-            for item in validate_vertical_trace_coverage(graph, mode="shadow").blocking_findings
+            for item in validate_vertical_trace_coverage(graph, mode="enforce").blocking_findings
             if item.category == "design_node_untraced"
         )
         self.assertEqual(finding.subject_ref, node["id"])
@@ -364,17 +364,6 @@ class VerticalTraceTest(unittest.TestCase):
         )
 
         self.assertIn("unknown_requirement_ref", {str(item.get("category") or "") for item in feedback})
-        self.assertEqual(
-            _vertical_trace_repair_feedback(
-                state={
-                    "vertical_trace_contract_version": VERTICAL_TRACE_GRAPH_VERSION,
-                    "vertical_trace_mode": "shadow",
-                },
-                approved=SimpleNamespace(canonical_model=self.model),
-                graph=design,
-            ),
-            [],
-        )
 
 
 if __name__ == "__main__":

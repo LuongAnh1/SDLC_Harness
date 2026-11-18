@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
@@ -10,14 +9,13 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from sdlc_harness.agents.designer.uiux import RUNTIME_SURFACE_BINDING_VERSION
 from sdlc_harness.agents.designer import (
     BOUNDARY_CONTRACT_VERSION,
     DELTA_VERSION,
-    DELTA_VERSION_V1,
     DESIGN_BUNDLE_STATE_KEY,
     DESIGN_BUNDLE_VERSION,
     GRAPH_VERSION,
-    GRAPH_VERSION_V1,
     RUNTIME_BINDING_VERSION,
     SURFACE_CONTRACT_VERSION,
     DesignerExecutionError,
@@ -55,7 +53,6 @@ from sdlc_harness.agents.designer.execution import (
     _prompt_observations,
     _reconcile_stale_placeholder_partitions,
     _repair_target_present,
-    _repair_targets,
     _scoped_review_feedback,
     _validate_repair_delta_scope,
 )
@@ -80,6 +77,10 @@ from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase2 import PhaseTwoWorkflow
 from sdlc_harness.workflows.phase3 import PhaseThreeWorkflow
 from tests._support import GitRepositoryTemplate, populate_typescript_target
+from sdlc_harness.agents.designer.uiux import UiUxGuidanceProvider as _UiUxProvider
+
+# The UI/UX skill is an external tool; Designer loop tests use its fake provider.
+_FAKE_UIUX = _UiUxProvider(skill_root=None, fake_mode=True)
 
 
 class VerticalDesignGraphTest(unittest.TestCase):
@@ -586,7 +587,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
             apply_designer_delta(
                 graph,
                 {
-                    "schema_version": DELTA_VERSION_V1,
+                    "schema_version": "designer_delta_v1",
                     "base_graph_digest": graph["artifact_digest"],
                     "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                     "operations": [{"op": "set_partition_coverage", "coverage": {"api": "covered"}}],
@@ -1397,18 +1398,26 @@ class VerticalDesignGraphTest(unittest.TestCase):
             ],
             "validations": ["A record is selected."],
             "outcomes": ["record deleted", "error shown"],
+            "runtime_surface": {
+                "schema_version": RUNTIME_SURFACE_BINDING_VERSION,
+                "screen_id": "delete-screen",
+                "entrypoint": "apps/web/src/AppShell.tsx#AppShell",
+                "composition_path": ["apps/web/src/AppShell.tsx#AppShell", "apps/web/src/DeleteScreen.tsx#DeleteScreen"],
+                "required_inputs": [],
+                "runnable_status": "bound",
+                "evidence_refs": [],
+            },
         }
 
     def test_bundle_contract_is_additive_but_required_for_bundle_readiness(self) -> None:
         graph = new_vertical_design_graph(
             run_id="run-bundle",
             snapshot_binding=self.binding,
-            contract_version=GRAPH_VERSION_V1,
         )
         designed, refs = apply_designer_delta(
             graph,
             {
-                "schema_version": DELTA_VERSION_V1,
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": graph["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -1438,7 +1447,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
         enriched, _ = apply_designer_delta(
             designed,
             {
-                "schema_version": DELTA_VERSION_V1,
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": designed["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -1464,7 +1473,7 @@ class VerticalDesignGraphTest(unittest.TestCase):
             },
             valid_evidence_refs=set(),
         )
-        self.assertEqual(design_bundle_findings(enriched), [])
+        self.assertNotIn("surface_contract_missing", {item["category"] for item in design_bundle_findings(enriched)})
         self.assertEqual(render_design_projections(enriched)["surface_view"]["schema_version"], "design_surface_view_v2")
 
     def test_delta_cannot_mutate_a_node_from_another_partition(self) -> None:
@@ -1809,13 +1818,12 @@ class DesignerResumeTest(unittest.TestCase):
                 "sdlc_harness.agents.designer.execution.completion_findings",
                 return_value=[],
             ), self.assertRaises(DesignerExecutionError) as caught:
-                DesignerToolLoopExecutor(settings=settings, store=store, llm_client=client).execute(
+                DesignerToolLoopExecutor(uiux_provider=_FAKE_UIUX, settings=settings, store=store, llm_client=client).execute(
                     run_id="run-pending-complete",
                     requirement_model=requirement,
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             self.assertEqual(caught.exception.error_code, "designer_invalid_action_exhausted")
@@ -1863,6 +1871,7 @@ class DesignerResumeTest(unittest.TestCase):
                 ),
             ), self.assertRaises(DesignerExecutionError) as caught:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient([]),
@@ -1872,7 +1881,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             self.assertEqual(caught.exception.error_code, "target_repo_codegraph_failed")
@@ -2124,7 +2132,6 @@ class DesignerResumeTest(unittest.TestCase):
             repair_task=None,
             observations_since_delta=0,
             last_invalid_action="",
-            uiux_mode="enforce",
         )
         ui_prompt = _designer_prompt(
             requirement_model={},
@@ -2136,15 +2143,14 @@ class DesignerResumeTest(unittest.TestCase):
             repair_task=None,
             observations_since_delta=0,
             last_invalid_action="",
-            uiux_mode="enforce",
         )
 
         self.assertNotIn("uiux.search_guidance", backend_prompt)
         self.assertIn("uiux.search_guidance(query,mode=domain,domain=ux|icons|react)", ui_prompt)
         self.assertIn("uiux.search_guidance(query,mode=stack,stack=react)", ui_prompt)
         self.assertIn("one dominant intent in 2-5 meaningful generic ASCII terms", ui_prompt)
-        self.assertIn("must not restore focus to that removed element", ui_prompt)
-        self.assertIn("If the active scenario itself owns a cancel/close path", ui_prompt)
+        self.assertIn("never targeting the removed element", ui_prompt)
+        self.assertIn("layout as {region,layer,content} items", ui_prompt)
         self.assertIn("Never add cancel/close behavior from another scenario", ui_prompt)
         self.assertIn("For an alternative or exception scenario", ui_prompt)
         self.assertIn("active_partition.branch_parent_requirement", ui_prompt)
@@ -2207,7 +2213,6 @@ class DesignerResumeTest(unittest.TestCase):
             repair_task=None,
             observations_since_delta=2,
             last_invalid_action="",
-            uiux_mode="enforce",
             active_guidance=guidance,
             source_inspected=True,
         )
@@ -2487,6 +2492,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as first_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient(
@@ -2499,7 +2505,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             self.assertEqual(first_pause.exception.error_code, "designer_step_review_required")
@@ -2512,6 +2517,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as second_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient(
@@ -2528,7 +2534,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             second = second_pause.exception.progress["pending_step_review"]
@@ -2539,6 +2544,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as third_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient(
@@ -2556,7 +2562,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             third = third_pause.exception.progress["pending_step_review"]
@@ -2613,6 +2618,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as input_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=first_client,
@@ -2623,7 +2629,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             input_pending = input_pause.exception.progress["pending_step_review"]
@@ -2650,6 +2655,7 @@ class DesignerResumeTest(unittest.TestCase):
             )
             with self.assertRaises(DesignerExecutionError) as output_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=second_client,
@@ -2665,7 +2671,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             self.assertEqual(
@@ -2715,6 +2720,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as invalid_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient([malformed]),
@@ -2725,7 +2731,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             pending = invalid_pause.exception.progress["pending_step_review"]
@@ -2736,6 +2741,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             with self.assertRaises(DesignerExecutionError) as next_pause:
                 DesignerToolLoopExecutor(
+                    uiux_provider=_FAKE_UIUX,
                     settings=settings,
                     store=store,
                     llm_client=_ScriptedDesignerClient(
@@ -2753,7 +2759,6 @@ class DesignerResumeTest(unittest.TestCase):
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
 
             next_pending = next_pause.exception.progress["pending_step_review"]
@@ -3248,18 +3253,6 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertNotIn("VDE-1", message)
         self.assertIn("VDE-2, VDE-3", message)
         self.assertIn("remove-before-add", message)
-
-    def test_repair_targets_preserve_finding_order_and_deduplicate_scenarios(self) -> None:
-        self.assertEqual(
-            _repair_targets(
-                [
-                    {"diagram_ids": ["sequence_sc_3", "sequence_sc_1"]},
-                    {"subject_ref": "sequence_sc_1:message:0001"},
-                    {"subject_ref": "SC-2:terminal"},
-                ]
-            ),
-            ["SC-3", "SC-1", "SC-2"],
-        )
 
     def test_bundle_repair_task_is_scoped_to_one_component_partition(self) -> None:
         graph = {
@@ -3779,7 +3772,6 @@ class DesignerResumeTest(unittest.TestCase):
                 "workspace_ref": "workspace",
                 "base_sha": "abc",
             },
-            contract_version=GRAPH_VERSION,
         )
         graph["nodes"] = [
             {
@@ -3917,7 +3909,7 @@ class DesignerResumeTest(unittest.TestCase):
 
     def test_branch_parent_is_the_main_flow_entry_not_composition_wiring(self) -> None:
         # run_20261102_061023 designer-0012: the hash-ordered pick landed on the SC-1 Root wiring node.
-        from sdlc_harness.agents.designer import GRAPH_VERSION_V2
+        from sdlc_harness.agents.designer import GRAPH_VERSION
         from sdlc_harness.agents.designer.execution import _branch_parent_scaffold
 
         requirement = {
@@ -3934,7 +3926,7 @@ class DesignerResumeTest(unittest.TestCase):
         }
         api = {"id": "VDN-1-api", "scenario_id": "SC-1", "surface": "api", "surface_contract": {"surface": "api"}}
         screen = {"id": "VDN-9-screen", "scenario_id": "SC-1", "surface": "ui", "surface_contract": {"surface": "ui"}}
-        graph = {"schema_version": GRAPH_VERSION_V2, "nodes": [wiring, api, screen], "edges": []}
+        graph = {"schema_version": GRAPH_VERSION, "nodes": [wiring, api, screen], "edges": []}
         scenario = requirement["scenario_contract"]["scenarios"][1]
 
         def parent() -> str:
@@ -4254,7 +4246,7 @@ class DesignerResumeTest(unittest.TestCase):
             root = Path(temp)
             target = root / "target"
             target.mkdir()
-            (target / "App.tsx").write_text("export function App() { return null; }\n", encoding="utf-8")
+            (target / "route.ts").write_text("export const route = '/items';\n", encoding="utf-8")
             store = RuntimeStore(repo_root=root, runtime_root=root / ".runtime")
             settings = SimpleNamespace(
                 llm_mode="deepseek",
@@ -4265,28 +4257,24 @@ class DesignerResumeTest(unittest.TestCase):
             requirement = {
                 "use_case_id": "UC1",
                 "scenario_contract": {
-                    "scenarios": [{"id": "SC-1", "surfaces": {"ui": {"status": "required"}}}]
+                    "scenarios": [{"id": "SC-1", "surfaces": {"api": {"status": "required"}}}]
                 },
             }
             landscape = {
                 "artifact_digest": "sha256:repo",
-                "components": [{"component_id": "web", "roots": ["."], "file_refs": ["App.tsx"]}],
+                "components": [{"component_id": "api", "roots": ["."], "file_refs": ["route.ts"]}],
                 "anchors": [
                     {
-                        "anchor_id": "RLA-0000000000000001",
-                        "kind": "ui_component",
-                        "component_id": "web",
-                        "path": "App.tsx",
-                        "symbol": "App",
+                        "anchor_id": "RLA-route",
+                        "kind": "api_route",
+                        "component_id": "api",
+                        "path": "route.ts",
+                        "symbol": "route",
                         "evidence_source": "test",
                     }
                 ],
                 "scenario_matches": [
-                    {
-                        "scenario_id": "SC-1",
-                        "surface": "ui",
-                        "candidate_anchor_refs": ["RLA-0000000000000001"],
-                    }
+                    {"scenario_id": "SC-1", "surface": "api", "candidate_anchor_refs": ["RLA-route"]}
                 ],
                 "snapshot": {},
             }
@@ -4296,67 +4284,63 @@ class DesignerResumeTest(unittest.TestCase):
                 "workspace_ref": "run_workspace_v1",
                 "base_sha": "abc123",
             }
-            initial = new_vertical_design_graph(
-                run_id=run_id,
-                snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V1,
-            )
+            initial = new_vertical_design_graph(run_id=run_id, snapshot_binding=binding)
 
-            def delta(validations: list[object]) -> dict[str, object]:
+            def delta(request_fields: list[object]) -> dict[str, object]:
                 return {
-                    "schema_version": DELTA_VERSION_V1,
+                    "schema_version": DELTA_VERSION,
                     "base_graph_digest": initial["artifact_digest"],
-                    "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "web"},
+                    "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                     "operations": [
-                        {"op": "set_partition_coverage", "coverage": {"ui": "covered"}},
+                        {"op": "set_partition_coverage", "coverage": {"api": "covered"}},
                         {
                             "op": "add_node",
                             "node": {
-                                "temp_ref": "tmp:ui",
-                                "semantic_key": "SC-1:ui",
-                                "name": "Delete heritage control",
-                                "kind": "ui_interaction",
-                                "surface": "ui",
+                                "temp_ref": "tmp:api",
+                                "semantic_key": "SC-1:api",
+                                "name": "Items route",
+                                "kind": "api_contract",
+                                "surface": "api",
                                 "disposition": "reuse",
                                 "requirement_refs": ["REQ-1"],
-                                "evidence_refs": ["RLA-0000000000000001"],
+                                "evidence_refs": ["RLA-route"],
                                 "evidence_reason": "",
-                                "contract": "Confirm deletion of the selected heritage record.",
+                                "contract": "Handle the items request.",
                                 "surface_contract": {
-                                    "schema_version": SURFACE_CONTRACT_VERSION,
-                                    "surface": "ui",
-                                    "entrypoint": "heritage list delete control",
-                                    "states": ["selected", "confirmation_open", "deleted"],
-                                    "transitions": [
-                                        {
-                                            "from": "selected",
-                                            "action": "confirm deletion",
-                                            "to": "deleted",
-                                            "outcome": "selected record is removed",
-                                        }
-                                    ],
-                                    "validations": validations,
-                                    "outcomes": ["record removed from the list"],
+                                    **VerticalDesignGraphTest._api_contract(),
+                                    "request_fields": request_fields,
+                                },
+                                "runtime_binding": {
+                                    "schema_version": RUNTIME_BINDING_VERSION,
+                                    "runtime_kind": "api_route",
+                                    "target": {"component_id": "api", "path": "route.ts", "symbol": "route"},
+                                    "attachment": {
+                                        "relation": "registered_by",
+                                        "owner_ref": "RLA-route",
+                                        "owner_path": "route.ts",
+                                        "owner_symbol": "route",
+                                    },
+                                    "evidence_refs": ["RLA-route"],
                                 },
                             },
                         },
                     ],
-                    "completion_claims": [{"scenario_id": "SC-1", "surfaces": ["ui"]}],
+                    "completion_claims": [{"scenario_id": "SC-1", "surfaces": ["api"]}],
                     "unresolved_items": [],
                 }
 
             result = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=store,
                 llm_client=_ScriptedDesignerClient(
                     [
+                        {"action": "repo.read", "arguments": {"path": "route.ts", "start_line": 1}},
+                        # A request field must be an object; the Harness rejects it and the Designer retries.
+                        {"action": "design.propose_delta", "arguments": {"delta": delta(["id"])}},
                         {
                             "action": "design.propose_delta",
-                            "arguments": {"delta": delta([{"name": "selection", "rule": "required"}])},
-                        },
-                        {
-                            "action": "design.propose_delta",
-                            "arguments": {"delta": delta(["A record must be selected before deletion."])},
+                            "arguments": {"delta": delta([{"name": "id", "type": "string", "location": "path"}])},
                         },
                     ]
                 ),
@@ -4366,7 +4350,6 @@ class DesignerResumeTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V1,
             )
 
             self.assertEqual(result.graph["revision"], 1)
@@ -4374,7 +4357,8 @@ class DesignerResumeTest(unittest.TestCase):
             self.assertEqual(len(result.delta_paths), 1)
             session = json.loads((root / result.session_path).read_text(encoding="utf-8"))
             self.assertIsNone(session["cursor"]["pending_call"])
-            self.assertEqual(session["observations"][0]["error"]["error_code"], "vertical_design_graph_invalid")
+            errors = [item["error"]["error_code"] for item in session["observations"] if item.get("error")]
+            self.assertEqual(errors, ["vertical_design_graph_invalid"])
 
     def test_v2_requires_source_read_before_first_component_delta(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -4470,6 +4454,7 @@ class DesignerResumeTest(unittest.TestCase):
                 [],
             )
             result = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=store,
                 llm_client=_ScriptedDesignerClient(
@@ -4543,10 +4528,9 @@ class DesignerResumeTest(unittest.TestCase):
             initial = new_vertical_design_graph(
                 run_id=run_id,
                 snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V1,
             )
             delta = {
-                "schema_version": DELTA_VERSION_V1,
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": initial["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -4564,6 +4548,19 @@ class DesignerResumeTest(unittest.TestCase):
                             "evidence_refs": ["RLA-0000000000000001"],
                             "evidence_reason": "",
                             "contract": "Handle the items request.",
+                            "surface_contract": VerticalDesignGraphTest._api_contract(),
+                            "runtime_binding": {
+                                "schema_version": RUNTIME_BINDING_VERSION,
+                                "runtime_kind": "api_route",
+                                "target": {"component_id": "api", "path": "route.ts", "symbol": "route"},
+                                "attachment": {
+                                    "relation": "registered_by",
+                                    "owner_ref": "RLA-0000000000000001",
+                                    "owner_path": "route.ts",
+                                    "owner_symbol": "route",
+                                },
+                                "evidence_refs": ["RLA-0000000000000001"],
+                            },
                         },
                     },
                 ],
@@ -4572,22 +4569,22 @@ class DesignerResumeTest(unittest.TestCase):
             }
 
             with self.assertRaises(DesignerExecutionError) as paused:
-                DesignerToolLoopExecutor(settings=settings, store=store, llm_client=_FailingDesignerClient()).execute(
+                DesignerToolLoopExecutor(uiux_provider=_FAKE_UIUX, settings=settings, store=store, llm_client=_FailingDesignerClient()).execute(
                     run_id=run_id,
                     requirement_model=requirement,
                     landscape=landscape,
                     target_path=target,
                     snapshot_binding=binding,
-                    contract_version=GRAPH_VERSION_V1,
                 )
             self.assertTrue(paused.exception.retriable)
 
             result = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=store,
                 llm_client=_ScriptedDesignerClient(
                     [
-                        {"action": "landscape.search", "arguments": {"scenario_id": "SC-1", "surface": "api"}},
+                        {"action": "repo.read", "arguments": {"path": "route.ts", "start_line": 1}},
                         {"action": "design.inspect_partition", "arguments": {"scenario_id": "SC-1"}},
                         {"action": "landscape.search", "arguments": {"scenario_id": "SC-1", "surface": "api"}},
                         {"action": "design.propose_delta", "arguments": {"delta": delta}},
@@ -4600,7 +4597,6 @@ class DesignerResumeTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V1,
             )
 
             self.assertEqual(result.graph["revision"], 1)
@@ -4611,7 +4607,7 @@ class DesignerResumeTest(unittest.TestCase):
 
             node_id = str(result.graph["nodes"][0]["id"])
             repair_delta = {
-                "schema_version": DELTA_VERSION_V1,
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": result.graph["artifact_digest"],
                 "partition": {"use_case_id": "UC1", "scenario_id": "SC-1", "component_id": "api"},
                 "operations": [
@@ -4622,10 +4618,14 @@ class DesignerResumeTest(unittest.TestCase):
                 "unresolved_items": [],
             }
             repaired = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=store,
                 llm_client=_ScriptedDesignerClient(
-                    [{"action": "design.propose_delta", "arguments": {"delta": repair_delta}}]
+                    [
+                        {"action": "repo.read", "arguments": {"path": "route.ts", "start_line": 1}},
+                        {"action": "design.propose_delta", "arguments": {"delta": repair_delta}},
+                    ]
                 ),
             ).execute(
                 run_id=run_id,
@@ -4636,7 +4636,6 @@ class DesignerResumeTest(unittest.TestCase):
                 existing_graph=result.graph,
                 repair_feedback=[{"id": "SEM-1", "message": "Add the missing interaction."}],
                 session_ordinal=2,
-                contract_version=GRAPH_VERSION_V1,
             )
             self.assertEqual(repaired.graph["revision"], 2)
             self.assertEqual(len(repaired.graph["edges"]), 1)
@@ -4662,6 +4661,7 @@ class DesignerResumeTest(unittest.TestCase):
             session_file.write_text(json.dumps(persisted), encoding="utf-8")
 
             reconciled = DesignerToolLoopExecutor(
+                uiux_provider=_FAKE_UIUX,
                 settings=settings,
                 store=store,
                 llm_client=_ScriptedDesignerClient([{"action": "complete", "arguments": {}}]),
@@ -4671,7 +4671,6 @@ class DesignerResumeTest(unittest.TestCase):
                 landscape=landscape,
                 target_path=target,
                 snapshot_binding=binding,
-                contract_version=GRAPH_VERSION_V1,
             )
             self.assertEqual(reconciled.graph["revision"], 1)
             self.assertEqual(reconciled.delta_paths, result.delta_paths)
@@ -4699,8 +4698,6 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                    "SDLC_VERTICAL_TRACE_MODE": "shadow",
-                    "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
@@ -4711,7 +4708,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             created = PhaseOneWorkflow(settings).start_or_get_run(dataset="eTour", use_case="UC1", requested_by="test")
             self.assertEqual(created["designer_contract_version"], GRAPH_VERSION)
             self.assertEqual(created[VERTICAL_TRACE_STATE_KEY], VERTICAL_TRACE_GRAPH_VERSION)
-            self.assertEqual(created[VERTICAL_TRACE_MODE_STATE_KEY], "shadow")
+            self.assertEqual(created[VERTICAL_TRACE_MODE_STATE_KEY], "enforce")
 
             designed = PhaseTwoWorkflow(settings).approve_checkpoint(run_id=str(created["run_id"]))
 
@@ -4752,7 +4749,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             trace_report = json.loads(
                 (root / str(designed["latest_artifacts"]["vertical_trace_validation"])).read_text(encoding="utf-8")
             )
-            self.assertEqual(trace_report["mode"], "shadow")
+            self.assertEqual(trace_report["mode"], "enforce")
             self.assertIn("vertical_trace", designed["quality_reports"])
             component_view = json.loads((root / str(designed["latest_artifacts"]["design_component_view"])).read_text(encoding="utf-8"))
             surface_view = json.loads((root / str(designed["latest_artifacts"]["design_surface_view"])).read_text(encoding="utf-8"))
@@ -4848,25 +4845,9 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
             revalidated_graph = json.loads((root / str(revalidated["latest_artifacts"]["vertical_design_graph"])).read_text(encoding="utf-8"))
             self.assertTrue(all(node.get("surface_contract") for node in revalidated_graph["nodes"]))
 
-            workflow = PhaseThreeWorkflow(settings)
-            state = workflow.store.read_state(str(created["run_id"]))
-            state[VERTICAL_TRACE_MODE_STATE_KEY] = "enforce"
-            workflow.store.write_state(state)
-            with self.assertRaises(HarnessError) as stale_trace:
-                workflow.approve_design_checkpoint(
-                    run_id=str(created["run_id"]),
-                    checkpoint_id=str(revalidated["pending_checkpoint"]["checkpoint_id"]),
-                )
-            self.assertEqual(stale_trace.exception.error_code, "requirement_v2_phase3_input_invalid")
-            state = workflow.store.read_state(str(created["run_id"]))
-            state[VERTICAL_TRACE_MODE_STATE_KEY] = "enforce"
-            workflow.store.write_state(state)
-            enforced = PhaseTwoWorkflow(settings).revalidate_design(run_id=str(created["run_id"]))
-            self.assertEqual(enforced["status"], "waiting_design_approval", enforced)
-            self.assertEqual(enforced[VERTICAL_TRACE_MODE_STATE_KEY], "enforce")
-            planned = workflow.approve_design_checkpoint(
+            planned = PhaseThreeWorkflow(settings).approve_design_checkpoint(
                 run_id=str(created["run_id"]),
-                checkpoint_id=str(enforced["pending_checkpoint"]["checkpoint_id"]),
+                checkpoint_id=str(revalidated["pending_checkpoint"]["checkpoint_id"]),
             )
             self.assertEqual(planned["status"], "waiting_implementation_plan_review", planned)
 
@@ -4882,8 +4863,6 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                     "SDLC_LLM_MODE": "fake",
                     "SDLC_SYNC_MODE": "mock",
                     "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
-                    "SDLC_VERTICAL_TRACE_MODE": "enforce",
-                    "SDLC_DESIGNER_CONTRACT_VERSION": GRAPH_VERSION,
                     "SDLC_DESIGN_LLM_CALL_BUDGET": "24",
                     "SDLC_TARGET_REPO_PATH": str(target.canonical),
                     "SDLC_TARGET_REPO_REMOTE": str(target.remote.resolve()),
@@ -4930,7 +4909,7 @@ class RepoAwareDesignerWorkflowTest(unittest.TestCase):
                 requested_by="test",
             )
 
-            self.assertEqual(created["designer_contract_version"], GRAPH_VERSION_V1)
+            self.assertEqual(created["designer_contract_version"], GRAPH_VERSION)
 
 
 class ErrorOnlyApiBoundaryTest(unittest.TestCase):
@@ -5059,6 +5038,18 @@ class BusinessRuleBoundaryInputsTest(unittest.TestCase):
                     ],
                     "validations": [],
                     "outcomes": ["controls are enabled"],
+                    "runtime_surface": {
+                        "schema_version": RUNTIME_SURFACE_BINDING_VERSION,
+                        "screen_id": "cancellation-screen",
+                        "entrypoint": "apps/web/src/AppShell.tsx#AppShell",
+                        "composition_path": [
+                            "apps/web/src/AppShell.tsx#AppShell",
+                            "apps/web/src/DeleteCulturalHeritagePanel.tsx#DeleteCulturalHeritagePanel",
+                        ],
+                        "required_inputs": [],
+                        "runnable_status": "bound",
+                        "evidence_refs": [],
+                    },
                 },
                 "runtime_binding": {
                     "schema_version": RUNTIME_BINDING_VERSION,

@@ -8,12 +8,17 @@ from ..core.errors import HarnessError
 from .snapshot import PROFILE_SNAPSHOT_STATE_KEY, read_profile_snapshot
 
 
-# Kept local to avoid importing the Designer package from config/profile bootstrap.
-DESIGNER_CONTRACT_STATE_KEY = "designer_contract_version"
-CURRENT_DESIGNER_CONTRACT_VERSION = "vertical_design_graph_v2"
-SUPPORTED_DESIGNER_CONTRACT_VERSIONS = frozenset(
-    {"vertical_design_graph_v1", "vertical_design_graph_v2"}
-)
+# The one contract set every run is executed with (owner decision 2026-11-18). A run pinned to anything else is
+# read-only: the code paths of older contracts were removed. Kept local to avoid importing agent packages from
+# config/profile bootstrap.
+CURRENT_CONTRACT_PINS = {
+    "designer_contract_version": "vertical_design_graph_v2",
+    "designer_ui_contract_version": "ui_experience_contract_v2",
+    "designer_uiux_mode": "enforce",
+    "designer_uiux_contract_version": "uiux_pro_max_search_v1",
+    "designer_ui_layout_contract": "layered_layout_v1",
+    "vertical_trace_mode": "enforce",
+}
 
 LEGACY_RETIRED_ALLOWED_COMMANDS = frozenset(
     {
@@ -56,13 +61,14 @@ def require_run_command_allowed(
             ),
             run_id=run_id,
         )
-    if _has_retired_designer_contract(state):
+    retired_pins = retired_contract_pins(state)
+    if retired_pins:
         if command_name in LEGACY_RETIRED_ALLOWED_COMMANDS:
             return
         raise HarnessError(
-            "legacy_designer_contract_retired",
+            "legacy_contract_retired",
             (
-                f"Run {run_id} has no current Vertical Design contract; "
+                f"Run {run_id} is pinned to retired contracts ({', '.join(retired_pins)}); "
                 "only read, existing-artifact sync, and workspace cleanup remain available."
             ),
             run_id=run_id,
@@ -89,7 +95,7 @@ def public_allowed_actions(
     normalized = [str(action) for action in items if action]
     if (
         not _is_legacy_projection(state)
-        and not _has_retired_designer_contract(state)
+        and not retired_contract_pins(state)
         and not _has_retired_developer_executor(state)
     ):
         if str(state.get("status") or "") == "design_paused" and "restart_design" not in normalized:
@@ -107,14 +113,14 @@ def public_run_summary(
 
     if (
         not _is_legacy_projection(state)
-        and not _has_retired_designer_contract(state)
+        and not retired_contract_pins(state)
         and not _has_retired_developer_executor(state)
     ):
         return state.get("summary_for_user") if summary is None else summary
     run_id = str(state.get("run_id") or "run này")
-    if not _is_legacy_projection(state) and _has_retired_designer_contract(state):
+    if not _is_legacy_projection(state) and retired_contract_pins(state):
         return (
-            f"Run {run_id} không có Vertical Design contract hiện hành; chỉ còn "
+            f"Run {run_id} ghim contract đã retire ({', '.join(retired_contract_pins(state))}); chỉ còn "
             "read/audit, sync artifact đã tồn tại và workspace cleanup."
         )
     if _has_retired_developer_executor(state):
@@ -146,5 +152,7 @@ def _has_retired_developer_executor(state: Mapping[str, object]) -> bool:
     return isinstance(execution, Mapping) and execution.get("executor") == "legacy"
 
 
-def _has_retired_designer_contract(state: Mapping[str, object]) -> bool:
-    return state.get(DESIGNER_CONTRACT_STATE_KEY) not in SUPPORTED_DESIGNER_CONTRACT_VERSIONS
+def retired_contract_pins(state: Mapping[str, object]) -> list[str]:
+    """The run's contract pins that differ from the current set (a missing pin is a pre-pin legacy run)."""
+
+    return [key for key, current in CURRENT_CONTRACT_PINS.items() if state.get(key) != current]

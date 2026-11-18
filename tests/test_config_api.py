@@ -107,11 +107,11 @@ class ConfigApiTests(unittest.TestCase):
             "SDLC_DESIGNER_LOOP_ENABLED",
             {field["name"] for field in validation_section["fields"]},
         )
-        vertical_trace_field = next(
-            field for field in validation_section["fields"] if field["name"] == "SDLC_VERTICAL_TRACE_MODE"
+        # Design contracts are fixed, so the dashboard offers no version or mode switch for them.
+        self.assertFalse(
+            {"SDLC_VERTICAL_TRACE_MODE", "SDLC_DESIGNER_CONTRACT_VERSION", "SDLC_DESIGN_SEMANTIC_REVIEW_MODE"}
+            & {field["name"] for field in validation_section["fields"]}
         )
-        self.assertEqual(vertical_trace_field["value"], "enforce")
-        self.assertEqual(vertical_trace_field["source"], "default")
         design_step_review_field = next(
             field
             for field in validation_section["fields"]

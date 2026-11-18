@@ -23,6 +23,7 @@ from sdlc_harness.events import EventStore
 from sdlc_harness.interfaces.http import ApiServerConfig, create_server
 from sdlc_harness.profiles import build_profile_snapshot
 from sdlc_harness.storage.runtime import RuntimeStore
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 
 
 class ReadApiFixture(unittest.TestCase):
@@ -55,7 +56,7 @@ class ReadApiFixture(unittest.TestCase):
             "run_id": self.run_id,
             "source_ref": "jira:SDLC-42",
             "requirement_contract_version": "v2",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
             "created_at": "2026-10-18T01:00:00Z",
             "updated_at": "2026-10-18T02:00:00Z",
             "current_phase": "design_review",

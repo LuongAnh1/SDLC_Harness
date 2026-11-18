@@ -22,7 +22,6 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "optional": {"checkpoint_id"},
         "overrides": {
             "design_repair_limit",
-            "design_validation_trials",
             "design_llm_call_budget",
             "implementation_plan_repair_limit",
             "implementation_repair_limit",
@@ -62,14 +61,14 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "command": "revalidate-design",
         "required": set(),
         "optional": set(),
-        "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
+        "overrides": {"design_repair_limit", "design_llm_call_budget"},
         "confirmation": "standard",
     },
     "restart_design": {
         "command": "restart-design",
         "required": set(),
         "optional": set(),
-        "overrides": {"design_repair_limit", "design_validation_trials", "design_llm_call_budget"},
+        "overrides": {"design_repair_limit", "design_llm_call_budget"},
         "confirmation": "confirm",
     },
     "revalidate_requirement": {
@@ -140,7 +139,6 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
 
 OVERRIDE_SETTINGS = {
     "design_repair_limit": ("SDLC_DESIGN_REPAIR_LIMIT", 0),
-    "design_validation_trials": ("SDLC_DESIGN_VALIDATION_TRIALS", 1),
     "design_llm_call_budget": ("SDLC_DESIGN_LLM_CALL_BUDGET", 1),
     "implementation_plan_repair_limit": ("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", 0),
     "implementation_repair_limit": ("SDLC_IMPLEMENTATION_REPAIR_LIMIT", 0),

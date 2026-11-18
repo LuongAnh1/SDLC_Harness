@@ -8,6 +8,7 @@ import unittest
 
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
+    CURRENT_CONTRACT_PINS,
     ComponentProfile,
     LanguageProfile,
     PROFILE_SNAPSHOT_VERSION,
@@ -321,13 +322,13 @@ class ProfileRegistryTests(unittest.TestCase):
             public_allowed_actions(state, ["approve_checkpoint", "continue_run", "sync_run"]),
             ["sync_run"],
         )
-        self.assertIn("Vertical Design contract", str(public_run_summary(state, "Continue this run.")))
+        self.assertIn("ghim contract đã retire", str(public_run_summary(state, "Continue this run.")))
 
     def test_profiled_paused_design_advertises_restart_for_persisted_runs(self) -> None:
         state = {
             "run_id": "run_paused",
             "status": "design_paused",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
             "profile_snapshot": build_profile_snapshot(
                 project_profile_id="typescript_fullstack_v1",
                 target_remote="https://github.com/example/target.git",

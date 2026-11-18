@@ -12,7 +12,6 @@ from .phase4_browser import (  # noqa: F401 - names the moved methods use
     LlmStepReviewRequired,
     Path,
     ReviewableLlmClient,
-    UIUX_MODE_STATE_KEY,
     UI_POLISH_CHECKPOINT_TYPE,
     UI_POLISH_RESULT_CHECKPOINT_TYPE,
     UiPolishPlanner,
@@ -203,19 +202,18 @@ class PhaseFourUiPolishCycle:
         evidence_refs = {str(item["evidence_ref"]) for item in evidence}
         authority_refs = set(_dict_value(visual_profile.get("tokens"))) | set(visual_contracts)
         guidance: dict[str, object] = {}
-        # Hướng 1 (owner, 2026-11-16): a run that pinned the UI/UX skill consults it here instead of waiting for the
+        # Hướng 1 (owner, 2026-11-16): UI Polish consults the UI/UX skill here instead of waiting for the
         # Developer to ask; guidance stays out of authority_refs (U4 accepts profile token keys and Design IDs only).
-        if str(state.get(UIUX_MODE_STATE_KEY) or "off") == "enforce":
-            provider = self.developer_tool_loop.uiux_provider
-            if provider is None:
-                raise HarnessError(
-                    "ui_polish_guidance_unavailable",
-                    "This run pins the UI/UX skill but SDLC_UIUX_SKILL_MODE is not enforce.",
-                    run_id=run_id,
-                )
-            guidance = ui_polish_guidance(
-                search=provider.search, visual_contracts=visual_contracts, visual_profile=visual_profile
+        provider = self.developer_tool_loop.uiux_provider
+        if provider is None:
+            raise HarnessError(
+                "ui_polish_guidance_unavailable",
+                "UI Polish needs the UI/UX skill but the Developer has no guidance provider.",
+                run_id=run_id,
             )
+        guidance = ui_polish_guidance(
+            search=provider.search, visual_contracts=visual_contracts, visual_profile=visual_profile
+        )
         context = {
             "visual_profile_ref": profile_ref,
             "visual_profile": visual_profile,

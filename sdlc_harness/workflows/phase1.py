@@ -22,7 +22,7 @@ from ..artifacts import (
 )
 from ..core.config import Settings
 from ..core.errors import HarnessError
-from ..profiles import build_profile_snapshot, profile_status_metadata
+from ..profiles import CURRENT_CONTRACT_PINS, build_profile_snapshot, profile_status_metadata, retired_contract_pins
 from ..sources.fixtures import UseCaseSource, load_use_case, source_provenance_entry
 from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
@@ -78,16 +78,8 @@ from ..agents.requirements.session_v1 import (
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION_V1,
-    GRAPH_VERSION_V2,
-    SUPPORTED_GRAPH_VERSIONS,
-    UI_CONTRACT_STATE_KEY,
-    UI_LAYOUT_CONTRACT_KEY,
     UIUX_CONTRACT_STATE_KEY,
-    UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
-    resolve_ui_contract_pin,
-    ui_layout_pin,
 )
 from ..agents.validator import VERTICAL_TRACE_GRAPH_VERSION, VERTICAL_TRACE_STATE_KEY
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -183,7 +175,7 @@ class PhaseOneWorkflow:
         """Chạy Phase 1 từ source đã được load, bất kể source là fixture hay Jira."""
 
         active_state = self.store.find_active_run(source.source_ref)
-        if active_state and str(active_state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS:
+        if active_state and not retired_contract_pins(active_state):
             return self._status_response(active_state, created_new_run=False)
 
         run_id = self.store.new_run_id()
@@ -213,34 +205,11 @@ class PhaseOneWorkflow:
             },
             "summary_for_user": "Đang chuẩn hóa use case thành Requirement Model V2.",
         }
-        designer_contract_version = str(
-            getattr(self.settings, "designer_contract_version", GRAPH_VERSION_V1)
-        )
-        if designer_contract_version not in SUPPORTED_GRAPH_VERSIONS:
-            raise HarnessError(
-                "vertical_design_graph_invalid",
-                f"Unsupported configured Designer contract: {designer_contract_version}",
-                run_id=run_id,
-            )
-        state[DESIGNER_CONTRACT_STATE_KEY] = designer_contract_version
-        state[UIUX_MODE_STATE_KEY] = self.settings.uiux_skill_mode
-        state[UIUX_CONTRACT_STATE_KEY] = (
-            UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
-        )
-        state[UI_CONTRACT_STATE_KEY] = resolve_ui_contract_pin(
-            ui_contract_version=str(
-                getattr(self.settings, "designer_ui_contract_version", "ui_experience_contract_v1")
-            ),
-            graph_v2=designer_contract_version == GRAPH_VERSION_V2,
-            uiux_mode=self.settings.uiux_skill_mode,
-            run_id=run_id,
-        )
-        state[UI_LAYOUT_CONTRACT_KEY] = ui_layout_pin(str(state[UI_CONTRACT_STATE_KEY]))
+        state.update(CURRENT_CONTRACT_PINS)
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
         state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
             COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
         )
-        state["vertical_trace_mode"] = self.settings.vertical_trace_mode
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,

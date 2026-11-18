@@ -17,7 +17,7 @@ from ...profiles import (
     PlanningPathPolicy,
 )
 from ...profiles.runtime_config import runtime_config_impact_issues
-from ..designer.graph import GRAPH_VERSION_V2, validate_vertical_design_graph
+from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
 
 
@@ -115,7 +115,7 @@ def build_component_work_units(
         if str(_dict(trace_nodes.get(source)).get("kind") or "") == "acceptance_criterion" and target in nodes:
             acceptance_by_design.setdefault(target, set()).add(source)
 
-    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION
     units: list[dict[str, object]] = []
     unit_by_node: dict[str, str] = {}
     for (scenario_id, component_id), group_nodes in sorted(grouped.items()):
@@ -1063,7 +1063,7 @@ def component_plan_issues(
         issues.append("Component-aware plan work-unit identity does not match the approved Design graph.")
     allowed_stages = set(verification_stage_ids)
     stage_owners = dict(verification_stage_ownership or {})
-    strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION_V2
+    strict_runtime_targets = str(_dict(design_graph).get("schema_version") or "") == GRAPH_VERSION
     for unit_id, unit in actual_by_id.items():
         expected = expected_by_id.get(unit_id)
         if expected:
@@ -1473,7 +1473,7 @@ def _structural_plan_issues(
 
     parent_scenarios: dict[str, set[str]] = {}
     branch_entry_units: dict[str, set[str]] = {}
-    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION_V2
+    entity_graph = str(design_graph.get("schema_version") or "") == GRAPH_VERSION
     scenario_edges: dict[str, list[dict[str, object]]] = {}
     for edge in _dicts(design_graph.get("edges")):
         source_node = str(edge.get("from") or "")

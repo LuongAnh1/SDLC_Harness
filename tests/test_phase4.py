@@ -4415,9 +4415,9 @@ class PhaseFourTest(unittest.TestCase):
                 [item["label"] for item in json.loads(client.prompts[0])["image_inputs"]],
                 [item["label"] for item in client.options[0]["images"]],
             )
-        # A run that did not pin the UI/UX skill gets no guidance and no guidance rule.
-        self.assertNotIn("uiux_guidance", planner.prompts[0])
-        self.assertNotIn("ui_polish_guidance", waiting["latest_artifacts"])
+        # Every run consults the UI/UX skill before planning the polish (guidance ranks below Design and profile).
+        self.assertIn("uiux_guidance", json.loads(planner.prompts[0])["planner_context"])
+        self.assertIn("ui_polish_guidance", waiting["latest_artifacts"])
         contract = self._artifact(waiting, "ui_polish_contract")
         self.assertEqual(contract["schema_version"], "ui_polish_contract_v1")
         self.assertEqual(contract["polish_units"][0]["write_paths"], ["apps/web/src/ClosurePanel.tsx"])

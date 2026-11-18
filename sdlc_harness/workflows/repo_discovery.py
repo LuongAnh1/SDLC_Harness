@@ -54,10 +54,7 @@ class RepoDiscoveryWorkflow:
             )
         existing = _dict_value(state.get("latest_artifacts")).get("repo_landscape")
         codegraph_ref = _dict_value(state.get("latest_artifacts")).get("repo_codegraph_snapshot")
-        needs_codegraph_snapshot = (
-            str(state.get("designer_uiux_mode") or "off") == "enforce"
-            and not (isinstance(codegraph_ref, str) and codegraph_ref.strip())
-        )
+        needs_codegraph_snapshot = not (isinstance(codegraph_ref, str) and codegraph_ref.strip())
         if isinstance(existing, str) and existing.strip() and not needs_codegraph_snapshot:
             path = self._artifact_path(existing, run_id=run_id)
             try:

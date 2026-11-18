@@ -198,8 +198,6 @@ class DeveloperToolLoopExecutor:
                 timeout_seconds=int(getattr(settings, "uiux_skill_timeout_seconds", 30)),
                 fake_mode=getattr(settings, "llm_mode", "") == "fake",
             )
-            if getattr(settings, "uiux_skill_mode", "off") == "enforce"
-            else None
         )
 
     def execute(

@@ -11,21 +11,14 @@ from ...core.errors import HarnessError
 from .uiux import (
     RUNTIME_SURFACE_BINDING_VERSION,
     UI_EXPERIENCE_CONTRACT_V2,
-    UIUX_EXPERIENCE_CONTRACT_VERSION,
 )
 
 
-GRAPH_VERSION_V1 = "vertical_design_graph_v1"
-GRAPH_VERSION_V2 = "vertical_design_graph_v2"
-GRAPH_VERSION = GRAPH_VERSION_V2
-SUPPORTED_GRAPH_VERSIONS = frozenset({GRAPH_VERSION_V1, GRAPH_VERSION_V2})
-DELTA_VERSION_V1 = "designer_delta_v1"
-DELTA_VERSION_V2 = "designer_delta_v2"
-DELTA_VERSION = DELTA_VERSION_V2
+# The only Design contracts the Harness executes (2026-11-18); runs pinned to older ones are retired.
+GRAPH_VERSION = "vertical_design_graph_v2"
+DELTA_VERSION = "designer_delta_v2"
 DESIGNER_CONTRACT_STATE_KEY = "designer_contract_version"
-DESIGN_BUNDLE_VERSION_V1 = "system_design_bundle_v1"
-DESIGN_BUNDLE_VERSION_V2 = "system_design_bundle_v2"
-DESIGN_BUNDLE_VERSION = DESIGN_BUNDLE_VERSION_V2
+DESIGN_BUNDLE_VERSION = "system_design_bundle_v2"
 DESIGN_BUNDLE_STATE_KEY = "design_bundle_contract_version"
 SURFACE_CONTRACT_VERSION = "design_surface_contract_v1"
 RUNTIME_BINDING_VERSION = "runtime_binding_v1"
@@ -38,7 +31,7 @@ UI_RUNTIME_STATES = ("loading", "ready", "empty", "error", "success")
 UI_VISUAL_GROUPS = ("hierarchy", "layout", "typography", "color_and_tokens", "focus_appearance", "responsive_rules")
 UI_STYLE_TARGET_POLICIES = frozenset({"reuse_existing", "new_stylesheet"})
 UI_SURFACE_ROLES = frozenset({"screen", "composition_wiring"})
-# Run-pinned opt-in: layout items become {region, layer, content}; graphs without the pin keep '<region>: <content>'.
+# Layout items are {region, layer, content}; the run pins this contract under UI_LAYOUT_CONTRACT_KEY.
 UI_LAYOUT_CONTRACT_KEY = "designer_ui_layout_contract"
 UI_LAYERED_LAYOUT_V1 = "layered_layout_v1"
 UI_LAYOUT_LAYERS = ("page", "overlay")
@@ -67,9 +60,10 @@ def canonicalize_composition_wiring(graph: dict[str, object]) -> dict[str, objec
 def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
     """Derive every forwarded input by screen and child; never infer business inputs."""
 
-    if not ui_contract_v2(graph):
-        return False
     run_id = str(graph.get("run_id") or "")
+    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
+    if not any(is_composition_wiring(node) for node in nodes):
+        return False  # nothing forwards inputs, so there is nothing to derive
     context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
     chain = {
         str(item.get("ref") or ""): item
@@ -81,7 +75,6 @@ def _materialize_composition_forwarding(graph: dict[str, object]) -> bool:
     }
     expected: dict[str, dict[tuple[str, str], set[str]]] = {}
     requirement_refs: dict[str, set[str]] = {}
-    nodes = _dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
     for node in nodes:
         if str(node.get("surface") or "") != "ui" or is_composition_wiring(node):
             continue
@@ -236,38 +229,14 @@ def graph_digest(graph: dict[str, object]) -> str:
     return canonical_hash({key: value for key, value in graph.items() if key != "artifact_digest"})
 
 
-def ui_contract_v2(graph: dict[str, object]) -> bool:
-    binding = graph.get("snapshot_binding")
-    return (
-        str(graph.get("schema_version") or "") == GRAPH_VERSION_V2
-        and isinstance(binding, dict)
-        and binding.get("designer_ui_contract_version") == UI_EXPERIENCE_CONTRACT_V2
-    )
-
-
-def ui_layered_layout(graph: dict[str, object]) -> bool:
-    return ui_contract_v2(graph) and _dict_value(graph.get("snapshot_binding")).get(UI_LAYOUT_CONTRACT_KEY) == UI_LAYERED_LAYOUT_V1
-
-
-def ui_layout_pin(ui_contract_version: str) -> str:
-    """Layout contract pinned for new runs; only ui_experience_contract_v2 runs get layered layout."""
-
-    return UI_LAYERED_LAYOUT_V1 if ui_contract_version == UI_EXPERIENCE_CONTRACT_V2 else ""
-
-
 def layout_regions(visual: dict[str, object]) -> list[tuple[str, str, str]]:
-    """(region, layer, content) for each layout item; layer is '' for legacy '<region>: <content>' strings."""
+    """(region, layer, content) for each layout item."""
 
-    regions: list[tuple[str, str, str]] = []
-    for item in visual.get("layout") if isinstance(visual.get("layout"), list) else []:
-        if isinstance(item, dict):
-            regions.append(
-                (str(item.get("region") or "").strip(), str(item.get("layer") or ""), str(item.get("content") or "").strip())
-            )
-        elif isinstance(item, str):
-            region, _, content = item.partition(":")
-            regions.append((region.strip(), "", content.strip()))
-    return regions
+    return [
+        (str(item.get("region") or "").strip(), str(item.get("layer") or ""), str(item.get("content") or "").strip())
+        for item in (visual.get("layout") if isinstance(visual.get("layout"), list) else [])
+        if isinstance(item, dict)
+    ]
 
 
 def new_vertical_design_graph(
@@ -276,7 +245,7 @@ def new_vertical_design_graph(
     snapshot_binding: dict[str, object],
     contract_version: str = GRAPH_VERSION,
 ) -> dict[str, object]:
-    if contract_version not in SUPPORTED_GRAPH_VERSIONS:
+    if contract_version != GRAPH_VERSION:
         raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=run_id)
     graph: dict[str, object] = {
         "schema_version": contract_version,
@@ -298,9 +267,8 @@ def validate_vertical_design_graph(
     expected_run_id: str | None = None,
     expected_binding: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if not isinstance(value, dict) or value.get("schema_version") not in SUPPORTED_GRAPH_VERSIONS:
+    if not isinstance(value, dict) or value.get("schema_version") != GRAPH_VERSION:
         raise HarnessError("vertical_design_graph_invalid", "Unsupported vertical Design graph contract.", run_id=expected_run_id)
-    graph_version = str(value.get("schema_version") or "")
     run_id = str(value.get("run_id") or "")
     if not run_id or (expected_run_id and run_id != expected_run_id):
         raise HarnessError("vertical_design_graph_invalid", "Design graph run identity is invalid.", run_id=expected_run_id)
@@ -311,8 +279,6 @@ def validate_vertical_design_graph(
         raise HarnessError("vertical_design_graph_invalid", "Design graph snapshot binding is missing.", run_id=run_id)
     if expected_binding is not None and any(binding.get(key) != item for key, item in expected_binding.items()):
         raise HarnessError("designer_input_drift", "Design graph no longer matches its frozen inputs.", run_id=run_id)
-    ui_v2 = ui_contract_v2(value)
-    layered = ui_layered_layout(value)
 
     partitions = _dict_items(value.get("partitions"), code="vertical_design_graph_invalid", run_id=run_id)
     partition_keys: set[str] = set()
@@ -326,14 +292,13 @@ def validate_vertical_design_graph(
         for surface, status in coverage.items():
             if str(surface) not in SURFACES or str(status) not in {"covered", "no_change", "not_applicable", "missing"}:
                 raise HarnessError("vertical_design_graph_invalid", "Design partition coverage contains an invalid value.", run_id=run_id)
-        if graph_version == GRAPH_VERSION_V2:
-            source_refs = partition.get("source_observation_refs", [])
-            if not isinstance(source_refs, list) or any(not isinstance(item, str) or not item for item in source_refs):
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    "Design partition source observations are invalid.",
-                    run_id=run_id,
-                )
+        source_refs = partition.get("source_observation_refs", [])
+        if not isinstance(source_refs, list) or any(not isinstance(item, str) or not item for item in source_refs):
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                "Design partition source observations are invalid.",
+                run_id=run_id,
+            )
         partition_keys.add(key)
 
     nodes = _dict_items(value.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
@@ -366,10 +331,8 @@ def validate_vertical_design_graph(
                 surface=str(node.get("surface") or ""),
                 node_id=node_id,
                 run_id=run_id,
-                ui_v2=ui_v2,
-                layered=layered,
             )
-        if graph_version == GRAPH_VERSION_V2 and node.get("runtime_binding") is not None:
+        if node.get("runtime_binding") is not None:
             _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
         node_ids.add(node_id)
 
@@ -392,15 +355,14 @@ def validate_vertical_design_graph(
             raise HarnessError("vertical_design_graph_invalid", "Design graph branch metadata is invalid.", run_id=run_id)
         if "terminal" in edge and not isinstance(edge.get("terminal"), bool):
             raise HarnessError("vertical_design_graph_invalid", "Design graph edge terminal marker is invalid.", run_id=run_id)
-        if graph_version == GRAPH_VERSION_V2:
-            if edge.get(BOUNDARY_CONTRACT_VERSION) is not None:
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Edge {edge_id} uses {BOUNDARY_CONTRACT_VERSION} as a field name; use boundary_contract instead.",
-                    run_id=run_id,
-                )
-            if edge.get("boundary_contract") is not None:
-                _validate_boundary_contract(edge.get("boundary_contract"), edge_id=edge_id, run_id=run_id)
+        if edge.get(BOUNDARY_CONTRACT_VERSION) is not None:
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Edge {edge_id} uses {BOUNDARY_CONTRACT_VERSION} as a field name; use boundary_contract instead.",
+                run_id=run_id,
+            )
+        if edge.get("boundary_contract") is not None:
+            _validate_boundary_contract(edge.get("boundary_contract"), edge_id=edge_id, run_id=run_id)
         scenario_id = str(edge.get("scenario_id") or "")
         order = edge.get("order")
         if not scenario_id or not isinstance(order, int) or order < 1 or (scenario_id, order) in edge_orders:
@@ -449,14 +411,13 @@ def design_bundle_findings(
                     "origin": "deterministic",
                 }
             )
-    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
-        findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
-        findings.extend(
-            _sequence_behavior_findings(
-                nodes=_dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id),
-                edges=_dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id),
-            )
+    findings.extend(_runtime_composition_findings(graph, required_surfaces=None, landscape=landscape))
+    findings.extend(
+        _sequence_behavior_findings(
+            nodes=_dict_items(graph.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id),
+            edges=_dict_items(graph.get("edges"), code="vertical_design_graph_invalid", run_id=run_id),
         )
+    )
     return findings
 
 
@@ -534,8 +495,6 @@ def _validate_surface_contract(
     surface: str,
     node_id: str,
     run_id: str,
-    ui_v2: bool = False,
-    layered: bool = False,
 ) -> None:
     if not isinstance(value, dict) or value.get("schema_version") != SURFACE_CONTRACT_VERSION:
         raise HarnessError(
@@ -623,22 +582,15 @@ def _validate_surface_contract(
         require_strings("outcomes")
         experience = value.get("experience_contract")
         if experience is not None:
-            _validate_ui_experience_contract(
-                experience,
-                node_id=node_id,
+            _validate_ui_experience_contract(experience, node_id=node_id, run_id=run_id)
+        _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
+        screen_id = str(_dict_value(_dict_value(experience).get("screen")).get("screen_id") or "")
+        if experience is not None and screen_id != str(_dict_value(value.get("runtime_surface")).get("screen_id") or ""):
+            raise HarnessError(
+                "vertical_design_graph_invalid",
+                f"Node {node_id} experience_contract.screen.screen_id must equal runtime_surface.screen_id.",
                 run_id=run_id,
-                expected_version=UI_EXPERIENCE_CONTRACT_V2 if ui_v2 else UIUX_EXPERIENCE_CONTRACT_VERSION,
-                layered=layered,
             )
-        if ui_v2:
-            _validate_runtime_surface(value.get("runtime_surface"), node_id=node_id, run_id=run_id)
-            screen_id = str(_dict_value(_dict_value(experience).get("screen")).get("screen_id") or "")
-            if experience is not None and screen_id != str(_dict_value(value.get("runtime_surface")).get("screen_id") or ""):
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Node {node_id} experience_contract.screen.screen_id must equal runtime_surface.screen_id.",
-                    run_id=run_id,
-                )
     elif surface == "api":
         require_text("operation_id")
         require_text("method")
@@ -784,18 +736,11 @@ def _is_symbol_ref(value: str) -> bool:
     return _is_repo_path(path) and bool(_TYPESCRIPT_IDENTIFIER.fullmatch(symbol))
 
 
-def _validate_ui_experience_contract(
-    value: object,
-    *,
-    node_id: str,
-    run_id: str,
-    expected_version: str = UIUX_EXPERIENCE_CONTRACT_VERSION,
-    layered: bool = False,
-) -> None:
-    if not isinstance(value, dict) or value.get("schema_version") != expected_version:
+def _validate_ui_experience_contract(value: object, *, node_id: str, run_id: str) -> None:
+    if not isinstance(value, dict) or value.get("schema_version") != UI_EXPERIENCE_CONTRACT_V2:
         raise HarnessError(
             "vertical_design_graph_invalid",
-            f"Node {node_id} has an unsupported UI experience contract; expected {expected_version}.",
+            f"Node {node_id} has an unsupported UI experience contract; expected {UI_EXPERIENCE_CONTRACT_V2}.",
             run_id=run_id,
         )
     for key in ("component_structure", "accessibility", "responsive", "focus_flow", "guidance_refs"):
@@ -818,23 +763,19 @@ def _validate_ui_experience_contract(
             f"Node {node_id} UI experience contract has invalid feedback.",
             run_id=run_id,
         )
-    if expected_version == UI_EXPERIENCE_CONTRACT_V2:
-        _validate_holistic_experience(value, node_id=node_id, run_id=run_id, layered=layered)
+    _validate_holistic_experience(value, node_id=node_id, run_id=run_id)
 
 
-def _layout_item_valid(item: object, layered: bool) -> bool:
-    if isinstance(item, dict):
-        return (
-            bool(str(item.get("region") or "").strip())
-            and item.get("layer") in UI_LAYOUT_LAYERS
-            and bool(str(item.get("content") or "").strip())
-        )
-    return not layered and isinstance(item, str) and bool(item.strip())
+def _layout_item_valid(item: object) -> bool:
+    return (
+        isinstance(item, dict)
+        and bool(str(item.get("region") or "").strip())
+        and item.get("layer") in UI_LAYOUT_LAYERS
+        and bool(str(item.get("content") or "").strip())
+    )
 
 
-def _validate_holistic_experience(
-    value: dict[str, object], *, node_id: str, run_id: str, layered: bool = False
-) -> None:
+def _validate_holistic_experience(value: dict[str, object], *, node_id: str, run_id: str) -> None:
     """Structural checks only; whether the UX decisions are good stays with semantic review."""
 
     def invalid(detail: str) -> HarnessError:
@@ -881,12 +822,8 @@ def _validate_holistic_experience(
         if key != "layout" and not texts(visual.get(key)):
             raise invalid(f"visual_contract.{key} needs at least one decision")
     layout = visual.get("layout")
-    if not isinstance(layout, list) or not layout or not all(_layout_item_valid(item, layered) for item in layout):
-        raise invalid(
-            "visual_contract.layout needs {region,layer,content} items with layer " + "|".join(UI_LAYOUT_LAYERS)
-            if layered
-            else "visual_contract.layout needs at least one decision"
-        )
+    if not isinstance(layout, list) or not layout or not all(_layout_item_valid(item) for item in layout):
+        raise invalid("visual_contract.layout needs {region,layer,content} items with layer " + "|".join(UI_LAYOUT_LAYERS))
     if str(visual.get("style_target_policy") or "") not in UI_STYLE_TARGET_POLICIES:
         raise invalid("visual_contract.style_target_policy must be " + "|".join(sorted(UI_STYLE_TARGET_POLICIES)))
     if not str(visual.get("style_target_reason") or "").strip():
@@ -986,14 +923,6 @@ def _validate_boundary_contract(value: object, *, edge_id: str, run_id: str) -> 
             raise HarnessError("vertical_design_graph_invalid", f"Edge {edge_id} boundary contract has invalid {key}.", run_id=run_id)
 
 
-def delta_version_for(graph_version: str) -> str:
-    return DELTA_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DELTA_VERSION_V1
-
-
-def design_bundle_version_for(graph_version: str) -> str:
-    return DESIGN_BUNDLE_VERSION_V2 if graph_version == GRAPH_VERSION_V2 else DESIGN_BUNDLE_VERSION_V1
-
-
 def apply_designer_delta(
     graph: dict[str, object],
     delta: object,
@@ -1003,7 +932,7 @@ def apply_designer_delta(
 ) -> tuple[dict[str, object], dict[str, str]]:
     run_id = str(graph.get("run_id") or "")
     validate_vertical_design_graph(graph, expected_run_id=run_id)
-    expected_delta_version = delta_version_for(str(graph.get("schema_version") or ""))
+    expected_delta_version = DELTA_VERSION
     if not isinstance(delta, dict) or delta.get("schema_version") != expected_delta_version:
         raise HarnessError(
             "designer_delta_invalid",
@@ -1088,8 +1017,7 @@ def apply_designer_delta(
         ),
     )
     candidate["partitions"] = sorted(_dict_items(candidate.get("partitions"), code="designer_delta_invalid", run_id=run_id), key=lambda item: _partition_key(item, run_id=run_id))
-    if str(candidate.get("schema_version") or "") == GRAPH_VERSION_V2:
-        _validate_unique_cross_scenario_parent(candidate, run_id=run_id)
+    _validate_unique_cross_scenario_parent(candidate, run_id=run_id)
     semantic_candidate = dict(candidate)
     semantic_candidate.pop("artifact_digest", None)
     semantic_candidate.pop("revision", None)
@@ -1209,38 +1137,33 @@ def completion_findings(
     for item in _dict_items(graph.get("unresolved_items"), code="vertical_design_graph_invalid", run_id=run_id):
         if str(item.get("owner") or "") in {"requirement", "human"}:
             findings.append(_finding("human_decision_required", str(item.get("id") or "unresolved"), str(item.get("message") or "Design requires a human decision.")))
-    if str(_dict_value(graph.get("snapshot_binding")).get("designer_uiux_mode") or "off") == "enforce":
-        for node in nodes:
-            if str(node.get("surface") or "") != "ui":
-                continue
-            surface_contract = _dict_value(node.get("surface_contract"))
-            expected_experience = (
-                UI_EXPERIENCE_CONTRACT_V2 if ui_contract_v2(graph) else UIUX_EXPERIENCE_CONTRACT_VERSION
-            )
-            if not _dict_value(surface_contract.get("experience_contract")) and not is_composition_wiring(node):
-                findings.append(
-                    _finding(
-                        "ui_experience_contract_missing",
-                        str(node.get("id") or "ui"),
-                        f"UI node has no {expected_experience} backed by observed UI/UX guidance.",
-                    )
+    for node in nodes:
+        if str(node.get("surface") or "") != "ui":
+            continue
+        surface_contract = _dict_value(node.get("surface_contract"))
+        if not _dict_value(surface_contract.get("experience_contract")) and not is_composition_wiring(node):
+            findings.append(
+                _finding(
+                    "ui_experience_contract_missing",
+                    str(node.get("id") or "ui"),
+                    f"UI node has no {UI_EXPERIENCE_CONTRACT_V2} backed by observed UI/UX guidance.",
                 )
-            if ui_contract_v2(graph) and not _dict_value(surface_contract.get("runtime_surface")):
-                findings.append(
-                    _finding(
-                        "ui_runtime_surface_missing",
-                        str(node.get("id") or "ui"),
-                        f"UI node has no {RUNTIME_SURFACE_BINDING_VERSION} proving entrypoint composition and required inputs.",
-                    )
-                )
-    if str(graph.get("schema_version") or "") == GRAPH_VERSION_V2:
-        findings.extend(
-            _runtime_composition_findings(
-                graph,
-                required_surfaces=required_surfaces,
-                landscape=landscape,
             )
+        if not _dict_value(surface_contract.get("runtime_surface")):
+            findings.append(
+                _finding(
+                    "ui_runtime_surface_missing",
+                    str(node.get("id") or "ui"),
+                    f"UI node has no {RUNTIME_SURFACE_BINDING_VERSION} proving entrypoint composition and required inputs.",
+                )
+            )
+    findings.extend(
+        _runtime_composition_findings(
+            graph,
+            required_surfaces=required_surfaces,
+            landscape=landscape,
         )
+    )
     return findings
 
 
@@ -1265,7 +1188,6 @@ def _runtime_composition_findings(
         for item in _dict_items((landscape or {}).get("components", []), code="vertical_design_graph_invalid", run_id=run_id)
     }
     findings: list[dict[str, object]] = []
-    ui_v2_graph = ui_contract_v2(graph)
     ui_components = _dict_value(
         _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context")).get("components")
     )
@@ -1366,7 +1288,7 @@ def _runtime_composition_findings(
             owner_valid = owner_valid and (not owner_symbol or owner_symbol == str(owner.get("symbol") or ""))
         elif owner_ref.startswith("RLA-") and not anchors:
             owner_valid = True
-        elif ui_v2_graph and component_id == "web":
+        elif component_id == "web":
             # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context.
             owner_key = f"{attachment.get('owner_path') or ''}#{attachment.get('owner_symbol') or ''}"
             ui_component = _dict_value(ui_components.get(owner_key))
@@ -1565,11 +1487,8 @@ def _runtime_composition_findings(
                     finding["contract_diagnostics"] = operation_diagnostics
                     findings.append(finding)
 
-    ui_v2 = ui_contract_v2(graph)
-    ui_reachable_from_entry: set[str] = set()
-    if ui_v2:
-        ui_findings, ui_reachable_from_entry = _ui_runtime_surface_findings(graph, nodes)
-        findings.extend(ui_findings)
+    ui_findings, ui_reachable_from_entry = _ui_runtime_surface_findings(graph, nodes)
+    findings.extend(ui_findings)
 
     inferred = required_surfaces or _required_surfaces_from_partitions(partitions)
     for scenario_id, surfaces in sorted(inferred.items()):
@@ -1587,10 +1506,9 @@ def _runtime_composition_findings(
                 if "api" in surfaces
                 else {"entrypoint", "service", "persistence_adapter", "data_model"}
             )
-            # Under UI contract v2 a UI component only starts a path once its composition proves app reachability.
+            # A UI component only starts a path once its composition proves app reachability.
             and not (
-                ui_v2
-                and str(item.get("surface") or "") == "ui"
+                str(item.get("surface") or "") == "ui"
                 and str(item.get("id") or "") not in ui_reachable_from_entry
             )
         ]
@@ -1873,8 +1791,7 @@ def _ui_runtime_surface_findings(
                         node=node,
                     )
                 )
-        if ui_layered_layout(graph):
-            findings.extend(_screen_visual_findings(screen_id, [node for node, _ in members]))
+        findings.extend(_screen_visual_findings(screen_id, [node for node, _ in members]))
     return findings, reachable
 
 

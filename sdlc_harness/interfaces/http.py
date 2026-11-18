@@ -735,6 +735,7 @@ def _http_status_for_error(error_code: str) -> int:
         "config_busy",
         "config_locked",
         "legacy_execution_profile_retired",
+        "legacy_contract_retired",
         "legacy_developer_executor_retired",
         "project_profile_required",
         "requirement_policy_challenge_not_ready",

@@ -16,7 +16,7 @@ import pytest
 
 from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.cli import main as cli_main
-from sdlc_harness.agents.designer import GRAPH_VERSION_V2
+from sdlc_harness.agents.designer import GRAPH_VERSION
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
 from sdlc_harness.agents.developer.planner import _parse_developer_plan_payload
 from sdlc_harness.agents.validator import (
@@ -713,7 +713,7 @@ class PhaseThreeTest(unittest.TestCase):
 
         with self.assertRaises(HarnessError) as error:
             workflow._component_plan_context(
-                state={"designer_contract_version": GRAPH_VERSION_V2},
+                state={"designer_contract_version": GRAPH_VERSION},
                 run_id="run_design_v2_without_plan_marker",
                 artifact_paths={},
                 requirement_revision=1,

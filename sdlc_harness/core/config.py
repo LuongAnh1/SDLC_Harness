@@ -64,19 +64,14 @@ class Settings:
     developer_working_memory_evidence_chars: int
     requirement_contract_version: str
     design_repair_limit: int
-    design_validation_trials: int
-    design_semantic_review_mode: str
     design_llm_call_budget: int
     designer_partition_action_budget: int
     designer_scenario_repair_action_budget: int
     designer_finalization_action_budget: int
     designer_global_action_hard_cap: int
-    designer_contract_version: str
     design_step_review_enabled: bool
     design_step_review_input_enabled: bool
     design_step_review_output_enabled: bool
-    designer_ui_contract_version: str
-    uiux_skill_mode: str
     runtime_closure_mode: str
     browser_stages_mode: str
     documentation_closure_mode: str
@@ -87,7 +82,6 @@ class Settings:
     browser_max_images_per_call: int
     uiux_skill_root: Path | None
     uiux_skill_timeout_seconds: int
-    vertical_trace_mode: str
     verification_policy_version: str
     implementation_plan_repair_limit: int
     implementation_plan_step_review_enabled: bool
@@ -454,24 +448,6 @@ def load_settings(
     if llm_thinking_mode not in {"disabled", "enabled"}:
         llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    vertical_trace_mode = merged.get("SDLC_VERTICAL_TRACE_MODE", "enforce").strip().lower() or "enforce"
-    if vertical_trace_mode not in {"shadow", "enforce"}:
-        vertical_trace_mode = "enforce"
-    designer_contract_version = merged.get(
-        "SDLC_DESIGNER_CONTRACT_VERSION",
-        "vertical_design_graph_v1",
-    ).strip()
-    if designer_contract_version not in {"vertical_design_graph_v1", "vertical_design_graph_v2"}:
-        designer_contract_version = "vertical_design_graph_v1"
-    designer_ui_contract_version = merged.get(
-        "SDLC_DESIGNER_UI_CONTRACT_VERSION",
-        "ui_experience_contract_v1",
-    ).strip()
-    if designer_ui_contract_version not in {"ui_experience_contract_v1", "ui_experience_contract_v2"}:
-        designer_ui_contract_version = "ui_experience_contract_v1"
-    uiux_skill_mode = merged.get("SDLC_UIUX_SKILL_MODE", "off").strip().lower() or "off"
-    if uiux_skill_mode not in {"off", "enforce"}:
-        uiux_skill_mode = "off"
     runtime_closure_mode = merged.get("SDLC_RUNTIME_CLOSURE_MODE", "off").strip().lower() or "off"
     if runtime_closure_mode not in {"off", "enforce"}:
         runtime_closure_mode = "off"
@@ -492,11 +468,6 @@ def load_settings(
         "verification_stage_policy_v2",
     }:
         verification_policy_version = "verification_stage_policy_v1"
-    design_semantic_review_mode = (
-        merged.get("SDLC_DESIGN_SEMANTIC_REVIEW_MODE", "legacy").strip().lower() or "legacy"
-    )
-    if design_semantic_review_mode not in {"legacy", "sliced_shadow", "sliced_enforce"}:
-        design_semantic_review_mode = "legacy"
     uiux_skill_root_raw = merged.get("SDLC_UIUX_SKILL_ROOT", "").strip()
     uiux_skill_root = Path(uiux_skill_root_raw).expanduser() if uiux_skill_root_raw else None
     if uiux_skill_root is not None and not uiux_skill_root.is_absolute():
@@ -550,8 +521,6 @@ def load_settings(
         ),
         requirement_contract_version="v2",
         design_repair_limit=_int_value(merged.get("SDLC_DESIGN_REPAIR_LIMIT"), default=3, minimum=0),
-        design_validation_trials=_int_value(merged.get("SDLC_DESIGN_VALIDATION_TRIALS"), default=3, minimum=1),
-        design_semantic_review_mode=design_semantic_review_mode,
         design_llm_call_budget=_int_value(merged.get("SDLC_DESIGN_LLM_CALL_BUDGET"), default=128, minimum=1),
         designer_partition_action_budget=_int_value(
             merged.get("SDLC_DESIGNER_PARTITION_ACTION_BUDGET"),
@@ -573,7 +542,6 @@ def load_settings(
             default=128,
             minimum=1,
         ),
-        designer_contract_version=designer_contract_version,
         design_step_review_enabled=_bool_value(
             merged.get("SDLC_DESIGN_STEP_REVIEW_ENABLED")
         ),
@@ -585,8 +553,6 @@ def load_settings(
             merged.get("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED"),
             default=True,
         ),
-        designer_ui_contract_version=designer_ui_contract_version,
-        uiux_skill_mode=uiux_skill_mode,
         runtime_closure_mode=runtime_closure_mode,
         browser_stages_mode=browser_stages_mode,
         documentation_closure_mode=documentation_closure_mode,
@@ -610,7 +576,6 @@ def load_settings(
             minimum=1,
             maximum=300,
         ),
-        vertical_trace_mode=vertical_trace_mode,
         verification_policy_version=verification_policy_version,
         implementation_plan_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT"), default=4, minimum=0),
         implementation_plan_step_review_enabled=_bool_value(

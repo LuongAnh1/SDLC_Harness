@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.interfaces.cli import _settings_from_args, build_parser, command_from_args
@@ -132,8 +133,7 @@ class ApplicationServiceTests(unittest.TestCase):
             "run_id": run_id,
             "status": "waiting_design_approval",
             "latest_artifacts": {},
-            "designer_contract_version": "vertical_design_graph_v1",
-            "designer_contract_version": "vertical_design_graph_v1",
+            **CURRENT_CONTRACT_PINS,
         }
         if profiled:
             state["profile_snapshot"] = build_profile_snapshot(

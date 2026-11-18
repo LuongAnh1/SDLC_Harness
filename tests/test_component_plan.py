@@ -10,11 +10,9 @@ import pytest
 
 from sdlc_harness.agents.designer import (
     DELTA_VERSION,
-    GRAPH_VERSION_V1,
-    GRAPH_VERSION_V2,
+    GRAPH_VERSION,
     RUNTIME_BINDING_VERSION,
     apply_designer_delta,
-    delta_version_for,
     new_vertical_design_graph,
 )
 from sdlc_harness.agents.developer.component_plan import _topological_order
@@ -1236,7 +1234,7 @@ def _graph_with_main_and_branch(contract_version: str) -> tuple[dict[str, object
         return apply_designer_delta(
             graph,
             {
-                "schema_version": delta_version_for(contract_version),
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": graph["artifact_digest"],
                 "partition": {
                     "use_case_id": model.use_case["id"],
@@ -1293,21 +1291,20 @@ def _graph_with_main_and_branch(contract_version: str) -> tuple[dict[str, object
     return graph, build_vertical_trace_graph(requirement_model=model, design_graph=graph)
 
 
-def test_blanket_branch_dependency_stays_for_v1_and_is_dropped_for_v2() -> None:
+def test_branch_units_depend_only_on_their_own_main_surface() -> None:
     planning, _ = _policy()
-    for version, expect_main_dependency in ((GRAPH_VERSION_V1, True), (GRAPH_VERSION_V2, False)):
-        graph, trace = _graph_with_main_and_branch(version)
-        units = build_component_work_units(
-            design_graph=graph,
-            trace_graph=trace,
-            repo_landscape={"anchors": []},
-            planning_policy=planning,
-        )
-        main_ui = next(u for u in units if u["scenario_id"] == "SC-1")
-        branch_ui = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "web")
-        branch_api = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "api")
-        assert branch_ui["depends_on"] == [main_ui["unit_id"]], version
-        assert (main_ui["unit_id"] in branch_api["depends_on"]) is expect_main_dependency, version
+    graph, trace = _graph_with_main_and_branch(GRAPH_VERSION)
+    units = build_component_work_units(
+        design_graph=graph,
+        trace_graph=trace,
+        repo_landscape={"anchors": []},
+        planning_policy=planning,
+    )
+    main_ui = next(u for u in units if u["scenario_id"] == "SC-1")
+    branch_ui = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "web")
+    branch_api = next(u for u in units if u["scenario_id"] == "SC-3" and u["component_id"] == "api")
+    assert branch_ui["depends_on"] == [main_ui["unit_id"]]
+    assert main_ui["unit_id"] not in branch_api["depends_on"]
 
 
 def _r9_units() -> tuple[list[dict[str, object]], dict[str, str]]:

@@ -32,18 +32,6 @@ def fake_completion(prompt: str) -> str:
         return fake_requirement_source_action(prompt)
     if "Requirement Model V2 Structured Output" in prompt or "Requirement Model V2 Bounded Repair" in prompt:
         return fake_requirement_model_v2(prompt)
-    if "UML Audit / Report" in prompt and "updated Class Diagram" in prompt:
-        return fake_design_model()
-    if "both a Class Diagram and Sequence Diagrams" in prompt:
-        return fake_design_model()
-    if "very concise architecture recommendation" in prompt:
-        return fake_architecture_recommendation()
-    if "requirements-to-design traceability" in prompt and "Class diagram:" in prompt:
-        return fake_traceability_class(prompt)
-    if "scenario-based traceability" in prompt and "sequence diagram:" in prompt:
-        return fake_traceability_sequence(prompt)
-    if "Design Semantic Review v3" in prompt:
-        return fake_design_semantic_review(prompt)
     if (
         "Design Semantic Scenario Review v2" in prompt
         or "Design Semantic Runtime Review v2" in prompt
@@ -774,104 +762,6 @@ Cho phép Agency Operator xóa một cultural heritage object đã chọn trong 
 """.strip()
 
 
-def fake_architecture_recommendation() -> str:
-    """Khuyến nghị kiến trúc giả lập cho Designer.analysis."""
-
-    return (
-        "Use a layered architecture with a boundary/controller, domain service, "
-        "and repository. This separates user interaction, business rules, and "
-        "persistence concerns while keeping the use case small enough for direct "
-        "traceability."
-    )
-
-
-def fake_design_model() -> str:
-    """Design PlantUML ổn định cho Designer.act trong fake mode."""
-
-    return """## Class Diagram
-@startuml
-class DeleteCulturalHeritageBoundary <<api>> {
-  +requestDeletion(heritageId : String) : void
-  +showConfirmation() : void
-  +showResult(message : String) : void
-}
-
-class DeleteCulturalHeritageService <<api>> {
-  +validateDeletion(heritageId : String) : boolean
-  +deleteHeritage(heritageId : String) : void
-  +cancelDeletion() : void
-}
-
-class CulturalHeritageRepository <<database>> {
-  +findById(heritageId : String) : CulturalHeritage
-  +delete(heritageId : String) : void
-}
-
-class CulturalHeritage <<contracts>> {
-  - id : String
-  - name : String
-}
-
-DeleteCulturalHeritageBoundary --> DeleteCulturalHeritageService
-DeleteCulturalHeritageService --> CulturalHeritageRepository
-CulturalHeritageRepository --> CulturalHeritage
-@enduml
-
-## Sequence Diagrams
-### Sequence Diagram for Use Case:
-@startuml
-actor "Agency Operator" as AO
-participant DeleteCulturalHeritageBoundary as Boundary
-participant DeleteCulturalHeritageService as Service
-database CulturalHeritageRepository as Repository
-
-AO -> Boundary: requestDeletion(heritageId)
-Boundary -> Boundary: showConfirmation()
-AO -> Boundary: confirm deletion
-Boundary -> Service: validateDeletion(heritageId)
-Service -> Repository: findById(heritageId)
-Repository --> Service: CulturalHeritage
-Service -> Repository: delete(heritageId)
-Repository --> Service: deletion saved
-Service --> Boundary: success
-Boundary --> AO: showResult(success message)
-@enduml""".strip()
-
-
-def fake_traceability_class(prompt: str) -> str:
-    """Trace class giả lập theo requirement JSON trong prompt."""
-
-    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="Class diagram:")
-    trace = []
-    for requirement in requirements:
-        content = str(requirement.get("content", ""))
-        trace.append(
-            {
-                "requirement": requirement.get("id"),
-                "content": content,
-                "links": _fake_class_links(content),
-            }
-        )
-    return json.dumps(trace, ensure_ascii=False, indent=2)
-
-
-def fake_traceability_sequence(prompt: str) -> str:
-    """Trace sequence giả lập theo requirement JSON trong prompt."""
-
-    requirements = _extract_requirements_from_trace_prompt(prompt, next_marker="sequence diagram:")
-    trace = []
-    for requirement in requirements:
-        content = str(requirement.get("content", ""))
-        trace.append(
-            {
-                "requirement": requirement.get("id"),
-                "content": content,
-                "links": _fake_sequence_links(content),
-            }
-        )
-    return json.dumps(trace, ensure_ascii=False, indent=2)
-
-
 def fake_implementation_plan_review(prompt: str = "") -> str:
     """LLM review giả lập cho Phase 3 implementation plan."""
 
@@ -912,62 +802,6 @@ def fake_implementation_plan_review(prompt: str = "") -> str:
             "test_issues": [],
             "scope_issues": [],
             "developer_feedback": "",
-        },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-
-def fake_design_semantic_review(prompt: str = "") -> str:
-    """Semantic design review fixture for offline Phase 2 tests."""
-
-    requirement_view = _json_object_after_marker(prompt, "Canonical Requirement review packet:\n")
-    design_view = _json_object_after_marker(prompt, "Canonical Vertical Design Graph semantic view:\n")
-    claims = requirement_view.get("claims") if isinstance(requirement_view.get("claims"), list) else []
-    nodes = design_view.get("nodes") if isinstance(design_view.get("nodes"), list) else []
-    assessments = []
-    for raw_claim in claims:
-        if not isinstance(raw_claim, dict):
-            continue
-        scenario_id = str(raw_claim.get("scenario_id") or "")
-        surface = str(raw_claim.get("surface") or "")
-        requirement_ids = {
-            str(item) for item in raw_claim.get("requirement_ids", []) if str(item)
-        }
-        candidates = [
-            item
-            for item in nodes
-            if isinstance(item, dict)
-            and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
-            and (not surface or str(item.get("surface") or "") == surface)
-            and (
-                not requirement_ids
-                or requirement_ids.intersection(str(ref) for ref in item.get("requirement_refs", []))
-            )
-        ]
-        if not candidates:
-            candidates = [
-                item
-                for item in nodes
-                if isinstance(item, dict)
-                and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
-            ]
-        design_ref = str(candidates[0].get("id") or "") if candidates else ""
-        assessments.append(
-            {
-                "claim_id": str(raw_claim.get("claim_id") or ""),
-                "status": "satisfied",
-                "design_refs": [design_ref] if design_ref else [],
-                "reason": "Fake Design evidence satisfies the claim.",
-            }
-        )
-
-    return json.dumps(
-        {
-            "ok": True,
-            "summary": "The fake design is behaviorally consistent with the approved requirement.",
-            "assessments": assessments,
-            "findings": [],
         },
         ensure_ascii=False,
         indent=2,
@@ -2090,5 +1924,4 @@ def _fake_sequence_links(content: str) -> list[dict[str, str]]:
     else:
         target = "validateDeletion(heritageId)"
     return [{"target": target, "reason": "Fake trace follows Rules A-D for deterministic tests."}]
-
 

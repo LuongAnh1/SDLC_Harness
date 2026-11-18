@@ -12,7 +12,6 @@ from dataclasses import dataclass, field, replace
 import hashlib
 from pathlib import Path
 import json
-from itertools import combinations
 import re
 import time
 from typing import Any
@@ -22,7 +21,6 @@ from ...core.errors import HarnessError
 from ...llm.json_utils import parse_first_json_object
 from ...llm.step_review import LlmStepReviewRequired
 from .semantic_review import (
-    SEMANTIC_REVIEW_MODES,
     build_semantic_review_plan,
     materialize_task_context,
     review_node_view,
@@ -207,8 +205,6 @@ class DesignValidator:
     def review(
         self,
         *,
-        requirement_packet: str,
-        design_artifact: str,
         class_graph: dict[str, object],
         sequence_graph: dict[str, object],
         traceability: TraceabilityResult,
@@ -216,223 +212,26 @@ class DesignValidator:
         vertical_trace: dict[str, object] | None = None,
         vertical_design_graph: dict[str, object] | None = None,
         repair_iterations: int = 0,
-        validation_trials: int = 1,
-        semantic_review_mode: str = "legacy",
         semantic_review_plan: dict[str, object] | None = None,
         semantic_call_budget: int | None = None,
         semantic_task_cache: Path | None = None,
         semantic_task_cache_version: int = 0,
     ) -> DesignValidationResult:
-        if semantic_review_mode not in SEMANTIC_REVIEW_MODES:
-            raise HarnessError(
-                "design_semantic_review_mode_invalid",
-                f"Unsupported Design semantic review mode: {semantic_review_mode}",
-            )
-        if semantic_review_mode != "legacy":
-            plan = semantic_review_plan or self.build_review_plan(
-                canonical_requirement=canonical_requirement,
-                vertical_design_graph=vertical_design_graph,
-            )
-            sliced_calls = len(_dict_items(plan.get("tasks"))) + 2
-            if semantic_review_mode == "sliced_enforce":
-                return self._sliced_review(
-                    class_graph=class_graph,
-                    sequence_graph=sequence_graph,
-                    traceability=traceability,
-                    canonical_requirement=canonical_requirement,
-                    vertical_trace=vertical_trace,
-                    vertical_design_graph=vertical_design_graph,
-                    repair_iterations=repair_iterations,
-                    review_plan=plan,
-                    call_budget=semantic_call_budget,
-                    task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
-                )
-            legacy = self.review(
-                requirement_packet=requirement_packet,
-                design_artifact=design_artifact,
-                class_graph=class_graph,
-                sequence_graph=sequence_graph,
-                traceability=traceability,
-                canonical_requirement=canonical_requirement,
-                vertical_trace=vertical_trace,
-                vertical_design_graph=vertical_design_graph,
-                repair_iterations=repair_iterations,
-                validation_trials=validation_trials,
-                semantic_review_mode="legacy",
-            )
-            shadow: DesignValidationResult | None = None
-            if semantic_call_budget is not None and max(1, int(validation_trials)) + sliced_calls > semantic_call_budget:
-                shadow_payload: dict[str, object] = {
-                    "ok": False,
-                    "inconclusive": True,
-                    "skipped": True,
-                    "error_code": "design_semantic_review_budget_exceeded",
-                    "summary": "Sliced shadow review did not fit the configured Design LLM call budget.",
-                    "planned_calls": sliced_calls,
-                }
-            else:
-                try:
-                    shadow = self._sliced_review(
-                        class_graph=class_graph,
-                        sequence_graph=sequence_graph,
-                        traceability=traceability,
-                        canonical_requirement=canonical_requirement,
-                        vertical_trace=vertical_trace,
-                        vertical_design_graph=vertical_design_graph,
-                        repair_iterations=repair_iterations,
-                        review_plan=plan,
-                        call_budget=sliced_calls,
-                        task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
-                    )
-                    shadow_payload = shadow.to_dict()
-                except LlmStepReviewRequired:
-                    raise
-                except HarnessError as exc:
-                    shadow_payload = {
-                        "ok": False,
-                        "inconclusive": True,
-                        "error": exc.to_response(),
-                        "summary": "Sliced shadow review failed; legacy remains authoritative.",
-                    }
-            legacy_keys = {item.canonical_key for item in legacy.blocking_findings}
-            shadow_keys = {item.canonical_key for item in shadow.blocking_findings} if shadow is not None else set()
-            shadow_inconclusive = shadow is None or shadow.inconclusive
-            return replace(
-                legacy,
-                mode="design_validation_sliced_shadow_v1",
-                llm_review={
-                    "ok": legacy.ok and not shadow_inconclusive,
-                    "summary": (
-                        "Sliced shadow review did not complete; legacy findings are retained but cannot trigger "
-                        "repair or checkpoint."
-                        if shadow_inconclusive
-                        else "Legacy semantic review remains authoritative; sliced review is observational."
-                    ),
-                    "authoritative": legacy.llm_review,
-                    "sliced_shadow": shadow_payload,
-                    "comparison": {
-                        "legacy_ok": legacy.ok,
-                        "sliced_ok": shadow.ok if shadow is not None else None,
-                        "legacy_blocking_count": len(legacy.blocking_findings),
-                        "sliced_blocking_count": len(shadow.blocking_findings) if shadow is not None else None,
-                        "legacy_only_blockers": sorted(legacy_keys - shadow_keys),
-                        "sliced_only_blockers": sorted(shadow_keys - legacy_keys),
-                    },
-                },
-                inconclusive=legacy.inconclusive or shadow_inconclusive,
-                semantic_review_plan=plan,
-            )
-
-        canonical = _canonical_requirement_dict(canonical_requirement)
-        review_claims = _semantic_review_claims(canonical)
-        valid_requirement_ids = {
-            requirement_id
-            for claim in review_claims
-            for requirement_id in _string_items(claim.get("requirement_ids"))
-        }
-        valid_requirement_ids.update(
-            str(claim.get("scenario_id") or "")
-            for claim in review_claims
-            if str(claim.get("scenario_id") or "")
+        plan = semantic_review_plan or self.build_review_plan(
+            canonical_requirement=canonical_requirement,
+            vertical_design_graph=vertical_design_graph,
         )
-        valid_subject_refs = _vertical_design_subject_refs(vertical_design_graph)
-        rule_findings = _rule_findings(
+        return self._sliced_review(
             class_graph=class_graph,
             sequence_graph=sequence_graph,
             traceability=traceability,
-        )
-        rule_payload = {
-            "ok": not any(item.severity == "blocking" for item in rule_findings),
-            "findings": [item.to_dict() for item in rule_findings],
-        }
-        requested_trials = max(1, int(validation_trials))
-        trial_payloads: list[dict[str, object]] = []
-        valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]] = []
-        for index in range(requested_trials):
-            trial_id = f"trial-{index + 1}"
-            try:
-                payload = self._semantic_review(
-                    class_graph=class_graph,
-                    sequence_graph=sequence_graph,
-                    traceability=traceability,
-                    canonical_requirement=canonical_requirement,
-                    vertical_trace=vertical_trace,
-                    vertical_design_graph=vertical_design_graph,
-                    rule_review=rule_payload,
-                    review_claims=review_claims,
-                )
-                _validate_semantic_assessments(
-                    payload,
-                    claims=review_claims,
-                    valid_subject_refs=valid_subject_refs,
-                )
-                normalized = _normalize_llm_findings(
-                    payload,
-                    valid_claim_ids={str(item.get("claim_id") or "") for item in review_claims},
-                    valid_requirement_ids=valid_requirement_ids,
-                    valid_subject_refs=valid_subject_refs,
-                )
-                if requested_trials > 1:
-                    normalized = _prepare_consensus_trial(normalized, trial_id=trial_id)
-                trial_payloads.append(
-                    {
-                        "trial_id": trial_id,
-                        "ok": True,
-                        "review": payload,
-                        "canonical_keys": sorted({item.canonical_key for item in normalized}),
-                    }
-                )
-                valid_trials.append((trial_id, payload, normalized))
-            except LlmStepReviewRequired:
-                raise
-            except HarnessError as exc:
-                if requested_trials == 1:
-                    raise
-                trial_payloads.append(
-                    {
-                        "trial_id": trial_id,
-                        "ok": False,
-                        "error": exc.to_response(),
-                        "canonical_keys": [],
-                    }
-                )
-
-        if requested_trials == 1:
-            llm_payload = valid_trials[0][1]
-            llm_findings = valid_trials[0][2]
-            findings = _deduplicate_findings([*rule_findings, *llm_findings])
-            return DesignValidationResult(
-                traceability=traceability,
-                blocking_findings=[item for item in findings if item.severity == "blocking"],
-                warnings=[item for item in findings if item.severity == "warning"],
-                rule_review=rule_payload,
-                llm_review=llm_payload,
-                repair_iterations=repair_iterations,
-            )
-
-        consensus = _aggregate_semantic_trials(
-            requested_trials=requested_trials,
-            valid_trials=valid_trials,
-        )
-        semantic_findings = [*consensus["blocking_findings"], *consensus["warnings"]]
-        findings = _deduplicate_findings([*rule_findings, *semantic_findings])
-        semantic_payload = {
-            "ok": not consensus["blocking_findings"] and len(valid_trials) == requested_trials,
-            "summary": "Semantic findings aggregated by majority vote.",
-            "trials": trial_payloads,
-            **consensus["metrics"],
-        }
-        return DesignValidationResult(
-            traceability=traceability,
-            blocking_findings=[item for item in findings if item.severity == "blocking"],
-            warnings=[item for item in findings if item.severity == "warning"],
-            rule_review=rule_payload,
-            llm_review=semantic_payload,
+            canonical_requirement=canonical_requirement,
+            vertical_trace=vertical_trace,
+            vertical_design_graph=vertical_design_graph,
             repair_iterations=repair_iterations,
-            mode="design_validation_consensus_v1",
-            semantic_consensus=consensus["metrics"],
-            disputed_findings=consensus["disputed_findings"],
-            inconclusive=len(valid_trials) != requested_trials,
+            review_plan=plan,
+            call_budget=semantic_call_budget,
+            task_cache=SemanticTaskCache(semantic_task_cache, version=semantic_task_cache_version) if semantic_task_cache else None,
         )
 
     def _sliced_review(
@@ -1112,157 +911,6 @@ Exact Design evidence:
             )
         return payload
 
-    def _semantic_review(
-        self,
-        *,
-        class_graph: dict[str, object],
-        sequence_graph: dict[str, object],
-        traceability: TraceabilityResult,
-        canonical_requirement: object | None,
-        vertical_trace: dict[str, object] | None,
-        vertical_design_graph: dict[str, object] | None,
-        rule_review: dict[str, object],
-        review_claims: list[dict[str, object]],
-    ) -> dict[str, object]:
-        canonical = _canonical_requirement_dict(canonical_requirement)
-        prompt = f"""Design Semantic Review v3
-
-Review the approved Requirement against the canonical Vertical Design Graph.
-
-Source-of-truth order:
-1. Canonical Requirement review claims define required behavior.
-2. Runtime-bound Vertical Design Graph defines the Design.
-3. Requirement-to-Design mapping and deterministic review provide structural evidence.
-4. Class and sequence graphs are derived compatibility projections. They may expose a contradiction but never override items 1-3.
-
-Review every claim exactly once. Do not infer a missing behavior only because a derived projection omits detail that is present in the canonical Vertical Design Graph. A node or edge that only repeats a required outcome is not evidence of an executable mechanism or causal order.
-
-Return one JSON object only:
-{{
-  "ok": true,
-  "summary": "short summary",
-  "assessments": [
-    {{
-      "claim_id": "SC-1:MF-1",
-      "status": "satisfied|missing|contradicted|uncertain",
-      "design_refs": ["exact VDN-* or VDE-* id"],
-      "reason": "short evidence-backed decision"
-    }}
-  ],
-  "findings": [
-    {{
-      "id": "SEM-001",
-      "category": "behavior_order|terminal_state|cross_diagram_contract|runtime_boundary_feasibility|decision_input_sufficiency|runtime_topology|data_consistency|transaction_boundary|negative_constraint|unsupported_assumption|ui_state_coverage|ui_journey_coherence|ui_runtime_input_binding|interaction_feedback|accessibility|responsive_attachment|authentication_contract|authorization_contract",
-      "severity": "blocking|warning",
-      "remediation_mode": "local_patch|partition_rebuild|inconclusive",
-      "message": "specific contradiction or ambiguity",
-      "expected_change": "specific UML correction",
-      "claim_ids": ["SC-1:MF-1"],
-      "requirement_ids": ["MAIN-1"],
-      "diagram_ids": ["exact existing VDN-* or VDE-* id whose contract may need mutation"],
-      "subject_ref": "exact VDN-* or VDE-* id where the defect is observed",
-      "evidence": [{{"source": "requirement|design", "ref": "stable id", "excerpt": "short exact evidence"}}]
-    }}
-  ]
-}}
-
-Assessment contract:
-- Return exactly one assessment for every supplied claim_id and no invented claim IDs.
-- satisfied assessments require at least one exact Design node/edge ID in design_refs.
-- missing, contradicted, and uncertain assessments require a finding bound through claim_ids.
-- Finding requirement_ids and subject_ref must use exact IDs supplied below.
-- Finding diagram_ids is the non-empty mutation scope. It must contain only exact supplied VDN/VDE ids whose
-  contracts may need to change; include every allowed repair target and omit evidence-only ids.
-- Every finding must select exactly one remediation_mode from the guide below.
-- For finding evidence with source "requirement", ref must be an exact Requirement ID from requirement_ids
-  (for example "MF-1" or "AC-3"), never a composite claim_id such as "SC-1:MF-1".
-- For finding evidence with source "design" or "design_graph", ref must be an exact VDN-* or VDE-* ID supplied below.
-
-{_REMEDIATION_GUIDE}
-
-Blocking policy:
-- Block a required behavior that is missing, contradicted, or ordered so its guard cannot prevent the action.
-- Block a sequence call whose receiver contract is inconsistent with the class design.
-- Block success, cancellation, and failure paths that reach the wrong terminal state.
-- Block persistence before required human confirmation only when neither the UI contract nor the interaction path represents that confirmation before the write.
-- Do not require a preliminary backend verification round trip unless the approved requirement explicitly requires it.
-- Reusing one UI owner across main and alternative scenarios is valid when each projection keeps its own behavior contract.
-- Verify that every runtime edge is executable. A direct call may stay within one application or target an importable
-  shared package; a call into another application requires an explicit API/transport surface.
-- For every decision, guard, branch, and exception outcome, verify that the receiving node has enough information to
-  decide it through an input/boundary mapping, a response or error event, an already-selected control-flow path, or
-  local runtime state. Do not require a dedicated boolean when the control flow already identifies the condition.
-  Block when the Design names a decision but models no source from which the receiver can make it.
-- Do not prescribe one fixed UI -> API -> business-rule -> data chain. Fan-out, caller-local rules, dedicated error
-  handlers, and other topologies are valid when every required surface is reachable and the declared path is executable.
-- A business rule does not imply backend placement. When a scenario marks API as not applicable, do not invent an
-  endpoint to connect UI to a backend service; report the placement/boundary contradiction so the Designer can keep
-  local logic in the caller application or an importable shared package.
-- Validate causal order: a condition may justify behavior only after a modeled runtime surface or edge can observe it.
-  A broken transport cannot also carry a new request or response, and naming an error scenario or projection does not
-  prove when the error becomes known.
-- A promised rollback, unchanged record, atomic outcome or safe retry needs an executable transaction boundary,
-  compensation, idempotency or reconciliation path. Repeating the promised outcome in node, edge or return prose is
-  not mechanism evidence; block when Requirement or Design promises the guarantee but no such mechanism is modeled.
-- Do not demand those mechanisms when neither Requirement nor Design promises the guarantee.
-- For each Vertical Design UI node, review its experience contract: component structure, observable feedback,
-  accessibility, responsive behavior, and focus flow must agree with the approved interaction and states.
-- Block a UI experience issue only when it omits or contradicts approved behavior, makes a required state or
-  outcome unobservable, or makes the approved interaction impossible. Visual polish and aesthetic preferences
-  are warnings unless the approved requirement explicitly makes them mandatory.
-- UI/UX guidance references are design evidence, not new Requirements; never promote a recommendation into a blocker by itself.
-- Treat approved negative constraints as behavior: inspect transitions, states, feedback, outcomes, and edges for a
-  contradiction instead of relying on keyword-specific deterministic rules.
-- Review authentication_required, authentication_source, and authentication Requirement refs against the full approved
-  preconditions and flows. Keep actor authentication separate from role/permission authorization; do not decide either
-  from field labels alone. Review authorization_required against the approved Requirement as the typed Design decision.
-- Review focus and announcement behavior semantically. A live/status announcement may announce without receiving
-  keyboard focus; block focus movement only when the modeled target makes an approved interaction inaccessible or
-  targets an element that no longer exists.
-{_holistic_ui_review_instruction(vertical_design_graph)}- Never invent a requirement. Every semantic blocker must cite a stable requirement id and design evidence.
-- Give every finding an exact Vertical Design node or edge ID as subject_ref.
-- An uncertainty without evidence is a warning, not a blocker.
-
-Canonical Requirement review packet:
-{json.dumps(_canonical_requirement_review_view(canonical, review_claims), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Canonical Vertical Design Graph semantic view:
-{json.dumps(_vertical_design_review_view(vertical_design_graph), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Requirement-to-Design mapping view:
-{json.dumps(_vertical_trace_review_view(vertical_trace), ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Compatibility class projection:
-{json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Compatibility sequence projection:
-{json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-
-Deterministic review:
-{json.dumps(rule_review, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
-""".strip()
-        raw = _complete_json(
-            self.llm_client,
-            system="You are SDLC Harness Design Validator. Return strict JSON only.",
-            prompt=prompt,
-        )
-        try:
-            payload = parse_first_json_object(raw, expected_keys={"ok", "findings"})
-        except json.JSONDecodeError as exc:
-            raise HarnessError(
-                "design_semantic_review_failed",
-                "Design semantic validator did not return parseable JSON.",
-            ) from exc
-        if not isinstance(payload.get("findings"), list):
-            raise HarnessError(
-                "design_semantic_review_failed",
-                "Design semantic validator response must contain a findings array.",
-            )
-        payload["ok"] = bool(payload.get("ok"))
-        payload["summary"] = str(payload.get("summary") or "").strip()
-        return payload
-
-
 def _rule_findings(
     *,
     class_graph: dict[str, object],
@@ -1455,101 +1103,6 @@ def _record_statement(record: dict[str, object]) -> str:
         if isinstance(value, (str, int, float)) and str(value).strip():
             parts.append(str(value).strip())
     return " ".join(parts)
-
-
-def _canonical_requirement_review_view(
-    canonical: dict[str, object], claims: list[dict[str, object]]
-) -> dict[str, object]:
-    return {
-        "schema_version": "design_semantic_requirement_view_v1",
-        "use_case": canonical.get("use_case") or {},
-        "claims": claims,
-        "assumptions": canonical.get("assumptions") or [],
-        "open_questions": canonical.get("open_questions") or [],
-        "decisions": canonical.get("decisions") or [],
-    }
-
-
-def _vertical_design_review_view(value: dict[str, object] | None) -> dict[str, object]:
-    graph = _dict_value(value)
-    node_keys = (
-        "id",
-        "scenario_id",
-        "component_id",
-        "surface",
-        "kind",
-        "name",
-        "semantic_key",
-        "disposition",
-        "requirement_refs",
-        "contract",
-        "surface_contract",
-        "runtime_binding",
-    )
-    edge_keys = (
-        "id",
-        "scenario_id",
-        "order",
-        "from",
-        "to",
-        "kind",
-        "label",
-        "terminal",
-        "branch_group",
-        "requirement_refs",
-        "boundary_contract",
-    )
-    return {
-        "schema_version": "vertical_design_semantic_view_v1",
-        "graph_digest": graph.get("artifact_digest"),
-        "nodes": [
-            {key: node[key] for key in node_keys if key in node}
-            for node in _dict_items(graph.get("nodes"))
-        ],
-        "edges": [
-            {key: edge[key] for key in edge_keys if key in edge}
-            for edge in _dict_items(graph.get("edges"))
-        ],
-        "unresolved_items": graph.get("unresolved_items") or [],
-        **({"ui_repo_context": _ui_repo_context_review_view(graph)} if _ui_contract_v2(graph) else {}),
-    }
-
-
-def _ui_contract_v2(graph: dict[str, object]) -> bool:
-    binding = _dict_value(graph.get("snapshot_binding"))
-    return binding.get("designer_ui_contract_version") == "ui_experience_contract_v2"
-
-
-def _ui_repo_context_review_view(graph: dict[str, object]) -> dict[str, object]:
-    context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
-    return {
-        "entrypoint": _dict_value(context.get("entrypoint")).get("ref"),
-        "composition_chain": [
-            {"ref": hop.get("ref"), "renders": hop.get("renders"), "passes_props": hop.get("passes_props")}
-            for hop in _dict_items(context.get("composition_chain"))
-        ],
-        "data_clients": [item.get("ref") for item in _dict_items(context.get("data_clients"))],
-        "auth": context.get("auth"),
-        "styles": context.get("styles"),
-        "verification": context.get("verification"),
-    }
-
-
-def _holistic_ui_review_instruction(vertical_design_graph: dict[str, object] | None) -> str:
-    if not _ui_contract_v2(_dict_value(vertical_design_graph)):
-        return ""
-    return (
-        "- UI contract v2: review each screen as one journey. Nodes sharing a screen_id must tell one consistent story "
-        "across scenarios (ui_journey_coherence). runtime_states must make loading, empty, error and success observable "
-        "when the approved behavior can reach them; not_applicable needs a reason that matches the Requirement. "
-        "focus_policies must give one deterministic target per event. Using ui_repo_context, check that every "
-        "required_input classification is plausible: external_use_case must match an approved precondition, and a "
-        "list-driven or authenticated screen marked bound must have a real provider (ui_runtime_input_binding). "
-        "Block only when a required behavior or state becomes unreachable or unobservable; visual taste stays a warning. "
-        "For role=composition_wiring, runtime_surface.forwarded_inputs is the authoritative per-screen propagation "
-        "contract; required_inputs lists only inputs consumed by the AS-IS hop. Do not demand screen inputs be "
-        "duplicated in both fields.\n"
-    )
 
 
 def _vertical_trace_review_view(value: dict[str, object] | None) -> dict[str, object]:
@@ -1920,136 +1473,6 @@ def _normalize_adjudication_repair_steps(
     return normalized
 
 
-def _prepare_consensus_trial(findings: list[DesignFinding], *, trial_id: str) -> list[DesignFinding]:
-    """Normalize one semantic vote and ensure one vote per canonical subject."""
-
-    prepared: list[DesignFinding] = []
-    for finding in findings:
-        severity = finding.severity
-        if severity == "blocking" and (not finding.requirement_ids or not finding.subject_ref):
-            severity = "warning"
-        subject_ref = finding.subject_ref
-        if not _normalize_reference(subject_ref):
-            # An unlocated observation cannot vote with another trial. Preserve it
-            # as disputed evidence under a trial-local identity instead.
-            subject_ref = f"unlocated:{trial_id}:{finding.finding_id}"
-        prepared.append(
-            DesignFinding(
-                finding_id=finding.finding_id,
-                category=finding.category,
-                severity=severity,
-                message=finding.message,
-                expected_change=finding.expected_change,
-                claim_ids=finding.claim_ids,
-                requirement_ids=finding.requirement_ids,
-                diagram_ids=finding.diagram_ids,
-                evidence=finding.evidence,
-                subject_ref=subject_ref,
-                support_count=1,
-                trial_ids=[trial_id],
-                origin="semantic",
-                remediation_mode=finding.remediation_mode,
-                remediation_reason=finding.remediation_reason,
-            )
-        )
-    unique: dict[str, DesignFinding] = {}
-    for finding in prepared:
-        current = unique.get(finding.canonical_key)
-        if current is None or _evidence_score(finding) > _evidence_score(current):
-            unique[finding.canonical_key] = finding
-    return list(unique.values())
-
-
-def _aggregate_semantic_trials(
-    *,
-    requested_trials: int,
-    valid_trials: list[tuple[str, dict[str, object], list[DesignFinding]]],
-) -> dict[str, object]:
-    """Majority-vote semantic findings while retaining minority observations."""
-
-    quorum = requested_trials // 2 + 1
-    groups: dict[str, list[tuple[str, DesignFinding]]] = {}
-    trial_key_sets: list[tuple[str, set[str]]] = []
-    for trial_id, _payload, findings in valid_trials:
-        key_set = {item.canonical_key for item in findings}
-        trial_key_sets.append((trial_id, key_set))
-        for finding in findings:
-            groups.setdefault(finding.canonical_key, []).append((trial_id, finding))
-
-    blockers: list[DesignFinding] = []
-    warnings: list[DesignFinding] = []
-    disputed: list[DesignFinding] = []
-    for ordinal, (key, votes) in enumerate(sorted(groups.items()), start=1):
-        blocker_votes = [(trial_id, item) for trial_id, item in votes if item.severity == "blocking"]
-        representative = max((item for _trial, item in votes), key=_evidence_score)
-        if len(blocker_votes) >= quorum:
-            severity = "blocking"
-            target = blockers
-        elif len(votes) >= quorum:
-            severity = "warning"
-            target = warnings
-        else:
-            severity = representative.severity
-            target = disputed
-        remediation_modes = {item.remediation_mode for _trial_id, item in votes}
-        remediation_mode = (
-            next(iter(remediation_modes)) if len(remediation_modes) == 1 else "inconclusive"
-        )
-        target.append(
-            DesignFinding(
-                finding_id=f"CONS-{ordinal:03d}",
-                category=representative.category,
-                severity=severity,
-                message=representative.message,
-                expected_change=representative.expected_change,
-                claim_ids=_merged_string_values(item.claim_ids for _trial, item in votes),
-                requirement_ids=_merged_string_values(item.requirement_ids for _trial, item in votes),
-                diagram_ids=_merged_string_values(item.diagram_ids for _trial, item in votes),
-                evidence=_merged_evidence(item.evidence for _trial, item in votes),
-                subject_ref=representative.subject_ref,
-                support_count=len({trial_id for trial_id, _item in votes}),
-                trial_ids=sorted({trial_id for trial_id, _item in votes}),
-                origin="semantic",
-                remediation_mode=remediation_mode,
-                remediation_reason=representative.remediation_reason,
-                repair_steps=representative.repair_steps,
-            )
-        )
-
-    pairwise = []
-    for (left_id, left), (right_id, right) in combinations(trial_key_sets, 2):
-        union = left | right
-        score = 1.0 if not union else len(left & right) / len(union)
-        pairwise.append(
-            {
-                "left_trial": left_id,
-                "right_trial": right_id,
-                "jaccard": round(score, 4),
-            }
-        )
-    consistency = (
-        round(sum(float(item["jaccard"]) for item in pairwise) / len(pairwise), 4)
-        if pairwise
-        else (1.0 if len(valid_trials) == requested_trials else 0.0)
-    )
-    metrics = {
-        "requested_trials": requested_trials,
-        "valid_trials": len(valid_trials),
-        "quorum": quorum,
-        "consensus_blocking_count": len(blockers),
-        "consensus_warning_count": len(warnings),
-        "disputed_count": len(disputed),
-        "pairwise_jaccard": pairwise,
-        "consistency_score": consistency,
-    }
-    return {
-        "blocking_findings": blockers,
-        "warnings": warnings,
-        "disputed_findings": disputed,
-        "metrics": metrics,
-    }
-
-
 def _subject_ref_from_evidence(evidence: list[dict[str, str]], diagram_ids: list[str]) -> str:
     for item in evidence:
         if item.get("source") in {"design", "design_graph"} and item.get("ref"):
@@ -2102,30 +1525,8 @@ def _merged_string_values(values: Any) -> list[str]:
     return [merged[key] for key in sorted(merged)]
 
 
-def _merged_evidence(values: Any) -> list[dict[str, str]]:
-    merged: dict[tuple[str, str, str], dict[str, str]] = {}
-    for group in values:
-        for item in group:
-            normalized = {
-                "source": str(item.get("source") or "").strip(),
-                "ref": str(item.get("ref") or "").strip(),
-                "excerpt": str(item.get("excerpt") or "").strip(),
-            }
-            key = (
-                normalized["source"].casefold(),
-                normalized["ref"].casefold(),
-                normalized["excerpt"].casefold(),
-            )
-            merged.setdefault(key, normalized)
-    return [merged[key] for key in sorted(merged)]
-
-
 def _normalize_reference(value: str) -> str:
     return re.sub(r"[^a-z0-9:_-]", "", value.strip().casefold())
-
-
-def _evidence_score(finding: DesignFinding) -> tuple[int, int, int]:
-    return (len(finding.evidence), len(finding.message), len(finding.expected_change))
 
 
 def _class_symbols(class_graph: dict[str, object]) -> dict[str, set[str]]:

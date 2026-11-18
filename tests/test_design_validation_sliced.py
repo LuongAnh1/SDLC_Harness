@@ -251,22 +251,17 @@ def _adjudication(
 def _review(
     client: StaticLlmClient,
     *,
-    mode: str = "sliced_enforce",
     budget: int = 8,
     inputs: tuple[dict[str, object], dict[str, object]] | None = None,
     plan: dict[str, object] | None = None,
 ):
     canonical, graph = inputs or _inputs()
     return DesignValidator(client).review(
-        requirement_packet="unused",
-        design_artifact="unused",
         class_graph={"nodes": []},
         sequence_graph={"sequenceDiagrams": []},
         traceability=_traceability(),
         canonical_requirement=canonical,
         vertical_design_graph=graph,
-        validation_trials=1,
-        semantic_review_mode=mode,
         semantic_review_plan=plan,
         semantic_call_budget=budget,
     )
@@ -958,83 +953,6 @@ def test_sliced_budget_is_checked_before_any_provider_call() -> None:
     assert result.llm_review["error"]["error_code"] == "design_semantic_review_budget_exceeded"
 
 
-def test_shadow_keeps_legacy_authoritative() -> None:
-    legacy_clean = {
-        "ok": True,
-        "summary": "legacy passed",
-        "assessments": _task_success("SC-1:MF-1", "SC-1:surface:ui")["assessments"],
-        "findings": [],
-    }
-    sliced_blocker = {
-        "ok": False,
-        "summary": "specialist found a blocker",
-        "assessments": [
-            {
-                "claim_id": "SC-1:MF-1",
-                "status": "contradicted",
-                "design_refs": ["VDN-ui-1"],
-                "reason": "Contradiction.",
-            },
-            {
-                "claim_id": "SC-1:surface:ui",
-                "status": "satisfied",
-                "design_refs": ["VDN-ui-1"],
-                "reason": "Surface exists.",
-            },
-        ],
-        "findings": [
-            {
-                "id": "SEM-001",
-                "category": "behavior_order",
-                "severity": "blocking",
-                "remediation_mode": "local_patch",
-                "message": "The behavior is contradicted.",
-                "expected_change": "Correct the behavior.",
-                "claim_ids": ["SC-1:MF-1"],
-                "requirement_ids": ["MF-1"],
-                "diagram_ids": ["VDN-ui-1"],
-                "subject_ref": "VDN-ui-1",
-                "evidence": [{"source": "design", "ref": "VDN-ui-1", "excerpt": "contradiction"}],
-            }
-        ],
-    }
-    client = StaticLlmClient(
-        [
-            legacy_clean,
-            sliced_blocker,
-            _coherence(),
-            _adjudication("scenario-sc-1:SEM-001"),
-        ]
-    )
-
-    result = _review(client, mode="sliced_shadow")
-
-    assert result.ok
-    assert result.blocking_findings == []
-    assert result.llm_review["sliced_shadow"]["blocking_count"] == 1
-    assert result.llm_review["comparison"]["legacy_ok"] is True
-    assert result.llm_review["comparison"]["sliced_ok"] is False
-    assert len(result.llm_review["comparison"]["sliced_only_blockers"]) == 1
-
-
-def test_incomplete_shadow_is_inconclusive_and_cannot_trigger_repair() -> None:
-    legacy_clean = {
-        "ok": True,
-        "summary": "legacy passed",
-        "assessments": _task_success("SC-1:MF-1", "SC-1:surface:ui")["assessments"],
-        "findings": [],
-    }
-
-    result = _review(StaticLlmClient([legacy_clean, "not-json", "not-json"]), mode="sliced_shadow")
-
-    assert result.inconclusive
-    assert not result.ok
-    assert result.blocking_findings == []
-    assert result.llm_review["ok"] is False
-    assert result.llm_review["sliced_shadow"]["inconclusive"] is True
-    assert "cannot trigger repair or checkpoint" in result.llm_review["summary"]
-
-
 def test_coherence_conflict_triggers_one_targeted_adjudication() -> None:
     specialist = _task_success("SC-1:MF-1", "SC-1:surface:ui")
     specialist["findings"] = [_warning_finding("SEM-TARGET"), _warning_finding("SEM-OTHER")]
@@ -1146,14 +1064,11 @@ def test_fake_mode_supports_sliced_specialist_and_coherence_prompts() -> None:
     canonical, graph = _inputs()
 
     result = DesignValidator(RoutedFakeLlmClient()).review(
-        requirement_packet="unused",
-        design_artifact="unused",
         class_graph={"nodes": []},
         sequence_graph={"sequenceDiagrams": []},
         traceability=_traceability(),
         canonical_requirement=canonical,
         vertical_design_graph=graph,
-        semantic_review_mode="sliced_enforce",
         semantic_call_budget=8,
     )
 
@@ -1182,14 +1097,11 @@ def test_sliced_step_review_replays_approved_tasks_without_duplicate_provider_ca
             label="Design Validator",
         )
         return DesignValidator(client).review(
-            requirement_packet="unused",
-            design_artifact="unused",
             class_graph={"nodes": []},
             sequence_graph={"sequenceDiagrams": []},
             traceability=_traceability(),
             canonical_requirement=canonical,
             vertical_design_graph=graph,
-            semantic_review_mode="sliced_enforce",
             semantic_call_budget=8,
         )
 
@@ -1644,15 +1556,11 @@ def _cached_review(
     client: StaticLlmClient, graph: dict[str, object], canonical: dict[str, object], cache: Path, version: int = 1
 ):
     return DesignValidator(client).review(
-        requirement_packet="unused",
-        design_artifact="unused",
         class_graph={"nodes": []},
         sequence_graph={"sequenceDiagrams": []},
         traceability=_traceability(),
         canonical_requirement=canonical,
         vertical_design_graph=graph,
-        validation_trials=1,
-        semantic_review_mode="sliced_enforce",
         semantic_call_budget=20,
         semantic_task_cache=cache,
         semantic_task_cache_version=version,

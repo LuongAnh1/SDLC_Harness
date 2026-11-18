@@ -21,17 +21,12 @@ from .graph import (
     DELTA_VERSION,
     EXTERNAL_DEPENDENCY_REF_PREFIXES,
     GRAPH_VERSION,
-    GRAPH_VERSION_V2,
     RUNTIME_BINDING_VERSION,
     SURFACE_CONTRACT_VERSION,
-    apply_designer_delta,
     completion_findings,
-    delta_version_for,
     graph_digest,
     is_composition_wiring,
     new_vertical_design_graph,
-    ui_contract_v2,
-    ui_layered_layout,
     validate_vertical_design_graph,
 )
 from .projections import _merged_runtime_states
@@ -40,9 +35,6 @@ from .ui_context import chain_path_to, required_props
 from .uiux import (
     RUNTIME_SURFACE_BINDING_VERSION,
     UI_EXPERIENCE_CONTRACT_V2,
-    UI_EXPERIENCE_CONTRACT_VERSIONS,
-    UIUX_CONTRACT_VERSION,
-    UIUX_EXPERIENCE_CONTRACT_VERSION,
     UiUxGuidanceProvider,
 )
 
@@ -122,11 +114,13 @@ class DesignerToolLoopExecutor:
         store: RuntimeStore,
         llm_client: Any,
         step_review: dict[str, object] | None = None,
+        uiux_provider: UiUxGuidanceProvider | None = None,
     ):
         self.settings = settings
         self.store = store
         self.llm_client = llm_client
         self.step_review = dict(step_review or {})
+        self.uiux_provider = uiux_provider
 
     def execute(
         self,
@@ -140,9 +134,6 @@ class DesignerToolLoopExecutor:
         repair_feedback: list[dict[str, object]] | None = None,
         session_ordinal: int = 1,
         on_progress: Any | None = None,
-        contract_version: str = GRAPH_VERSION,
-        uiux_mode: str = "off",
-        uiux_contract_version: str = "",
     ) -> DesignerExecutionResult:
         session_name = f"design_v{max(1, session_ordinal)}"
         session_dir = self.store.run_dir(run_id) / "designer_execution" / session_name
@@ -156,25 +147,12 @@ class DesignerToolLoopExecutor:
         session: dict[str, object] | None = None
         registry: DesignerToolRegistry | None = None
         try:
-            uiux_provider: UiUxGuidanceProvider | None = None
-            uiux_profile: dict[str, object] = {}
-            if uiux_mode == "enforce":
-                if uiux_contract_version != UIUX_CONTRACT_VERSION:
-                    raise DesignerExecutionError(
-                        "designer_uiux_contract_missing",
-                        "Run has no supported pinned UI/UX guidance contract.",
-                        run_id=run_id,
-                        retriable=False,
-                        session_path=session_path,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                    )
-                uiux_provider = UiUxGuidanceProvider(
-                    skill_root=self.settings.uiux_skill_root,
-                    timeout_seconds=self.settings.uiux_skill_timeout_seconds,
-                    fake_mode=self.settings.llm_mode == "fake",
-                )
-                uiux_profile = uiux_provider.preflight()
+            uiux_provider = self.uiux_provider or UiUxGuidanceProvider(
+                skill_root=self.settings.uiux_skill_root,
+                timeout_seconds=self.settings.uiux_skill_timeout_seconds,
+                fake_mode=self.settings.llm_mode == "fake",
+            )
+            uiux_profile = uiux_provider.preflight()
             action_budget_policy = _designer_action_budget_policy(
                 settings=self.settings,
                 requirement_model=requirement_model,
@@ -188,8 +166,6 @@ class DesignerToolLoopExecutor:
                 target_path=target_path,
                 repair_feedback=repair_feedback or [],
                 session_ordinal=session_ordinal,
-                contract_version=contract_version,
-                uiux_mode=uiux_mode,
                 uiux_profile=uiux_profile,
                 action_budget_policy=action_budget_policy,
             )
@@ -235,7 +211,6 @@ class DesignerToolLoopExecutor:
                 graph = existing_graph or new_vertical_design_graph(
                     run_id=run_id,
                     snapshot_binding=snapshot_binding,
-                    contract_version=contract_version,
                 )
                 graph = validate_vertical_design_graph(
                     graph,
@@ -285,7 +260,6 @@ class DesignerToolLoopExecutor:
                 graph=graph,
                 fake_mode=self.settings.llm_mode == "fake",
                 uiux_provider=uiux_provider,
-                uiux_mode=uiux_mode,
                 expected_codegraph_digest=str(snapshot_binding.get("repo_codegraph_snapshot_digest") or ""),
             )
             registry.register_evidence_refs(
@@ -527,7 +501,6 @@ class DesignerToolLoopExecutor:
                         surface=surface,
                         scenario_id=scenario_id,
                         name=str((anchor or {}).get("symbol") or f"{scenario_id} {surface}"),
-                        uiux_mode=registry.uiux_mode,
                         guidance_refs=guidance_refs,
                     )
                     fake_binding = _fake_runtime_binding(
@@ -538,7 +511,7 @@ class DesignerToolLoopExecutor:
                         source_refs=source_refs,
                         fallback_symbol=f"{scenario_id} {surface}",
                     )
-                    if surface == "ui" and ui_contract_v2(registry.graph):
+                    if surface == "ui":
                         fake_contract["runtime_surface"], fake_binding = _fake_runtime_surface(
                             graph=registry.graph,
                             landscape=landscape,
@@ -546,7 +519,6 @@ class DesignerToolLoopExecutor:
                             scenario_id=scenario_id,
                         )
                         if isinstance(fake_contract.get("experience_contract"), dict):
-                            fake_contract["experience_contract"]["schema_version"] = UI_EXPERIENCE_CONTRACT_V2
                             fake_contract["experience_contract"].update(
                                 _experience_v2_fields(
                                     registry.graph,
@@ -574,7 +546,7 @@ class DesignerToolLoopExecutor:
                         }
                     )
                 delta = {
-                    "schema_version": delta_version_for(str(registry.graph.get("schema_version") or "")),
+                    "schema_version": DELTA_VERSION,
                     "base_graph_digest": registry.graph["artifact_digest"],
                     "partition": partition,
                     "operations": operations,
@@ -622,7 +594,7 @@ class DesignerToolLoopExecutor:
                     tool_id="design.propose_delta",
                     arguments={
                         "delta": {
-                            "schema_version": delta_version_for(str(registry.graph.get("schema_version") or "")),
+                            "schema_version": DELTA_VERSION,
                             "base_graph_digest": registry.graph["artifact_digest"],
                             "partition": {
                                 "use_case_id": _requirement_use_case_id(requirement_model),
@@ -668,8 +640,6 @@ class DesignerToolLoopExecutor:
         journal_file: Path,
         on_progress: Any | None,
     ) -> list[str]:
-        if registry.uiux_mode != "enforce":
-            return []
         partition_key = f"{scenario_id}|{component_id}"
         session["active_partition_key"] = partition_key
         session["active_guidance_key"] = partition_key
@@ -721,14 +691,10 @@ class DesignerToolLoopExecutor:
             for item in _dicts(registry.graph.get("nodes"))
             if not isinstance(item.get("surface_contract"), dict)
             or (
-                registry.uiux_mode == "enforce"
-                and str(item.get("surface") or "") == "ui"
+                str(item.get("surface") or "") == "ui"
                 and not isinstance(_dict(item.get("surface_contract")).get("experience_contract"), dict)
             )
-            or (
-                str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
-                and not isinstance(item.get("runtime_binding"), dict)
-            )
+            or not isinstance(item.get("runtime_binding"), dict)
         ]
         grouped: dict[tuple[str, str, str], list[dict[str, object]]] = {}
         for node in nodes:
@@ -799,25 +765,19 @@ class DesignerToolLoopExecutor:
                         surface=str(node.get("surface") or "interaction"),
                         scenario_id=str(node.get("scenario_id") or "SC-1"),
                         name=str(node.get("name") or node.get("semantic_key") or "Design element"),
-                        uiux_mode=registry.uiux_mode,
                         guidance_refs=guidance_refs,
                     )
                 elif (
-                    registry.uiux_mode == "enforce"
-                    and str(node.get("surface") or "") == "ui"
+                    str(node.get("surface") or "") == "ui"
                     and not isinstance(_dict(node.get("surface_contract")).get("experience_contract"), dict)
                 ):
                     changes["surface_contract"] = _fake_surface_contract(
                         surface="ui",
                         scenario_id=str(node.get("scenario_id") or "SC-1"),
                         name=str(node.get("name") or node.get("semantic_key") or "Design element"),
-                        uiux_mode=registry.uiux_mode,
                         guidance_refs=guidance_refs,
                     )
-                if (
-                    str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
-                    and not isinstance(node.get("runtime_binding"), dict)
-                ):
+                if not isinstance(node.get("runtime_binding"), dict):
                     node_refs = set(_strings(node.get("evidence_refs")))
                     anchor = next(
                         (item for item in component_anchors if str(item.get("anchor_id") or "") in node_refs),
@@ -839,7 +799,7 @@ class DesignerToolLoopExecutor:
                     }
                 )
             delta = {
-                "schema_version": delta_version_for(str(registry.graph.get("schema_version") or "")),
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": registry.graph["artifact_digest"],
                 "partition": partition,
                 "operations": operations,
@@ -916,7 +876,7 @@ class DesignerToolLoopExecutor:
                 tool_id="design.propose_delta",
                 arguments={
                     "delta": {
-                        "schema_version": delta_version_for(str(registry.graph.get("schema_version") or "")),
+                        "schema_version": DELTA_VERSION,
                         "base_graph_digest": registry.graph["artifact_digest"],
                         "partition": {
                             "use_case_id": str(partition_state.get("use_case_id") or "UC1"),
@@ -1054,11 +1014,8 @@ class DesignerToolLoopExecutor:
                     try:
                         action, normalization = _parse_designer_tool_action(
                             str(exchange.get("raw_completion") or ""),
-                            require_runtime_binding=(
-                                str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
-                            ),
-                            repair_closers=ui_contract_v2(registry.graph)
-                            and str(exchange.get("finish_reason") or "") == "stop",
+                            require_runtime_binding=True,
+                            repair_closers=str(exchange.get("finish_reason") or "") == "stop",
                         )
                     except json.JSONDecodeError:
                         pass
@@ -1158,7 +1115,6 @@ class DesignerToolLoopExecutor:
                         session, current_target=_review_target_key(repair_task, active_partition)
                     ),
                     last_rejected_delta=_dict(session.get("last_review_rejected_delta")),
-                    uiux_mode=registry.uiux_mode,
                     active_guidance=_guidance_observations(session, guidance_key),
                     source_inspected=bool(_source_observation_refs(session, active_component_id)),
                     actions_remaining=scope_actions_remaining,
@@ -1242,12 +1198,9 @@ class DesignerToolLoopExecutor:
                 try:
                     action, normalization = _parse_designer_tool_action(
                         completion.content,
-                        require_runtime_binding=(
-                            str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
-                        ),
+                        require_runtime_binding=True,
                         # A length-truncated output must never be completed into a partial delta.
-                        repair_closers=ui_contract_v2(registry.graph)
-                        and str(getattr(completion, "finish_reason", "") or "") == "stop",
+                        repair_closers=str(getattr(completion, "finish_reason", "") or "") == "stop",
                     )
                 except json.JSONDecodeError:
                     if bool(self.step_review.get("enabled")):
@@ -1327,7 +1280,6 @@ class DesignerToolLoopExecutor:
             cursor = _dict(session.get("cursor"))
             tool_id = str(action.get("action") or "")
             arguments = action.get("arguments")
-            graph_is_v2 = str(registry.graph.get("schema_version") or "") == GRAPH_VERSION_V2
             source_refs = _source_observation_refs(session, active_component_id)
             exact_deterministic_repair = _is_exact_deterministic_repair_delta(
                 arguments=arguments,
@@ -1335,7 +1287,7 @@ class DesignerToolLoopExecutor:
             )
             if tool_id == "uiux.search_guidance":
                 args = _dict(arguments)
-                if registry.uiux_mode != "enforce" or not ui_guidance_required:
+                if not ui_guidance_required:
                     self._invalid_action(
                         session,
                         session_file,
@@ -1416,8 +1368,7 @@ class DesignerToolLoopExecutor:
                     _write_json_atomic(session_file, session)
                     continue
             if (
-                graph_is_v2
-                and tool_id == "design.propose_delta"
+                tool_id == "design.propose_delta"
                 and active_component_id
                 and not source_refs
                 and not exact_deterministic_repair
@@ -1450,7 +1401,6 @@ class DesignerToolLoopExecutor:
                 continue
             if (
                 tool_id == "design.propose_delta"
-                and registry.uiux_mode == "enforce"
                 and ui_guidance_required
                 and not _has_required_ui_guidance(session, guidance_key)
                 and not _feature_guidance_satisfied(registry.graph)
@@ -1475,7 +1425,6 @@ class DesignerToolLoopExecutor:
                 continue
             if (
                 tool_id == "design.propose_delta"
-                and registry.uiux_mode == "enforce"
                 and ui_guidance_required
                 and not _delta_contains_ui_experience(arguments)
             ):
@@ -1494,7 +1443,7 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
-            if graph_is_v2 and tool_id == "design.propose_delta" and active_component_id and source_refs:
+            if tool_id == "design.propose_delta" and active_component_id and source_refs:
                 arguments = _attach_source_observations(arguments, component_id=active_component_id, refs=source_refs)
             if tool_id == "complete" and (active_partition is not None or repair_task is not None):
                 if active_partition is not None:
@@ -1837,7 +1786,7 @@ class DesignerToolLoopExecutor:
         delta_path = ""
         if tool_id == "design.propose_delta":
             record = {
-                "schema_version": delta_version_for(str(registry.graph.get("schema_version") or "")),
+                "schema_version": DELTA_VERSION,
                 "call_id": effective_call_id,
                 "input": arguments,
                 "result": output,
@@ -1951,8 +1900,6 @@ class DesignerToolLoopExecutor:
         target_path: Path,
         repair_feedback: list[dict[str, object]],
         session_ordinal: int,
-        contract_version: str,
-        uiux_mode: str,
         uiux_profile: dict[str, object],
         action_budget_policy: dict[str, object],
     ) -> dict[str, object]:
@@ -1963,8 +1910,8 @@ class DesignerToolLoopExecutor:
             "snapshot_binding": snapshot_binding,
             "repair_feedback": repair_feedback,
             "session_ordinal": session_ordinal,
-            "designer_contract_version": contract_version,
-            "designer_uiux_mode": uiux_mode,
+            "designer_contract_version": GRAPH_VERSION,
+            "designer_uiux_mode": "enforce",
             "designer_uiux_profile": uiux_profile,
         }
         return {
@@ -1980,7 +1927,7 @@ class DesignerToolLoopExecutor:
                 "repo.search",
                 "repo.read",
                 "codegraph.query",
-                *(["uiux.search_guidance"] if uiux_mode == "enforce" else []),
+                "uiux.search_guidance",
                 "design.inspect_partition",
                 "design.propose_delta",
                 "complete",
@@ -2376,7 +2323,7 @@ def _guidance_key(
 ) -> str:
     """UI contract v2 shares one guidance lane per feature so every partition designs the same screen."""
 
-    if partition_key and ui_contract_v2(graph):
+    if partition_key:
         return f"ui-feature|{_requirement_use_case_id(requirement_model)}"
     return partition_key
 
@@ -2384,7 +2331,7 @@ def _guidance_key(
 def _feature_guidance_satisfied(graph: dict[str, object]) -> bool:
     """Under UI contract v2 one feature-level guidance pass is enough; later sessions (repairs) reuse its refs."""
 
-    return ui_contract_v2(graph) and any(
+    return any(
         _strings(_dict(_dict(node.get("surface_contract")).get("experience_contract")).get("guidance_refs"))
         for node in _dicts(graph.get("nodes"))
         if str(node.get("surface") or "") == "ui"
@@ -2397,8 +2344,6 @@ def _ui_guidance_required(
     repair_task: dict[str, object] | None,
     graph: dict[str, object],
 ) -> bool:
-    if str(_dict(graph.get("snapshot_binding")).get("designer_uiux_mode") or "off") != "enforce":
-        return False
     if active_partition is not None:
         return "ui" in _strings(active_partition.get("missing_surfaces")) or any(
             str(item.get("surface") or "") == "ui"
@@ -2581,11 +2526,11 @@ def _delta_contains_ui_experience(arguments: object) -> bool:
             if str(node.get("surface") or "") != "ui":
                 continue
             experience = _dict(_dict(node.get("surface_contract")).get("experience_contract"))
-            if experience.get("schema_version") in UI_EXPERIENCE_CONTRACT_VERSIONS:
+            if experience.get("schema_version") == UI_EXPERIENCE_CONTRACT_V2:
                 return True
         if str(operation.get("op") or "") == "update_node":
             experience = _dict(_dict(_dict(operation.get("changes")).get("surface_contract")).get("experience_contract"))
-            if experience.get("schema_version") in UI_EXPERIENCE_CONTRACT_VERSIONS:
+            if experience.get("schema_version") == UI_EXPERIENCE_CONTRACT_V2:
                 return True
     return False
 
@@ -2825,7 +2770,6 @@ def _designer_prompt(
     observation_limit: int = OBSERVATION_ACTION_LIMIT,
     last_review_feedback: str = "",
     last_rejected_delta: dict[str, object] | None = None,
-    uiux_mode: str = "off",
     active_guidance: list[dict[str, object]] | None = None,
     source_inspected: bool = False,
     actions_remaining: int | None = None,
@@ -2839,7 +2783,7 @@ def _designer_prompt(
             last_review_feedback=last_review_feedback,
         )
     graph_contract = str(graph.get("schema_version") or GRAPH_VERSION)
-    delta_contract = delta_version_for(graph_contract)
+    delta_contract = DELTA_VERSION
     repair_partition = _dict((repair_task or {}).get("partition"))
     repair_scenario_id = str(repair_partition.get("scenario_id") or "")
     prompt_graph = (
@@ -2864,7 +2808,7 @@ def _designer_prompt(
     active_requirement_slice = _active_requirement_slice(
         requirement_model=requirement_model,
         active_partition=active_partition,
-        include_outcome_context=ui_contract_v2(graph),
+        include_outcome_context=True,
     )
     prompt_review_feedback = _prompt_review_feedback(
         last_review_feedback,
@@ -2890,7 +2834,7 @@ def _designer_prompt(
         },
         "recent_observations": observations,
         "active_uiux_guidance": active_guidance or [],
-        "uiux_mode": uiux_mode,
+        "uiux_mode": "enforce",
         "repair_feedback": (
             [] if active_partition is not None or repair_task is not None else repair_feedback
         ),
@@ -2928,19 +2872,18 @@ def _designer_prompt(
     guidance_reused = _feature_guidance_satisfied(graph)
     uiux_status = (
         _uiux_guidance_status(active_guidance or [], source_inspected=source_inspected)
-        if uiux_mode == "enforce" and ui_guidance_required and not guidance_reused
+        if ui_guidance_required and not guidance_reused
         else {}
     )
     payload["uiux_guidance_status"] = uiux_status
-    ui_v2_work = ui_guidance_required and ui_contract_v2(graph)
-    if ui_v2_work:
+    if ui_guidance_required:
         payload["ui_runtime_context"] = _ui_runtime_prompt_context(
             graph,
             requirement_model=requirement_model,
             allowed_refs=_strings(_dict(active_requirement_slice).get("allowed_requirement_refs")),
         )
         payload["feature_ux_decisions"] = _feature_ux_decisions(graph)
-    experience_version = UI_EXPERIENCE_CONTRACT_V2 if ui_contract_v2(graph) else UIUX_EXPERIENCE_CONTRACT_VERSION
+    experience_version = UI_EXPERIENCE_CONTRACT_V2
     runtime_surface_instruction = (
         f"UI contract v2: every UI node's surface_contract.runtime_surface ({RUNTIME_SURFACE_BINDING_VERSION}) must "
         "prove how a user reaches the screen. composition_path starts at ui_runtime_context.entrypoint and ends at the "
@@ -2966,7 +2909,7 @@ def _designer_prompt(
         "wiring hop to the screen, referencing that hop's temp_ref. An "
         "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
         "Requirement does not state. "
-        if ui_v2_work
+        if ui_guidance_required
         else ""
     )
     uiux_status_instruction = (
@@ -3006,15 +2949,11 @@ def _designer_prompt(
             "outcome) to this node. Also fill screen{screen_id,purpose,entry_condition}; runtime_states for loading, "
             "ready, empty, error and success, each as {presentation,trigger} or {not_applicable:true,reason}; "
             "visual_contract with hierarchy, "
-            + (
-                "layout as {region,layer,content} items where layer is 'page' for regions in the page flow and "
-                "'overlay' for a dialog, modal or popover drawn above the page and for every region rendered inside "
-                "it (for example a notice or retry action shown within the dialog); reuse the same region names, "
-                "layers and style_target_policy that feature_ux_decisions already set for this screen_id; "
-                if ui_layered_layout(graph)
-                else "layout as '<region>: <content>' items, "
-            )
-            + "typography, color_and_tokens, "
+            + "layout as {region,layer,content} items where layer is 'page' for regions in the page flow and "
+            "'overlay' for a dialog, modal or popover drawn above the page and for every region rendered inside "
+            "it (for example a notice or retry action shown within the dialog); reuse the same region names, "
+            "layers and style_target_policy that feature_ux_decisions already set for this screen_id; "
+            "typography, color_and_tokens, "
             "focus_appearance, responsive_rules, style_target_policy (reuse_existing only when ui_runtime_context "
             "styles has a stylesheet, otherwise new_stylesheet) and style_target_reason; focus_policies as structured "
             "decisions {event,source_removed,removed_element,primary_target,fallback_target,selection_strategy,"
@@ -3022,13 +2961,9 @@ def _designer_prompt(
             "element. primary_target/fallback_target own keyboard focus; announcement.target owns the announced "
             "region. A status/live-region announcement never receives keyboard focus: set announcement.moves_focus=false "
             "and restore focus to a stable surviving primary_target; and repo_evidence_refs from ui_runtime_context evidence. "
-            if ui_contract_v2(graph)
-            else "When success removes the initiating control or selected row, focus_flow "
-            "must not restore focus to that removed element; move focus to the status region or the next surviving control. "
-            "If the active scenario itself owns a cancel/close path and the trigger still exists, return focus to that trigger. "
         )
         + "Never add cancel/close behavior from another scenario; keep each alternative or exception in its own projection. "
-        if uiux_mode == "enforce" and ui_guidance_required
+        if ui_guidance_required
         else ""
     )
     construction_instruction = (
@@ -3104,7 +3039,7 @@ def _designer_prompt(
     uiux_tool_instruction = (
         "uiux.search_guidance(query,mode=domain,domain=ux|icons|react) or "
         "uiux.search_guidance(query,mode=stack,stack=react); "
-        if uiux_mode == "enforce" and ui_guidance_required and not guidance_reused
+        if ui_guidance_required and not guidance_reused
         else ""
     )
     delta_scaffold_instruction = (
@@ -3493,7 +3428,6 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
 
     context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
     has_stylesheet = bool(_strings(_dict(context.get("styles")).get("stylesheet_files")))
-    layered = ui_layered_layout(graph)
     if not fake_label:
         return {
             "screen": {
@@ -3507,11 +3441,7 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
             },
             "visual_contract": {
                 "hierarchy": ["<primary to secondary content order>"],
-                "layout": (
-                    [{"region": "<region name>", "layer": "<page|overlay>", "content": "<what the region shows>"}]
-                    if layered
-                    else ["<region>: <content>"]
-                ),
+                "layout": [{"region": "<region name>", "layer": "<page|overlay>", "content": "<what the region shows>"}],
                 "typography": ["<heading/body/label decisions>"],
                 "color_and_tokens": ["<semantic color/token decisions>"],
                 "focus_appearance": ["<visible focus indicator>"],
@@ -3553,8 +3483,6 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
                     {"region": "main", "layer": "page", "content": "primary content"},
                     {"region": "footer", "layer": "page", "content": "status region"},
                 ]
-                if layered
-                else ["header: screen title", "main: primary content", "footer: status region"]
             ),
             "typography": ["One h1 heading; body text for content."],
             "color_and_tokens": ["Semantic error and success colors."],
@@ -3568,11 +3496,7 @@ def _experience_v2_fields(graph: dict[str, object], *, screen_id: str, fake_labe
     }
 
 
-def _surface_contract_scaffold(
-    surface: str,
-    *,
-    uiux_mode: str = "off",
-) -> dict[str, object]:
+def _surface_contract_scaffold(surface: str) -> dict[str, object]:
     common: dict[str, object] = {
         "schema_version": SURFACE_CONTRACT_VERSION,
         "surface": surface,
@@ -3588,16 +3512,15 @@ def _surface_contract_scaffold(
             "validations": ["<validation rule, or remove this item when none>"],
             "outcomes": ["<observable outcome>"],
         }
-        if uiux_mode == "enforce":
-            contract["experience_contract"] = {
-                "schema_version": UIUX_EXPERIENCE_CONTRACT_VERSION,
-                "component_structure": ["<component and responsibility>"],
-                "feedback": [{"trigger": "<interaction or result>", "response": "<visible feedback>"}],
-                "accessibility": ["<keyboard and semantic accessibility behavior>"],
-                "responsive": ["<small and large viewport behavior>"],
-                "focus_flow": ["<focus entry, movement, and restoration>"],
-                "guidance_refs": ["<successful uiux:sha256 evidence refs>"],
-            }
+        contract["experience_contract"] = {
+            "schema_version": UI_EXPERIENCE_CONTRACT_V2,
+            "component_structure": ["<component and responsibility>"],
+            "feedback": [{"trigger": "<interaction or result>", "response": "<visible feedback>"}],
+            "accessibility": ["<keyboard and semantic accessibility behavior>"],
+            "responsive": ["<small and large viewport behavior>"],
+            "focus_flow": ["<focus entry, movement, and restoration>"],
+            "guidance_refs": ["<successful uiux:sha256 evidence refs>"],
+        }
         return contract
     if surface == "api":
         return {
@@ -3692,7 +3615,6 @@ def _fake_surface_contract(
     surface: str,
     scenario_id: str,
     name: str,
-    uiux_mode: str = "off",
     guidance_refs: list[str] | None = None,
 ) -> dict[str, object]:
     common: dict[str, object] = {"schema_version": SURFACE_CONTRACT_VERSION, "surface": surface}
@@ -3706,19 +3628,18 @@ def _fake_surface_contract(
             "validations": [],
             "outcomes": [f"{scenario_id} outcome"],
         }
-        if uiux_mode == "enforce":
-            contract["experience_contract"] = {
-                "schema_version": UIUX_EXPERIENCE_CONTRACT_VERSION,
-                "component_structure": [f"{label} owns the approved interaction and observable states."],
-                "feedback": [
-                    {"trigger": "successful action", "response": "Show a concise success message."},
-                    {"trigger": "failed action", "response": "Show an actionable error without losing user context."},
-                ],
-                "accessibility": ["Support keyboard operation and semantic labels."],
-                "responsive": ["Preserve the interaction without horizontal overflow on small viewports."],
-                "focus_flow": ["Move focus into confirmation UI and restore it to the trigger on close."],
-                "guidance_refs": list(guidance_refs or []),
-            }
+        contract["experience_contract"] = {
+            "schema_version": UI_EXPERIENCE_CONTRACT_V2,
+            "component_structure": [f"{label} owns the approved interaction and observable states."],
+            "feedback": [
+                {"trigger": "successful action", "response": "Show a concise success message."},
+                {"trigger": "failed action", "response": "Show an actionable error without losing user context."},
+            ],
+            "accessibility": ["Support keyboard operation and semantic labels."],
+            "responsive": ["Preserve the interaction without horizontal overflow on small viewports."],
+            "focus_flow": ["Move focus into confirmation UI and restore it to the trigger on close."],
+            "guidance_refs": list(guidance_refs or []),
+        }
         return contract
     if surface == "api":
         return {
@@ -4121,10 +4042,7 @@ def _active_partition(
                     "evidence_refs": [],
                     "evidence_reason": "<required for add; empty otherwise>",
                     "contract": "<one concise non-empty string>",
-                    "surface_contract": _surface_contract_scaffold(
-                        str(item["surface"]),
-                        uiux_mode=str(_dict(graph.get("snapshot_binding")).get("designer_uiux_mode") or "off"),
-                    ),
+                    "surface_contract": _surface_contract_scaffold(str(item["surface"])),
                     "runtime_binding": _runtime_binding_scaffold(
                         surface=str(item["surface"]),
                         component=component,
@@ -4136,30 +4054,28 @@ def _active_partition(
             for item in surface_work
         ]
         wiring_templates: list[dict[str, object]] = []
-        if ui_contract_v2(graph):
-            for scaffold, item in zip(node_scaffolds, surface_work):
-                if item["surface"] != "ui":
-                    continue
-                wiring_templates.extend(
-                    _wiring_operation_templates(
-                        graph,
-                        landscape=landscape,
-                        scenario_id=scenario_id,
-                        component_id=component_id,
-                        owner_anchors=_dicts(item.get("composition_owner_candidates")),
-                        requirement_refs=_strings(item.get("requirement_refs")),
-                    )
-                )
-                contract = scaffold["node"]["surface_contract"]
-                contract["runtime_surface"] = _runtime_surface_scaffold(
+        for scaffold, item in zip(node_scaffolds, surface_work):
+            if item["surface"] != "ui":
+                continue
+            wiring_templates.extend(
+                _wiring_operation_templates(
                     graph,
+                    landscape=landscape,
+                    scenario_id=scenario_id,
+                    component_id=component_id,
                     owner_anchors=_dicts(item.get("composition_owner_candidates")),
+                    requirement_refs=_strings(item.get("requirement_refs")),
                 )
-                if isinstance(contract.get("experience_contract"), dict):
-                    contract["experience_contract"]["schema_version"] = UI_EXPERIENCE_CONTRACT_V2
-                    contract["experience_contract"].update(
-                        _experience_v2_fields(graph, screen_id=str(contract["runtime_surface"]["screen_id"]))
-                    )
+            )
+            contract = scaffold["node"]["surface_contract"]
+            contract["runtime_surface"] = _runtime_surface_scaffold(
+                graph,
+                owner_anchors=_dicts(item.get("composition_owner_candidates")),
+            )
+            if isinstance(contract.get("experience_contract"), dict):
+                contract["experience_contract"].update(
+                    _experience_v2_fields(graph, screen_id=str(contract["runtime_surface"]["screen_id"]))
+                )
         branch_parent = _branch_parent_scaffold(
             scenario=scenario,
             requirement_model=requirement_model,
@@ -4181,7 +4097,7 @@ def _active_partition(
             "branch_parent_requirement": branch_parent,
             "base_graph_digest": graph.get("artifact_digest"),
             "delta_scaffold": {
-                "schema_version": delta_version_for(str(graph.get("schema_version") or "")),
+                "schema_version": DELTA_VERSION,
                 "base_graph_digest": graph.get("artifact_digest"),
                 "partition": partition,
                 "operations": operations,
@@ -4283,10 +4199,7 @@ def _branch_parent_scaffold(
 ) -> dict[str, object] | None:
     """Seed the mandatory V2 branch-to-primary-main dependency in the first branch delta."""
 
-    if (
-        str(graph.get("schema_version") or "") != GRAPH_VERSION_V2
-        or str(scenario.get("kind") or "") not in {"alternative", "exception"}
-    ):
+    if str(scenario.get("kind") or "") not in {"alternative", "exception"}:
         return None
     branch_id = str(scenario.get("id") or "")
     nodes = _dicts(graph.get("nodes"))
@@ -4498,11 +4411,7 @@ def _active_repair_task(
     allowed_edge_endpoint_ids = [
         str(item.get("id") or "") for item in scenario_nodes if str(item.get("id") or "")
     ]
-    if (
-        str(graph.get("schema_version") or "") == GRAPH_VERSION_V2
-        and finding_codes
-        and finding_codes <= {"branch_parent_missing", "branch_parent_invalid"}
-    ):
+    if finding_codes and finding_codes <= {"branch_parent_missing", "branch_parent_invalid"}:
         parent = _main_flow_entry_node(requirement_model=requirement_model or {}, graph=graph)
         parent_id = str((parent or {}).get("id") or "")
         if parent_id and parent_id not in allowed_edge_endpoint_ids:
@@ -4753,7 +4662,7 @@ def _repair_delta_scaffold(
                 }
             )
     return {
-        "schema_version": delta_version_for(str(graph.get("schema_version") or "")),
+        "schema_version": DELTA_VERSION,
         "base_graph_digest": graph.get("artifact_digest"),
         "partition": partition,
         "operations": operations,
@@ -5073,15 +4982,6 @@ def _ambiguous_branch_parent_excess_edge_ids(findings: list[dict[str, object]]) 
         for edge_id in _strings(finding.get("diagram_ids"))[1:]
         if edge_id.startswith("VDE-")
     }
-
-
-def _repair_targets(repair_feedback: list[dict[str, object]]) -> list[str]:
-    targets: list[str] = []
-    for finding in repair_feedback:
-        for target in _finding_repair_targets(finding):
-            if target not in targets:
-                targets.append(target)
-    return targets or ["global"]
 
 
 def _finding_repair_targets(finding: dict[str, object]) -> list[str]:

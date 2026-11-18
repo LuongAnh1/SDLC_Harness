@@ -34,7 +34,6 @@ class DesignerToolRegistry:
         graph: dict[str, object],
         fake_mode: bool,
         uiux_provider: UiUxGuidanceProvider | None = None,
-        uiux_mode: str = "off",
         expected_codegraph_digest: str = "",
     ):
         self.run_id = run_id
@@ -43,7 +42,6 @@ class DesignerToolRegistry:
         self.graph = graph
         self.codegraph = CodeGraphContextProvider(fake_mode=fake_mode)
         self.uiux_provider = uiux_provider
-        self.uiux_mode = uiux_mode
         roots = {
             str(root)
             for component in _dicts(landscape.get("components"))
@@ -303,7 +301,7 @@ class DesignerToolRegistry:
         }, [ref]
 
     def _uiux_search(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
-        if self.uiux_mode != "enforce" or self.uiux_provider is None:
+        if self.uiux_provider is None:
             raise HarnessError(
                 "designer_tool_input_invalid",
                 "uiux.search_guidance is unavailable for this run.",

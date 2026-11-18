@@ -8,25 +8,19 @@ from pathlib import Path
 
 from ..agents.designer import (
     DESIGN_BUNDLE_STATE_KEY,
+    DESIGN_BUNDLE_VERSION,
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION_V1,
-    GRAPH_VERSION_V2,
-    SUPPORTED_GRAPH_VERSIONS,
-    UI_CONTRACT_STATE_KEY,
+    GRAPH_VERSION,
     UI_EXPERIENCE_CONTRACT_V2,
     UI_LAYOUT_CONTRACT_KEY,
     canonicalize_composition_wiring,
-    ui_layout_pin,
     UIUX_CONTRACT_STATE_KEY,
-    UIUX_CONTRACT_VERSION,
     UIUX_MODE_STATE_KEY,
-    resolve_ui_contract_pin,
     DesignerExecutionError,
     DesignerExecutionResult,
     DesignerToolLoopExecutor,
     build_deterministic_trace,
     design_bundle_findings,
-    design_bundle_version_for,
     projection_manifest,
     render_design_projections,
     render_ui_feature_experience,
@@ -40,7 +34,6 @@ from ..agents.validator import (
     TraceabilityResult,
     VERTICAL_TRACE_GRAPH_VERSION,
     VERTICAL_TRACE_MODE_STATE_KEY,
-    VERTICAL_TRACE_MODES,
     VERTICAL_TRACE_STATE_KEY,
     bounded_trace_view,
     build_requirement_graph_v2,
@@ -53,7 +46,12 @@ from ..core.config import Settings
 from ..core.errors import HarnessError
 from ..llm.client import BudgetedLlmClient, LlmClient
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
-from ..profiles import build_planning_path_policy, read_profile_snapshot
+from ..profiles import (
+    CURRENT_CONTRACT_PINS,
+    build_planning_path_policy,
+    read_profile_snapshot,
+    retired_contract_pins,
+)
 from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_design_checkpoint
 from ..workspaces import RunWorkspaceManager
@@ -235,7 +233,7 @@ class PhaseTwoWorkflow:
             and phase == "implementation_planning"
         )
         recoverable_vertical_design_block = (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") in SUPPORTED_GRAPH_VERSIONS
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION
             and status == "design_blocked"
             and phase.startswith("design_")
         )
@@ -469,7 +467,7 @@ class PhaseTwoWorkflow:
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
         if (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") not in SUPPORTED_GRAPH_VERSIONS
+            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") != GRAPH_VERSION
             or str(state.get("status") or "") not in {"design_paused", *_INTERRUPTED_DESIGNER_STATUSES}
         ):
             raise HarnessError(
@@ -507,27 +505,6 @@ class PhaseTwoWorkflow:
                 run_id=run_id,
             )
         approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)
-        contract_version = str(self.settings.designer_contract_version)
-        if contract_version not in SUPPORTED_GRAPH_VERSIONS:
-            raise HarnessError(
-                "vertical_design_graph_invalid",
-                f"Unsupported configured Designer contract: {contract_version}",
-                run_id=run_id,
-            )
-        if self.settings.vertical_trace_mode not in VERTICAL_TRACE_MODES:
-            raise HarnessError(
-                "vertical_trace_mode_invalid",
-                f"Unsupported configured vertical trace mode: {self.settings.vertical_trace_mode}",
-                run_id=run_id,
-            )
-        ui_contract_version = resolve_ui_contract_pin(
-            ui_contract_version=str(
-                getattr(self.settings, "designer_ui_contract_version", "ui_experience_contract_v1")
-            ),
-            graph_v2=contract_version == GRAPH_VERSION_V2,
-            uiux_mode=self.settings.uiux_skill_mode,
-            run_id=run_id,
-        )
 
         previous_execution = _dict_value(state.get("designer_execution"))
         versions = _design_versions(state)
@@ -552,15 +529,8 @@ class PhaseTwoWorkflow:
                 "designer_repair_feedback": [],
                 "traceability_diagnostics": [],
                 "summary_for_user": "Đang chạy lại Design từ Requirement đã duyệt bằng cấu hình hiện tại.",
-                DESIGNER_CONTRACT_STATE_KEY: contract_version,
-                UIUX_MODE_STATE_KEY: self.settings.uiux_skill_mode,
-                UIUX_CONTRACT_STATE_KEY: (
-                    UIUX_CONTRACT_VERSION if self.settings.uiux_skill_mode == "enforce" else ""
-                ),
-                UI_CONTRACT_STATE_KEY: ui_contract_version,
-                UI_LAYOUT_CONTRACT_KEY: ui_layout_pin(ui_contract_version),
+                **CURRENT_CONTRACT_PINS,
                 VERTICAL_TRACE_STATE_KEY: VERTICAL_TRACE_GRAPH_VERSION,
-                VERTICAL_TRACE_MODE_STATE_KEY: self.settings.vertical_trace_mode,
             }
         )
         state.pop(DESIGN_BUNDLE_STATE_KEY, None)
@@ -573,7 +543,6 @@ class PhaseTwoWorkflow:
             existing_graph=None,
             session_ordinal=session_ordinal,
         )
-
 
 
     def _run_vertical_design(
@@ -592,28 +561,15 @@ class PhaseTwoWorkflow:
         """Run the repo-aware Designer loop and publish compatibility projections."""
 
         run_id = str(state.get("run_id") or "")
-        design_contract_version = str(state.get(DESIGNER_CONTRACT_STATE_KEY) or GRAPH_VERSION_V1)
-        if design_contract_version not in SUPPORTED_GRAPH_VERSIONS:
+        retired_pins = retired_contract_pins(state)
+        if retired_pins:
             raise HarnessError(
-                "vertical_design_graph_invalid",
-                f"Unsupported pinned Designer contract: {design_contract_version}",
+                "legacy_contract_retired",
+                f"Run is pinned to retired contracts: {', '.join(retired_pins)}.",
                 run_id=run_id,
             )
-        uiux_mode = str(state.get(UIUX_MODE_STATE_KEY) or "off")
-        uiux_contract_version = str(state.get(UIUX_CONTRACT_STATE_KEY) or "")
-        if uiux_mode == "enforce" and uiux_contract_version != UIUX_CONTRACT_VERSION:
-            raise HarnessError(
-                "designer_uiux_contract_missing",
-                "Run requires UI/UX guidance but has no supported pinned UI/UX contract.",
-                run_id=run_id,
-            )
-        resolve_ui_contract_pin(
-            ui_contract_version=str(state.get(UI_CONTRACT_STATE_KEY) or "ui_experience_contract_v1"),
-            graph_v2=design_contract_version == GRAPH_VERSION_V2,
-            uiux_mode=uiux_mode,
-            run_id=run_id,
-        )
-        design_bundle_version = design_bundle_version_for(design_contract_version)
+        design_contract_version = GRAPH_VERSION
+        design_bundle_version = DESIGN_BUNDLE_VERSION
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         landscape = self.repo_discovery.run(
             run_id=run_id,
@@ -759,9 +715,6 @@ class PhaseTwoWorkflow:
                     repair_feedback=repair_feedback,
                     session_ordinal=ordinal,
                     on_progress=on_progress,
-                    contract_version=design_contract_version,
-                    uiux_mode=uiux_mode,
-                    uiux_contract_version=uiux_contract_version,
                     )
                 except DesignerExecutionError as exc:
                     state = self.store.read_state(run_id)
@@ -866,28 +819,14 @@ class PhaseTwoWorkflow:
                 missing_links=missing_links,
                 mode="traceability_v2",
             )
-            trace_mode = str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "")
-            trace_enabled = (
-                str(state.get(VERTICAL_TRACE_STATE_KEY) or "") == VERTICAL_TRACE_GRAPH_VERSION
-                and trace_mode in VERTICAL_TRACE_MODES
+            trace_graph = build_vertical_trace_graph(
+                requirement_model=approved.canonical_model,
+                design_graph=graph,
             )
-            trace_graph = (
-                build_vertical_trace_graph(
-                    requirement_model=approved.canonical_model,
-                    design_graph=graph,
-                )
-                if trace_enabled
-                else None
-            )
-            trace_validation = (
-                validate_vertical_trace_coverage(trace_graph, mode=trace_mode)
-                if trace_graph is not None
-                else None
-            )
+            trace_validation = validate_vertical_trace_coverage(trace_graph, mode="enforce")
             bundle_findings = design_bundle_findings(graph, landscape=landscape)
             bundle_blockers = _bundle_design_findings(bundle_findings)
-            trace_blockers = list(trace_validation.blocking_findings) if trace_validation is not None else []
-            enforced_trace_blockers = trace_blockers if trace_mode == "enforce" else []
+            enforced_trace_blockers = list(trace_validation.blocking_findings)
             deterministic_blockers = [*bundle_blockers, *enforced_trace_blockers]
             semantic_plan: dict[str, object] = {}
             semantic_plan_path = ""
@@ -920,31 +859,26 @@ class PhaseTwoWorkflow:
                             label="Design Validator",
                         )
                     )
-                if self.settings.design_semantic_review_mode != "legacy":
-                    semantic_plan = validator.build_review_plan(
-                        canonical_requirement=approved.canonical_model,
-                        vertical_design_graph=graph,
-                    )
-                    semantic_plan_file = self.store.write_json_artifact(
-                        run_id,
-                        f"design_semantic_review_plan_v{version}.json",
-                        semantic_plan,
-                    )
-                    semantic_plan_path = self.store.relative(semantic_plan_file)
+                semantic_plan = validator.build_review_plan(
+                    canonical_requirement=approved.canonical_model,
+                    vertical_design_graph=graph,
+                )
+                semantic_plan_file = self.store.write_json_artifact(
+                    run_id,
+                    f"design_semantic_review_plan_v{version}.json",
+                    semantic_plan,
+                )
+                semantic_plan_path = self.store.relative(semantic_plan_file)
                 try:
                     validation = validator.review(
-                        requirement_packet=approved.requirement_packet,
-                        design_artifact=str(projections["design_markdown"]),
                         class_graph=projections["class_graph"],
                         sequence_graph=projections["sequence_graph"],
                         traceability=traceability,
                         canonical_requirement=approved.canonical_model,
-                        vertical_trace=bounded_trace_view(trace_graph) if trace_graph is not None else None,
+                        vertical_trace=bounded_trace_view(trace_graph),
                         vertical_design_graph=graph,
                         repair_iterations=repair_iteration,
-                        validation_trials=self.settings.design_validation_trials,
-                        semantic_review_mode=self.settings.design_semantic_review_mode,
-                        semantic_review_plan=semantic_plan or None,
+                        semantic_review_plan=semantic_plan,
                         semantic_call_budget=self.llm.remaining,
                         semantic_task_cache=(
                             self.store.run_dir(run_id) / "design_validator_execution" / "semantic_task_cache_v1.json"
@@ -979,11 +913,7 @@ class PhaseTwoWorkflow:
                     self.store.write_state(state)
                     return self._status_response(state, created_new_run=False)
             validation_payload = validation.to_dict()
-            validation_payload["version"] = (
-                "design_validation_report_v5_sliced"
-                if self.settings.design_semantic_review_mode != "legacy"
-                else "design_validation_report_v4_vertical_graph"
-            )
+            validation_payload["version"] = "design_validation_report_v5_sliced"
             validation_payload["semantic_mode"] = validation.mode
             validation_payload["mode"] = design_contract_version
             graph_path = self.store.write_json_artifact(run_id, f"vertical_design_graph_v{version}.json", graph)
@@ -1043,30 +973,29 @@ class PhaseTwoWorkflow:
                         "ui_feature_experience_markdown": self.store.relative(ui_feature_markdown),
                     }
                 )
-            if trace_graph is not None and trace_validation is not None:
-                trace_graph_path = self.store.write_json_artifact(
-                    run_id,
-                    f"vertical_trace_graph_v{version}.json",
-                    trace_graph,
-                )
-                trace_validation_payload = trace_validation.to_dict()
-                trace_validation_payload.update(
-                    {
-                        "design_version": f"v{version}",
-                        "requirement_revision": approved.canonical_model.revision,
-                    }
-                )
-                trace_validation_path = self.store.write_json_artifact(
-                    run_id,
-                    f"vertical_trace_validation_v{version}.json",
-                    trace_validation_payload,
-                )
-                vertical_paths.update(
-                    {
-                        "vertical_trace_graph": self.store.relative(trace_graph_path),
-                        "vertical_trace_validation": self.store.relative(trace_validation_path),
-                    }
-                )
+            trace_graph_path = self.store.write_json_artifact(
+                run_id,
+                f"vertical_trace_graph_v{version}.json",
+                trace_graph,
+            )
+            trace_validation_payload = trace_validation.to_dict()
+            trace_validation_payload.update(
+                {
+                    "design_version": f"v{version}",
+                    "requirement_revision": approved.canonical_model.revision,
+                }
+            )
+            trace_validation_path = self.store.write_json_artifact(
+                run_id,
+                f"vertical_trace_validation_v{version}.json",
+                trace_validation_payload,
+            )
+            vertical_paths.update(
+                {
+                    "vertical_trace_graph": self.store.relative(trace_graph_path),
+                    "vertical_trace_validation": self.store.relative(trace_validation_path),
+                }
+            )
             candidate_artifacts = {**design_paths, **vertical_paths}
             manifest = projection_manifest(graph=graph, artifacts=candidate_artifacts)
             manifest_path = self.store.write_json_artifact(
@@ -1081,11 +1010,7 @@ class PhaseTwoWorkflow:
                 "blocking_findings": [item.to_dict() for item in validation.blocking_findings],
                 "warnings": [item.to_dict() for item in validation.warnings],
                 "disputed_findings": [item.to_dict() for item in validation.disputed_findings],
-                "vertical_trace_findings": (
-                    [item.to_dict() for item in trace_validation.blocking_findings]
-                    if trace_validation is not None
-                    else []
-                ),
+                "vertical_trace_findings": [item.to_dict() for item in trace_validation.blocking_findings],
             }
             ledger_path = self.store.write_json_artifact(
                 run_id,
@@ -1124,12 +1049,11 @@ class PhaseTwoWorkflow:
                 "data_count": len(_dict_items(projections["surface_view"].get("data"))),
                 **_runtime_design_summary(graph=graph, findings=bundle_findings),
             }
-            if trace_validation is not None:
-                quality_reports["vertical_trace"] = {
-                    **trace_validation.to_dict(),
-                    "graph": design_paths["vertical_trace_graph"],
-                    "report": design_paths["vertical_trace_validation"],
-                }
+            quality_reports["vertical_trace"] = {
+                **trace_validation.to_dict(),
+                "graph": design_paths["vertical_trace_graph"],
+                "report": design_paths["vertical_trace_validation"],
+            }
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -1152,7 +1076,7 @@ class PhaseTwoWorkflow:
             self.store.write_state(state)
             if validation.ok:
                 break
-            if validation.inconclusive and self.settings.design_semantic_review_mode != "legacy":
+            if validation.inconclusive:
                 semantic_inconclusive = True
                 break
             current_digest = str(graph.get("artifact_digest") or "")
@@ -1363,9 +1287,6 @@ class PhaseTwoWorkflow:
         return validate_vertical_design_graph(graph, expected_run_id=run_id)
 
 
-
-
-
     def _require_requirement_checkpoint(
         self,
         state: dict[str, object],
@@ -1422,11 +1343,6 @@ def _vertical_trace_repair_feedback(
 ) -> list[dict[str, object]]:
     """Preflight the persisted graph so enforce revalidation starts with exact L4 blockers."""
 
-    if (
-        str(state.get(VERTICAL_TRACE_STATE_KEY) or "") != VERTICAL_TRACE_GRAPH_VERSION
-        or str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") != "enforce"
-    ):
-        return []
     canonical_requirement = getattr(approved, "canonical_model", None)
     if canonical_requirement is None:
         return []
@@ -1540,38 +1456,33 @@ def _vertical_snapshot_binding(
     ).hexdigest()
     profile = _dict_value(state.get("profile_snapshot"))
     artifacts = _string_dict(state.get("latest_artifacts"))
-    # Only v2 runs carry these keys so historical graphs keep matching their frozen binding.
-    ui_contract: dict[str, object] = {}
-    if str(state.get(UI_CONTRACT_STATE_KEY) or "") == UI_EXPERIENCE_CONTRACT_V2:
-        ui_contract = {
-            "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
-            "ui_repo_context": build_ui_repo_context(
-                target_path=Path(str(getattr(workspace, "worktree_path", ""))),
-                landscape=landscape,
-                project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
-                verification_policy_version=str(profile.get("verification_policy_version") or ""),
-            ),
-            "requirement_reference_ids": sorted(
-                str(item.get("id"))
-                for value in [
-                    *requirement_payload.values(),
-                    *_dict_value(requirement_payload.get("flows")).values(),
-                ]
-                if isinstance(value, list)
-                for item in value
-                if isinstance(item, dict) and str(item.get("id") or "")
-            ),
-            "approved_decision_ids": sorted(
-                str(item.get("id"))
-                for item in requirement_payload.get("decisions", [])
-                if isinstance(item, dict)
-                and str(item.get("id") or "").startswith("D-")
-                and str(item.get("status") or "").strip().lower() == "accepted"
-            ),
-        }
-        # Pinned per run, so runs started before the layered layout contract keep their frozen binding.
-        if state.get(UI_LAYOUT_CONTRACT_KEY):
-            ui_contract[UI_LAYOUT_CONTRACT_KEY] = state[UI_LAYOUT_CONTRACT_KEY]
+    ui_contract: dict[str, object] = {
+        "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
+        "ui_repo_context": build_ui_repo_context(
+            target_path=Path(str(getattr(workspace, "worktree_path", ""))),
+            landscape=landscape,
+            project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
+            verification_policy_version=str(profile.get("verification_policy_version") or ""),
+        ),
+        "requirement_reference_ids": sorted(
+            str(item.get("id"))
+            for value in [
+                *requirement_payload.values(),
+                *_dict_value(requirement_payload.get("flows")).values(),
+            ]
+            if isinstance(value, list)
+            for item in value
+            if isinstance(item, dict) and str(item.get("id") or "")
+        ),
+        "approved_decision_ids": sorted(
+            str(item.get("id"))
+            for item in requirement_payload.get("decisions", [])
+            if isinstance(item, dict)
+            and str(item.get("id") or "").startswith("D-")
+            and str(item.get("status") or "").strip().lower() == "accepted"
+        ),
+    }
+    ui_contract[UI_LAYOUT_CONTRACT_KEY] = state[UI_LAYOUT_CONTRACT_KEY]
     return {
         **ui_contract,
         "requirement_contract_version": approved.contract_version,
@@ -1582,8 +1493,8 @@ def _vertical_snapshot_binding(
         "repo_landscape_digest": landscape.get("artifact_digest"),
         "repo_codegraph_snapshot_artifact_ref": artifacts.get("repo_codegraph_snapshot"),
         "repo_codegraph_snapshot_digest": state.get("repo_codegraph_snapshot_digest"),
-        "designer_uiux_mode": state.get(UIUX_MODE_STATE_KEY, "off"),
-        "designer_uiux_contract_version": state.get(UIUX_CONTRACT_STATE_KEY, ""),
+        "designer_uiux_mode": state.get(UIUX_MODE_STATE_KEY),
+        "designer_uiux_contract_version": state.get(UIUX_CONTRACT_STATE_KEY),
         "project_profile_id": profile.get("project_profile_id"),
         "project_profile_schema": profile.get("project_profile_schema"),
         "language_profile_id": profile.get("language_profile_id"),
@@ -1592,22 +1503,6 @@ def _vertical_snapshot_binding(
         "workspace_ref": "run_workspace_v1",
         "base_sha": getattr(workspace, "base_sha", ""),
     }
-
-
-
-
-def _designer_requirement_packet(
-    *,
-    state: dict[str, object],
-    requirement_packet: str,
-    run_id: str,
-) -> str:
-    """Attach run-frozen component ownership rules only to Designer input."""
-
-    directive = _profile_component_routing_directive(state=state, run_id=run_id)
-    if not directive:
-        return requirement_packet
-    return f"{requirement_packet.rstrip()}\n\n{directive}"
 
 
 def _profile_component_routing_directive(*, state: dict[str, object], run_id: str) -> str:
@@ -1633,71 +1528,6 @@ def _profile_component_routing_directive(*, state: dict[str, object], run_id: st
             "Do not invent a component and do not leave ownership implicit.",
         ]
     )
-
-
-def _profile_component_routing_findings(
-    *,
-    state: dict[str, object],
-    class_graph: dict[str, object],
-    run_id: str,
-) -> list[DesignFinding]:
-    """Fail Phase 2 before approval when Phase 3 cannot route a design symbol."""
-
-    snapshot = read_profile_snapshot(state, run_id=run_id)
-    if snapshot is None:
-        return []
-    project, language = snapshot.resolve_profiles(run_id=run_id)
-    policy = build_planning_path_policy(project=project, language=language)
-    failures: list[tuple[str, HarnessError]] = []
-    nodes = class_graph.get("nodes")
-    for node in nodes if isinstance(nodes, list) else []:
-        if not isinstance(node, dict):
-            continue
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        if not class_name:
-            continue
-        try:
-            policy.infer_component(node=node, class_name=class_name, run_id=run_id)
-        except HarnessError as exc:
-            if exc.error_code not in DESIGN_ROUTING_ERROR_CODES:
-                raise
-            failures.append((class_name, exc))
-    if not failures:
-        return []
-
-    component_ids = ", ".join(rule.component_id for rule in policy.component_rules)
-    class_names = ", ".join(name for name, _ in failures)
-    return [
-        DesignFinding(
-            finding_id="RULE-PROFILE-COMPONENT-ROUTING",
-            category="project_component_routing",
-            severity="blocking",
-            message=f"Design symbols do not have unambiguous project-component ownership: {class_names}.",
-            expected_change=(
-                "Add or correct exactly one supported component stereotype on every listed declaration "
-                f"({component_ids}); do not use a default/fallback component."
-            ),
-            diagram_ids=["class_diagram"],
-            evidence=[
-                {
-                    "source": "class_diagram",
-                    "ref": class_name,
-                    "excerpt": f"{exc.error_code}: {exc.message}",
-                }
-                for class_name, exc in failures
-            ],
-            subject_ref=policy.project_profile_id,
-            origin="deterministic",
-        )
-    ]
-
-
-
-
-
-
-
-
 
 
 def _bundle_design_findings(items: list[dict[str, object]]) -> list[DesignFinding]:
@@ -1792,19 +1622,10 @@ def _traceability_summary(missing_links: dict[str, list[dict[str, str]]]) -> str
     return "không phát hiện missing link class/sequence." if total == 0 else f"còn {total} missing link class/sequence cần review."
 
 
-
-
-
-
-
-
-
-
 def _design_versions(state: dict[str, object]) -> list[str]:
     quality = _dict_value(_dict_value(state.get("quality_reports")).get("design_validation"))
     versions = quality.get("versions")
     return [str(item) for item in versions] if isinstance(versions, list) else []
-
 
 
 def _unused_repair_session_ordinal(
@@ -1839,8 +1660,6 @@ def _next_design_version(artifact_dir: Path) -> int:
         if path.is_dir() and suffix.isdigit():
             versions.append(int(suffix))
     return max(versions, default=0) + 1
-
-
 
 
 def _artifact_ref(path: str) -> str:

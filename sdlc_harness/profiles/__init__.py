@@ -86,11 +86,13 @@ from .code_trace import (
     code_trace_policy_from_snapshot,
 )
 from .retirement import (
+    CURRENT_CONTRACT_PINS,
     LEGACY_RETIRED_ALLOWED_COMMANDS,
     public_allowed_actions,
     public_run_summary,
     require_project_profile_for_start,
     require_run_command_allowed,
+    retired_contract_pins,
 )
 
 __all__ = [
@@ -167,4 +169,6 @@ __all__ = [
     "public_run_summary",
     "require_project_profile_for_start",
     "require_run_command_allowed",
+    "retired_contract_pins",
+    "CURRENT_CONTRACT_PINS",
 ]

@@ -33,6 +33,7 @@ from sdlc_harness.sources.jira import load_jira_issue_source
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.sync.atlassian import real_sync_requirement_checkpoint
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
+from sdlc_harness.profiles import CURRENT_CONTRACT_PINS
 
 
 class PhaseOneTest(unittest.TestCase):
@@ -236,8 +237,6 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_trace_dev_role_prompts_are_available(self) -> None:
         prompt_paths = [
-            self.repo_root / "sdlc_harness" / "agents" / "designer" / "prompts" / "designer.txt",
-            self.repo_root / "sdlc_harness" / "agents" / "validator" / "prompts" / "validator.txt",
             self.repo_root / "sdlc_harness" / "agents" / "developer" / "prompts" / "developer.txt",
             self.repo_root / "sdlc_harness" / "agents" / "tester" / "prompts" / "tester.txt",
         ]
@@ -669,7 +668,7 @@ class PhaseOneTest(unittest.TestCase):
 
         self.assertTrue(second["created_new_run"])
         self.assertNotEqual(first["run_id"], second["run_id"])
-        self.assertEqual(second["designer_contract_version"], "vertical_design_graph_v1")
+        self.assertEqual(second["designer_contract_version"], "vertical_design_graph_v2")
 
     def test_clean_default_start_snapshots_typescript_profile_in_fake_mock_mode(self) -> None:
         with (
@@ -971,7 +970,7 @@ class PhaseOneTest(unittest.TestCase):
             {
                 "run_id": run_id,
                 "profile_snapshot": self.profile_snapshot(),
-                "designer_contract_version": "vertical_design_graph_v1",
+                **CURRENT_CONTRACT_PINS,
             }
         )
         response = {
@@ -1009,7 +1008,7 @@ class PhaseOneTest(unittest.TestCase):
             {
                 "run_id": run_id,
                 "profile_snapshot": self.profile_snapshot(),
-                "designer_contract_version": "vertical_design_graph_v1",
+                **CURRENT_CONTRACT_PINS,
             }
         )
         stdout = io.StringIO()
