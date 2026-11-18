@@ -140,8 +140,9 @@ class PhaseThreeWorkflow:
         state = self.store.read_state(run_id)
         pinned_review = state.get("implementation_plan_step_review")
         status = str(state.get("status") or "")
-        # A replay killed mid-way leaves an in-flight status; approved exchanges replay identically.
-        interrupted = status in _STEP_REVIEW_REPLAY_STATUSES and _dict_value(pinned_review).get("enabled") is True
+        # A plan run killed mid-way leaves an in-flight status: plan again from the frozen inputs; with review on,
+        # approved exchanges replay identically.
+        interrupted = status in _INTERRUPTED_PLAN_STATUSES
         if status != "implementation_plan_step_review_required" and not interrupted:
             raise HarnessError(
                 "implementation_plan_step_review_not_pending",
@@ -1217,10 +1218,12 @@ def _next_implementation_plan_version(artifact_dir: Path) -> int:
     return max(versions, default=0) + 1
 
 
-_STEP_REVIEW_REPLAY_STATUSES = {
+# In-progress plan statuses; finding one under the run lock means the plan run was killed (graph `running` nodes).
+_INTERRUPTED_PLAN_STATUSES = {
     "implementation_planning",
     "implementation_plan_validating",
     "implementation_plan_repairing",
+    "implementation_plan_revalidating",
 }
 
 

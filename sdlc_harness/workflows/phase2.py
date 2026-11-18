@@ -79,6 +79,9 @@ ALLOWED_DESIGN_PAUSED_ACTIONS = [
     "cancel_run",
 ]
 
+# In-progress Designer loop statuses; finding one under the run lock means the loop was killed mid-session.
+_INTERRUPTED_DESIGNER_STATUSES = frozenset({"design_investigating", "design_repairing", "design_applying_delta"})
+
 _PHASE2_ARTIFACT_KEYS = frozenset(
     {
         "designer_analysis",
@@ -178,7 +181,8 @@ class PhaseTwoWorkflow:
         """Resume một L2 environment failure trên cùng frozen workspace/input."""
 
         state = self.store.read_state(run_id)
-        if str(state.get("status") or "") != "repo_discovery_paused":
+        # `repo_discovery`: the command that started discovery died (see graph `running` nodes).
+        if str(state.get("status") or "") not in {"repo_discovery_paused", "repo_discovery"}:
             raise HarnessError(
                 "repo_discovery_not_resumable",
                 f"Repo discovery cannot continue from status {state.get('status')!r}.",
@@ -466,7 +470,7 @@ class PhaseTwoWorkflow:
         state = self.store.read_state(run_id)
         if (
             str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") not in SUPPORTED_GRAPH_VERSIONS
-            or str(state.get("status") or "") != "design_paused"
+            or str(state.get("status") or "") not in {"design_paused", *_INTERRUPTED_DESIGNER_STATUSES}
         ):
             raise HarnessError(
                 "designer_session_not_resumable",
@@ -495,7 +499,8 @@ class PhaseTwoWorkflow:
 
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
-        if str(state.get("status") or "") != "design_paused":
+        # `design_restarting`: an interrupted restart restarts again (versions come from the files on disk).
+        if str(state.get("status") or "") not in {"design_paused", "design_restarting"}:
             raise HarnessError(
                 "design_restart_not_allowed",
                 f"Design can only restart from status 'design_paused', not {state.get('status')!r}.",

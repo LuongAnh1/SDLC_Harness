@@ -117,8 +117,16 @@ class WorkflowGraphShapeTest(unittest.TestCase):
                     self.assertTrue(node.continue_routes, "work nodes need a continue route")
                 if node.kind == "step_review":
                     self.assertIsNotNone(node.step_review)
-                if node.kind in {"running", "terminal"}:
+                if node.kind == "terminal":
                     self.assertFalse(moves)
+                if node.kind == "running":
+                    # Only an interrupted run resumes; code review sync moves through `sync_run` instead.
+                    self.assertFalse(node.approve or node.step_review)
+                    if node.status.startswith("code_review"):
+                        self.assertFalse(node.continue_routes)
+                    else:
+                        self.assertEqual(len(node.continue_routes), 1, "an interrupted run needs a resume route")
+                        self.assertNotEqual(node.workflow, graph.PHASE_FOUR)
                 if node.continue_routes:
                     self.assertIsNotNone(node.continue_routes[-1])
         self.assertTrue(set(graph.PHASE_STAGES.values()) <= stages)
@@ -263,7 +271,15 @@ class WorkflowGraphParityTest(unittest.TestCase):
             class Recorder:
                 def __init__(self, settings, **kwargs) -> None:
                     self.kwargs = kwargs
-                    self.store = type("Store", (), {"read_state": staticmethod(lambda run_id: state)})()
+                    self.store = type(
+                        "Store",
+                        (),
+                        {
+                            "read_state": staticmethod(lambda run_id: state),
+                            # Resuming an interrupted `running` node records the recovery first.
+                            "write_state": staticmethod(lambda new_state: None),
+                        },
+                    )()
 
                 def __getattr__(self, method: str):
                     def call(**kwargs):

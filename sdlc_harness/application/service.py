@@ -18,7 +18,7 @@ from ..profiles import (
 )
 from ..sources.fixtures import source_ref_for
 from ..sources.jira import jira_source_ref_for
-from ..storage.runtime import RuntimeStore
+from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..workspaces.manager import RunWorkspaceManager
 from ..workflows.approval import CheckpointApprovalWorkflow
 from ..workflows.graph import PHASE_FOUR, PHASE_ONE, PHASE_THREE, PHASE_TWO, node_for
@@ -267,6 +267,17 @@ class ApplicationService:
                     run_id=run_id
                 )
             if node is not None and node.workflow != PHASE_FOUR and node.continue_routes:
+                if node.kind == "running":
+                    # We hold the run lock, so the command that set this in-progress status is gone.
+                    state.setdefault("recoveries", []).append(
+                        {
+                            "code": "interrupted_resume",
+                            "from_status": node.status,
+                            "handler": node.continue_routes[0].handler,
+                            "recovered_at": utc_now_iso(),
+                        }
+                    )
+                    phase_one.store.write_state(state)
                 workflow = phase_one if node.workflow == PHASE_ONE else workflows[node.workflow](settings)
                 return getattr(workflow, node.continue_routes[0].handler)(run_id=run_id)
             developer_review: dict[str, object] = {}

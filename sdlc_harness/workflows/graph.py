@@ -29,7 +29,9 @@ KINDS = (
     "agent",  # the Developer tool loop
     "human",  # waits for the owner
     "step_review",  # paused for per-call review
-    "running",  # set while work is in progress; nothing resumes it from continue_run
+    # Set while work is in progress. Every mutating command holds the run's OS lock, so `continue_run` finding this
+    # status means the process that set it died; its resume route (if any) picks the work up again.
+    "running",
     "blocked",  # a failure; only retry routes move it
     "terminal",
 )
@@ -80,13 +82,23 @@ def _human(status: str, stage: str, approve: Approval | None, phase: str = "") -
     return Node(status=status, phase=phase or stage, stage=stage, kind="human", approve=approve)
 
 
-def _running(status: str, stage: str, phase: str = "") -> Node:
-    return Node(status=status, phase=phase or stage, stage=stage, kind="running")
+def _running(status: str, stage: str, phase: str = "", resume: tuple[str, str] = ("", "")) -> Node:
+    workflow, handler = resume
+    return Node(
+        status=status,
+        phase=phase or stage,
+        stage=stage,
+        kind="running",
+        workflow=workflow,
+        continue_routes=(Route(handler),) if handler else (),
+    )
 
 
 def _step_review(status: str, stage: str, review: StepReview) -> Node:
     return Node(status=status, phase=stage, stage=stage, kind="step_review", workflow=review.workflow, step_review=review)
 
+
+_PLAN_RESUME = (PHASE_THREE, "continue_implementation_plan_step_review")
 
 # A blocked run moves on only through these retry rules (order matters: the first match wins).
 BLOCKED_ROUTES = (
@@ -127,15 +139,16 @@ NODES: tuple[Node, ...] = (
            phase="waiting_requirement_approval"),
     Node("failed", "", "", "terminal"),
     # Phase 2: repository discovery and design
-    _running("repo_discovery", "design", phase="repo_discovery"),
+    _running("repo_discovery", "design", phase="repo_discovery", resume=(PHASE_TWO, "continue_repo_discovery")),
     Node("repo_discovery_paused", "repo_discovery", "design", "generate", PHASE_TWO,
          (Route("continue_repo_discovery"),)),
     Node("repo_discovery_blocked", "repo_discovery", "design", "blocked"),
-    _running("design_investigating", "design", phase="design_investigating"),
-    _running("design_repairing", "design", phase="design_investigating"),
-    _running("design_applying_delta", "design", phase="design_investigating"),
-    _running("design_validating", "design", phase="design_validating"),
-    _running("design_restarting", "design", phase="design_restarting"),
+    # The Designer session is saved after every action, so an interrupted loop resumes like a transport pause.
+    _running("design_investigating", "design", phase="design_investigating", resume=(PHASE_TWO, "continue_design")),
+    _running("design_repairing", "design", phase="design_investigating", resume=(PHASE_TWO, "continue_design")),
+    _running("design_applying_delta", "design", phase="design_investigating", resume=(PHASE_TWO, "continue_design")),
+    _running("design_validating", "design", phase="design_validating", resume=(PHASE_TWO, "revalidate_design")),
+    _running("design_restarting", "design", phase="design_restarting", resume=(PHASE_TWO, "restart_design")),
     Node("design_paused", "design_investigating", "design", "step_review", PHASE_TWO,
          step_review=StepReview(PHASE_TWO, "designer_step_review", "continue_design", always_enabled=False)),
     _human("design_human_required", "design", None, phase="design_review"),
@@ -143,10 +156,11 @@ NODES: tuple[Node, ...] = (
     _human("waiting_design_approval", "design", Approval(PHASE_THREE, "approve_design_checkpoint"),
            phase="design_review"),
     # Phase 3: implementation plan
-    _running("implementation_planning", "plan", phase="implementation_planning"),
-    _running("implementation_plan_validating", "plan", phase="implementation_plan_validating"),
-    _running("implementation_plan_repairing", "plan", phase="implementation_plan_repairing"),
-    _running("implementation_plan_revalidating", "plan", phase="implementation_plan_revalidating"),
+    # An interrupted plan run plans again from the frozen Requirement and Design; approved exchanges replay.
+    _running("implementation_planning", "plan", phase="implementation_planning", resume=_PLAN_RESUME),
+    _running("implementation_plan_validating", "plan", phase="implementation_plan_validating", resume=_PLAN_RESUME),
+    _running("implementation_plan_repairing", "plan", phase="implementation_plan_repairing", resume=_PLAN_RESUME),
+    _running("implementation_plan_revalidating", "plan", phase="implementation_plan_revalidating", resume=_PLAN_RESUME),
     _step_review("implementation_plan_step_review_required", "plan",
                  StepReview(PHASE_THREE, "plan_step_review", "continue_implementation_plan_step_review")),
     _human("waiting_implementation_plan_review", "plan",

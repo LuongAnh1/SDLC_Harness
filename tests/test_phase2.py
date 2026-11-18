@@ -13,6 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import (
     DesignDraft,
@@ -472,6 +473,74 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertTrue((run_dir / "designer_execution" / f"design_v{first_ordinal}").is_dir())
         self.assertTrue((run_dir / "designer_execution" / f"design_v{second_ordinal}").is_dir())
         self.assertIn("restart_design", restarted["allowed_next_actions"])
+
+    def _continue_through_service(self, run_id: str) -> dict[str, object]:
+        overrides = {
+            **self._target_overrides(),
+            "SDLC_LLM_MODE": "fake",
+            "SDLC_SYNC_MODE": "mock",
+            "SDLC_PROJECT_PROFILE": "typescript_fullstack_v1",
+            "SDLC_DESIGN_REPAIR_LIMIT": "2",
+            "SDLC_DESIGN_VALIDATION_TRIALS": "3",
+            "SDLC_DESIGN_LLM_CALL_BUDGET": "16",
+        }
+        return ApplicationService(root=self.repo_root).execute(
+            ApplicationCommand(
+                name="continue-run",
+                arguments={"run_id": run_id},
+                settings_overrides=overrides,
+                runtime_root=self.runtime_root,
+            )
+        )
+
+    def _assert_interrupted_resume(self, run_id: str, *, from_status: str, handler: str) -> None:
+        recoveries = PhaseTwoWorkflow(self.settings).store.read_state(run_id).get("recoveries") or []
+        self.assertEqual(
+            [(item["code"], item["from_status"], item["handler"]) for item in recoveries],
+            [("interrupted_resume", from_status, handler)],
+        )
+
+    def test_designer_loop_killed_mid_session_resumes_from_continue_run(self) -> None:
+        run_id = str(self._create_phase1_run()["run_id"])
+        with patch.object(DesignerToolLoopExecutor, "_execute_fake", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+        state = PhaseTwoWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(state["status"], "design_investigating")
+        session_dir = PhaseTwoWorkflow(self.settings).store.run_dir(run_id) / "designer_execution"
+        self.assertTrue(any(session_dir.glob("design_v*/designer_loop_session_v1.json")))
+
+        resumed = self._continue_through_service(run_id)
+
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+        self._assert_interrupted_resume(run_id, from_status="design_investigating", handler="continue_design")
+
+    def test_repo_discovery_killed_mid_way_resumes_from_continue_run(self) -> None:
+        run_id = str(self._create_phase1_run()["run_id"])
+        with patch("sdlc_harness.workflows.repo_discovery.build_repo_landscape", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                PhaseTwoWorkflow(self.settings).approve_checkpoint(run_id=run_id)
+        self.assertEqual(PhaseTwoWorkflow(self.settings).store.read_state(run_id)["status"], "repo_discovery")
+
+        resumed = self._continue_through_service(run_id)
+
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+        self._assert_interrupted_resume(run_id, from_status="repo_discovery", handler="continue_repo_discovery")
+
+    def test_design_restart_killed_mid_way_restarts_again_from_continue_run(self) -> None:
+        run_id = str(self._create_phase1_run()["run_id"])
+        review = {"enabled": True, "review_input": True, "review_output": True}
+        paused = PhaseTwoWorkflow(self.settings, designer_step_review=review).approve_checkpoint(run_id=run_id)
+        self.assertEqual(paused["status"], "design_paused")
+        with patch.object(PhaseTwoWorkflow, "_run_vertical_design", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                PhaseTwoWorkflow(self.settings).restart_design(run_id=run_id)
+        self.assertEqual(PhaseTwoWorkflow(self.settings).store.read_state(run_id)["status"], "design_restarting")
+
+        resumed = self._continue_through_service(run_id)
+
+        self.assertEqual(resumed["status"], "waiting_design_approval")
+        self._assert_interrupted_resume(run_id, from_status="design_restarting", handler="restart_design")
 
     def test_restart_design_rejects_non_paused_run(self) -> None:
         created = self._create_phase1_run()

@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 import pytest
 
+from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import GRAPH_VERSION_V2
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
@@ -548,6 +549,40 @@ class PhaseThreeTest(unittest.TestCase):
             PhaseThreeWorkflow(self.settings, plan_step_review={"enabled": True}).continue_implementation_plan_step_review(
                 run_id=self.run_id
             )
+
+    def test_plan_run_killed_mid_way_resumes_from_continue_run(self) -> None:
+        approved = self._create_phase2_run()
+        with patch.object(DeveloperPlanAgent, "plan", autospec=True, side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                PhaseThreeWorkflow(self.settings).approve_design_checkpoint(
+                    run_id=self.run_id,
+                    checkpoint_id=str(approved["pending_checkpoint"]["checkpoint_id"]),
+                )
+        store = PhaseOneWorkflow(self.settings).store
+        self.assertEqual(store.read_state(self.run_id)["status"], "implementation_planning")
+
+        resumed = ApplicationService(root=self.repo_root).execute(
+            ApplicationCommand(
+                name="continue-run",
+                arguments={"run_id": self.run_id},
+                settings_overrides={
+                    "SDLC_LLM_MODE": "fake",
+                    "SDLC_SYNC_MODE": "mock",
+                    "SDLC_DESIGN_REPAIR_LIMIT": "2",
+                    "SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT": "2",
+                    "SDLC_TARGET_REPO_PATH": str(self.target_repo),
+                    "SDLC_TARGET_REPO_REMOTE": self.remote_url,
+                },
+                runtime_root=self.runtime_root,
+            )
+        )
+
+        self.assertEqual(resumed["status"], "waiting_implementation_plan_review")
+        recoveries = store.read_state(self.run_id).get("recoveries") or []
+        self.assertEqual(
+            [(item["code"], item["from_status"], item["handler"]) for item in recoveries],
+            [("interrupted_resume", "implementation_planning", "continue_implementation_plan_step_review")],
+        )
 
     def test_new_design_checkpoint_supersedes_approved_plan_exchange(self) -> None:
         approved = self._create_phase2_run()
