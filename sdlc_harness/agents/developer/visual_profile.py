@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from ...core.errors import HarnessError
+from ...core.coerce import dict_copies as _dict_items
 
 
 VISUAL_PROFILE_VERSION = "developer_visual_profile_v1"
@@ -222,10 +223,6 @@ def _font_stack(name: str) -> str:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

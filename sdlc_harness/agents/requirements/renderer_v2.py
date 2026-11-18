@@ -9,6 +9,7 @@ from .clarification_policy_v1 import (
     DEFERRED_TO_DESIGN,
 )
 from .model_v2 import RequirementModelV2
+from ...core.coerce import dict_items as _dict_items
 
 
 def render_requirement_packet_v2(model: RequirementModelV2) -> str:
@@ -281,8 +282,3 @@ def _status_suffix(item: dict[str, Any]) -> str:
     status = str(item.get("status") or "")
     return f" _(status: {status})_" if status else ""
 
-
-def _dict_items(value: Any) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]

@@ -39,6 +39,7 @@ from .registry import (
     resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
+from ..core.coerce import string_items as _string_items
 
 DEFAULT_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 20000
@@ -1904,12 +1905,6 @@ def _dependency_setup_failure_kind(*, stdout: str, stderr: str) -> str:
     if any(marker in combined for marker in environment_markers):
         return "environment"
     return _command_failure_kind(stdout=stdout, stderr=stderr)
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _truncate_output(value: str) -> str:

@@ -81,6 +81,7 @@ from .graph import (
     continue_handler,
     node_for,
 )
+from ..core.coerce import dict_items as _dict_items, string_items as _string_items
 
 ALLOWED_IMPLEMENTATION_READY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_IMPLEMENTATION_EXECUTION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -1393,18 +1394,6 @@ def _code_trace_policy_for_state(
             run_id=run_id,
         )
     return code_trace_policy_from_snapshot(snapshot, run_id=run_id)
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _int_value(value: object, *, default: int = 0) -> int:

@@ -7,6 +7,7 @@ import re
 
 from ...core.errors import HarnessError
 from .profile_context import developer_generation_context, developer_path_is_test
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 def fake_developer_files(work_packet: dict[str, object]) -> list[dict[str, object]]:
@@ -220,18 +221,3 @@ def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
         return []
     return [str(value).strip().replace("\\", "/") for value in values if str(value).strip()]
 
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

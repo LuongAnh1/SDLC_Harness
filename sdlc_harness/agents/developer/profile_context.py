@@ -12,6 +12,7 @@ from ...profiles import (
     is_profiled_work_packet_schema,
     resolve_language_prompt_directive,
 )
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value
 
 
 def developer_generation_context(work_packet: dict[str, object]) -> dict[str, object]:
@@ -142,12 +143,3 @@ def _allowed_paths(work_packet: dict[str, object]) -> list[str]:
 def _profile_error(message: str) -> HarnessError:
     return HarnessError("developer_prompt_profile_invalid", message)
 
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}

@@ -6,7 +6,6 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
@@ -15,6 +14,7 @@ from ...profiles import (
     signature_shape,
 )
 from .typescript_ast import TypeScriptAstEvidence
+from ...core.coerce import dict_items as _dicts, string_items as _strings
 
 
 JAVA_METHOD_RE = re.compile(
@@ -538,10 +538,3 @@ def _dedupe_findings(values: list[dict[str, object]]) -> list[dict[str, object]]
         result[key] = {**item, "canonical_key": key}
     return list(result.values())
 
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _strings(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

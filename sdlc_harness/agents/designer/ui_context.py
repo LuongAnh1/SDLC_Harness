@@ -18,6 +18,7 @@ from ...profiles import (
     build_verification_stage_policy_version,
     get_project_profile,
 )
+from ...core.coerce import dict_copies as _dicts
 
 UI_REPO_CONTEXT_VERSION = "ui_repo_experience_context_v1"
 WEB_COMPONENT_ID = "web"
@@ -367,10 +368,6 @@ def _within(path: Path, root: Path) -> bool:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

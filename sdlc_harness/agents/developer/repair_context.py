@@ -12,6 +12,7 @@ import re
 
 from ...core.errors import HarnessError
 from ...profiles import get_language_profile
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value
 
 
 _SYMBOL = re.compile(r"^[A-Za-z_$][A-Za-z0-9_$]*$")
@@ -318,14 +319,6 @@ def _walk_dicts(value: object):
     elif isinstance(value, list):
         for item in value:
             yield from _walk_dicts(item)
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

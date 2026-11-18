@@ -22,6 +22,7 @@ import re
 from ...profiles.planning import PlanningPathPolicy
 from ...profiles.verification import BrowserStageFacts
 from .closure_contract import build_closure_work_packet
+from ...core.coerce import dict_copies as _dicts
 
 READINESS_CONTEXT_SCHEMA_VERSION = "browser_readiness_context_v1"
 READINESS_WORK_PACKET_MODE = "browser_readiness"
@@ -971,10 +972,6 @@ def _blocked(context: dict[str, object], error_code: str, message: str) -> dict[
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _text(value: object) -> str:

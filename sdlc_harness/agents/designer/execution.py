@@ -37,6 +37,7 @@ from .uiux import (
     UI_EXPERIENCE_CONTRACT_V2,
     UiUxGuidanceProvider,
 )
+from ...core.coerce import dict_copies as _dicts
 
 
 SESSION_VERSION = "designer_loop_session_v1"
@@ -5864,10 +5865,6 @@ def _append_journal(path: Path, entry: dict[str, object]) -> None:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

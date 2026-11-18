@@ -14,6 +14,7 @@ import json
 
 from ..sources.fixtures import UseCaseSource
 from ..storage.runtime import RuntimeStore, utc_now_iso
+from ..core.coerce import dict_items as _dict_items
 
 
 def write_use_case_packet(*, store: RuntimeStore, run_id: str, source: UseCaseSource) -> str:
@@ -778,12 +779,6 @@ def _test_report_markdown(report: dict[str, object]) -> str:
         ]
     )
     return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _table_cell(value: str) -> str:

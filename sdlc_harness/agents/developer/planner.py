@@ -40,6 +40,7 @@ from .component_plan import (
     rebind_legacy_mappings_to_work_units,
     unit_write_scope,
 )
+from ...core.coerce import dict_items as _dict_items, string_items as _string_items
 
 
 @dataclass(frozen=True)
@@ -2077,12 +2078,6 @@ def _affected_unit_ids(review: dict[str, object]) -> list[str]:
     return sorted(set(re.findall(r"\bWU-[A-F0-9]{12}\b", text)))
 
 
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
 def _requirement_coverage(
     *,
     requirement_graph: dict[str, object],
@@ -2761,12 +2756,6 @@ def _markdown_plan(
         ]
     )
     return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _object_dict(value: object) -> dict[str, object]:

@@ -58,6 +58,7 @@ from .repo_discovery import (
     REPO_DISCOVERY_CONTRACT_VERSION,
     RepoDiscoveryWorkflow,
 )
+from ..core.coerce import dict_copies as _dict_items, dict_value as _dict_value
 
 ALLOWED_DESIGN_ACTIONS = [
     "approve_checkpoint",
@@ -1563,10 +1564,6 @@ def _runtime_design_summary(
     }
 
 
-def _dict_items(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
 def _design_repair_stalled(
     *,
     prior_digest: str,
@@ -1578,10 +1575,6 @@ def _design_repair_stalled(
         (prior_digest and current_digest == prior_digest)
         or (prior_blocker_keys and current_blocker_keys == prior_blocker_keys)
     )
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
 
 
 def _string_dict(value: object) -> dict[str, str]:

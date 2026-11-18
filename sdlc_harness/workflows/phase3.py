@@ -59,6 +59,7 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..workspaces import RunWorkspaceManager
+from ..core.coerce import dict_value as _dict_value
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "approve_checkpoint",
@@ -1297,10 +1298,6 @@ def _read_json_artifact(path: Path, *, run_id: str) -> dict[str, object]:
             run_id=run_id,
         )
     return parsed
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
 
 
 def _string_dict(value: object) -> dict[str, str]:

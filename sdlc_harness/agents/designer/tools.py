@@ -6,12 +6,12 @@ import hashlib
 import json
 from pathlib import Path
 import re
-from typing import Any
 
 from ...core.errors import HarnessError
 from ...repo_context import CodeGraphContextProvider
 from .graph import apply_designer_delta
 from .uiux import UiUxGuidanceProvider, guidance_evidence_ref
+from ...core.coerce import dict_copies as _dicts
 
 
 MAX_RESULTS = 20
@@ -401,10 +401,6 @@ def _within(path: Path, root: Path) -> bool:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

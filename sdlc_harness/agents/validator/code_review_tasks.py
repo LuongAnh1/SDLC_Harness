@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 from typing import Any
+from ...core.coerce import dict_copies as _dicts, string_items as _strings
 
 
 CODE_VALIDATION_MODE = "scenario_boundary_code_validation_v1"
@@ -825,10 +826,3 @@ def _unique_dicts(values: Any) -> list[dict[str, object]]:
 def _dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
 
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _strings(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

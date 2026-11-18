@@ -8,10 +8,11 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-from typing import Any, Callable
+from typing import Callable
 
 from ...core.errors import HarnessError
 from ...profiles import CodeTracePolicy
+from ...core.coerce import dict_items as _dict_items
 
 
 TYPESCRIPT_AST_EVIDENCE_VERSION = "typescript_ast_evidence_v2"
@@ -414,6 +415,3 @@ def _environment_value(env: dict[str, str], key: str) -> str:
     expected = key.casefold()
     return next((value for name, value in env.items() if name.casefold() == expected), "")
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

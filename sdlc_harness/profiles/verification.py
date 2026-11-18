@@ -13,6 +13,7 @@ from ..core.errors import HarnessError
 from .model import ProjectProfile
 from .planning import PlanningPathPolicy
 from .signature import implementation_signature_contract_issues
+from ..core.coerce import dict_items as _dict_items, string_items as _string_items
 
 if TYPE_CHECKING:
     from .snapshot import ProfileSnapshotV1
@@ -410,14 +411,3 @@ def verification_stage_policy_from_snapshot(
             raise HarnessError(exc.error_code, exc.message, run_id=run_id) from exc
         raise
 
-
-def _dict_items(value: object) -> list[dict[str, object]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

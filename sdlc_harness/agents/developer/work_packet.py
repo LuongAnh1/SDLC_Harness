@@ -11,7 +11,6 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
@@ -23,6 +22,7 @@ from ...profiles import (
 )
 from ...storage.runtime import utc_now_iso
 from ...profiles.runtime_config import canonical_runtime_config_impact
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 MAX_FILE_CONTENT_CHARS = 40000
 PROFILED_EDITABLE_PATH_POLICY_VERSION = "editable_path_policy_v1"
@@ -1132,18 +1132,3 @@ def _profiled_path_policy_contract(policy: PlanningPathPolicy) -> dict[str, obje
         "protected_paths": list(policy.protected_paths),
     }
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]

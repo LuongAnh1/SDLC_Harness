@@ -26,6 +26,7 @@ from ...profiles import (
     profiled_plan_contract_issues,
     resolve_language_prompt_directive,
 )
+from ...core.coerce import dict_items as _dict_items, string_items as _string_items
 
 
 _PLAN_FINDING_CATEGORIES = {
@@ -116,11 +117,6 @@ def _resolve_verification_policy(
         )
     return verification_policy
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 @dataclass(frozen=True)
 class ImplementationPlanReview:
@@ -1057,12 +1053,6 @@ def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, 
 
 def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
     return expected_keys.issubset(candidate.keys())
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _excerpt(content: str, *, limit: int) -> str:

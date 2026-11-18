@@ -11,6 +11,7 @@ from ...core.errors import HarnessError
 from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..requirements import RequirementModelV2
 from .design_validation import DesignFinding
+from ...core.coerce import dict_copies as _dicts
 
 
 VERTICAL_TRACE_GRAPH_VERSION = "vertical_trace_graph_v1"
@@ -668,10 +669,6 @@ def _graph_digest(graph: dict[str, object]) -> str:
 
 def _dict(value: object) -> dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _strings(value: object) -> list[str]:

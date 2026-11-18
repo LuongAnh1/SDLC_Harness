@@ -15,6 +15,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ..developer.closure_contract import CLOSURE_EXECUTION_FACTS, CLOSURE_REVIEW_DUTIES
 from ..developer.closure_planner import _parse_json_object, call_structured_json
+from ...core.coerce import dict_items as _dicts
 
 CLOSURE_REVIEW_PROMPT_MARKER = "Runtime Closure Contract Review v1"
 CLOSURE_CODE_REVIEW_PROMPT_MARKER = "Runtime Closure Code Review v1"
@@ -239,6 +240,3 @@ def parse_closure_review(
 def _string_list(value: object) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
 
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

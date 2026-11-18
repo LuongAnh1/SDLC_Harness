@@ -28,6 +28,7 @@ from ...profiles.runtime_config import (
     runtime_config_impact_issues,
     runtime_config_policy,
 )
+from ...core.coerce import dict_items as _dicts
 
 CONTEXT_SCHEMA_VERSION = "runtime_closure_context_v1"
 CONTRACT_SCHEMA_VERSION = "runtime_closure_contract_v1"
@@ -2024,6 +2025,3 @@ def _raw_texts(value: object) -> list[str]:
 def _dict(value: object) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []

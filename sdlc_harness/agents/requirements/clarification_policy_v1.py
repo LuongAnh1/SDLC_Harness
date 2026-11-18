@@ -11,6 +11,7 @@ from typing import Any
 
 from ...loop import canonical_json_hash
 from .model_v2 import RequirementModelV2
+from ...core.coerce import dict_items as _dict_items
 
 
 SHADOW_SCHEMA_VERSION = "requirement_clarification_policy_shadow_v1"
@@ -278,10 +279,6 @@ def _agent_default_rejection_reasons(question: dict[str, Any]) -> list[str]:
 
 def _count(entries: list[dict[str, object]], disposition: str) -> int:
     return sum(1 for item in entries if item.get("shadow_disposition") == disposition)
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 import json
+from ...core.coerce import dict_copies as _dicts
 
 DOCUMENTATION_CONTEXT_SCHEMA_VERSION = "documentation_closure_context_v1"
 DOCUMENTATION_PATH = "README.md"
@@ -238,10 +239,6 @@ def documented_commands(block: str) -> list[str]:
 
 def _dict(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _lists(value: object) -> list[object]:

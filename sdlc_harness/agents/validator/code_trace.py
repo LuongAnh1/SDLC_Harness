@@ -37,6 +37,7 @@ from .code_review_tasks import (
     build_code_validation_review_plan,
 )
 from .typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
+from ...core.coerce import dict_items as _dict_items, string_items as _string_items
 
 MAX_SNIPPET_TOTAL_CHARS = 60000
 MAX_SNIPPET_FILE_CHARS = 20000
@@ -963,12 +964,6 @@ def _dict_value(value: object) -> dict[str, object]:
     return dict(value) if isinstance(value, dict) else {}
 
 
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
 def _test_paths(
     work_packet: dict[str, object],
     *,
@@ -1024,12 +1019,6 @@ def _profiled_source_paths(
         if path not in paths:
             paths.append(path)
     return paths
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _symbol_from_target(planned_target: str) -> str:

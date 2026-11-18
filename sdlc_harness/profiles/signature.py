@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from typing import Any
 
 from .planning import PlanningPathPolicy
+from ..core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION = "implementation_signature_contract_v1"
@@ -357,14 +357,3 @@ def implementation_signature_contract_digest(contract: dict[str, object]) -> str
     ).hexdigest()
     return f"sha256:{digest}"
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _dict_value(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

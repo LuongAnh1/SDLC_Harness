@@ -17,6 +17,7 @@ from ...profiles import (
 from ...profiles.runtime_config import runtime_config_impact_issues
 from ..designer.graph import GRAPH_VERSION, validate_vertical_design_graph
 from ..validator.vertical_trace import validate_vertical_trace_graph
+from ...core.coerce import dict_items as _dicts, string_items as _strings
 
 
 COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION = (
@@ -1791,14 +1792,6 @@ def _dedupe_mappings(items: list[dict[str, object]]) -> list[dict[str, object]]:
 
 def _dict(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _strings(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []
 
 
 def _safe_relative_paths(value: object) -> list[str]:

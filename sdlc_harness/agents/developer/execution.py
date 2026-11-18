@@ -45,6 +45,7 @@ from .visual_profile import (
     read_visual_profiles,
     visual_profile_required,
 )
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 _LEGACY_ACTION_NAMES = {
@@ -7885,14 +7886,3 @@ def _clip_json_value(value: object, limit: int) -> object:
         return value
     return {"truncated": True, "preview": raw[:limit]}
 
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _dict_value(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from .graph import DESIGN_BUNDLE_VERSION, UI_RUNTIME_STATES, is_composition_wiring, layout_regions
+from ...core.coerce import dict_copies as _dicts
 
 UI_FEATURE_EXPERIENCE_VERSION = "ui_feature_experience_v1"
 _RUNNABLE_RANK = {"bound": 0, "fixture_required": 1, "externally_blocked": 2}
@@ -949,10 +950,6 @@ def _slug(value: str) -> str:
 
 def _uml_id(value: str) -> str:
     return "N_" + re.sub(r"[^A-Za-z0-9_]", "_", value)
-
-
-def _dicts(value: object) -> list[dict[str, Any]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _dict(value: object) -> dict[str, Any]:

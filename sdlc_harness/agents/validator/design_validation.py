@@ -27,6 +27,7 @@ from .semantic_review import (
     relation_index,
 )
 from .traceability import TraceabilityResult
+from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
 FINDING_IDENTITY_VERSION = "design_finding_identity_v2"
@@ -1566,22 +1567,6 @@ def _deduplicate_findings(findings: list[DesignFinding]) -> list[DesignFinding]:
             seen.add(key)
             result.append(item)
     return result
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
-
-
-def _dict_value(value: object) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _string_items(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
 
 
 def _complete_json(llm_client: Any, *, system: str, prompt: str) -> str:

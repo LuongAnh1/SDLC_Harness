@@ -9,6 +9,7 @@ from typing import Any
 from ...core.errors import HarnessError
 from ..developer.closure_planner import _parse_json_object, call_structured_json
 from ..developer.polish_planner import IMAGE_INPUTS_RULE, POLISH_INCONCLUSIVE, image_inputs
+from ...core.coerce import dict_copies as _dicts, string_items as _strings
 
 
 POLISH_REVIEW_PROMPT_MARKER = "UI Polish Contract Review v1"
@@ -916,10 +917,3 @@ def _guard_journey_contract_retry(
             "Contract retry changed fields outside the reported mechanical correction.",
         )
 
-
-def _dicts(value: object) -> list[dict[str, object]]:
-    return [dict(item) for item in value if isinstance(item, dict)] if isinstance(value, list) else []
-
-
-def _strings(value: object) -> list[str]:
-    return [str(item).strip() for item in value if str(item).strip()] if isinstance(value, list) else []

@@ -5,10 +5,10 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
-from typing import Any
 
 from ...core.errors import HarnessError
 from .model_v2 import QuestionStatus, RequirementModelV2
+from ...core.coerce import dict_items as _dict_items
 
 
 GAP_REPORT_VERSION = "requirement_gap_report_v1"
@@ -259,10 +259,6 @@ def _gap_identity(item: dict[str, object]) -> str:
 
 def _without_id(item: dict[str, object]) -> dict[str, object]:
     return {key: deepcopy(value) for key, value in item.items() if key != "id"}
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
 def _string_items(value: object) -> list[str]:

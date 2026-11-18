@@ -13,9 +13,9 @@ import hashlib
 import json
 import subprocess
 from pathlib import Path
-from typing import Any
 
 from ..core.errors import HarnessError
+from ..core.coerce import dict_items as _dict_items
 
 MAX_EVIDENCE_CHARS = 12000
 DEFAULT_TIMEOUT_SECONDS = 45
@@ -581,12 +581,6 @@ def _fake_repo_evidence(*, target_path: Path, target_files: list[str]) -> str:
             lines.append(_truncate(path.read_text(encoding="utf-8", errors="replace"), limit=1200))
             lines.append("```")
     return "\n".join(lines)
-
-
-def _dict_items(value: object) -> list[dict[str, Any]]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, dict)]
 
 
 def _truncate(text: str, *, limit: int) -> str:
