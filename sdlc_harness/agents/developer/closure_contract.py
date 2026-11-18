@@ -51,7 +51,6 @@ RESOLUTION_COMPATIBILITY: dict[str | None, tuple[str, ...]] = {
     "external_use_case": ("approved_demo_fixture", "unresolved_external"),
     None: RESOLUTION_KINDS,
 }
-PRODUCTION_RESOLUTION_KINDS = ("existing_runtime", "new_boundary")
 PROVIDER_KINDS = ("symbol", "env_var")
 CHANGE_REFS = ("plan", "closure")
 PROBE_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
@@ -62,7 +61,6 @@ BOUND_INPUT_KEYS = (
     "code_snapshot_fingerprint",
     "verification_policy_version",
 )
-CLOSURE_RUNNABLE_STATUSES = ("bound", "fixture_bound", "externally_blocked")
 
 CONTRACT_INVALID = "runtime_closure_contract_invalid"
 CONFIG_UNSUPPORTED = "runtime_closure_config_unsupported"

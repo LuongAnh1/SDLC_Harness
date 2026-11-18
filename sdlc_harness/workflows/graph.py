@@ -451,11 +451,6 @@ def approval_for(status: str) -> Approval | None:
     return node.approve if node is not None else None
 
 
-def step_review_for(status: str) -> StepReview | None:
-    node = NODES_BY_STATUS.get(status)
-    return node.step_review if node is not None else None
-
-
 def dashboard_workflow() -> dict[str, object]:
     """Dashboard nodes and lookups, derived from the graph so new stages never go missing."""
 

@@ -100,8 +100,6 @@ ALLOWED_IMPLEMENTATION_REPAIR_NEEDED_ACTIONS = [
     "cancel_run",
 ]
 ALLOWED_IMPLEMENTATION_REPAIR_BLOCKED_ACTIONS = ["revalidate_implementation", "get_status", "cancel_run"]
-ALLOWED_QA_REPAIR_NEEDED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
-ALLOWED_QA_GENERATION_RETRY_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_QA_TESTED_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_PUBLISH_ACTIONS = ["continue_run", "get_status", "cancel_run"]
 ALLOWED_CODE_REVIEW_SYNC_ACTIONS = ["get_status", "sync_run", "cancel_run"]
@@ -129,11 +127,6 @@ CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "implementation_plan": 20000,
 }
 
-MAX_QA_REQUIREMENT_CHARS = 6000
-MAX_QA_VERIFICATION_CHARS = 4000
-MAX_QA_CODE_FILE_CHARS = 5000
-MAX_QA_CODE_TOTAL_CHARS = 24000
-MAX_QA_TRACE_SAMPLE_EDGES = 20
 MAX_VERIFICATION_DIAGNOSTIC_CHARS = 6000
 
 
@@ -1032,31 +1025,6 @@ def _positive_int_or_none(value: object) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
-
-
-def _bounded_artifact_section(
-    *,
-    store: RuntimeStore,
-    relative_path: str,
-    label: str,
-    limit: int,
-) -> dict[str, object]:
-    path = (store.repo_root / relative_path).resolve()
-    if not path.exists():
-        raise HarnessError(
-            "approved_implementation_plan_not_found",
-            f"QA input artifact does not exist: {relative_path}",
-        )
-    text = path.read_text(encoding="utf-8", errors="replace")
-    excerpt = text[:limit]
-    return {
-        "label": label,
-        "path": relative_path,
-        "content": excerpt,
-        "content_truncated": len(excerpt) < len(text),
-        "chars_total": len(text),
-        "chars_sent": len(excerpt),
-    }
 
 
 def _code_review_publication_paths(

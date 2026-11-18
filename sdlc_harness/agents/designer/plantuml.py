@@ -11,16 +11,6 @@ from __future__ import annotations
 import re
 
 
-_CLASS_DECL_RE = re.compile(r"^\s*(class|interface|abstract|enum)\s+([A-Za-z_][\w]*)(?:\s+<<(.+?)>>)?\s*\{?\s*$")
-_FIELD_RE = re.compile(r"^\s*([+\-#])\s*([A-Za-z_][\w]*)\s*:\s*([^()]+?)\s*$")
-_METHOD_RE = re.compile(r"^\s*([+\-#])\s*([A-Za-z_][\w]*)\s*\((.*?)\)\s*(?::\s*(.+?))?\s*$")
-_RELATION_RE = re.compile(r"^\s*([A-Za-z_][\w]*)\s+([.ox*<|}\-]+(?:>|[.ox*<|}\-]+)?)\s+([A-Za-z_][\w]*)")
-_PARTICIPANT_RE = re.compile(
-    r'^\s*(actor|participant|boundary|control|utility|database|entity|collections|queue|node|cloud|storage)\s+(.+?)\s*$',
-    re.IGNORECASE,
-)
-_MESSAGE_RE = re.compile(r"^\s*([A-Za-z_][\w]*)\s*([-]+>>?|-->|--x|->x)\s*([A-Za-z_][\w]*)\s*:\s*(.+?)\s*$")
-_CONTROL_START = {"alt", "opt", "loop", "group", "break", "par", "critical"}
 
 
 def extract_class_sequence_diagrams(design_model: str) -> tuple[str, list[str]]:

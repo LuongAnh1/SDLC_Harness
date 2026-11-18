@@ -16,14 +16,6 @@ from ..requirements import RequirementModelV2
 from ...core.errors import HarnessError
 
 
-_REQUIREMENT_SECTIONS = {
-    "Preconditions": "PRE",
-    "Main Flow": "MAIN",
-    "Alternative / Exception Flows": "ALT",
-    "Postconditions": "POST",
-    "Acceptance Criteria": "AC",
-    "Quality / Non-functional Requirements": "NFR",
-}
 
 
 @dataclass(frozen=True)

@@ -41,7 +41,6 @@ from sdlc_harness.verification import (
     VerificationResult,
     VerificationRunner,
     VerificationStageResult,
-    resolve_verification_preparation_spec,
     resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
@@ -127,11 +126,8 @@ class ProfiledVerificationTest(unittest.TestCase):
         return {**self.packet, "output_contract": {"allowed_paths": list(paths)}}
 
     def test_registry_resolves_exact_order_and_rejects_drift(self) -> None:
-        preparation = resolve_verification_preparation_spec(self.policy)
-        self.assertIsNotNone(preparation)
-        self.assertEqual(preparation.preparation_id, "dependency_setup")
-        self.assertEqual(preparation.argv, ("npm", "ci"))
         preparations = resolve_verification_preparation_specs(self.policy)
+        self.assertEqual(preparations[0].argv, ("npm", "ci"))
         self.assertEqual(
             [item.preparation_id for item in preparations],
             ["dependency_setup", "generated_source_setup"],

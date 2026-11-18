@@ -2227,16 +2227,6 @@ def _render_bounded_line_ranges(
     return "\n".join(parts), included
 
 
-def _merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
-    merged: list[list[int]] = []
-    for start, end in sorted(ranges):
-        if not merged or start > merged[-1][1] + 1:
-            merged.append([start, end])
-        else:
-            merged[-1][1] = max(merged[-1][1], end)
-    return [(start, end) for start, end in merged]
-
-
 def _project_symbol_evidence(
     symbol_evidence: dict[str, object],
     *,

@@ -11,7 +11,6 @@ from ...core.errors import HarnessError
 from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
 
-SEMANTIC_REVIEW_MODES = frozenset({"legacy", "sliced_shadow", "sliced_enforce"})
 
 
 def build_semantic_review_plan(

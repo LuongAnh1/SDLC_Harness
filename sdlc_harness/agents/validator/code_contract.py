@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from pathlib import Path
-import re
 
 from ...core.errors import HarnessError
 from ...profiles import (
@@ -17,14 +15,6 @@ from .typescript_ast import TypeScriptAstEvidence
 from ...core.coerce import dict_items as _dicts, string_items as _strings
 
 
-JAVA_METHOD_RE = re.compile(
-    r"(?ms)^[ \t]*(?:@[\w.]+(?:\([^\n]*?\))?[ \t]*\n[ \t]*)*"
-    r"(?:(?:public|protected|private|static|final|abstract|default|synchronized|native|strictfp)[ \t]+)*"
-    r"(?:<[^>{};]+>[ \t]+)?"
-    r"(?P<return>[A-Za-z_$][\w$.,<>? \t\[\]]*)[ \t]+"
-    r"(?P<name>[A-Za-z_$][\w$]*)[ \t]*\((?P<params>[^)]*)\)[ \t]*"
-    r"(?:throws[^{;]+)?[ \t]*(?:\{|;)",
-)
 
 
 def build_validation_claims(
@@ -63,87 +53,6 @@ def build_validation_claims(
             }
         )
     return claims
-
-
-def deterministic_contract_findings(
-    *,
-    target_path: Path,
-    work_packet: dict[str, object],
-    approved_context: dict[str, object],
-) -> list[dict[str, object]]:
-    """Compare approved Java method contracts with declarations in the worktree."""
-
-    graph = approved_context.get("class_diagram_graph_data")
-    if not isinstance(graph, dict):
-        return []
-    proposed_paths = {
-        str(item.get("path") or "").replace("\\", "/")
-        for item in _dicts(work_packet.get("proposed_files"))
-        if str(item.get("path") or "").endswith(".java")
-    }
-    findings: list[dict[str, object]] = []
-    for node in _dicts(graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        if not class_name:
-            continue
-        source_path = _source_path_for_class(class_name, proposed_paths)
-        if not source_path:
-            continue
-        source_file = target_path / source_path
-        if not source_file.is_file():
-            continue
-        source_text = source_file.read_text(encoding="utf-8", errors="replace")
-        # Exact parameter matching is a hard gate only at explicit Java interface
-        # boundaries. Concrete helper methods may intentionally use accumulators or
-        # richer return types while preserving the approved observable behavior.
-        if not re.search(rf"\binterface\s+{re.escape(class_name)}\b", source_text):
-            continue
-        methods = _java_methods(source_text)
-        for method in _dicts(node.get("methods")):
-            method_name = str(method.get("name") or "").strip()
-            if not method_name:
-                continue
-            expected_params = [
-                _normalize_java_type(str(item.get("type") or ""))
-                for item in _dicts(method.get("parameters"))
-            ]
-            expected_return = _normalize_java_type(str(method.get("returnType") or "void"))
-            same_name = [item for item in methods if item[0] == method_name]
-            if not same_name:
-                continue  # Existing static symbol evidence owns missing methods.
-            # Java permits callers to ignore a returned value, while generated UML often
-            # records such operations as void. Parameter shape is the stable call contract;
-            # return-type-only differences remain semantic observations for the LLM.
-            exact = any(params == expected_params for _name, params, _result in same_name)
-            if exact:
-                continue
-            actual = [f"{method_name}({', '.join(params)}): {result}" for _name, params, result in same_name]
-            design_element_id = f"method:{class_name}.{method_name}"
-            message = (
-                f"Approved method contract requires {method_name}({', '.join(expected_params)}): "
-                f"{expected_return}, but {source_path} declares {', '.join(actual)}."
-            )
-            finding = {
-                "type": "contract_signature_mismatch",
-                "blocking": True,
-                "owner": "developer",
-                "recommended_action": "developer_repair",
-                "message": message,
-                "requirement_ref": _requirement_for_design(work_packet, design_element_id),
-                "design_element_id": design_element_id,
-                "code_ref": f"{source_path}#{method_name}",
-                "evidence_ref": "approved_class_diagram_graph",
-                "evidence_quote": f"{method_name}({', '.join(expected_params)}): {expected_return}",
-                "expected_signature": {
-                    "name": method_name,
-                    "parameters": expected_params,
-                    "return_type": expected_return,
-                },
-                "actual_signatures": actual,
-            }
-            finding["canonical_key"] = canonical_finding_key(finding)
-            findings.append(finding)
-    return _dedupe_findings(findings)
 
 
 def deterministic_typescript_contract_findings(
@@ -280,59 +189,6 @@ def _typescript_signature_matches(
     return actual_shape == expected_shape
 
 
-def prepare_semantic_trial(
-    *,
-    findings: list[dict[str, object]],
-    observations: list[dict[str, object]],
-    claims: list[dict[str, object]],
-    verification_evidence: dict[str, object],
-    trial_id: str,
-) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
-    """Bind findings to fixed claims and reject claims contradicted by Verification."""
-
-    accepted: list[dict[str, object]] = []
-    normalized_observations = [dict(item) for item in observations]
-    rejected: list[dict[str, object]] = []
-    for raw in findings:
-        item = dict(raw)
-        item["trial_id"] = trial_id
-        claim_id = _resolve_claim_id(item, claims)
-        if _contradicts_verification(item, verification_evidence):
-            item.update(
-                {
-                    "blocking": False,
-                    "owner": "validator",
-                    "recommended_action": "validator_mapping_fix",
-                    "normalization_reason": "contradicted_by_executed_verification_evidence",
-                }
-            )
-            rejected.append(item)
-            normalized_observations.append(item)
-            continue
-        if not claim_id and str(item.get("type") or "") == "trace_mapping_issue":
-            # This finding targets Validator's own approved-evidence mapping,
-            # not a Developer implementation claim. The upstream normalizer
-            # has already required an exact quote from approved context, so it
-            # may remain blocking without being sent to Developer.
-            claim_id = "VALIDATOR-MAPPING"
-        if not claim_id:
-            item.update(
-                {
-                    "blocking": False,
-                    "owner": "validator",
-                    "recommended_action": "validator_mapping_fix",
-                    "normalization_reason": "finding_not_bound_to_fixed_claim",
-                }
-            )
-            rejected.append(item)
-            normalized_observations.append(item)
-            continue
-        item["claim_id"] = claim_id
-        item["canonical_key"] = canonical_finding_key(item)
-        accepted.append(item)
-    return _dedupe_findings(accepted), normalized_observations, rejected
-
-
 def snapshot_fingerprint(
     *,
     work_packet: dict[str, object],
@@ -434,94 +290,6 @@ def canonical_finding_key(item: dict[str, object]) -> str:
         str(item.get("type") or "").strip(),
     ]
     return "|".join(part.casefold() for part in parts)
-
-
-def _resolve_claim_id(item: dict[str, object], claims: list[dict[str, object]]) -> str:
-    explicit = str(item.get("claim_id") or "").strip()
-    valid_ids = {str(claim.get("claim_id") or "") for claim in claims}
-    if explicit in valid_ids:
-        return explicit
-    requirement_ref = str(item.get("requirement_ref") or "").strip()
-    design_id = str(item.get("design_element_id") or "").strip()
-    code_ref = str(item.get("code_ref") or "").split("#", 1)[0].replace("\\", "/")
-    scored: list[tuple[int, str]] = []
-    for claim in claims:
-        score = 0
-        if requirement_ref and requirement_ref == str(claim.get("requirement_ref") or ""):
-            score += 4
-        if design_id and design_id in _strings(claim.get("design_element_ids")):
-            score += 3
-        if code_ref and any(str(target).split("#", 1)[0] == code_ref for target in _strings(claim.get("code_targets"))):
-            score += 2
-        if score:
-            scored.append((score, str(claim.get("claim_id") or "")))
-    return max(scored)[1] if scored else ""
-
-
-def _contradicts_verification(item: dict[str, object], evidence: dict[str, object]) -> bool:
-    message = str(item.get("message") or "").casefold()
-    markers = ("not executed", "never executed", "not run", "no test runner", "main()-only", "main-only")
-    if not any(marker in message for marker in markers):
-        return False
-    executed = [str(value).casefold() for value in evidence.get("executed_test_entrypoints", []) if str(value)]
-    code_ref = str(item.get("code_ref") or "").replace("\\", "/")
-    test_name = Path(code_ref.split("#", 1)[0]).stem.casefold()
-    return bool(test_name and any(value.endswith(test_name) or test_name in value for value in executed))
-
-
-def _java_methods(source: str) -> list[tuple[str, list[str], str]]:
-    cleaned = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
-    cleaned = re.sub(r"//[^\n]*", "", cleaned)
-    methods: list[tuple[str, list[str], str]] = []
-    for match in JAVA_METHOD_RE.finditer(cleaned):
-        name = match.group("name")
-        result = _normalize_java_type(match.group("return"))
-        if result in {"return", "throw", "new"}:
-            continue
-        params = [_parameter_type(value) for value in _split_java_params(match.group("params"))]
-        methods.append((name, params, result))
-    return methods
-
-
-def _split_java_params(raw: str) -> list[str]:
-    if not raw.strip():
-        return []
-    values: list[str] = []
-    current: list[str] = []
-    depth = 0
-    for char in raw:
-        if char in "<([":
-            depth += 1
-        elif char in ">)]":
-            depth = max(0, depth - 1)
-        if char == "," and depth == 0:
-            values.append("".join(current).strip())
-            current = []
-        else:
-            current.append(char)
-    if current:
-        values.append("".join(current).strip())
-    return values
-
-
-def _parameter_type(raw: str) -> str:
-    value = re.sub(r"@[\w.]+(?:\([^)]*\))?", "", raw)
-    value = re.sub(r"\b(?:final|volatile|transient)\b", "", value).strip()
-    parts = value.rsplit(None, 1)
-    return _normalize_java_type(parts[0] if len(parts) == 2 else value)
-
-
-def _normalize_java_type(raw: str) -> str:
-    value = re.sub(r"\s+", "", raw or "")
-    value = value.replace("...", "[]")
-    value = re.sub(r"\b(?:java\.lang|java\.util)\.", "", value)
-    return value
-
-
-def _source_path_for_class(class_name: str, paths: set[str]) -> str:
-    suffix = f"/{class_name}.java"
-    matches = sorted(path for path in paths if path.endswith(suffix) or path == f"{class_name}.java")
-    return matches[0] if len(matches) == 1 else ""
 
 
 def _requirement_for_design(work_packet: dict[str, object], design_element_id: str) -> str:

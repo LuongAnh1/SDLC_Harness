@@ -338,17 +338,6 @@ def resolve_verification_preparation_specs(
     return _PREPARATION_SPECS_BY_PROJECT.get(policy.project_profile_id, ())
 
 
-def resolve_verification_preparation_spec(
-    policy: VerificationStagePolicy,
-    *,
-    run_id: str | None = None,
-) -> VerificationPreparationSpec | None:
-    """Giữ API tương thích cho caller cũ cần dependency preparation đầu tiên."""
-
-    specs = resolve_verification_preparation_specs(policy, run_id=run_id)
-    return specs[0] if specs else None
-
-
 def resolve_verification_stage_specs(
     policy: VerificationStagePolicy,
     *,

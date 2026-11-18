@@ -5816,29 +5816,6 @@ def _execute_action(
     return {"ok": False, "error": "unsupported_action"}
 
 
-def _selected_repair_paths(
-    work_packet: dict[str, object],
-    feedback: dict[str, object] | None,
-    *,
-    target_path: Path | None = None,
-) -> set[str]:
-    """Compatibility wrapper returning diagnostic hints, not the write boundary."""
-
-    closure = build_repair_closure(
-        work_packet=work_packet,
-        feedback=feedback,
-        target_path=target_path,
-    )
-    return set(
-        _string_items(closure.get("diagnostic_paths"))
-        or _string_items(closure.get("direct_repair_paths"))
-    )
-
-
-def _looks_like_test_path(path: str) -> bool:
-    return developer_path_is_test(path)
-
-
 def _compiler_symbol_referenced(text_folded: str, symbol_folded: str) -> bool:
     """Match compiler-style type ownership without treating every type mention as a repair target."""
 
@@ -6376,12 +6353,6 @@ def _item_diagnostic_paths(item: dict[str, object]) -> list[str]:
 def _item_contract_anchor_paths(item: dict[str, object]) -> list[str]:
     declared = [path.replace("\\", "/") for path in _string_items(item.get("contract_anchor_paths"))]
     return list(dict.fromkeys(declared))
-
-
-def _item_required_paths(item: dict[str, object]) -> list[str]:
-    """Compatibility alias: legacy required paths are context, not a mutation checklist."""
-
-    return _item_context_paths(item)
 
 
 def _item_ui_screen_ids(item: dict[str, object]) -> list[str]:
@@ -7248,26 +7219,6 @@ def _reopen_scope_expanded_items(
     journal["updated_at"] = reopened_at
 
 
-def _reopen_database_entrypoint_items(
-    *,
-    target_path: Path,
-    session_dir: Path,
-    manifest: dict[str, object],
-    journal: dict[str, object],
-    item_ids: list[str],
-) -> None:
-    """Compatibility wrapper for the earlier DB-entrypoint scope migration."""
-
-    _reopen_scope_expanded_items(
-        target_path=target_path,
-        session_dir=session_dir,
-        manifest=manifest,
-        journal=journal,
-        item_ids=item_ids,
-        reason="database_entrypoint_scope",
-    )
-
-
 def _supersede_pending_step_review(
     *,
     session_dir: Path,
@@ -7406,15 +7357,6 @@ def _current_passed_stages(
         and _dict_value(result.get("input_hashes")) == current_hashes
         and str(result.get("stage_id") or "")
     }
-
-
-def _current_failed_stages(
-    history: list[dict[str, object]],
-    *,
-    current_hashes: dict[str, str],
-) -> set[str]:
-    del current_hashes
-    return set(_verification_repair_state(history))
 
 
 def _timeout_diagnostic_state(history: list[dict[str, object]]) -> dict[str, object]:

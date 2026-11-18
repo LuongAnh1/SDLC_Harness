@@ -327,22 +327,6 @@ class LlmClient:
         )
         return completion
 
-    def _call_chat_completions(
-        self,
-        *,
-        system: str,
-        prompt: str,
-        json_mode: bool = False,
-        max_tokens: int | None = None,
-    ) -> LlmCompletion:
-        """Gọi API Chat Completions tương thích OpenAI bằng stdlib."""
-
-        return self._call_chat_completions_messages(
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-            json_mode=json_mode,
-            max_tokens=max_tokens,
-        )
-
     def _call_chat_completions_messages(
         self,
         *,

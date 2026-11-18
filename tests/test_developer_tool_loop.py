@@ -41,9 +41,8 @@ from sdlc_harness.agents.developer.execution import (
     _prior_attempt_feedback,
     _prepare_patch_text,
     _required_test_mutation_paths,
-    _reopen_database_entrypoint_items,
+    _reopen_scope_expanded_items,
     _search_code,
-    _selected_repair_paths,
     _step_review_start_ordinal,
     _supersede_pending_step_review,
     _timeout_diagnostic_completion_error,
@@ -4832,12 +4831,13 @@ class DeveloperToolLoopTest(unittest.TestCase):
         completion.parent.mkdir(parents=True, exist_ok=True)
         completion.write_text(json.dumps({"unit_id": "WU-DB-QUERY"}), encoding="utf-8")
 
-        _reopen_database_entrypoint_items(
+        _reopen_scope_expanded_items(
             target_path=self.repo,
             session_dir=session_dir,
             manifest=merged,
             journal=journal,
             item_ids=reopened,
+            reason="database_entrypoint_scope",
         )
 
         reopened_entry = journal["items"][1]
@@ -5092,32 +5092,7 @@ class DeveloperToolLoopTest(unittest.TestCase):
         manifest = json.loads((self.root / result.manifest_path).read_text(encoding="utf-8"))
         self.assertEqual(manifest["repair_iteration"], 1)
 
-    def test_verification_feedback_does_not_treat_incidental_type_mentions_as_repair_targets(self) -> None:
-        packet = self.work_packet()
-        selected = _selected_repair_paths(
-            packet,
-            {
-                "feedback_source": "verification",
-                "verification": {
-                    "stderr": ".\\SRC\\MAINTEST.java:12: error: cannot call main.run()",
-                },
-            },
-        )
 
-        self.assertEqual(selected, {"src/MainTest.java"})
-
-    def test_verification_feedback_includes_high_signal_compiler_owner_symbols(self) -> None:
-        selected = _selected_repair_paths(
-            self.work_packet(),
-            {
-                "feedback_source": "verification",
-                "verification": {
-                    "stderr": ".\\src\\MainTest.java:12: error: cannot inherit from final Main",
-                },
-            },
-        )
-
-        self.assertEqual(selected, {"src/Main.java", "src/MainTest.java"})
 
     def test_blocked_repair_scope_mismatch_has_safe_resume_migration(self) -> None:
         state = {

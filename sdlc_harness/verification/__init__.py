@@ -10,7 +10,6 @@ from .registry import (
     RUNTIME_PROBE_SPEC_PATH,
     VerificationPreparationSpec,
     VerificationStageSpec,
-    resolve_verification_preparation_spec,
     resolve_verification_preparation_specs,
     resolve_verification_stage_specs,
 )
@@ -32,7 +31,6 @@ __all__ = [
     "VerificationStageResult",
     "VerificationPreparationSpec",
     "VerificationStageSpec",
-    "resolve_verification_preparation_spec",
     "resolve_verification_preparation_specs",
     "resolve_verification_stage_specs",
 ]
