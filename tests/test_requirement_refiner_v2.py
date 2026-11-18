@@ -92,6 +92,21 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             ),
         ]
 
+    def test_open_questions_without_effective_blocking_get_it_from_python(self) -> None:
+        # The prompt no longer asks for effective_blocking; Python must still set it on every question.
+        without = deepcopy(self.payload)
+        for question in without["open_questions"]:
+            question.pop("effective_blocking")
+
+        baseline, _ = self.refine(self.completion(self.payload))
+        result, _ = self.refine(self.completion(without))
+
+        self.assertEqual(result.final_report.status, baseline.final_report.status)
+        self.assertEqual(
+            [question["effective_blocking"] for question in result.model.open_questions],
+            [question["effective_blocking"] for question in baseline.model.open_questions],
+        )
+
     def test_step_review_pauses_before_input_and_after_output_without_skipping_action(self) -> None:
         client = ScriptedLlmClient(self.source_actions() + [self.completion(self.payload)])
         with TemporaryDirectory() as directory:
@@ -236,7 +251,7 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             )
             self.assertEqual(
                 [call["max_tokens"] for call in client.calls],
-                [2048, 4096, 32768],
+                [2048, 4096, 65536],
             )
             prompts = [str(call["prompt"]) for call in client.calls]
             self.assertNotIn("# Requirement Model V2 Structured Output", prompts[0])
@@ -245,6 +260,10 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             self.assertIn('{"action":"source.search|source.read"', prompts[1])
             self.assertIn("# Requirement Model V2 Structured Output", prompts[2])
             self.assertIn('{"action":"source.search|source.read|complete"', prompts[2])
+            # The model contract must not contradict the action envelope (Conduit UC1: bare models returned).
+            self.assertIn('{"action":"complete","arguments":{"requirement_model":{...}}', prompts[2])
+            self.assertNotIn("Return exactly one JSON object", prompts[2])
+            self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])
             self.assertIn(
@@ -529,7 +548,7 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
         self.assertIn("must appear in the question's `affects` list", repair_prompt)
         self.assertIn("requirement.propose_delta", repair_prompt)
         self.assertIn("Requirement Repair Delta V1", repair_prompt)
-        self.assertNotIn("## Required JSON shape", repair_prompt)
+        self.assertNotIn("## Required `requirement_model` shape", repair_prompt)
 
     def test_invalid_question_options_use_bounded_delta_repair(self) -> None:
         invalid = deepcopy(self.payload)

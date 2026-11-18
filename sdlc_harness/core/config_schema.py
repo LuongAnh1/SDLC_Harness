@@ -13,7 +13,7 @@ _PROJECT_PROFILE_OPTIONS = list_project_profile_ids()
 PHASE1_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     "refiner_list": {"label": "Refiner source list", "effort": "none", "max_tokens": 2048, "timeout": 90},
     "refiner_navigation": {"label": "Refiner source navigation", "effort": "low", "max_tokens": 4096, "timeout": 90},
-    "refiner_synthesis": {"label": "Refiner synthesis", "effort": "high", "max_tokens": 32768, "timeout": 180},
+    "refiner_synthesis": {"label": "Refiner synthesis", "effort": "high", "max_tokens": 65536, "timeout": 300},
     "refiner_repair": {"label": "Refiner repair", "effort": "high", "max_tokens": 32768, "timeout": 180},
     "refiner_final_repair": {"label": "Refiner final repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
     "coverage": {"label": "Requirement coverage", "effort": "high", "max_tokens": 24576, "timeout": 180},

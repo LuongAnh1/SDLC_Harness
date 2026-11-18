@@ -1,6 +1,6 @@
 # Requirement Model V2 Structured Output
 
-Return exactly one JSON object. Do not use markdown fences or prose.
+This section defines `arguments.requirement_model` of the `complete` action. Never return the model on its own: the response is always the one action object `{"action":"complete","arguments":{"requirement_model":{...}},"summary":"..."}`, with no markdown fences or prose.
 
 Dataset: `{{DATASET}}`
 Use case: `{{USE_CASE}}`
@@ -26,7 +26,7 @@ Source ref: `{{SOURCE_REF}}`
 - When the source explicitly delegates such a conventional default, keep the unresolved choice out of `BR-*`, `AC-*`, and `QR-*` until Python accepts it as an assumption. It may reference a related flow item, but use one of the exact agent-default categories above and do not mark a scenario surface `clarification_required` solely for that choice.
 - Use `deferred_to_design` for colors, layout, visual style, UI-only wording, terminology-only choices, and implementation preferences. Do not create an assumption for them.
 - Use `human_required` for source conflict, business rules, acceptance criteria, data identity, API/external contracts, authorization, security/privacy, compliance, scope, or a decision that changes whether a UI/API/business/data surface participates.
-- `effective_blocking`, root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
+- Do not return `effective_blocking`; Python derives it from `proposed_blocking` and the clarification policy. Root metadata, provenance ledger, evidence `source_id`, decisions, and validation are controlled by Python. Evidence must cite an `observation_ref` returned by the source tool; Python will verify the quote, stamp `source_id`, and remove the temporary observation reference.
 
 ## Required source coverage pass
 
@@ -144,7 +144,9 @@ Surface classification rules:
 - Never ask a human to repair a snapshot, catalog, fingerprint, tool argument, JSON shape,
   or validation error.
 
-## Required JSON shape
+## Required `requirement_model` shape
+
+Put this object inside the `complete` action described above.
 
 ```json
 {
@@ -192,7 +194,7 @@ Surface classification rules:
   "acceptance_criteria": [{"id": "AC-1", "text": "", "status": "unknown", "evidence_refs": [], "open_question_refs": ["Q-1"], "verifies": ["BR-1"]}],
   "quality_requirements": [],
   "assumptions": [{"id": "ASM-1", "text": "...", "status": "assumption", "evidence_refs": [], "open_question_refs": [], "reason": "...", "affects": []}],
-  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "effective_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "multiple_choice", "options": [{"key": "option_a", "answer": "First user-facing answer", "implication": "Optional impact"}, {"key": "option_b", "answer": "Second user-facing answer", "implication": null}], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
+  "open_questions": [{"id": "Q-1", "question": "...", "category": "...", "proposed_disposition": "human_required|agent_default|deferred_to_design", "proposed_blocking": false, "affects": [], "depends_on": [], "status": "open", "answer_guidance": null, "answer_mode": "multiple_choice", "options": [{"key": "option_a", "answer": "First user-facing answer", "implication": "Optional impact"}, {"key": "option_b", "answer": "Second user-facing answer", "implication": null}], "recommended_option": null, "suggested_answer": null, "why_it_is_safe": null, "impact": "low|medium|high", "uncertainty": "low|medium|high", "reversible": false, "evidence_refs": []}],
   "decisions": [],
   "evidence": [{"id": "E-1", "observation_ref": "OBS-1", "location": "...", "quote": "exact quote from that observation"}],
   "validation": {"status": "invalid", "errors": []}
