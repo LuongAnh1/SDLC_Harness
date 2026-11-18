@@ -36,6 +36,11 @@ from .phase4_browser import _verification_digest, _worktree_fingerprint
 from .phase4_closure import _next_closure_artifact_version, _write_closure_json
 from .phase4_documentation import _read_text_exact, _sha256
 from ..core import run_state
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from ..storage.runtime import RuntimeStore
+    from ..verification.runner import VerificationRunner
 
 FINAL_VERIFICATION_SCHEMA_VERSION = "final_verification_v1"
 ALLOWED_FINAL_VERIFICATION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -43,8 +48,28 @@ _FINAL_PHASE = "final_verification"
 _ENVIRONMENT_ERROR = "final_verification_environment_failed"
 
 
-class PhaseFourFinalVerificationCycle:
+class FinalVerificationHost(Protocol):
+    """Everything Final Verification uses from the Phase 4 workflow (its whole dependency surface)."""
+
+    store: RuntimeStore
+    verification_runner: VerificationRunner
+
+    def _browser_inputs(self, *, state: dict[str, object], run_id: str) -> dict[str, object]: ...
+
+    def _code_review_publication_manifest(
+        self, *, state: dict[str, object], run_id: str, work_packet: dict[str, object], qa_generated: dict[str, object]
+    ) -> tuple[list[str], list[str]]: ...
+
+    def _existing_artifact_path(self, relative_path: str, *, run_id: str) -> Path: ...
+
+    def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]: ...
+
+
+class FinalVerificationLane:
     """Own `documentation_approved` -> `final_verification_passed`."""
+
+    def __init__(self, host: FinalVerificationHost) -> None:
+        self.host = host
 
     def _final_verification_retry_allowed(self, state: dict[str, object]) -> bool:
         return (
@@ -57,7 +82,7 @@ class PhaseFourFinalVerificationCycle:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
         pin = run_state.final_verification(state)
         state[run_state.FINAL_VERIFICATION] = {**pin, "status": "running", "started_at": utc_now_iso()}
-        self.store.write_state(state)
+        self.host.store.write_state(state)
         report: dict[str, object] = {"schema_version": FINAL_VERIFICATION_SCHEMA_VERSION, "run_id": run_id}
         try:
             self._run_final_verification(state=state, run_id=run_id, report=report)
@@ -82,8 +107,8 @@ class PhaseFourFinalVerificationCycle:
                     "summary_for_user": f"Final Verification bị chặn cho run {run_id}: {exc.message}",
                 }
             )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
+            self.host.store.write_state(state)
+            return self.host._status_response(state, created_new_run=False)
 
         artifact_ref = self._write_final_verification_report(run_id, {**report, "status": "passed"})
         latest_artifacts["final_verification"] = artifact_ref
@@ -112,12 +137,12 @@ class PhaseFourFinalVerificationCycle:
                 ),
             }
         )
-        self.store.write_state(state)
-        return self._status_response(state, created_new_run=False)
+        self.host.store.write_state(state)
+        return self.host._status_response(state, created_new_run=False)
 
     def _run_final_verification(self, *, state: dict[str, object], run_id: str, report: dict[str, object]) -> None:
         def read(ref: str) -> dict[str, object]:
-            return _read_json_artifact(self._existing_artifact_path(ref, run_id=run_id), run_id=run_id)
+            return _read_json_artifact(self.host._existing_artifact_path(ref, run_id=run_id), run_id=run_id)
 
         documentation = run_state.documentation_closure(state)
         if str(documentation.get("status") or "") != "approved" or not documentation.get("artifact"):
@@ -126,7 +151,7 @@ class PhaseFourFinalVerificationCycle:
                 "Final Verification needs the approved Documentation Closure.",
                 run_id=run_id,
             )
-        inputs = self._browser_inputs(state=state, run_id=run_id)
+        inputs = self.host._browser_inputs(state=state, run_id=run_id)
         target_path: Path = inputs["target_path"]
         doc_artifact = read(str(documentation["artifact"]))
 
@@ -155,7 +180,7 @@ class PhaseFourFinalVerificationCycle:
 
         # F2: the publication manifest must cover every change, then CI's own suite runs on exactly that tree.
         qa_generated = read(_required_phase4_artifact(_string_dict(state.get("latest_artifacts")), "qa_generated_tests", run_id=run_id))
-        paths, evidence_only = self._code_review_publication_manifest(
+        paths, evidence_only = self.host._code_review_publication_manifest(
             state=state, run_id=run_id, work_packet=inputs["frozen_packet"], qa_generated=qa_generated
         )
         unpublished = sorted(
@@ -179,7 +204,7 @@ class PhaseFourFinalVerificationCycle:
         tree = target_path.parent / f"fv_{run_id[-8:]}"
         _create_publication_tree(target_path, tree, paths, run_id=run_id)
         try:
-            result = self.verification_runner.run(target_path=tree, work_packet=packet, verification_policy=policy)
+            result = self.host.verification_runner.run(target_path=tree, work_packet=packet, verification_policy=policy)
             report["f2"] = {
                 "ok": result.status == "passed",
                 "policy_version": policy.policy_version,
@@ -212,7 +237,7 @@ class PhaseFourFinalVerificationCycle:
             if missing:
                 raise HarnessError("final_verification_failed", f"F3: documented commands F2 did not run: {missing}", run_id=run_id)
             if demo is not None:
-                demo_result = self.verification_runner.run_demo_flag_stage(
+                demo_result = self.host.verification_runner.run_demo_flag_stage(
                     target_path=tree,
                     work_packet=packet,
                     verification_policy=policy,
@@ -234,10 +259,24 @@ class PhaseFourFinalVerificationCycle:
             _remove_publication_tree(target_path, tree)
 
     def _write_final_verification_report(self, run_id: str, report: dict[str, object]) -> str:
-        version = _next_closure_artifact_version(self.store, run_id, "final_verification")
+        version = _next_closure_artifact_version(self.host.store, run_id, "final_verification")
         return _write_closure_json(
-            self.store, run_id, f"final_verification_v{version}.json", {**report, "version": version}
+            self.host.store, run_id, f"final_verification_v{version}.json", {**report, "version": version}
         )
+
+
+class PhaseFourFinalVerificationCycle:
+    """Workflow side of the D2 pilot: the names the graph and other lanes call, delegated to `FinalVerificationLane`."""
+
+    def _final_verification_lane(self) -> FinalVerificationLane:
+        # Built per call: the lane reads its dependencies from the workflow when it runs (tests replace them).
+        return FinalVerificationLane(self)
+
+    def _final_verification_retry_allowed(self, state: dict[str, object]) -> bool:
+        return self._final_verification_lane()._final_verification_retry_allowed(state)
+
+    def _continue_final_verification(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        return self._final_verification_lane()._continue_final_verification(state=state, run_id=run_id)
 
 
 def _fingerprint_changes(captured: dict[str, object], current: dict[str, object]) -> list[str]:

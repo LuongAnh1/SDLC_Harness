@@ -35,6 +35,11 @@ from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4 import _dict_items
 from .phase4_closure import _next_closure_artifact_version, _write_closure_json, _write_closure_text
 from ..core import run_state
+from typing import TYPE_CHECKING, Protocol
+
+if TYPE_CHECKING:
+    from ..storage.runtime import RuntimeStore
+    from ..workspaces import RunWorkspaceManager
 
 DOCUMENTATION_CLOSURE_CONTRACT_VERSION = "documentation_closure_v1"
 DOCUMENTATION_CHECKPOINT_TYPE = "documentation_closure_review"
@@ -45,8 +50,24 @@ _DOCUMENTATION_PHASE = "documentation_closure"
 HARNESS_EVIDENCE_PATHS = (RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH)
 
 
-class PhaseFourDocumentationCycle:
+class DocumentationHost(Protocol):
+    """Everything Documentation Closure uses from the Phase 4 workflow (its whole dependency surface)."""
+
+    store: RuntimeStore
+    workspace_manager: RunWorkspaceManager
+
+    def _browser_inputs(self, *, state: dict[str, object], run_id: str) -> dict[str, object]: ...
+
+    def _existing_artifact_path(self, relative_path: str, *, run_id: str) -> Path: ...
+
+    def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]: ...
+
+
+class DocumentationClosureLane:
     """Own `qa_tested` -> `documentation_approved` for runs pinned to Documentation Closure."""
+
+    def __init__(self, host: DocumentationHost) -> None:
+        self.host = host
 
     def _documentation_pin(self, state: dict[str, object]) -> dict[str, object]:
         return run_state.documentation_closure(state)
@@ -64,9 +85,9 @@ class PhaseFourDocumentationCycle:
             "pinned_at": utc_now_iso(),
         }
         state[run_state.DOCUMENTATION_CLOSURE] = {**pin, "status": "drafting"}
-        self.store.write_state(state)
+        self.host.store.write_state(state)
         try:
-            inputs = self._browser_inputs(state=state, run_id=run_id)
+            inputs = self.host._browser_inputs(state=state, run_id=run_id)
             target_path: Path = inputs["target_path"]
             browser = run_state.browser_stages(state)
             qa = _dict_value(browser.get("qa"))
@@ -84,7 +105,7 @@ class PhaseFourDocumentationCycle:
                     run_id=run_id,
                 )
             def read(ref: str) -> dict[str, object]:
-                return _read_json_artifact(self._existing_artifact_path(ref, run_id=run_id), run_id=run_id)
+                return _read_json_artifact(self.host._existing_artifact_path(ref, run_id=run_id), run_id=run_id)
 
             stage_results = _dict_items(_dict_value(read(refs["verification"]).get("verification")).get("stage_results"))
             policy = build_browser_stage_policy(project=get_project_profile(inputs["planning_policy"].project_profile_id))
@@ -123,7 +144,7 @@ class PhaseFourDocumentationCycle:
                 )
             with open(readme_path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(updated)
-            version = _next_closure_artifact_version(self.store, run_id, "documentation_closure")
+            version = _next_closure_artifact_version(self.host.store, run_id, "documentation_closure")
             artifact = {
                 "schema_version": DOCUMENTATION_CLOSURE_CONTRACT_VERSION,
                 "run_id": run_id,
@@ -135,9 +156,9 @@ class PhaseFourDocumentationCycle:
                 "readme_sha256_after": _sha256(updated),
                 "gates": {"ok": True, "gate_ids": ["DC1", "DC2", "DC3", "DC4", "DC5"], "issues": []},
             }
-            artifact_ref = _write_closure_json(self.store, run_id, f"documentation_closure_v{version}.json", artifact)
+            artifact_ref = _write_closure_json(self.host.store, run_id, f"documentation_closure_v{version}.json", artifact)
             checkpoint_ref = _write_closure_text(
-                self.store,
+                self.host.store,
                 run_id,
                 f"documentation_closure_checkpoint_v{version}.md",
                 _documentation_checkpoint_markdown(
@@ -158,8 +179,8 @@ class PhaseFourDocumentationCycle:
                     "summary_for_user": f"Documentation Closure bị chặn cho run {run_id}: {exc.message}",
                 }
             )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
+            self.host.store.write_state(state)
+            return self.host._status_response(state, created_new_run=False)
 
         latest_artifacts.update(
             {"documentation_closure": artifact_ref, "documentation_closure_checkpoint": checkpoint_ref}
@@ -201,8 +222,8 @@ class PhaseFourDocumentationCycle:
                 ),
             }
         )
-        self.store.write_state(state)
-        return self._status_response(state, created_new_run=False)
+        self.host.store.write_state(state)
+        return self.host._status_response(state, created_new_run=False)
 
     def _documentation_publication_paths(
         self,
@@ -221,7 +242,7 @@ class PhaseFourDocumentationCycle:
         added: set[str] = set()
         receipt_ref = str(_string_dict(state.get("latest_artifacts")).get("runtime_config_execution") or "")
         if receipt_ref:
-            receipt = _read_json_artifact(self._existing_artifact_path(receipt_ref, run_id=run_id), run_id=run_id)
+            receipt = _read_json_artifact(self.host._existing_artifact_path(receipt_ref, run_id=run_id), run_id=run_id)
             added.add(str(receipt.get("path") or ""))
         for requirement in _dict_items(work_packet.get("package_dependency_requirements")):
             added.add(str(requirement.get("consumer_manifest_path") or requirement.get("manifest_path") or ""))
@@ -242,7 +263,7 @@ class PhaseFourDocumentationCycle:
         receipt_ref = str(latest_artifacts.get("runtime_config_execution") or "")
         if not receipt_ref:
             return {}
-        receipt = _read_json_artifact(self._existing_artifact_path(receipt_ref, run_id=run_id), run_id=run_id)
+        receipt = _read_json_artifact(self.host._existing_artifact_path(receipt_ref, run_id=run_id), run_id=run_id)
         path = str(receipt.get("path") or "")
         env_file = target_path / path
         return parse_env_example(_read_text_exact(env_file)) if path and env_file.is_file() else {}
@@ -253,8 +274,8 @@ class PhaseFourDocumentationCycle:
         run_id: str,
         checkpoint_id: str | None = None,
     ) -> dict[str, object]:
-        with self.workspace_manager.locked_workspace(run_id):
-            state = self.store.read_state(run_id)
+        with self.host.workspace_manager.locked_workspace(run_id):
+            state = self.host.store.read_state(run_id)
             if str(state.get("status") or "") != "waiting_documentation_review":
                 raise HarnessError(
                     "checkpoint_not_current", f"Run is not waiting for documentation review: {run_id}", run_id=run_id
@@ -264,7 +285,7 @@ class PhaseFourDocumentationCycle:
             if checkpoint.get("type") != DOCUMENTATION_CHECKPOINT_TYPE or (checkpoint_id and checkpoint_id != current_id):
                 raise HarnessError("checkpoint_not_current", "This is not the current documentation checkpoint.", run_id=run_id)
             pin = self._documentation_pin(state)
-            target_path = self._browser_inputs(state=state, run_id=run_id)["target_path"]
+            target_path = self.host._browser_inputs(state=state, run_id=run_id)["target_path"]
             # The owner approves the exact bytes the gates checked; an edit after drafting needs a new draft.
             if _sha256(_read_text_exact(target_path / DOCUMENTATION_PATH)) != pin.get("readme_sha256"):
                 raise HarnessError(
@@ -289,8 +310,36 @@ class PhaseFourDocumentationCycle:
                     "summary_for_user": f"Anh đã duyệt mục README cho run {run_id}.",
                 }
             )
-            self.store.write_state(state)
-            return self._status_response(state, created_new_run=False)
+            self.host.store.write_state(state)
+            return self.host._status_response(state, created_new_run=False)
+
+
+class PhaseFourDocumentationCycle:
+    """Workflow side of the D2 pilot: the names the graph and other lanes call, delegated to `DocumentationClosureLane`."""
+
+    def _documentation_closure_lane(self) -> DocumentationClosureLane:
+        # Built per call: the lane reads its dependencies from the workflow when it runs (tests replace them).
+        return DocumentationClosureLane(self)
+
+    def _continue_documentation_closure(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
+        return self._documentation_closure_lane()._continue_documentation_closure(state=state, run_id=run_id)
+
+    def _documentation_publication_paths(
+        self,
+        *,
+        state: dict[str, object],
+        run_id: str,
+        work_packet: dict[str, object],
+    ) -> tuple[list[str], list[str]]:
+        return self._documentation_closure_lane()._documentation_publication_paths(state=state, run_id=run_id, work_packet=work_packet)
+
+    def approve_documentation_checkpoint(
+        self,
+        *,
+        run_id: str,
+        checkpoint_id: str | None = None,
+    ) -> dict[str, object]:
+        return self._documentation_closure_lane().approve_documentation_checkpoint(run_id=run_id, checkpoint_id=checkpoint_id)
 
 
 def _read_text_exact(path: Path) -> str:
