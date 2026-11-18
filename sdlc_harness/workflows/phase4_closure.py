@@ -65,6 +65,7 @@ from .phase4 import (
     _required_phase4_artifact,
     _string_items,
 )
+from ..core import run_state
 
 # Error codes a later continue_run retries, and the closure stage it resumes.
 _RETRYABLE_BLOCKS = {
@@ -100,7 +101,7 @@ class PhaseFourRuntimeClosureCycle:
         error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
         if str(state.get("current_phase") or "") != "runtime_closure":
             return ""
-        blocked_from = str(_dict_value(state.get("runtime_closure")).get("blocked_from") or "planning")
+        blocked_from = str(run_state.runtime_closure(state).get("blocked_from") or "planning")
         # A spent repair budget the owner raised with `adjust_budget` reruns the step that hit it.
         if blocked_from in {"verifying", "reviewing"} and self._spent_budget_has_room(state):
             return blocked_from
@@ -356,7 +357,7 @@ class PhaseFourRuntimeClosureCycle:
         )
 
     def _pin_runtime_closure(self, state: dict[str, object], *, new_attempt: bool) -> dict[str, object]:
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         if not pin.get("mode"):
             pin = {
                 "mode": "enforce",
@@ -368,7 +369,7 @@ class PhaseFourRuntimeClosureCycle:
         elif new_attempt:
             pin = {**pin, "planning_attempt": int(pin.get("planning_attempt") or 1) + 1}
         pin = {**pin, "status": "planning"}
-        state["runtime_closure"] = pin
+        state[run_state.RUNTIME_CLOSURE] = pin
         self.store.write_state(state)
         return pin
 
@@ -440,7 +441,7 @@ class PhaseFourRuntimeClosureCycle:
         latest_artifacts: dict[str, str],
         exc: HarnessError,
     ) -> dict[str, object]:
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         raw = str(getattr(exc, "raw_response", "") or "")
         if raw:
             latest_artifacts["runtime_closure_raw_response"] = _write_closure_text(
@@ -479,7 +480,7 @@ class PhaseFourRuntimeClosureCycle:
     def _continue_runtime_closure_act(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         """Run or resume the Developer tool loop over the approved closure units."""
 
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
         latest_artifacts = dict(artifact_paths)
         artifact_version = _int_value(pin.get("artifact_version"))
@@ -645,7 +646,7 @@ class PhaseFourRuntimeClosureCycle:
                 "latest_artifacts": latest_artifacts,
                 "pending_checkpoint": None,
                 "runtime_closure": self._with_session_scope_extensions(
-                    {**_dict_value(state.get("runtime_closure")), "status": "written"},
+                    {**run_state.runtime_closure(state), "status": "written"},
                     journal_ref=result.journal_path,
                     run_id=run_id,
                 ),
@@ -663,7 +664,7 @@ class PhaseFourRuntimeClosureCycle:
     # ------------------------------------------------------------------ post-execution (L5.3.6)
 
     def _closure_run_inputs(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         artifact_paths = _string_dict(state.get("latest_artifacts"))
 
         def read(ref: str) -> dict[str, object]:
@@ -693,8 +694,8 @@ class PhaseFourRuntimeClosureCycle:
         }
 
     def _set_closure_stage(self, state: dict[str, object], stage: str) -> dict[str, object]:
-        pin = {**_dict_value(state.get("runtime_closure")), "status": stage}
-        state["runtime_closure"] = pin
+        pin = {**run_state.runtime_closure(state), "status": stage}
+        state[run_state.RUNTIME_CLOSURE] = pin
         self.store.write_state(state)
         return pin
 
@@ -803,7 +804,7 @@ class PhaseFourRuntimeClosureCycle:
                 "current_phase": "runtime_closure",
                 "status": "runtime_closure_verified",
                 "latest_artifacts": latest_artifacts,
-                "runtime_closure": {**_dict_value(state.get("runtime_closure")), "status": "verified"},
+                "runtime_closure": {**run_state.runtime_closure(state), "status": "verified"},
                 "allowed_next_actions": ALLOWED_RUNTIME_CLOSURE_AUTOMATION_ACTIONS,
                 "last_error": None,
                 "summary_for_user": (
@@ -843,7 +844,7 @@ class PhaseFourRuntimeClosureCycle:
                 + "; ".join(routed["conflicts"]),
                 run_id=run_id,
             )
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         iterations = _int_value(pin.get("repair_iterations"))
         if iterations >= self._repair_limit(state, "runtime_closure_repair"):
             raise HarnessError(
@@ -889,7 +890,7 @@ class PhaseFourRuntimeClosureCycle:
         """Developer repair over the cited closure units (plus D11 a Plan units), then back to G14."""
 
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         session = _dict_value(pin.get("repair_session"))
         iteration = _int_value(pin.get("repair_iterations")) + 1
         artifact_version = _int_value(session.get("artifact_version"))
@@ -1035,7 +1036,7 @@ class PhaseFourRuntimeClosureCycle:
                 "latest_artifacts": latest_artifacts,
                 "runtime_closure": self._with_session_scope_extensions(
                     {
-                        **_dict_value(state.get("runtime_closure")),
+                        **run_state.runtime_closure(state),
                         "status": "written",
                         "repair_iterations": iteration,
                         "repair_session": None,
@@ -1197,7 +1198,7 @@ class PhaseFourRuntimeClosureCycle:
         verification: dict[str, object],
         review: dict[str, object],
     ) -> dict[str, object]:
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         runnable = closure_runnable_status(contract)
         report_version = _next_closure_artifact_version(self.store, run_id, "runtime_closure_report", suffix=".md")
         report_path = _write_closure_text(
@@ -1266,7 +1267,7 @@ class PhaseFourRuntimeClosureCycle:
     def _runtime_closure_publication_paths(self, *, state: dict[str, object], run_id: str) -> list[str]:
         """Closure files published with the Draft PR (D13): closure packet paths, D11 extensions, probe spec."""
 
-        pin = _dict_value(state.get("runtime_closure"))
+        pin = run_state.runtime_closure(state)
         if str(pin.get("status") or "") != "runtime_closed" or not pin.get("work_packet"):
             return []
         packet = _read_json_artifact(
@@ -1313,7 +1314,7 @@ class PhaseFourRuntimeClosureCycle:
                     f"Checkpoint {checkpoint_id} is not the current runtime closure checkpoint {current_id}.",
                     run_id=run_id,
                 )
-            pin = _dict_value(state.get("runtime_closure"))
+            pin = run_state.runtime_closure(state)
             state.update(
                 {
                     "updated_at": utc_now_iso(),

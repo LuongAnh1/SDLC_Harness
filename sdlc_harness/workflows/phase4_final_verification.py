@@ -35,6 +35,7 @@ from .phase4 import _dict_items, _required_phase4_artifact
 from .phase4_browser import _verification_digest, _worktree_fingerprint
 from .phase4_closure import _next_closure_artifact_version, _write_closure_json
 from .phase4_documentation import _read_text_exact, _sha256
+from ..core import run_state
 
 FINAL_VERIFICATION_SCHEMA_VERSION = "final_verification_v1"
 ALLOWED_FINAL_VERIFICATION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -54,8 +55,8 @@ class PhaseFourFinalVerificationCycle:
 
     def _continue_final_verification(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
-        pin = _dict_value(state.get("final_verification"))
-        state["final_verification"] = {**pin, "status": "running", "started_at": utc_now_iso()}
+        pin = run_state.final_verification(state)
+        state[run_state.FINAL_VERIFICATION] = {**pin, "status": "running", "started_at": utc_now_iso()}
         self.store.write_state(state)
         report: dict[str, object] = {"schema_version": FINAL_VERIFICATION_SCHEMA_VERSION, "run_id": run_id}
         try:
@@ -64,7 +65,7 @@ class PhaseFourFinalVerificationCycle:
             if "f1" in report:
                 artifact_ref = self._write_final_verification_report(run_id, {**report, "status": "failed"})
                 latest_artifacts["final_verification"] = artifact_ref
-            state["final_verification"] = {**_dict_value(state.get("final_verification")), "status": "failed"}
+            state[run_state.FINAL_VERIFICATION] = {**run_state.final_verification(state), "status": "failed"}
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -86,8 +87,8 @@ class PhaseFourFinalVerificationCycle:
 
         artifact_ref = self._write_final_verification_report(run_id, {**report, "status": "passed"})
         latest_artifacts["final_verification"] = artifact_ref
-        state["final_verification"] = {
-            **_dict_value(state.get("final_verification")),
+        state[run_state.FINAL_VERIFICATION] = {
+            **run_state.final_verification(state),
             "status": "passed",
             "artifact": artifact_ref,
             "worktree_sha256": _dict_value(report.get("f1")).get("worktree_sha256"),
@@ -118,7 +119,7 @@ class PhaseFourFinalVerificationCycle:
         def read(ref: str) -> dict[str, object]:
             return _read_json_artifact(self._existing_artifact_path(ref, run_id=run_id), run_id=run_id)
 
-        documentation = _dict_value(state.get("documentation_closure"))
+        documentation = run_state.documentation_closure(state)
         if str(documentation.get("status") or "") != "approved" or not documentation.get("artifact"):
             raise HarnessError(
                 "final_verification_documentation_not_approved",
@@ -130,7 +131,7 @@ class PhaseFourFinalVerificationCycle:
         doc_artifact = read(str(documentation["artifact"]))
 
         # F1: nothing but the approved README section changed since the last browser verification.
-        verification_ref = str(_dict_value(_dict_value(state.get("browser_stages")).get("qa")).get("verification") or "")
+        verification_ref = str(_dict_value(run_state.browser_stages(state).get("qa")).get("verification") or "")
         captured = _dict_value(read(verification_ref).get("worktree_fingerprint")) if verification_ref else {}
         current = _worktree_fingerprint(target_path)
         changed = _fingerprint_changes(captured, current)

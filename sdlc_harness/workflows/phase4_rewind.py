@@ -35,6 +35,7 @@ from .graph import REWIND_STAGES, REWIND_TARGETS, node_for
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4_closure import _file_sha256
 from .phase4_documentation import DOCUMENTATION_PATH, _read_text_exact, _sha256
+from ..core import run_state
 
 _POLISH_SESSION = re.compile(r"^ui_polish(?:_repair)?_v\d+$")
 _STAGE_QUALITY_REPORTS = {
@@ -109,9 +110,9 @@ class PhaseFourRewind:
             restored = _apply_restores(target_path, plan["restores"])
             sessions = _supersede_sessions(run_dir, plan["sessions"])
             if target.browser_status:
-                browser = dict(_dict_value(rewound.get("browser_stages")))
+                browser = dict(run_state.browser_stages(rewound))
                 browser.pop("blocked_from", None)
-                rewound["browser_stages"] = {**browser, "status": target.browser_status}
+                rewound[run_state.BROWSER_STAGES] = {**browser, "status": target.browser_status}
             recovered_at = utc_now_iso()
             rewound.setdefault("recoveries", []).append(
                 {
@@ -166,7 +167,7 @@ class PhaseFourRewind:
     # never touches the disk, so a refusal leaves the run exactly as it was.
 
     def _rewind_journey(self, state, *, reset, run_id, target_path, plan) -> None:
-        browser = dict(_dict_value(state.get("browser_stages")))
+        browser = dict(run_state.browser_stages(state))
         journey = _dict_value(browser.get("journey"))
         if not journey:
             return
@@ -174,10 +175,10 @@ class PhaseFourRewind:
         kept = {key: journey[key] for key in ("review_attempt", "repair_unit_ids", "repair_paths") if key in journey}
         browser["journey"] = {**kept, "status": "ready", "attempt": int(journey.get("attempt") or 1) + 1}
         browser["journey_patch_iterations"] = 0
-        state["browser_stages"] = browser
+        state[run_state.BROWSER_STAGES] = browser
 
     def _rewind_polish(self, state, *, reset, run_id, target_path, plan) -> None:
-        browser = dict(_dict_value(state.get("browser_stages")))
+        browser = dict(run_state.browser_stages(state))
         polish = _dict_value(browser.get("polish"))
         if not polish:
             return
@@ -190,7 +191,7 @@ class PhaseFourRewind:
             **({"result_review_attempt": polish["result_review_attempt"]} if "result_review_attempt" in polish else {}),
         }
         browser["repair_iterations"] = {**_dict_value(browser.get("repair_iterations")), "polish": 0}
-        state["browser_stages"] = browser
+        state[run_state.BROWSER_STAGES] = browser
 
     def _polish_restores(self, polish, *, run_id, target_path) -> dict[str, bytes | None]:
         """Polish's source baseline, once it is proven that no one changed a Polish file after Polish verified it."""
@@ -234,7 +235,7 @@ class PhaseFourRewind:
         return restores
 
     def _rewind_qa(self, state, *, reset, run_id, target_path, plan) -> None:
-        browser = dict(_dict_value(state.get("browser_stages")))
+        browser = dict(run_state.browser_stages(state))
         qa = _dict_value(browser.get("qa"))
         if not qa:
             return
@@ -247,10 +248,10 @@ class PhaseFourRewind:
                 "attempt": int(qa.get("attempt") or 1) + 1,
                 **({"reviews": qa["reviews"]} if qa.get("reviews") else {}),
             }
-        state["browser_stages"] = browser
+        state[run_state.BROWSER_STAGES] = browser
 
     def _rewind_documentation(self, state, *, reset, run_id, target_path, plan) -> None:
-        pin = _dict_value(state.get("documentation_closure"))
+        pin = run_state.documentation_closure(state)
         if not pin:
             return
         if pin.get("artifact"):
@@ -258,7 +259,7 @@ class PhaseFourRewind:
                 pin, run_id=run_id, target_path=target_path
             )
         # The lane stays pinned to the run; only the drafted section goes.
-        state["documentation_closure"] = {
+        state[run_state.DOCUMENTATION_CLOSURE] = {
             key: pin[key] for key in ("mode", "contract_version", "pinned_at") if key in pin
         }
 

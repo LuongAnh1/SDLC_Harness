@@ -38,6 +38,7 @@ from .phase4_browser import (  # noqa: F401 - names the moved methods use
     worktree_dirty_paths,
     write_phase4_code_change_report,
 )
+from ..core import run_state
 
 
 class PhaseFourBrowserReadinessCycle:
@@ -48,7 +49,7 @@ class PhaseFourBrowserReadinessCycle:
 
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
         try:
-            closure = _dict_value(state.get("runtime_closure"))
+            closure = run_state.runtime_closure(state)
             if str(closure.get("status") or "") != "runtime_closed":
                 raise HarnessError(
                     "browser_stages_require_runtime_closure",
@@ -203,7 +204,7 @@ class PhaseFourBrowserReadinessCycle:
     def _continue_browser_readiness_repair(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
         readiness = self._readiness_pin(state)
-        iteration = _int_value(_dict_value(_dict_value(state.get("browser_stages")).get("repair_iterations")).get("readiness")) + 1
+        iteration = _int_value(_dict_value(run_state.browser_stages(state).get("repair_iterations")).get("readiness")) + 1
         session = _dict_value(readiness.get("repair_session"))
         try:
             inputs = self._browser_inputs(state=state, run_id=run_id)
@@ -264,8 +265,8 @@ class PhaseFourBrowserReadinessCycle:
             return self._block_browser_stage(
                 state=state, run_id=run_id, latest_artifacts=latest_artifacts, exc=exc, stage="repairing"
             )
-        pin = _dict_value(state.get("browser_stages"))
-        state["browser_stages"] = {
+        pin = run_state.browser_stages(state)
+        state[run_state.BROWSER_STAGES] = {
             **pin,
             "repair_iterations": {**_dict_value(pin.get("repair_iterations")), "readiness": iteration},
         }
@@ -474,7 +475,7 @@ class PhaseFourBrowserReadinessCycle:
     ) -> dict[str, object]:
         """Every readiness problem goes to the single readiness unit; one counter (D18: limit 2)."""
 
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("readiness"))
         if iterations >= self._repair_limit(state, "browser_readiness_repair"):
             raise HarnessError(
@@ -541,7 +542,7 @@ class PhaseFourBrowserReadinessCycle:
         latest_artifacts: dict[str, str],
         summary: str,
     ) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         readiness = _dict_value(pin.get("readiness"))
         state.update(
             {

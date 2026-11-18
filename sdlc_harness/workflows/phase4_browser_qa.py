@@ -56,6 +56,7 @@ from .phase4_browser import (  # noqa: F401 - names the moved methods use
     worktree_dirty_paths,
     write_phase4_code_change_report,
 )
+from ..core import run_state
 
 
 class PhaseFourBrowserQaCycle:
@@ -72,7 +73,7 @@ class PhaseFourBrowserQaCycle:
         source: str,
     ) -> dict[str, object]:
         findings = problems
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         patches = _int_value(pin.get("journey_patch_iterations"))
         if patches >= self._repair_limit(state, "browser_journey_patch"):
             raise HarnessError(
@@ -132,7 +133,7 @@ class PhaseFourBrowserQaCycle:
         new_attempt: bool = False,
     ) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iteration = _int_value(pin.get("journey_patch_iterations")) + 1
         journey = self._journey_pin(state)
         attempt = max(1, _int_value(journey.get("attempt"))) + (1 if new_attempt else 0)
@@ -227,8 +228,8 @@ class PhaseFourBrowserQaCycle:
                 stage="qa_journey_patch",
                 phase=_QA_PHASE,
             )
-        pin = _dict_value(state.get("browser_stages"))
-        state["browser_stages"] = {**pin, "journey_patch_iterations": iteration}
+        pin = run_state.browser_stages(state)
+        state[run_state.BROWSER_STAGES] = {**pin, "journey_patch_iterations": iteration}
         self._set_journey(state, status="captured", plan=plan_ref)
         self._set_qa(
             state,
@@ -237,7 +238,7 @@ class PhaseFourBrowserQaCycle:
             verification=verification_ref,
             needs_regression=False,
         )
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -263,7 +264,7 @@ class PhaseFourBrowserQaCycle:
         problems: list[dict[str, object]],
         source: str,
     ) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("qa"))
         if iterations >= self._repair_limit(state, "browser_qa_repair"):
             raise HarnessError(
@@ -376,7 +377,7 @@ class PhaseFourBrowserQaCycle:
 
     def _continue_browser_qa_repair(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iteration = _int_value(_dict_value(pin.get("repair_iterations")).get("qa")) + 1
         qa = self._qa_pin(state)
         session = _dict_value(qa.get("repair_session"))
@@ -460,13 +461,13 @@ class PhaseFourBrowserQaCycle:
                 stage="qa_repairing",
                 phase=_QA_PHASE,
             )
-        pin = _dict_value(state.get("browser_stages"))
-        state["browser_stages"] = {
+        pin = run_state.browser_stages(state)
+        state[run_state.BROWSER_STAGES] = {
             **pin,
             "repair_iterations": {**_dict_value(pin.get("repair_iterations")), "qa": iteration},
         }
         self._set_qa(state, status="written", repair_session=None)
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -490,7 +491,7 @@ class PhaseFourBrowserQaCycle:
                 self._existing_artifact_path(str(self._journey_pin(state).get("plan") or ""), run_id=run_id),
                 run_id=run_id,
             )
-            iteration = _int_value(_dict_value(_dict_value(state.get("browser_stages")).get("repair_iterations")).get("qa"))
+            iteration = _int_value(_dict_value(run_state.browser_stages(state).get("repair_iterations")).get("qa"))
             suite = self._run_browser_suite(
                 run_id=run_id,
                 inputs=inputs,
@@ -561,7 +562,7 @@ class PhaseFourBrowserQaCycle:
             evidence_tree_hash=_worktree_fingerprint(inputs["target_path"]).get("sha256"),
             needs_regression=True,
         )
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -1125,9 +1126,9 @@ class PhaseFourBrowserQaCycle:
                 "qa_test_report": report_ref,
             }
         )
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         self._set_qa(state, status="passed", report=report_ref)
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),

@@ -38,6 +38,7 @@ from .phase4 import (
     _positive_int_or_none,
     _required_phase4_artifact,
 )
+from ..core import run_state
 
 
 PUBLICATION_PREVIEW_CHECKPOINT_TYPE = "publication_preview"
@@ -242,7 +243,7 @@ class PhaseFourPublicationCycle:
     # ------------------------------------------------------------------ L5.5 publication preview (D7)
 
     def _publication_tree_matches_final_verification(self, state: dict[str, object], target_path: Path) -> bool:
-        expected = str(_dict_value(state.get("final_verification")).get("worktree_sha256") or "")
+        expected = str(run_state.final_verification(state).get("worktree_sha256") or "")
         return bool(expected) and _worktree_fingerprint(target_path).get("sha256") == expected
 
     def _block_publication(self, state: dict[str, object], *, run_id: str, error: HarnessError) -> dict[str, object]:
@@ -297,8 +298,8 @@ class PhaseFourPublicationCycle:
                 "version": version,
                 "pr_title": prepared["pr_title"],
                 "pr_body": body_ref,
-                "final_verification": _dict_value(state.get("final_verification")).get("artifact"),
-                "worktree_sha256": _dict_value(state.get("final_verification")).get("worktree_sha256"),
+                "final_verification": run_state.final_verification(state).get("artifact"),
+                "worktree_sha256": run_state.final_verification(state).get("worktree_sha256"),
             },
         )
         latest_artifacts.update({"github_pr_body": body_ref, "publication_preview": preview_ref})
@@ -390,7 +391,7 @@ class PhaseFourPublicationCycle:
         else:
             lines.append("- No runtime probe was recorded.")
         lines.append(f"- Contract: `{_dict_value(state.get('runtime_closure')).get('approved_contract', '')}`")
-        polish = _dict_value(_dict_value(state.get("browser_stages")).get("polish"))
+        polish = _dict_value(run_state.browser_stages(state).get("polish"))
         result_review = read("ui_polish_result_review")
         accepted = [*_dict_items(read("ui_polish_contract_review").get("warnings")), *_dict_items(result_review.get("warnings"))]
         lines.extend(
@@ -409,7 +410,7 @@ class PhaseFourPublicationCycle:
             ]
         )
         documentation = _read_json_artifact(
-            self._existing_artifact_path(str(_dict_value(state.get("documentation_closure")).get("artifact") or ""), run_id=run_id),
+            self._existing_artifact_path(str(run_state.documentation_closure(state).get("artifact") or ""), run_id=run_id),
             run_id=run_id,
         )
         context = _dict_value(documentation.get("context"))

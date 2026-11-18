@@ -34,6 +34,7 @@ from ..verification.registry import (
 from .phase3 import _dict_value, _read_json_artifact, _string_dict
 from .phase4 import _dict_items
 from .phase4_closure import _next_closure_artifact_version, _write_closure_json, _write_closure_text
+from ..core import run_state
 
 DOCUMENTATION_CLOSURE_CONTRACT_VERSION = "documentation_closure_v1"
 DOCUMENTATION_CHECKPOINT_TYPE = "documentation_closure_review"
@@ -48,7 +49,7 @@ class PhaseFourDocumentationCycle:
     """Own `qa_tested` -> `documentation_approved` for runs pinned to Documentation Closure."""
 
     def _documentation_pin(self, state: dict[str, object]) -> dict[str, object]:
-        return _dict_value(state.get("documentation_closure"))
+        return run_state.documentation_closure(state)
 
     def _continue_documentation_closure(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
@@ -62,12 +63,12 @@ class PhaseFourDocumentationCycle:
             "contract_version": DOCUMENTATION_CLOSURE_CONTRACT_VERSION,
             "pinned_at": utc_now_iso(),
         }
-        state["documentation_closure"] = {**pin, "status": "drafting"}
+        state[run_state.DOCUMENTATION_CLOSURE] = {**pin, "status": "drafting"}
         self.store.write_state(state)
         try:
             inputs = self._browser_inputs(state=state, run_id=run_id)
             target_path: Path = inputs["target_path"]
-            browser = _dict_value(state.get("browser_stages"))
+            browser = run_state.browser_stages(state)
             qa = _dict_value(browser.get("qa"))
             refs = {
                 "verification": str(qa.get("verification") or ""),
@@ -144,7 +145,7 @@ class PhaseFourDocumentationCycle:
                 ),
             )
         except HarnessError as exc:
-            state["documentation_closure"] = {**self._documentation_pin(state), "status": "blocked"}
+            state[run_state.DOCUMENTATION_CLOSURE] = {**self._documentation_pin(state), "status": "blocked"}
             state.update(
                 {
                     "updated_at": utc_now_iso(),
@@ -163,7 +164,7 @@ class PhaseFourDocumentationCycle:
         latest_artifacts.update(
             {"documentation_closure": artifact_ref, "documentation_closure_checkpoint": checkpoint_ref}
         )
-        state["documentation_closure"] = {
+        state[run_state.DOCUMENTATION_CLOSURE] = {
             **self._documentation_pin(state),
             "status": "waiting_review",
             "version": version,

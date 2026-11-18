@@ -6,6 +6,7 @@ from collections.abc import Mapping
 
 from ..core.errors import HarnessError
 from .snapshot import PROFILE_SNAPSHOT_STATE_KEY, read_profile_snapshot
+from ..core.run_state import LANE_PINS
 
 
 # The one contract set every run is executed with (owner decision 2026-11-18). A run pinned to anything else is
@@ -151,10 +152,6 @@ def _is_legacy_projection(state: Mapping[str, object]) -> bool:
 def _has_retired_developer_executor(state: Mapping[str, object]) -> bool:
     execution = state.get("developer_execution")
     return isinstance(execution, Mapping) and execution.get("executor") == "legacy"
-
-
-# Phase 4 lanes pin their mode when the run enters them; every lane is always on (2026-11-18).
-LANE_PINS = ("runtime_closure", "browser_stages", "documentation_closure")
 
 
 def retired_contract_pins(state: Mapping[str, object]) -> list[str]:

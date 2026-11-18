@@ -118,6 +118,7 @@ from .phase4_closure import (
     _write_closure_json,
     _write_closure_text,
 )
+from ..core import run_state
 
 BROWSER_STAGES_CONTRACT_VERSION = "browser_stages_contract_v1"
 ALLOWED_BROWSER_STAGE_AUTOMATION_ACTIONS = ["continue_run", "get_status", "cancel_run"]
@@ -429,7 +430,7 @@ class PhaseFourBrowserStagesCycle:
         # A spent repair budget the owner raised with `adjust_budget` reruns the step that hit it.
         if error_code not in _RETRYABLE_ERROR_CODES and not self._spent_budget_has_room(state):
             return ""
-        return str(_dict_value(state.get("browser_stages")).get("blocked_from") or "deriving")
+        return str(run_state.browser_stages(state).get("blocked_from") or "deriving")
 
     def _resume_browser_stage(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         stage = self._browser_retry_stage(state)
@@ -483,21 +484,21 @@ class PhaseFourBrowserStagesCycle:
     # ------------------------------------------------------------------ pin and scope
 
     def _readiness_pin(self, state: dict[str, object]) -> dict[str, object]:
-        return _dict_value(_dict_value(state.get("browser_stages")).get("readiness"))
+        return _dict_value(run_state.browser_stages(state).get("readiness"))
 
     def _set_readiness(self, state: dict[str, object], **fields: object) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         readiness = {**_dict_value(pin.get("readiness")), **fields}
-        state["browser_stages"] = {**pin, "readiness": readiness}
+        state[run_state.BROWSER_STAGES] = {**pin, "readiness": readiness}
         return readiness
 
     def _pin_browser_stages(self, state: dict[str, object], *, project_profile_id: str, run_id: str) -> None:
         """Pin once per run; a legacy profile_snapshot is never rewritten (D10)."""
 
-        if _dict_value(state.get("browser_stages")).get("mode"):
+        if run_state.browser_stages(state).get("mode"):
             return
         facts = browser_stage_facts(project_profile_id, run_id=run_id)
-        state["browser_stages"] = {
+        state[run_state.BROWSER_STAGES] = {
             "mode": "enforce",
             "contract_version": BROWSER_STAGES_CONTRACT_VERSION,
             "verification_policy_version": BROWSER_STAGE_POLICY_VERSION,
@@ -696,30 +697,30 @@ class PhaseFourBrowserStagesCycle:
     # ------------------------------------------------------------------ journey plan (L5.4.2)
 
     def _journey_pin(self, state: dict[str, object]) -> dict[str, object]:
-        return _dict_value(_dict_value(state.get("browser_stages")).get("journey"))
+        return _dict_value(run_state.browser_stages(state).get("journey"))
 
     def _set_journey(self, state: dict[str, object], **fields: object) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         journey = {**_dict_value(pin.get("journey")), **fields}
-        state["browser_stages"] = {**pin, "journey": journey}
+        state[run_state.BROWSER_STAGES] = {**pin, "journey": journey}
         return journey
 
     def _polish_pin(self, state: dict[str, object]) -> dict[str, object]:
-        return _dict_value(_dict_value(state.get("browser_stages")).get("polish"))
+        return _dict_value(run_state.browser_stages(state).get("polish"))
 
     def _set_polish(self, state: dict[str, object], **fields: object) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         polish = {**_dict_value(pin.get("polish")), **fields}
-        state["browser_stages"] = {**pin, "polish": polish}
+        state[run_state.BROWSER_STAGES] = {**pin, "polish": polish}
         return polish
 
     def _qa_pin(self, state: dict[str, object]) -> dict[str, object]:
-        return _dict_value(_dict_value(state.get("browser_stages")).get("qa"))
+        return _dict_value(run_state.browser_stages(state).get("qa"))
 
     def _set_qa(self, state: dict[str, object], **fields: object) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         qa = {**_dict_value(pin.get("qa")), **fields}
-        state["browser_stages"] = {**pin, "qa": qa}
+        state[run_state.BROWSER_STAGES] = {**pin, "qa": qa}
         return qa
 
     # ------------------------------------------------------------------ UI Polish contract (L5.4.4)
@@ -729,7 +730,7 @@ class PhaseFourBrowserStagesCycle:
     # ------------------------------------------------------------------ Browser QA (L5.4.6)
 
     def _browser_publication_paths(self, *, state: dict[str, object], run_id: str) -> list[str]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         if str(pin.get("status") or "") != "browser_qa_passed":
             return []
         readiness_ref = str(_dict_value(pin.get("readiness")).get("context") or "")
@@ -843,9 +844,9 @@ class PhaseFourBrowserStagesCycle:
         phase: str = _READINESS_PHASE,
     ) -> dict[str, object]:
         retryable = exc.error_code in _RETRYABLE_ERROR_CODES
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         if pin.get("mode"):
-            state["browser_stages"] = {**pin, "blocked_from": stage}
+            state[run_state.BROWSER_STAGES] = {**pin, "blocked_from": stage}
             if phase == _JOURNEY_PHASE:
                 self._set_journey(state, status="blocked")
             elif phase == _POLISH_PHASE:

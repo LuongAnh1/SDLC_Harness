@@ -66,6 +66,7 @@ from .phase4_browser import (  # noqa: F401 - names the moved methods use
     worktree_dirty_paths,
     write_phase4_code_change_report,
 )
+from ..core import run_state
 
 
 class PhaseFourUiPolishCycle:
@@ -342,7 +343,7 @@ class PhaseFourUiPolishCycle:
         attempt = max(1, _int_value(polish.get("attempt"))) + (1 if new_attempt else 0)
         version = _next_closure_artifact_version(self.store, run_id, "ui_polish_contract")
         self._set_polish(state, status="planning", attempt=attempt)
-        state["browser_stages"] = {**_dict_value(state.get("browser_stages")), "status": "polish_planning"}
+        state[run_state.BROWSER_STAGES] = {**run_state.browser_stages(state), "status": "polish_planning"}
         self.store.write_state(state)
         try:
             inputs = self._ui_polish_inputs(
@@ -482,7 +483,7 @@ class PhaseFourUiPolishCycle:
                     "U5: the committed visual profile changed after the UI Polish contract was proposed.",
                     run_id=run_id,
                 )
-            pin = _dict_value(state.get("browser_stages"))
+            pin = run_state.browser_stages(state)
             polish = _dict_value(pin.get("polish"))
             state.update(
                 {
@@ -629,7 +630,7 @@ class PhaseFourUiPolishCycle:
 
     def _continue_ui_polish_repair(self, *, state: dict[str, object], run_id: str) -> dict[str, object]:
         latest_artifacts = dict(_string_dict(state.get("latest_artifacts")))
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iteration = _int_value(_dict_value(pin.get("repair_iterations")).get("polish")) + 1
         session = _dict_value(self._polish_pin(state).get("repair_session"))
         try:
@@ -698,8 +699,8 @@ class PhaseFourUiPolishCycle:
                 state=state, run_id=run_id, latest_artifacts=latest_artifacts, exc=exc,
                 stage="polish_repairing", phase=_POLISH_PHASE,
             )
-        pin = _dict_value(state.get("browser_stages"))
-        state["browser_stages"] = {
+        pin = run_state.browser_stages(state)
+        state[run_state.BROWSER_STAGES] = {
             **pin,
             "repair_iterations": {**_dict_value(pin.get("repair_iterations")), "polish": iteration},
         }
@@ -887,7 +888,7 @@ class PhaseFourUiPolishCycle:
             verification=report_ref,
             after_manifest=suite["manifest_ref"],
         )
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -1139,7 +1140,7 @@ class PhaseFourUiPolishCycle:
 
         checkpoint_id = f"checkpoint_ui_polish_result_{run_id}_v{checkpoint_version}"
         self._set_polish(state, status="waiting_result_review", result_review=result_ref)
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         state.update(
             {
                 "updated_at": utc_now_iso(),
@@ -1209,7 +1210,7 @@ class PhaseFourUiPolishCycle:
         summary: str,
         extra: dict[str, object] | None = None,
     ) -> dict[str, object]:
-        pin = _dict_value(state.get("browser_stages"))
+        pin = run_state.browser_stages(state)
         iterations = _int_value(_dict_value(pin.get("repair_iterations")).get("polish"))
         if iterations >= self._repair_limit(state, "browser_polish_repair"):
             raise HarnessError(
@@ -1274,7 +1275,7 @@ class PhaseFourUiPolishCycle:
             current_id = str(checkpoint.get("checkpoint_id") or "")
             if checkpoint.get("type") != UI_POLISH_RESULT_CHECKPOINT_TYPE or (checkpoint_id and checkpoint_id != current_id):
                 raise HarnessError("checkpoint_not_current", "This is not the current UI Polish result checkpoint.", run_id=run_id)
-            pin = _dict_value(state.get("browser_stages"))
+            pin = run_state.browser_stages(state)
             polish = _dict_value(pin.get("polish"))
             state.update(
                 {

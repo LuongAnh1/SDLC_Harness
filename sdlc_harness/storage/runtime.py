@@ -19,6 +19,7 @@ from ..core.errors import HarnessError
 from .artifact_index import index_artifact_changes
 from .locks import RuntimeActionLock
 from .runtime_readme import ensure_runtime_readme
+from ..core.run_state import STATE_SCHEMA_VERSION, STATE_SCHEMA_VERSION_KEY, migrate_state
 
 TERMINAL_STATUSES = {"done", "cancelled", "failed", "code_review_approved"}
 _SAFE_RUN_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -125,9 +126,10 @@ class RuntimeStore:
         if not path.exists():
             raise HarnessError("run_not_found", f"Run not found: {run_id}", run_id=run_id)
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            state = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise HarnessError("state_corrupted", f"State file is not valid JSON: {run_id}", run_id=run_id) from exc
+        return migrate_state(state, run_id=run_id)
 
     def list_states(self, *, limit: int) -> list[dict[str, object]]:
         """Read recent run states without creating or mutating runtime storage."""
@@ -150,6 +152,7 @@ class RuntimeStore:
     def write_state(self, state: dict[str, object]) -> None:
         run_id = str(state["run_id"])
         run_dir = self.run_dir(run_id)
+        state[STATE_SCHEMA_VERSION_KEY] = STATE_SCHEMA_VERSION
         previous: dict[str, object] | None = None
         if self.state_path(run_id).is_file():
             previous = self.read_state(run_id)
