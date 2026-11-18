@@ -245,6 +245,15 @@ class _UnitLoop:
             progress=_progress(self.journal),
         )
 
+    def action_limit(self) -> int:
+        """Actions this unit may use now: its budget plus the reserves its history has unlocked."""
+        return _developer_action_limit(
+            configured_max_actions=self.configured_max_actions,
+            timeout_action_reserve=self.timeout_action_reserve,
+            verification_repair_action_reserve=self.verification_repair_action_reserve,
+            history=self.history,
+        )
+
     def reject_completion(self, gate: dict[str, object], feedback: dict[str, object]) -> None:
         """Record why execution.complete_unit was refused; the Developer reads the feedback on its next action."""
         self.entry["actions"][-1]["completion_gate"] = {"status": "rejected", **gate}
@@ -1312,14 +1321,11 @@ class DeveloperToolLoopExecutor:
                 )
                 if seed_context:
                     loop.history.append(seed_context)
+            # Set before the loop: a unit resumed past its hard ceiling runs no action but still reports its limit.
+            max_actions = loop.action_limit()
             for action_index in range(loop.next_action_index, loop.maximum_action_limit + 1):
                 loop.action_index = action_index
-                max_actions = _developer_action_limit(
-                    configured_max_actions=loop.configured_max_actions,
-                    timeout_action_reserve=loop.timeout_action_reserve,
-                    verification_repair_action_reserve=loop.verification_repair_action_reserve,
-                    history=loop.history,
-                )
+                max_actions = loop.action_limit()
                 if action_index > max_actions:
                     break
                 turn = self._request_action(loop, max_actions)

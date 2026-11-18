@@ -3838,6 +3838,47 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertEqual(resumed_journal["items"][0]["attempts"], 1)
         self.assertEqual(resumed_journal["items"][0].get("attempt_history", []), [])
 
+    def test_budget_resume_past_the_action_ceiling_pauses_again_without_calling_the_llm(self) -> None:
+        # A unit paused at its hard ceiling (both reserves spent) resumes with no action left; here a lowered
+        # budget puts the next action past the ceiling the same way. It used to crash on an unset max_actions.
+        def settings(max_actions: str, repair_reserve: str):
+            return load_settings(
+                root=self.root,
+                runtime_root=self.runtime,
+                overrides={
+                    "SDLC_LLM_MODE": "deepseek",
+                    "SDLC_LLM_API_KEY": "test-only",
+                    "SDLC_DEVELOPER_MAX_ACTIONS_PER_ITEM": max_actions,
+                    "SDLC_DEVELOPER_VERIFICATION_REPAIR_ACTION_RESERVE": repair_reserve,
+                },
+            )
+
+        packet = self.unit_packet()
+        packet["execution_units"] = [dict(packet["execution_units"][0])]
+        legacy = LlmCompletion(
+            content=json.dumps({"action": "read_file", "arguments": {"path": "src/Main.java"}}),
+            finish_reason="stop",
+            usage={},
+        )
+        self.settings = settings("5", "6")
+        with self.assertRaises(DeveloperExecutionError) as paused:
+            self.executor(ScriptedLlm([legacy] * 5)).execute(
+                run_id="run_budget_ceiling", work_packet=packet, target_path=self.repo
+            )
+        self.assertEqual(paused.exception.error_code, "developer_action_limit_exceeded")
+
+        # Ceiling now 1 action + 4 timeout reserve + 0 repair reserve = 5 < next action 6.
+        self.settings = settings("1", "0")
+        resumed_llm = ScriptedLlm([])
+        with self.assertRaises(DeveloperExecutionError) as resumed:
+            self.executor(resumed_llm).execute(run_id="run_budget_ceiling", work_packet=packet, target_path=self.repo)
+
+        self.assertEqual(resumed.exception.error_code, "developer_action_limit_exceeded")
+        self.assertEqual(resumed_llm.prompts, [])
+        journal = json.loads((self.root / resumed.exception.journal_path).read_text(encoding="utf-8"))
+        entry = journal["items"][0]
+        self.assertEqual((entry["status"], entry["budget_resume"]["next_action_index"]), ("review_required", 6))
+
     def test_truncated_execution_unit_rolls_back_and_can_resume(self) -> None:
         first_llm = ScriptedLlm(
             [
