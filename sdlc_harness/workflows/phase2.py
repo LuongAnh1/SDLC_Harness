@@ -492,15 +492,25 @@ class PhaseTwoWorkflow:
         )
 
     def restart_design(self, *, run_id: str) -> dict[str, object]:
-        """Abandon a paused Designer session and restart from the approved Requirement."""
+        """Abandon a paused (or graph-less blocked) Designer session and restart from the approved Requirement."""
 
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
+        status = str(state.get("status") or "")
+        # A run blocked before any Design graph exists (e.g. budget hard cap) has nothing to revalidate or lose.
+        blocked_without_graph = (
+            status == "design_blocked"
+            and self._blocked_session_graph(state=state, run_id=run_id) is None
+            and self._latest_vertical_graph(state, run_id=run_id, required=False) is None
+        )
         # `design_restarting`: an interrupted restart restarts again (versions come from the files on disk).
-        if str(state.get("status") or "") not in {"design_paused", "design_restarting"}:
+        if status not in {"design_paused", "design_restarting"} and not blocked_without_graph:
             raise HarnessError(
                 "design_restart_not_allowed",
-                f"Design can only restart from status 'design_paused', not {state.get('status')!r}.",
+                (
+                    "Design can only restart from status 'design_paused' or a 'design_blocked' run "
+                    f"without a Design graph, not {state.get('status')!r}."
+                ),
                 run_id=run_id,
             )
         approved = read_frozen_requirement_input(store=self.store, state=state, run_id=run_id)

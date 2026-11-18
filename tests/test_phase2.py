@@ -382,6 +382,29 @@ class PhaseTwoTest(unittest.TestCase):
 
         self.assertEqual(context.exception.error_code, "design_restart_not_allowed")
 
+    def test_restart_design_recovers_run_blocked_before_any_design_graph(self) -> None:
+        run_id = str(self._create_phase1_run()["run_id"])
+        capped = load_settings(
+            root=self.repo_root,
+            runtime_root=self.runtime_root,
+            overrides={
+                **self._target_overrides(),
+                "SDLC_LLM_MODE": "fake",
+                "SDLC_SYNC_MODE": "mock",
+                "SDLC_DESIGNER_GLOBAL_ACTION_HARD_CAP": "1",
+            },
+        )
+        blocked = PhaseTwoWorkflow(capped).approve_checkpoint(run_id=run_id)
+        self.assertEqual(blocked["status"], "design_blocked")
+        self.assertEqual(blocked["last_error"]["error_code"], "designer_action_budget_hard_cap_exceeded")
+        with self.assertRaises(HarnessError) as context:
+            PhaseTwoWorkflow(self.settings).revalidate_design(run_id=run_id)
+        self.assertEqual(context.exception.error_code, "vertical_design_graph_missing")
+
+        restarted = PhaseTwoWorkflow(self.settings).restart_design(run_id=run_id)
+
+        self.assertEqual(restarted["status"], "waiting_design_approval")
+
     def test_production_flow_blocks_safely_when_tight_budget_cannot_converge(self) -> None:
         settings = load_settings(
             root=self.repo_root,
@@ -402,6 +425,10 @@ class PhaseTwoTest(unittest.TestCase):
         self.assertEqual(response["last_error"]["error_code"], "design_semantic_review_inconclusive")
         self.assertIn("revalidate_design", response["allowed_next_actions"])
         self.assertIsNone(response["pending_checkpoint"])
+        # A blocked run that already has a Design graph keeps it: restart is refused, revalidate is the way on.
+        with self.assertRaises(HarnessError) as context:
+            PhaseTwoWorkflow(settings).restart_design(run_id=str(created["run_id"]))
+        self.assertEqual(context.exception.error_code, "design_restart_not_allowed")
 
     def test_repair_stalls_when_canonical_blockers_repeat_after_graph_change(self) -> None:
         self.assertTrue(
