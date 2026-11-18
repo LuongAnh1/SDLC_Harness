@@ -183,6 +183,112 @@ class DeveloperExecutionResult:
     session_path: str = ""
 
 
+@dataclass
+class _UnitLoop:
+    """One execution unit's Developer tool loop: fixed inputs and budgets, plus the state working_state.json keeps."""
+
+    store: RuntimeStore
+    run_id: str
+    work_packet: dict[str, object]
+    target_path: Path
+    session_dir: Path
+    item: dict[str, object]
+    manifest: dict[str, object]
+    journal: dict[str, object]
+    journal_file: Path
+    on_progress: Callable[[dict[str, object], str, str], None] | None
+    manifest_path: str
+    journal_path: str
+    verification_policy: VerificationStagePolicy | None
+    item_id: str
+    entry: dict[str, object]
+    item_paths: list[str]
+    execution_hash_paths: list[str]
+    context_paths: list[str]
+    repair_mode: bool
+    working_state_file: Path
+    llm_client: Any
+    configured_max_actions: int
+    timeout_action_reserve: int
+    verification_repair_action_reserve: int
+    visual_profile_action_reserve: int
+    maximum_action_limit: int
+    max_retries: int
+    fallback_max_tokens: int
+    normal_options: dict[str, object]
+    repair_options: dict[str, object]
+    context_window_tokens: int
+    working_memory_evidence_chars: int
+    max_write_chars: int
+    visual_profile_file: Path
+    visual_app_scope_id: str
+    visual_required: bool
+    history: list[dict[str, object]]
+    seen_observations: set[str]
+    mutated_paths: set[str]
+    refreshed_dependency_ids: set[str]
+    length_failures: int
+    invalid_action_failures: int
+    next_action_index: int
+    durable_next_action_index: int
+    action_index: int  # the action in progress: an interrupted unit resumes from it
+
+    def fail(self, error_code: str, message: str, *, retriable: bool) -> DeveloperExecutionError:
+        """The loop's error, carrying its manifest, journal and current progress."""
+        return DeveloperExecutionError(
+            error_code,
+            message,
+            run_id=self.run_id,
+            retriable=retriable,
+            manifest_path=self.manifest_path,
+            journal_path=self.journal_path,
+            progress=_progress(self.journal),
+        )
+
+    def reject_completion(self, gate: dict[str, object], feedback: dict[str, object]) -> None:
+        """Record why execution.complete_unit was refused; the Developer reads the feedback on its next action."""
+        self.entry["actions"][-1]["completion_gate"] = {"status": "rejected", **gate}
+        self.history.append({"action": "rejected", **feedback})
+        _write_json_atomic(self.journal_file, self.journal)
+
+    def persist(self, next_index: int, *, cursor: int | None = None) -> None:
+        """Write working_state.json so a paused unit resumes at next_index with the same history."""
+        self.durable_next_action_index = next_index
+        current_cursor = int(getattr(self.llm_client, "cursor", 0)) if cursor is None else cursor
+        payload = {
+            "version": "developer_working_state_v1",
+            "unit_id": self.item_id,
+            "history": self.history,
+            "seen_observations": sorted(self.seen_observations),
+            "mutated_paths": sorted(self.mutated_paths),
+            "length_failures": self.length_failures,
+            "invalid_action_failures": self.invalid_action_failures,
+            "next_action_index": next_index,
+            "review_cursor": max(0, current_cursor),
+            "refreshed_dependency_ids": sorted(self.refreshed_dependency_ids),
+            "visual_profile_action_reserve": self.visual_profile_action_reserve,
+            "updated_at": utc_now_iso(),
+        }
+        _write_json_atomic(self.working_state_file, payload)
+        self.entry["working_state_path"] = self.store.relative(self.working_state_file)
+        self.entry["paused_sha256_by_path"] = {
+            path: _file_hash(self.target_path / path) for path in self.execution_hash_paths
+        }
+
+
+@dataclass(frozen=True)
+class _ActionTurn:
+    """One Developer action request: the facts its prompt showed (the action policy reuses them) and the reply."""
+
+    max_actions: int
+    uiux_available: bool
+    app_visual_profile: dict[str, object]
+    visual_candidates: list[dict[str, object]]
+    call_id: str
+    raw: str
+    finish_reason: str
+
+
 class DeveloperToolLoopExecutor:
     """Execute approved code work as bounded JSON actions against one run worktree."""
 
@@ -925,7 +1031,7 @@ class DeveloperToolLoopExecutor:
             if on_progress:
                 on_progress(_progress(journal), manifest_path, journal_path)
 
-    def _execute_item(
+    def _open_unit_loop(
         self,
         *,
         run_id: str,
@@ -941,7 +1047,8 @@ class DeveloperToolLoopExecutor:
         journal_path: str,
         verification_policy: VerificationStagePolicy | None,
         initial_history: list[dict[str, object]] | None = None,
-    ) -> None:
+    ) -> _UnitLoop | None:
+        """Begin or resume one unit; None when a resumed unit completed without another action."""
         item_id = str(item.get("id") or "")
         entry = _journal_item(journal, item_id)
         # D11 (b): new files this item already created under its new_file_policy stay writable.
@@ -1036,7 +1143,7 @@ class DeveloperToolLoopExecutor:
             _write_json_atomic(journal_file, journal)
             if on_progress:
                 on_progress(_progress(journal), manifest_path, journal_path)
-            return
+            return None
         length_failures = int(working_state.get("length_failures") or 0)
         invalid_action_failures = int(working_state.get("invalid_action_failures") or 0)
         next_action_index = max(1, int(working_state.get("next_action_index") or 1))
@@ -1114,874 +1221,865 @@ class DeveloperToolLoopExecutor:
                     run_id=run_id,
                 ),
             )
+        return _UnitLoop(
+            store=self.store,
+            run_id=run_id,
+            work_packet=work_packet,
+            target_path=target_path,
+            session_dir=session_dir,
+            item=item,
+            manifest=manifest,
+            journal=journal,
+            journal_file=journal_file,
+            on_progress=on_progress,
+            manifest_path=manifest_path,
+            journal_path=journal_path,
+            verification_policy=verification_policy,
+            item_id=item_id,
+            entry=entry,
+            item_paths=item_paths,
+            execution_hash_paths=execution_hash_paths,
+            context_paths=context_paths,
+            repair_mode=repair_mode,
+            working_state_file=working_state_file,
+            llm_client=llm_client,
+            configured_max_actions=configured_max_actions,
+            timeout_action_reserve=timeout_action_reserve,
+            verification_repair_action_reserve=verification_repair_action_reserve,
+            visual_profile_action_reserve=visual_profile_action_reserve,
+            maximum_action_limit=maximum_action_limit,
+            max_retries=max_retries,
+            fallback_max_tokens=fallback_max_tokens,
+            normal_options=normal_options,
+            repair_options=repair_options,
+            context_window_tokens=context_window_tokens,
+            working_memory_evidence_chars=working_memory_evidence_chars,
+            max_write_chars=max_write_chars,
+            visual_profile_file=visual_profile_file,
+            visual_app_scope_id=visual_app_scope_id,
+            visual_required=visual_required,
+            history=history,
+            seen_observations=seen_observations,
+            mutated_paths=mutated_paths,
+            refreshed_dependency_ids=refreshed_dependency_ids,
+            length_failures=length_failures,
+            invalid_action_failures=invalid_action_failures,
+            next_action_index=next_action_index,
+            durable_next_action_index=durable_next_action_index,
+            action_index=next_action_index,
+        )
 
-        def persist_working_state(next_index: int, *, cursor: int | None = None) -> None:
-            nonlocal durable_next_action_index
-            durable_next_action_index = next_index
-            current_cursor = int(getattr(llm_client, "cursor", 0)) if cursor is None else cursor
-            payload = {
-                "version": "developer_working_state_v1",
-                "unit_id": item_id,
-                "history": history,
-                "seen_observations": sorted(seen_observations),
-                "mutated_paths": sorted(mutated_paths),
-                "length_failures": length_failures,
-                "invalid_action_failures": invalid_action_failures,
-                "next_action_index": next_index,
-                "review_cursor": max(0, current_cursor),
-                "refreshed_dependency_ids": sorted(refreshed_dependency_ids),
-                "visual_profile_action_reserve": visual_profile_action_reserve,
-                "updated_at": utc_now_iso(),
-            }
-            _write_json_atomic(working_state_file, payload)
-            entry["working_state_path"] = self.store.relative(working_state_file)
-            entry["paused_sha256_by_path"] = {
-                path: _file_hash(target_path / path) for path in execution_hash_paths
-            }
-
+    def _execute_item(
+        self,
+        *,
+        run_id: str,
+        work_packet: dict[str, object],
+        target_path: Path,
+        session_dir: Path,
+        item: dict[str, object],
+        manifest: dict[str, object],
+        journal: dict[str, object],
+        journal_file: Path,
+        on_progress: Callable[[dict[str, object], str, str], None] | None,
+        manifest_path: str,
+        journal_path: str,
+        verification_policy: VerificationStagePolicy | None,
+        initial_history: list[dict[str, object]] | None = None,
+    ) -> None:
+        loop = self._open_unit_loop(
+            run_id=run_id,
+            work_packet=work_packet,
+            target_path=target_path,
+            session_dir=session_dir,
+            item=item,
+            manifest=manifest,
+            journal=journal,
+            journal_file=journal_file,
+            on_progress=on_progress,
+            manifest_path=manifest_path,
+            journal_path=journal_path,
+            verification_policy=verification_policy,
+            initial_history=initial_history,
+        )
+        if loop is None:
+            return
         try:
-            if not history:
+            if not loop.history:
                 seed_context = _codegraph_seed_context(
                     target_path=target_path,
                     item=item,
                     repo_context_provider=self.repo_context_provider,
                 )
                 if seed_context:
-                    history.append(seed_context)
-            for action_index in range(next_action_index, maximum_action_limit + 1):
+                    loop.history.append(seed_context)
+            for action_index in range(loop.next_action_index, loop.maximum_action_limit + 1):
+                loop.action_index = action_index
                 max_actions = _developer_action_limit(
-                    configured_max_actions=configured_max_actions,
-                    timeout_action_reserve=timeout_action_reserve,
-                    verification_repair_action_reserve=verification_repair_action_reserve,
-                    history=history,
+                    configured_max_actions=loop.configured_max_actions,
+                    timeout_action_reserve=loop.timeout_action_reserve,
+                    verification_repair_action_reserve=loop.verification_repair_action_reserve,
+                    history=loop.history,
                 )
                 if action_index > max_actions:
                     break
-                uiux_available = _developer_uiux_available(
-                    manifest=manifest,
-                    journal=journal,
-                    item=item,
-                )
-                uiux_guidance = _developer_uiux_guidance(
-                    journal=journal,
-                    item=item,
-                )
-                visual_store = read_visual_profiles(visual_profile_file)
-                app_visual_profile = _dict_value(
-                    _dict_value(visual_store.get("profiles")).get(visual_app_scope_id)
-                )
-                visual_candidates = _developer_visual_candidates(
-                    journal=journal,
-                    app_scope_id=visual_app_scope_id,
-                )
-                prompt = _action_prompt(
-                    item=item,
-                    manifest=manifest,
-                    history=history,
-                    target_path=target_path,
-                    max_write_chars=max_write_chars,
-                    force_incremental=length_failures > 0,
-                    action_index=action_index,
-                    max_actions=max_actions,
-                    mutated=bool(mutated_paths),
-                    context_window_tokens=context_window_tokens,
-                    working_memory_evidence_chars=working_memory_evidence_chars,
-                    uiux_available=uiux_available,
-                    uiux_guidance=uiux_guidance,
-                    visual_profile_required=visual_required,
-                    app_visual_profile=app_visual_profile,
-                    visual_profile_candidates=visual_candidates,
-                    visual_app_scope_id=visual_app_scope_id,
-                    journal=journal,
-                )
-                active_options = (
-                    repair_options
-                    if repair_mode or bool(_verification_repair_state(history))
-                    else normal_options
-                )
-                configured_max_tokens = int(
-                    active_options.get("max_tokens") or fallback_max_tokens
-                )
-                max_tokens = _completion_token_budget(
-                    prompt,
-                    configured_max_tokens=configured_max_tokens,
-                    context_window_tokens=context_window_tokens,
-                )
-                completion = llm_client.complete_with_metadata(
-                    system=(
-                        "You are Developer Executor in a controlled SDLC worktree. One response proposes exactly "
-                        "one JSON action and then stops. The action is not executed until the Harness returns its "
-                        "tool result in a later turn. Reason only far enough to choose the current action: do not "
-                        "plan, draft, or evaluate later actions or files. Outcomes owned by a required Verification "
-                        "stage are not preconditions for the current action; follow the typed contract and let the "
-                        "Harness stage judge them instead of speculating about toolchain behavior. Never narrate "
-                        "reasoning, emit or repeat a second action, or claim an action ran without a Harness tool "
-                        "result. Use tools only within the approved execution unit; do not include analysis, thinking "
-                        "markers, or markdown."
-                    ),
-                    prompt=prompt,
-                    json_mode=True,
-                    model=str(active_options.get("model") or "") or None,
-                    reasoning_effort=str(active_options.get("reasoning_effort") or "") or None,
-                    max_tokens=max_tokens,
-                    timeout_seconds=int(active_options.get("timeout_seconds") or 0) or None,
-                )
-                journal.pop("pending_step_review", None)
-                raw = str(getattr(completion, "content", ""))
-                call_id = f"{item_id}:a{int(entry.get('attempts') or 1)}:c{action_index}"
-                metadata = {
-                    "call_id": call_id,
-                    "item_attempt": int(entry.get("attempts") or 1),
-                    "action_index": action_index,
-                    "finish_reason": str(getattr(completion, "finish_reason", "") or ""),
-                    "usage": getattr(completion, "usage", {}) if isinstance(getattr(completion, "usage", {}), dict) else {},
-                    "max_tokens": max_tokens,
-                    "request_options": {
-                        "model": str(active_options.get("model") or ""),
-                        "reasoning_effort": str(active_options.get("reasoning_effort") or ""),
-                        "max_tokens": max_tokens,
-                        "timeout_seconds": int(active_options.get("timeout_seconds") or 0),
-                    },
-                    "created_at": utc_now_iso(),
-                    "replayed": getattr(llm_client, "last_replay_kind", "") == "approved",
-                }
-                if metadata["replayed"] is not True:
-                    _write_action_artifacts(
-                        session_dir,
-                        item_id,
-                        int(entry.get("attempts") or 1),
-                        action_index,
-                        raw,
-                        metadata,
-                    )
-                entry.setdefault("actions", []).append(metadata)
-                if metadata["finish_reason"] == "length":
-                    length_failures += 1
-                    history.append({"action": "rejected", "error": "finish_reason=length", "instruction": "Use a smaller write or patch."})
-                    persist_working_state(action_index + 1)
-                    _write_json_atomic(journal_file, journal)
-                    if length_failures > max_retries:
-                        raise DeveloperExecutionError(
-                            "developer_action_truncated",
-                            f"Developer action for execution unit {item_id} exceeded the output budget after {length_failures} attempts.",
-                            run_id=run_id,
-                            retriable=True,
-                            manifest_path=manifest_path,
-                            journal_path=journal_path,
-                            progress=_progress(journal),
-                        )
+                turn = self._request_action(loop, max_actions)
+                action = self._accept_action(loop, turn)
+                if action is None:
                     continue
-                try:
-                    action = _parse_action(raw)
-                    invalid_action_failures = 0
-                    if action.get("normalization"):
-                        entry["actions"][-1]["parse_normalization"] = action["normalization"]
-                except HarnessError as exc:
-                    invalid_action_failures += 1
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": exc.message,
-                            "instruction": (
-                                "Return exactly one JSON action object with no analysis, thinking markers, "
-                                "markdown, or additional action."
-                            ),
-                        }
-                    )
-                    persist_working_state(action_index + 1)
-                    _write_json_atomic(journal_file, journal)
-                    if invalid_action_failures > max_retries:
-                        raise DeveloperExecutionError(
-                            "developer_action_invalid",
-                            f"Developer returned invalid tool actions for execution unit {item_id}: {exc.message}",
-                            run_id=run_id,
-                            retriable=True,
-                            manifest_path=manifest_path,
-                            journal_path=journal_path,
-                            progress=_progress(journal),
-                        ) from exc
-                    continue
-                if action.get("action") not in _UNIT_ACTION_NAMES:
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": "developer_unit_legacy_tool_not_allowed",
-                            "instruction": "Use one canonical Developer Tool Action v2 tool ID.",
-                        }
-                    )
-                    persist_working_state(action_index + 1)
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                current_hashes = {
-                    path: _file_hash(target_path / path) for path in execution_hash_paths
-                }
-                dependency_statuses = _package_dependency_statuses(
-                    target_path=target_path,
-                    item=item,
-                    run_id=run_id,
-                )
-                pending_dependency_ids = [
-                    str(status.get("dependency_id") or "")
-                    for status in dependency_statuses
-                    if status.get("satisfied") is not True
-                ]
-                repair_state = _verification_repair_state(history)
-                failed_stage_ids = sorted(repair_state)
-                policy_error = _new_test_context_policy_error(
-                    action=action,
-                    history=history,
-                    manifest=manifest,
-                    target_path=target_path,
-                    item_paths=item_paths,
-                ) or _action_policy_error(
-                    action=action,
-                    history=history,
-                    seen_observations=seen_observations,
-                    mutated=bool(mutated_paths),
-                    action_index=action_index,
-                    max_actions=max_actions,
-                    pending_stage_ids=sorted(
-                        set(_string_items(item.get("required_stage_ids")))
-                        - _current_passed_stages(
-                            history,
-                            current_hashes=current_hashes,
-                        )
-                    ),
-                    failed_stage_ids=failed_stage_ids,
-                    repair_mutated_stage_ids=sorted(
-                        stage_id
-                        for stage_id, episode in repair_state.items()
-                        if episode.get("mutated_since_failure") is True
-                    ),
-                    repair_verification_ready_stage_ids=sorted(
-                        stage_id
-                        for stage_id, episode in repair_state.items()
-                        if episode.get("verification_ready") is True
-                    ),
-                    repair_verification_forced_stage_ids=sorted(
-                        stage_id
-                        for stage_id, episode in repair_state.items()
-                        if episode.get("verification_forced") is True
-                    ),
-                    closure_resolved=True,
-                    handled_paths=set(),
-                    unresolved_paths=set(),
-                    pending_package_dependency_ids=pending_dependency_ids,
-                    uiux_available=uiux_available,
-                    uiux_success_count=_developer_uiux_success_count(journal=journal, item=item),
-                    visual_profile_required=visual_required,
-                    visual_profile_committed=bool(app_visual_profile),
-                    visual_profile_candidate_count=len(visual_candidates),
-                )
-                if policy_error:
-                    result = {"ok": False, **policy_error}
-                else:
-                    try:
-                        result = _execute_action(
-                            action=action,
-                            run_id=run_id,
-                            work_packet=work_packet,
-                            repo_root=target_path,
-                            item_paths=item_paths,
-                            item=item,
-                            session_dir=session_dir,
-                            max_write_chars=max_write_chars,
-                            repo_context_provider=self.repo_context_provider,
-                            verification_runner=self.verification_runner,
-                            verification_policy=verification_policy,
-                            uiux_provider=self.uiux_provider,
-                            journal=journal,
-                            visual_profile_file=visual_profile_file,
-                            visual_app_scope_id=visual_app_scope_id,
-                            package_tool_timeout_seconds=int(
-                                getattr(self.settings, "developer_package_tool_timeout_seconds", 120)
-                            ),
-                        )
-                    except HarnessError as exc:
-                        if exc.error_code in _RECOVERABLE_ACTION_POLICY_ERRORS:
-                            repeat_count = 1 + sum(
-                                1
-                                for row in history
-                                if _dict_value(row.get("result")).get("error") == exc.error_code
-                            )
-                            result = {
-                                "ok": False,
-                                "error": exc.error_code,
-                                "reason": exc.message,
-                                "instruction": (
-                                    "Do not create or modify that path. Rework the implementation and tests "
-                                    "using only the approved execution-unit paths."
-                                ),
-                                "approved_paths": item_paths,
-                                "policy_repeat_count": repeat_count,
-                            }
-                        else:
-                            raise DeveloperExecutionError(
-                                exc.error_code,
-                                exc.message,
-                                run_id=run_id,
-                                retriable=(
-                                    exc.error_code == "llm_transport_failed"
-                                    or exc.error_code.startswith("target_repo_codegraph")
-                                ),
-                                manifest_path=manifest_path,
-                                journal_path=journal_path,
-                                progress=_progress(journal),
-                            ) from exc
-                if (
-                    action["action"] == "verification.run_stage"
-                    and result.get("status") == "failed"
-                    and result.get("failure_kind") == "implementation"
-                ):
-                    diagnostic_fingerprint = _verification_diagnostic_fingerprint(result)
-                    result["diagnostic_fingerprint"] = diagnostic_fingerprint
-                    result["diagnostic_repeat_count"] = 1 + _diagnostic_repeat_count(
-                        history,
-                        fingerprint=diagnostic_fingerprint,
-                    )
-                if action["action"] == "uiux.search_guidance":
-                    if result.get("ok") is True:
-                        _remember_developer_uiux_guidance(
-                            journal=journal,
-                            item=item,
-                            result=result,
-                        )
-                    elif str(result.get("error") or "") in {
-                        "developer_uiux_unavailable",
-                        "designer_uiux_unavailable",
-                        "designer_uiux_failed",
-                    }:
-                        journal["uiux_disabled"] = {
-                            "reason": str(result.get("error") or "developer_uiux_unavailable"),
-                            "disabled_at": utc_now_iso(),
-                        }
-                if action["action"] == "uiux.search_visual_profile" and result.get("candidate"):
-                    _remember_developer_visual_candidate(
-                        journal=journal,
-                        app_scope_id=visual_app_scope_id,
-                        candidate=_dict_value(result.get("candidate")),
-                    )
-                    current_candidates = _developer_visual_candidates(
-                        journal=journal,
-                        app_scope_id=visual_app_scope_id,
-                    )
-                    if len(current_candidates) >= 2 and not any(
-                        row.get("valid") is True for row in current_candidates
-                    ):
-                        invalid_attempts = journal.setdefault("uiux_visual_candidate_failures", [])
-                        if isinstance(invalid_attempts, list):
-                            invalid_attempts.append(
-                                {
-                                    "app_scope_id": visual_app_scope_id,
-                                    "candidate_ids": [
-                                        str(row.get("candidate_id") or "") for row in current_candidates
-                                    ],
-                                    "failed_at": utc_now_iso(),
-                                }
-                            )
-                        candidate_cache = _dict_value(journal.get("uiux_visual_candidates_by_app"))
-                        candidate_cache[visual_app_scope_id] = []
-                        journal["uiux_visual_candidates_by_app"] = candidate_cache
-                        persist_working_state(action_index + 1)
-                        _write_json_atomic(journal_file, journal)
-                        raise DeveloperExecutionError(
-                            "developer_visual_profile_invalid",
-                            "Two UI/UX visual-profile candidates failed deterministic validation.",
-                            run_id=run_id,
-                            retriable=True,
-                            manifest_path=manifest_path,
-                            journal_path=journal_path,
-                            progress=_progress(journal),
-                        )
-                if str(result.get("error") or "") == "developer_visual_profile_unavailable":
-                    persist_working_state(action_index + 1)
-                    _write_json_atomic(journal_file, journal)
-                    raise DeveloperExecutionError(
-                        "developer_visual_profile_unavailable",
-                        str(result.get("reason") or "Required UI/UX visual-profile skill is unavailable."),
-                        run_id=run_id,
-                        retriable=True,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
-                timeout_diagnostic = _timeout_diagnostic_state(history)
-                if (
-                    result.get("ok") is True
-                    and _is_timeout_diagnostic_instrumentation_action(
-                        action,
-                        timeout_diagnostic=timeout_diagnostic,
-                    )
-                ):
-                    result["timeout_diagnostic_instrumentation"] = True
-                history.append(
-                    {
-                        "action": action["action"],
-                        "arguments": _action_history_arguments(action),
-                        "result": result,
-                        "summary": str(action.get("summary") or "").strip()[:500],
-                        "tool_call": {
-                            "version": "role_tool_call_v1",
-                            "call_id": call_id,
-                            "tool_id": action["action"],
-                            "arguments": _action_history_arguments(action),
-                        },
-                        "tool_result": {
-                            "version": "role_tool_result_v1",
-                            "call_id": call_id,
-                            "tool_id": action["action"],
-                            "result": _clip_json_value(result, 4000),
-                        },
-                    }
-                )
-                entry["actions"][-1]["tool_action"] = action["action"]
-                entry["actions"][-1]["action_summary"] = history[-1]["summary"]
-                entry["actions"][-1]["tool_call"] = history[-1]["tool_call"]
-                entry["actions"][-1]["tool_result"] = _clip_json_value(result, 4000)
-                if (
-                    action["action"] == "verification.run_stage"
-                    and result.get("ok") is not True
-                    and result.get("failure_kind") == "environment"
-                ):
-                    raise DeveloperExecutionError(
-                        "developer_verification_environment_failed",
-                        str(result.get("reason") or "Developer unit verification environment failed."),
-                        run_id=run_id,
-                        retriable=True,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
-                if action["action"] in _OBSERVATION_ACTIONS and result.get("ok"):
-                    seen_observations.update(_observation_signatures(action, result=result))
-                if action["action"] in _MUTATION_ACTIONS and result.get("ok"):
-                    mutated_path = str(result.get("path") or "").replace("\\", "/")
-                    if mutated_path:
-                        mutated_paths.add(mutated_path)
-                    seen_observations.clear()
-                inspected_paths = {
-                    path for path in context_paths if _has_successful_target_inspection(history, item_path=path)
-                }
-                handled_paths = mutated_paths & set(context_paths)
-                entry["handled_paths"] = sorted(handled_paths)
-                entry["inspected_paths"] = sorted(inspected_paths)
-                entry["unresolved_paths"] = []
-                if result.get("error") == "no_effect_mutation":
-                    entry["no_effect_actions"] = int(entry.get("no_effect_actions") or 0) + 1
-                persist_working_state(action_index + 1)
-                journal["updated_at"] = utc_now_iso()
-                _write_json_atomic(journal_file, journal)
-                if (
-                    result.get("error") in _RECOVERABLE_ACTION_POLICY_ERRORS
-                    and int(result.get("policy_repeat_count") or 0) > max_retries
-                ):
-                    raise DeveloperExecutionError(
-                        str(result.get("error") or "developer_act_out_of_scope"),
-                        str(result.get("reason") or "Developer action remained outside the approved unit scope."),
-                        run_id=run_id,
-                        retriable=False,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
-                if (
-                    result.get("error") in {"duplicate_no_effect_mutation", "verification_repair_ready"}
-                    and int(result.get("repeat_count") or 0) >= _MAX_IDENTICAL_NO_EFFECT_MUTATIONS
-                ):
-                    raise DeveloperExecutionError(
-                        "developer_repair_stalled",
-                        (
-                            "Developer repeated the same no-effect mutation "
-                            f"{_MAX_IDENTICAL_NO_EFFECT_MUTATIONS} times for "
-                            f"{_dict_value(action.get('arguments')).get('path') or '<unknown>'}."
-                        ),
-                        run_id=run_id,
-                        retriable=False,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
-                if (
-                    result.get("error") == "duplicate_observation"
-                    and int(result.get("repeat_count") or 0) >= _MAX_IDENTICAL_DIAGNOSTIC_RESULTS
-                ):
-                    raise DeveloperExecutionError(
-                        "developer_repair_stalled",
-                        (
-                            "Developer repeated the same cached observation "
-                            f"{_MAX_IDENTICAL_DIAGNOSTIC_RESULTS} times instead of advancing the repair."
-                        ),
-                        run_id=run_id,
-                        retriable=False,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
-                if (
-                    action["action"] == "verification.run_stage"
-                    and int(result.get("diagnostic_repeat_count") or 0)
-                    >= _MAX_IDENTICAL_DIAGNOSTIC_RESULTS
-                ):
-                    raise DeveloperExecutionError(
-                        "developer_repair_stalled",
-                        (
-                            f"Developer verification stage {result.get('stage_id') or '<unknown>'} returned the "
-                            f"same diagnostics {_MAX_IDENTICAL_DIAGNOSTIC_RESULTS} times."
-                        ),
-                        run_id=run_id,
-                        retriable=False,
-                        manifest_path=manifest_path,
-                        journal_path=journal_path,
-                        progress=_progress(journal),
-                    )
+                result = self._action_result(loop, turn, action)
+                self._record_action(loop, turn, action, result)
+                self._enforce_repeat_limits(loop, action, result)
                 if action["action"] not in {"complete", "execution.complete_unit"}:
                     continue
-                diagnostic_completion_error = _timeout_diagnostic_completion_error(
-                    target_path=target_path,
-                    item_paths=item_paths,
-                )
-                if diagnostic_completion_error:
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        **diagnostic_completion_error,
-                    }
-                    history.append({"action": "rejected", **diagnostic_completion_error})
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                complete_arguments = _dict_value(action.get("arguments"))
-                no_change_required = complete_arguments.get("no_change_required") is True
-                declared_unchanged: set[str] = set()
-                declared_dispositions: dict[str, dict[str, str]] = {}
-                invalid_unchanged: list[str] = []
-                for row in _dict_items(complete_arguments.get("unchanged_paths")):
-                    path = str(row.get("path") or "").replace("\\", "/")
-                    reason = str(row.get("reason") or "").strip()
-                    if path not in context_paths or path not in inspected_paths or not reason:
-                        invalid_unchanged.append(path or "<missing>")
-                        continue
-                    declared_unchanged.add(path)
-                    declared_dispositions[path] = {"status": "verified_unchanged", "reason": reason}
-                for row in _dict_items(complete_arguments.get("path_dispositions")):
-                    path = str(row.get("path") or "").replace("\\", "/")
-                    status = str(row.get("status") or "").strip()
-                    reason = str(row.get("reason") or "").strip()
-                    valid = (
-                        path in item_paths
-                        and status in {"mutated", "verified_unchanged", "not_required"}
-                        and bool(reason)
-                        and (
-                            (status == "mutated" and path in mutated_paths)
-                            or (status != "mutated" and path in inspected_paths)
-                        )
-                    )
-                    if not valid:
-                        invalid_unchanged.append(path or "<missing>")
-                        continue
-                    declared_dispositions[path] = {"status": status, "reason": reason}
-                    if status != "mutated":
-                        declared_unchanged.add(path)
-                handled_paths = (mutated_paths & set(context_paths)) | declared_unchanged
-                entry["handled_paths"] = sorted(handled_paths)
-                entry["unchanged_paths"] = sorted(declared_unchanged)
-                covered_paths = set(mutated_paths) | set(declared_dispositions)
-                unresolved_paths = set(item_paths) - covered_paths
-                entry["unresolved_paths"] = (
-                    sorted(unresolved_paths)
-                )
-                entry["path_dispositions"] = {
-                    path: declared_dispositions.get(
-                        path,
-                        {"status": "mutated", "reason": "Successful bounded mutation."},
-                    )
-                    for path in sorted(covered_paths)
-                }
-                existing_paths = {path for path in item_paths if (target_path / path).is_file()}
-                verified_unchanged_completion = (
-                    bool(item_paths)
-                    and set(item_paths) <= existing_paths
-                    and not invalid_unchanged
-                    and not unresolved_paths
-                    and all(
-                        declared_dispositions.get(path, {}).get("status") == "verified_unchanged"
-                        for path in item_paths
-                    )
-                )
-                no_change_allowed = verified_unchanged_completion or (
-                    repair_mode
-                    and no_change_required
-                    and bool(declared_unchanged)
-                    and not invalid_unchanged
-                )
-                required_test_mutations = set(
-                    _required_test_mutation_paths(item, repair_mode=repair_mode)
-                ) - set(mutated_paths)
-                if required_test_mutations:
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        "reason": "test_intent_evidence_missing",
-                        "missing_test_mutations": sorted(required_test_mutations),
-                    }
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": (
-                                "complete requires each required_test_mutation_path to be mutated in this unit. "
-                                "A passing pre-existing test file does not prove a directly affected intent. "
-                                f"missing_test_mutations={sorted(required_test_mutations)}."
-                            ),
-                        }
-                    )
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                completed_unit = (
-                    bool(mutated_paths)
-                    and mutated_paths <= existing_paths
-                    and (
-                        not unresolved_paths
-                    )
-                )
-                if not completed_unit and not no_change_allowed:
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        "reason": "path_disposition_or_mutation_missing",
-                        "unresolved_paths": sorted(unresolved_paths),
-                    }
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": (
-                                "complete requires at least one successful mutation and a disposition for every unit "
-                                "path. Repair feedback may instead use "
-                                "no_change_required=true with unchanged_paths=[{path, reason}] after fresh inspection. "
-                                f"invalid_paths={invalid_unchanged}; unresolved_paths={sorted(unresolved_paths)}."
-                            ),
-                        }
-                    )
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                required_stages = set(_string_items(item.get("required_stage_ids")))
-                current_hashes = {
-                    path: _file_hash(target_path / path) for path in execution_hash_paths
-                }
-                missing_stages = sorted(
-                    required_stages - _current_passed_stages(history, current_hashes=current_hashes)
-                )
-                if missing_stages:
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        "reason": "required_verification_missing",
-                        "missing_stage_ids": missing_stages,
-                    }
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": "developer_unit_verification_missing",
-                            "instruction": f"Run required verification stages on current hashes: {missing_stages}",
-                        }
-                    )
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                runtime_config_issues = runtime_config_source_issues(
-                    repo_root=target_path,
-                    changes=_dict_items(item.get("runtime_config_changes")),
-                )
-                if runtime_config_issues:
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        "reason": "runtime_config_contract_mismatch",
-                        "findings": _clip_json_value(runtime_config_issues, 4000),
-                    }
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": "developer_runtime_config_contract_mismatch",
-                            "instruction": (
-                                "Read the approved runtime configuration from mandatory_obligations, "
-                                "then make the declared source read the exact environment variable "
-                                "and use its approved default before completing this unit."
-                            ),
-                            "findings": runtime_config_issues,
-                        }
-                    )
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                signature_evidence = _unit_signature_evidence(
-                    run_id=run_id,
-                    target_path=target_path,
-                    work_packet=work_packet,
-                    item=item,
-                )
-                if signature_evidence.get("status") == "failed":
-                    findings = _dict_items(signature_evidence.get("findings"))
-                    entry["actions"][-1]["completion_gate"] = {
-                        "status": "rejected",
-                        "reason": "approved_signature_mismatch",
-                        "findings": _clip_json_value(findings, 4000),
-                    }
-                    history.append(
-                        {
-                            "action": "rejected",
-                            "error": "developer_unit_signature_mismatch",
-                            "instruction": "Repair the approved signatures before completing this unit.",
-                            "findings": findings,
-                        }
-                    )
-                    _write_json_atomic(journal_file, journal)
-                    continue
-                codegraph_evidence = _codegraph_affected_test_evidence(
-                    target_path=target_path,
-                    mutated_paths=mutated_paths,
-                    repo_context_provider=self.repo_context_provider,
-                )
-                entry["signature_evidence"] = signature_evidence
-                entry["codegraph_evidence"] = codegraph_evidence
-                entry["actions"][-1]["completion_gate"] = {"status": "passed"}
-                self._complete_item(
-                    item=item,
-                    entry=entry,
-                    target_path=target_path,
-                    session_dir=session_dir,
-                    summary=str(action.get("arguments", {}).get("summary") or ""),
-                    mutated_paths=mutated_paths,
-                    no_change_required=no_change_allowed,
-                    verification_evidence=_stage_evidence(history),
-                    codegraph_evidence=codegraph_evidence,
-                )
-                journal["updated_at"] = utc_now_iso()
-                _write_json_atomic(journal_file, journal)
-                if on_progress:
-                    on_progress(_progress(journal), manifest_path, journal_path)
-                return
-            active_repair = _verification_repair_state(history)
+                if self._complete_unit(loop, action):
+                    return
+            active_repair = _verification_repair_state(loop.history)
             error_code = "developer_repair_budget_exhausted" if active_repair else "developer_action_limit_exceeded"
             message = (
-                f"Developer did not finish repair for execution unit {item_id} within {max_actions} tool actions."
+                f"Developer did not finish repair for execution unit {loop.item_id} within {max_actions} tool actions."
                 if active_repair
-                else f"Developer did not complete execution unit {item_id} within {max_actions} tool actions."
+                else f"Developer did not complete execution unit {loop.item_id} within {max_actions} tool actions."
             )
-            raise DeveloperExecutionError(
-                error_code,
-                message,
-                run_id=run_id,
-                retriable=False,
-                manifest_path=manifest_path,
-                journal_path=journal_path,
-                progress=_progress(journal),
-            )
+            raise loop.fail(error_code, message, retriable=False)
         except LlmStepReviewRequired as exc:
-            pending_action_index = locals().get("action_index", next_action_index)
-            persist_working_state(
-                int(pending_action_index),
-                cursor=max(0, int(getattr(llm_client, "cursor", 1)) - 1),
-            )
-            journal["last_failed_unit_id"] = item_id
-            journal["pending_step_review"] = dict(exc.progress)
-            entry["status"] = "review_required"
-            entry["last_error_at"] = utc_now_iso()
-            journal["status"] = "paused"
-            journal["updated_at"] = utc_now_iso()
-            _write_json_atomic(journal_file, journal)
-            raise DeveloperExecutionError(
-                exc.error_code,
-                exc.message,
-                run_id=run_id,
-                retriable=True,
-                manifest_path=manifest_path,
-                journal_path=journal_path,
-                progress=_progress(journal),
-            ) from exc
+            self._pause_unit_for_resume(loop, pending_step_review=dict(exc.progress))
+            raise loop.fail(exc.error_code, exc.message, retriable=True) from exc
         except DeveloperExecutionError as exc:
             if exc.error_code == "developer_action_limit_exceeded":
-                persist_working_state(durable_next_action_index)
-                journal.pop("pending_step_review", None)
-                journal["last_failed_unit_id"] = item_id
-                entry["status"] = "review_required"
-                entry["last_error_at"] = utc_now_iso()
-                entry["budget_resume"] = {
-                    "version": "developer_budget_resume_v1",
-                    "next_action_index": durable_next_action_index,
-                    "configured_max_actions": configured_max_actions,
-                    "paused_at": utc_now_iso(),
-                }
-                journal["status"] = "paused"
-                journal["updated_at"] = utc_now_iso()
-                _write_json_atomic(journal_file, journal)
-                exc.manifest_path = exc.manifest_path or manifest_path
-                exc.journal_path = exc.journal_path or journal_path
-                exc.progress = _progress(journal)
-                raise
-            self._rollback_item(target_path=target_path, session_dir=session_dir, item=item, entry=entry)
-            journal["last_failed_unit_id"] = item_id
-            entry["status"] = "pending"
-            entry["last_error_at"] = utc_now_iso()
-            journal["status"] = "paused"
-            journal["updated_at"] = utc_now_iso()
-            _write_json_atomic(journal_file, journal)
+                self._pause_unit_at_budget(loop)
+            else:
+                self._roll_back_unit(loop, journal_status="paused", mark_error_time=True)
             exc.manifest_path = exc.manifest_path or manifest_path
             exc.journal_path = exc.journal_path or journal_path
             exc.progress = _progress(journal)
             raise
         except HarnessError as exc:
             if exc.error_code == "llm_transport_failed":
-                pending_action_index = locals().get("action_index", next_action_index)
-                persist_working_state(
-                    int(pending_action_index),
-                    cursor=max(0, int(getattr(llm_client, "cursor", 1)) - 1),
-                )
-                journal.pop("pending_step_review", None)
-                journal["last_failed_unit_id"] = item_id
-                entry["status"] = "review_required"
-                entry["last_error_at"] = utc_now_iso()
-                journal["status"] = "paused"
-                journal["updated_at"] = utc_now_iso()
-                _write_json_atomic(journal_file, journal)
-                raise DeveloperExecutionError(
-                    exc.error_code,
-                    exc.message,
-                    run_id=run_id,
-                    retriable=True,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                    progress=_progress(journal),
-                ) from exc
-            self._rollback_item(target_path=target_path, session_dir=session_dir, item=item, entry=entry)
-            journal["last_failed_unit_id"] = item_id
-            entry["status"] = "pending"
-            journal["status"] = "blocked"
-            journal["updated_at"] = utc_now_iso()
-            _write_json_atomic(journal_file, journal)
-            raise DeveloperExecutionError(
-                exc.error_code,
-                exc.message,
-                run_id=run_id,
-                retriable=(
-                    exc.error_code
-                    in {
-                        "typescript_ast_extractor_unavailable",
-                        "typescript_ast_extraction_failed",
-                    }
-                    or exc.error_code.startswith("target_repo_codegraph")
-                ),
-                manifest_path=manifest_path,
-                journal_path=journal_path,
-                progress=_progress(journal),
-            ) from exc
+                self._pause_unit_for_resume(loop)
+                raise loop.fail(exc.error_code, exc.message, retriable=True) from exc
+            self._roll_back_unit(loop, journal_status="blocked")
+            retriable = exc.error_code in {
+                "typescript_ast_extractor_unavailable",
+                "typescript_ast_extraction_failed",
+            } or exc.error_code.startswith("target_repo_codegraph")
+            raise loop.fail(exc.error_code, exc.message, retriable=retriable) from exc
         except (OSError, subprocess.SubprocessError) as exc:
-            self._rollback_item(target_path=target_path, session_dir=session_dir, item=item, entry=entry)
-            journal["last_failed_unit_id"] = item_id
-            entry["status"] = "pending"
-            journal["status"] = "paused"
-            journal["updated_at"] = utc_now_iso()
-            _write_json_atomic(journal_file, journal)
-            raise DeveloperExecutionError(
+            self._roll_back_unit(loop, journal_status="paused")
+            raise loop.fail(
                 "developer_tool_failed",
-                f"Developer workspace tool failed for execution unit {item_id}: {exc}",
-                run_id=run_id,
+                f"Developer workspace tool failed for execution unit {loop.item_id}: {exc}",
                 retriable=True,
-                manifest_path=manifest_path,
-                journal_path=journal_path,
-                progress=_progress(journal),
             ) from exc
+
+    def _request_action(self, loop: _UnitLoop, max_actions: int) -> _ActionTurn:
+        """Ask the Developer for the next action and record the call in the journal."""
+        uiux_available = _developer_uiux_available(
+            manifest=loop.manifest,
+            journal=loop.journal,
+            item=loop.item,
+        )
+        uiux_guidance = _developer_uiux_guidance(
+            journal=loop.journal,
+            item=loop.item,
+        )
+        visual_store = read_visual_profiles(loop.visual_profile_file)
+        app_visual_profile = _dict_value(
+            _dict_value(visual_store.get("profiles")).get(loop.visual_app_scope_id)
+        )
+        visual_candidates = _developer_visual_candidates(
+            journal=loop.journal,
+            app_scope_id=loop.visual_app_scope_id,
+        )
+        prompt = _action_prompt(
+            item=loop.item,
+            manifest=loop.manifest,
+            history=loop.history,
+            target_path=loop.target_path,
+            max_write_chars=loop.max_write_chars,
+            force_incremental=loop.length_failures > 0,
+            action_index=loop.action_index,
+            max_actions=max_actions,
+            mutated=bool(loop.mutated_paths),
+            context_window_tokens=loop.context_window_tokens,
+            working_memory_evidence_chars=loop.working_memory_evidence_chars,
+            uiux_available=uiux_available,
+            uiux_guidance=uiux_guidance,
+            visual_profile_required=loop.visual_required,
+            app_visual_profile=app_visual_profile,
+            visual_profile_candidates=visual_candidates,
+            visual_app_scope_id=loop.visual_app_scope_id,
+            journal=loop.journal,
+        )
+        active_options = (
+            loop.repair_options
+            if loop.repair_mode or bool(_verification_repair_state(loop.history))
+            else loop.normal_options
+        )
+        configured_max_tokens = int(
+            active_options.get("max_tokens") or loop.fallback_max_tokens
+        )
+        max_tokens = _completion_token_budget(
+            prompt,
+            configured_max_tokens=configured_max_tokens,
+            context_window_tokens=loop.context_window_tokens,
+        )
+        completion = loop.llm_client.complete_with_metadata(
+            system=(
+                "You are Developer Executor in a controlled SDLC worktree. One response proposes exactly "
+                "one JSON action and then stops. The action is not executed until the Harness returns its "
+                "tool result in a later turn. Reason only far enough to choose the current action: do not "
+                "plan, draft, or evaluate later actions or files. Outcomes owned by a required Verification "
+                "stage are not preconditions for the current action; follow the typed contract and let the "
+                "Harness stage judge them instead of speculating about toolchain behavior. Never narrate "
+                "reasoning, emit or repeat a second action, or claim an action ran without a Harness tool "
+                "result. Use tools only within the approved execution unit; do not include analysis, thinking "
+                "markers, or markdown."
+            ),
+            prompt=prompt,
+            json_mode=True,
+            model=str(active_options.get("model") or "") or None,
+            reasoning_effort=str(active_options.get("reasoning_effort") or "") or None,
+            max_tokens=max_tokens,
+            timeout_seconds=int(active_options.get("timeout_seconds") or 0) or None,
+        )
+        loop.journal.pop("pending_step_review", None)
+        raw = str(getattr(completion, "content", ""))
+        call_id = f"{loop.item_id}:a{int(loop.entry.get('attempts') or 1)}:c{loop.action_index}"
+        metadata = {
+            "call_id": call_id,
+            "item_attempt": int(loop.entry.get("attempts") or 1),
+            "action_index": loop.action_index,
+            "finish_reason": str(getattr(completion, "finish_reason", "") or ""),
+            "usage": getattr(completion, "usage", {}) if isinstance(getattr(completion, "usage", {}), dict) else {},
+            "max_tokens": max_tokens,
+            "request_options": {
+                "model": str(active_options.get("model") or ""),
+                "reasoning_effort": str(active_options.get("reasoning_effort") or ""),
+                "max_tokens": max_tokens,
+                "timeout_seconds": int(active_options.get("timeout_seconds") or 0),
+            },
+            "created_at": utc_now_iso(),
+            "replayed": getattr(loop.llm_client, "last_replay_kind", "") == "approved",
+        }
+        if metadata["replayed"] is not True:
+            _write_action_artifacts(
+                loop.session_dir,
+                loop.item_id,
+                int(loop.entry.get("attempts") or 1),
+                loop.action_index,
+                raw,
+                metadata,
+            )
+        loop.entry.setdefault("actions", []).append(metadata)
+        return _ActionTurn(
+            max_actions=max_actions,
+            uiux_available=uiux_available,
+            app_visual_profile=app_visual_profile,
+            visual_candidates=visual_candidates,
+            call_id=call_id,
+            raw=raw,
+            finish_reason=metadata["finish_reason"],
+        )
+
+    def _accept_action(self, loop: _UnitLoop, turn: _ActionTurn) -> dict[str, object] | None:
+        """The parsed action, or None after recording why the reply is rejected (truncated, invalid, legacy)."""
+        if turn.finish_reason == "length":
+            loop.length_failures += 1
+            loop.history.append({"action": "rejected", "error": "finish_reason=length", "instruction": "Use a smaller write or patch."})
+            loop.persist(loop.action_index + 1)
+            _write_json_atomic(loop.journal_file, loop.journal)
+            if loop.length_failures > loop.max_retries:
+                raise loop.fail(
+                    "developer_action_truncated",
+                    f"Developer action for execution unit {loop.item_id} exceeded the output budget after {loop.length_failures} attempts.",
+                    retriable=True,
+                )
+            return None
+        try:
+            action = _parse_action(turn.raw)
+            loop.invalid_action_failures = 0
+            if action.get("normalization"):
+                loop.entry["actions"][-1]["parse_normalization"] = action["normalization"]
+        except HarnessError as exc:
+            loop.invalid_action_failures += 1
+            loop.history.append(
+                {
+                    "action": "rejected",
+                    "error": exc.message,
+                    "instruction": (
+                        "Return exactly one JSON action object with no analysis, thinking markers, "
+                        "markdown, or additional action."
+                    ),
+                }
+            )
+            loop.persist(loop.action_index + 1)
+            _write_json_atomic(loop.journal_file, loop.journal)
+            if loop.invalid_action_failures > loop.max_retries:
+                raise loop.fail(
+                    "developer_action_invalid",
+                    f"Developer returned invalid tool actions for execution unit {loop.item_id}: {exc.message}",
+                    retriable=True,
+                ) from exc
+            return None
+        if action.get("action") not in _UNIT_ACTION_NAMES:
+            loop.history.append(
+                {
+                    "action": "rejected",
+                    "error": "developer_unit_legacy_tool_not_allowed",
+                    "instruction": "Use one canonical Developer Tool Action v2 tool ID.",
+                }
+            )
+            loop.persist(loop.action_index + 1)
+            _write_json_atomic(loop.journal_file, loop.journal)
+            return None
+        return action
+
+    def _action_result(
+        self,
+        loop: _UnitLoop,
+        turn: _ActionTurn,
+        action: dict[str, object],
+    ) -> dict[str, object]:
+        """Run the action unless the action policy rejects it; either way return its tool result."""
+        current_hashes = {
+            path: _file_hash(loop.target_path / path) for path in loop.execution_hash_paths
+        }
+        dependency_statuses = _package_dependency_statuses(
+            target_path=loop.target_path,
+            item=loop.item,
+            run_id=loop.run_id,
+        )
+        pending_dependency_ids = [
+            str(status.get("dependency_id") or "")
+            for status in dependency_statuses
+            if status.get("satisfied") is not True
+        ]
+        repair_state = _verification_repair_state(loop.history)
+        failed_stage_ids = sorted(repair_state)
+        policy_error = _new_test_context_policy_error(
+            action=action,
+            history=loop.history,
+            manifest=loop.manifest,
+            target_path=loop.target_path,
+            item_paths=loop.item_paths,
+        ) or _action_policy_error(
+            action=action,
+            history=loop.history,
+            seen_observations=loop.seen_observations,
+            mutated=bool(loop.mutated_paths),
+            action_index=loop.action_index,
+            max_actions=turn.max_actions,
+            pending_stage_ids=sorted(
+                set(_string_items(loop.item.get("required_stage_ids")))
+                - _current_passed_stages(
+                    loop.history,
+                    current_hashes=current_hashes,
+                )
+            ),
+            failed_stage_ids=failed_stage_ids,
+            repair_mutated_stage_ids=sorted(
+                stage_id
+                for stage_id, episode in repair_state.items()
+                if episode.get("mutated_since_failure") is True
+            ),
+            repair_verification_ready_stage_ids=sorted(
+                stage_id
+                for stage_id, episode in repair_state.items()
+                if episode.get("verification_ready") is True
+            ),
+            repair_verification_forced_stage_ids=sorted(
+                stage_id
+                for stage_id, episode in repair_state.items()
+                if episode.get("verification_forced") is True
+            ),
+            closure_resolved=True,
+            handled_paths=set(),
+            unresolved_paths=set(),
+            pending_package_dependency_ids=pending_dependency_ids,
+            uiux_available=turn.uiux_available,
+            uiux_success_count=_developer_uiux_success_count(journal=loop.journal, item=loop.item),
+            visual_profile_required=loop.visual_required,
+            visual_profile_committed=bool(turn.app_visual_profile),
+            visual_profile_candidate_count=len(turn.visual_candidates),
+        )
+        if policy_error:
+            result = {"ok": False, **policy_error}
+        else:
+            try:
+                result = _execute_action(
+                    action=action,
+                    run_id=loop.run_id,
+                    work_packet=loop.work_packet,
+                    repo_root=loop.target_path,
+                    item_paths=loop.item_paths,
+                    item=loop.item,
+                    session_dir=loop.session_dir,
+                    max_write_chars=loop.max_write_chars,
+                    repo_context_provider=self.repo_context_provider,
+                    verification_runner=self.verification_runner,
+                    verification_policy=loop.verification_policy,
+                    uiux_provider=self.uiux_provider,
+                    journal=loop.journal,
+                    visual_profile_file=loop.visual_profile_file,
+                    visual_app_scope_id=loop.visual_app_scope_id,
+                    package_tool_timeout_seconds=int(
+                        getattr(self.settings, "developer_package_tool_timeout_seconds", 120)
+                    ),
+                )
+            except HarnessError as exc:
+                if exc.error_code in _RECOVERABLE_ACTION_POLICY_ERRORS:
+                    repeat_count = 1 + sum(
+                        1
+                        for row in loop.history
+                        if _dict_value(row.get("result")).get("error") == exc.error_code
+                    )
+                    result = {
+                        "ok": False,
+                        "error": exc.error_code,
+                        "reason": exc.message,
+                        "instruction": (
+                            "Do not create or modify that path. Rework the implementation and tests "
+                            "using only the approved execution-unit paths."
+                        ),
+                        "approved_paths": loop.item_paths,
+                        "policy_repeat_count": repeat_count,
+                    }
+                else:
+                    raise loop.fail(
+                        exc.error_code,
+                        exc.message,
+                        retriable=(
+                            exc.error_code == "llm_transport_failed"
+                            or exc.error_code.startswith("target_repo_codegraph")
+                        ),
+                    ) from exc
+        return result
+
+    def _record_action(
+        self,
+        loop: _UnitLoop,
+        turn: _ActionTurn,
+        action: dict[str, object],
+        result: dict[str, object],
+    ) -> None:
+        """Add the action and its result to the history and journal, then persist the working state."""
+        if (
+            action["action"] == "verification.run_stage"
+            and result.get("status") == "failed"
+            and result.get("failure_kind") == "implementation"
+        ):
+            diagnostic_fingerprint = _verification_diagnostic_fingerprint(result)
+            result["diagnostic_fingerprint"] = diagnostic_fingerprint
+            result["diagnostic_repeat_count"] = 1 + _diagnostic_repeat_count(
+                loop.history,
+                fingerprint=diagnostic_fingerprint,
+            )
+        if action["action"] == "uiux.search_guidance":
+            if result.get("ok") is True:
+                _remember_developer_uiux_guidance(
+                    journal=loop.journal,
+                    item=loop.item,
+                    result=result,
+                )
+            elif str(result.get("error") or "") in {
+                "developer_uiux_unavailable",
+                "designer_uiux_unavailable",
+                "designer_uiux_failed",
+            }:
+                loop.journal["uiux_disabled"] = {
+                    "reason": str(result.get("error") or "developer_uiux_unavailable"),
+                    "disabled_at": utc_now_iso(),
+                }
+        if action["action"] == "uiux.search_visual_profile" and result.get("candidate"):
+            _remember_developer_visual_candidate(
+                journal=loop.journal,
+                app_scope_id=loop.visual_app_scope_id,
+                candidate=_dict_value(result.get("candidate")),
+            )
+            current_candidates = _developer_visual_candidates(
+                journal=loop.journal,
+                app_scope_id=loop.visual_app_scope_id,
+            )
+            if len(current_candidates) >= 2 and not any(
+                row.get("valid") is True for row in current_candidates
+            ):
+                invalid_attempts = loop.journal.setdefault("uiux_visual_candidate_failures", [])
+                if isinstance(invalid_attempts, list):
+                    invalid_attempts.append(
+                        {
+                            "app_scope_id": loop.visual_app_scope_id,
+                            "candidate_ids": [
+                                str(row.get("candidate_id") or "") for row in current_candidates
+                            ],
+                            "failed_at": utc_now_iso(),
+                        }
+                    )
+                candidate_cache = _dict_value(loop.journal.get("uiux_visual_candidates_by_app"))
+                candidate_cache[loop.visual_app_scope_id] = []
+                loop.journal["uiux_visual_candidates_by_app"] = candidate_cache
+                loop.persist(loop.action_index + 1)
+                _write_json_atomic(loop.journal_file, loop.journal)
+                raise loop.fail(
+                    "developer_visual_profile_invalid",
+                    "Two UI/UX visual-profile candidates failed deterministic validation.",
+                    retriable=True,
+                )
+        if str(result.get("error") or "") == "developer_visual_profile_unavailable":
+            loop.persist(loop.action_index + 1)
+            _write_json_atomic(loop.journal_file, loop.journal)
+            raise loop.fail(
+                "developer_visual_profile_unavailable",
+                str(result.get("reason") or "Required UI/UX visual-profile skill is unavailable."),
+                retriable=True,
+            )
+        timeout_diagnostic = _timeout_diagnostic_state(loop.history)
+        if (
+            result.get("ok") is True
+            and _is_timeout_diagnostic_instrumentation_action(
+                action,
+                timeout_diagnostic=timeout_diagnostic,
+            )
+        ):
+            result["timeout_diagnostic_instrumentation"] = True
+        loop.history.append(
+            {
+                "action": action["action"],
+                "arguments": _action_history_arguments(action),
+                "result": result,
+                "summary": str(action.get("summary") or "").strip()[:500],
+                "tool_call": {
+                    "version": "role_tool_call_v1",
+                    "call_id": turn.call_id,
+                    "tool_id": action["action"],
+                    "arguments": _action_history_arguments(action),
+                },
+                "tool_result": {
+                    "version": "role_tool_result_v1",
+                    "call_id": turn.call_id,
+                    "tool_id": action["action"],
+                    "result": _clip_json_value(result, 4000),
+                },
+            }
+        )
+        loop.entry["actions"][-1]["tool_action"] = action["action"]
+        loop.entry["actions"][-1]["action_summary"] = loop.history[-1]["summary"]
+        loop.entry["actions"][-1]["tool_call"] = loop.history[-1]["tool_call"]
+        loop.entry["actions"][-1]["tool_result"] = _clip_json_value(result, 4000)
+        if (
+            action["action"] == "verification.run_stage"
+            and result.get("ok") is not True
+            and result.get("failure_kind") == "environment"
+        ):
+            raise loop.fail(
+                "developer_verification_environment_failed",
+                str(result.get("reason") or "Developer unit verification environment failed."),
+                retriable=True,
+            )
+        if action["action"] in _OBSERVATION_ACTIONS and result.get("ok"):
+            loop.seen_observations.update(_observation_signatures(action, result=result))
+        if action["action"] in _MUTATION_ACTIONS and result.get("ok"):
+            mutated_path = str(result.get("path") or "").replace("\\", "/")
+            if mutated_path:
+                loop.mutated_paths.add(mutated_path)
+            loop.seen_observations.clear()
+        inspected_paths = {
+            path for path in loop.context_paths if _has_successful_target_inspection(loop.history, item_path=path)
+        }
+        handled_paths = loop.mutated_paths & set(loop.context_paths)
+        loop.entry["handled_paths"] = sorted(handled_paths)
+        loop.entry["inspected_paths"] = sorted(inspected_paths)
+        loop.entry["unresolved_paths"] = []
+        if result.get("error") == "no_effect_mutation":
+            loop.entry["no_effect_actions"] = int(loop.entry.get("no_effect_actions") or 0) + 1
+        loop.persist(loop.action_index + 1)
+        loop.journal["updated_at"] = utc_now_iso()
+        _write_json_atomic(loop.journal_file, loop.journal)
+
+    def _enforce_repeat_limits(self, loop: _UnitLoop, action: dict[str, object], result: dict[str, object]) -> None:
+        """Stop the unit when the Developer keeps repeating an out-of-scope, no-effect or diagnostic action."""
+        if (
+            result.get("error") in _RECOVERABLE_ACTION_POLICY_ERRORS
+            and int(result.get("policy_repeat_count") or 0) > loop.max_retries
+        ):
+            raise loop.fail(
+                str(result.get("error") or "developer_act_out_of_scope"),
+                str(result.get("reason") or "Developer action remained outside the approved unit scope."),
+                retriable=False,
+            )
+        if (
+            result.get("error") in {"duplicate_no_effect_mutation", "verification_repair_ready"}
+            and int(result.get("repeat_count") or 0) >= _MAX_IDENTICAL_NO_EFFECT_MUTATIONS
+        ):
+            raise loop.fail(
+                "developer_repair_stalled",
+                (
+                    "Developer repeated the same no-effect mutation "
+                    f"{_MAX_IDENTICAL_NO_EFFECT_MUTATIONS} times for "
+                    f"{_dict_value(action.get('arguments')).get('path') or '<unknown>'}."
+                ),
+                retriable=False,
+            )
+        if (
+            result.get("error") == "duplicate_observation"
+            and int(result.get("repeat_count") or 0) >= _MAX_IDENTICAL_DIAGNOSTIC_RESULTS
+        ):
+            raise loop.fail(
+                "developer_repair_stalled",
+                (
+                    "Developer repeated the same cached observation "
+                    f"{_MAX_IDENTICAL_DIAGNOSTIC_RESULTS} times instead of advancing the repair."
+                ),
+                retriable=False,
+            )
+        if (
+            action["action"] == "verification.run_stage"
+            and int(result.get("diagnostic_repeat_count") or 0)
+            >= _MAX_IDENTICAL_DIAGNOSTIC_RESULTS
+        ):
+            raise loop.fail(
+                "developer_repair_stalled",
+                (
+                    f"Developer verification stage {result.get('stage_id') or '<unknown>'} returned the "
+                    f"same diagnostics {_MAX_IDENTICAL_DIAGNOSTIC_RESULTS} times."
+                ),
+                retriable=False,
+            )
+
+    def _complete_unit(self, loop: _UnitLoop, action: dict[str, object]) -> bool:
+        """Gate execution.complete_unit: True when the unit completed, False after recording the rejection."""
+        inspected_paths = {
+            path for path in loop.context_paths if _has_successful_target_inspection(loop.history, item_path=path)
+        }
+        diagnostic_completion_error = _timeout_diagnostic_completion_error(
+            target_path=loop.target_path,
+            item_paths=loop.item_paths,
+        )
+        if diagnostic_completion_error:
+            loop.reject_completion(diagnostic_completion_error, diagnostic_completion_error)
+            return False
+        complete_arguments = _dict_value(action.get("arguments"))
+        no_change_required = complete_arguments.get("no_change_required") is True
+        declared_unchanged: set[str] = set()
+        declared_dispositions: dict[str, dict[str, str]] = {}
+        invalid_unchanged: list[str] = []
+        for row in _dict_items(complete_arguments.get("unchanged_paths")):
+            path = str(row.get("path") or "").replace("\\", "/")
+            reason = str(row.get("reason") or "").strip()
+            if path not in loop.context_paths or path not in inspected_paths or not reason:
+                invalid_unchanged.append(path or "<missing>")
+                continue
+            declared_unchanged.add(path)
+            declared_dispositions[path] = {"status": "verified_unchanged", "reason": reason}
+        for row in _dict_items(complete_arguments.get("path_dispositions")):
+            path = str(row.get("path") or "").replace("\\", "/")
+            status = str(row.get("status") or "").strip()
+            reason = str(row.get("reason") or "").strip()
+            valid = (
+                path in loop.item_paths
+                and status in {"mutated", "verified_unchanged", "not_required"}
+                and bool(reason)
+                and (
+                    (status == "mutated" and path in loop.mutated_paths)
+                    or (status != "mutated" and path in inspected_paths)
+                )
+            )
+            if not valid:
+                invalid_unchanged.append(path or "<missing>")
+                continue
+            declared_dispositions[path] = {"status": status, "reason": reason}
+            if status != "mutated":
+                declared_unchanged.add(path)
+        handled_paths = (loop.mutated_paths & set(loop.context_paths)) | declared_unchanged
+        loop.entry["handled_paths"] = sorted(handled_paths)
+        loop.entry["unchanged_paths"] = sorted(declared_unchanged)
+        covered_paths = set(loop.mutated_paths) | set(declared_dispositions)
+        unresolved_paths = set(loop.item_paths) - covered_paths
+        loop.entry["unresolved_paths"] = (
+            sorted(unresolved_paths)
+        )
+        loop.entry["path_dispositions"] = {
+            path: declared_dispositions.get(
+                path,
+                {"status": "mutated", "reason": "Successful bounded mutation."},
+            )
+            for path in sorted(covered_paths)
+        }
+        existing_paths = {path for path in loop.item_paths if (loop.target_path / path).is_file()}
+        verified_unchanged_completion = (
+            bool(loop.item_paths)
+            and set(loop.item_paths) <= existing_paths
+            and not invalid_unchanged
+            and not unresolved_paths
+            and all(
+                declared_dispositions.get(path, {}).get("status") == "verified_unchanged"
+                for path in loop.item_paths
+            )
+        )
+        no_change_allowed = verified_unchanged_completion or (
+            loop.repair_mode
+            and no_change_required
+            and bool(declared_unchanged)
+            and not invalid_unchanged
+        )
+        required_test_mutations = set(
+            _required_test_mutation_paths(loop.item, repair_mode=loop.repair_mode)
+        ) - set(loop.mutated_paths)
+        if required_test_mutations:
+            loop.reject_completion(
+                {"reason": "test_intent_evidence_missing", "missing_test_mutations": sorted(required_test_mutations)},
+                {
+                    "error": (
+                        "complete requires each required_test_mutation_path to be mutated in this unit. "
+                        "A passing pre-existing test file does not prove a directly affected intent. "
+                        f"missing_test_mutations={sorted(required_test_mutations)}."
+                    ),
+                },
+            )
+            return False
+        completed_unit = (
+            bool(loop.mutated_paths)
+            and loop.mutated_paths <= existing_paths
+            and (
+                not unresolved_paths
+            )
+        )
+        if not completed_unit and not no_change_allowed:
+            loop.reject_completion(
+                {"reason": "path_disposition_or_mutation_missing", "unresolved_paths": sorted(unresolved_paths)},
+                {
+                    "error": (
+                        "complete requires at least one successful mutation and a disposition for every unit "
+                        "path. Repair feedback may instead use "
+                        "no_change_required=true with unchanged_paths=[{path, reason}] after fresh inspection. "
+                        f"invalid_paths={invalid_unchanged}; unresolved_paths={sorted(unresolved_paths)}."
+                    ),
+                },
+            )
+            return False
+        required_stages = set(_string_items(loop.item.get("required_stage_ids")))
+        current_hashes = {
+            path: _file_hash(loop.target_path / path) for path in loop.execution_hash_paths
+        }
+        missing_stages = sorted(
+            required_stages - _current_passed_stages(loop.history, current_hashes=current_hashes)
+        )
+        if missing_stages:
+            loop.reject_completion(
+                {"reason": "required_verification_missing", "missing_stage_ids": missing_stages},
+                {
+                    "error": "developer_unit_verification_missing",
+                    "instruction": f"Run required verification stages on current hashes: {missing_stages}",
+                },
+            )
+            return False
+        runtime_config_issues = runtime_config_source_issues(
+            repo_root=loop.target_path,
+            changes=_dict_items(loop.item.get("runtime_config_changes")),
+        )
+        if runtime_config_issues:
+            loop.reject_completion(
+                {"reason": "runtime_config_contract_mismatch", "findings": _clip_json_value(runtime_config_issues, 4000)},
+                {
+                    "error": "developer_runtime_config_contract_mismatch",
+                    "instruction": (
+                        "Read the approved runtime configuration from mandatory_obligations, "
+                        "then make the declared source read the exact environment variable "
+                        "and use its approved default before completing this unit."
+                    ),
+                    "findings": runtime_config_issues,
+                },
+            )
+            return False
+        signature_evidence = _unit_signature_evidence(
+            run_id=loop.run_id,
+            target_path=loop.target_path,
+            work_packet=loop.work_packet,
+            item=loop.item,
+        )
+        if signature_evidence.get("status") == "failed":
+            findings = _dict_items(signature_evidence.get("findings"))
+            loop.reject_completion(
+                {"reason": "approved_signature_mismatch", "findings": _clip_json_value(findings, 4000)},
+                {
+                    "error": "developer_unit_signature_mismatch",
+                    "instruction": "Repair the approved signatures before completing this unit.",
+                    "findings": findings,
+                },
+            )
+            return False
+        codegraph_evidence = _codegraph_affected_test_evidence(
+            target_path=loop.target_path,
+            mutated_paths=loop.mutated_paths,
+            repo_context_provider=self.repo_context_provider,
+        )
+        loop.entry["signature_evidence"] = signature_evidence
+        loop.entry["codegraph_evidence"] = codegraph_evidence
+        loop.entry["actions"][-1]["completion_gate"] = {"status": "passed"}
+        self._complete_item(
+            item=loop.item,
+            entry=loop.entry,
+            target_path=loop.target_path,
+            session_dir=loop.session_dir,
+            summary=str(action.get("arguments", {}).get("summary") or ""),
+            mutated_paths=loop.mutated_paths,
+            no_change_required=no_change_allowed,
+            verification_evidence=_stage_evidence(loop.history),
+            codegraph_evidence=codegraph_evidence,
+        )
+        loop.journal["updated_at"] = utc_now_iso()
+        _write_json_atomic(loop.journal_file, loop.journal)
+        if loop.on_progress:
+            loop.on_progress(_progress(loop.journal), loop.manifest_path, loop.journal_path)
+        return True
+
+    def _pause_unit_for_resume(
+        self,
+        loop: _UnitLoop,
+        *,
+        pending_step_review: dict[str, object] | None = None,
+    ) -> None:
+        """Pause at the action in progress, keeping its history: a step review or a transport retry resumes it."""
+        loop.persist(loop.action_index, cursor=max(0, int(getattr(loop.llm_client, "cursor", 1)) - 1))
+        journal = loop.journal
+        journal["last_failed_unit_id"] = loop.item_id
+        if pending_step_review is None:
+            journal.pop("pending_step_review", None)
+        else:
+            journal["pending_step_review"] = pending_step_review
+        loop.entry["status"] = "review_required"
+        loop.entry["last_error_at"] = utc_now_iso()
+        journal["status"] = "paused"
+        journal["updated_at"] = utc_now_iso()
+        _write_json_atomic(loop.journal_file, journal)
+
+    def _pause_unit_at_budget(self, loop: _UnitLoop) -> None:
+        """Pause a unit that spent its action budget: a raised budget resumes it at its next action."""
+        loop.persist(loop.durable_next_action_index)
+        journal = loop.journal
+        journal.pop("pending_step_review", None)
+        journal["last_failed_unit_id"] = loop.item_id
+        loop.entry["status"] = "review_required"
+        loop.entry["last_error_at"] = utc_now_iso()
+        loop.entry["budget_resume"] = {
+            "version": "developer_budget_resume_v1",
+            "next_action_index": loop.durable_next_action_index,
+            "configured_max_actions": loop.configured_max_actions,
+            "paused_at": utc_now_iso(),
+        }
+        journal["status"] = "paused"
+        journal["updated_at"] = utc_now_iso()
+        _write_json_atomic(loop.journal_file, journal)
+
+    def _roll_back_unit(self, loop: _UnitLoop, *, journal_status: str, mark_error_time: bool = False) -> None:
+        """Restore the unit's files from its snapshot; its next attempt starts over."""
+        self._rollback_item(target_path=loop.target_path, session_dir=loop.session_dir, item=loop.item, entry=loop.entry)
+        loop.journal["last_failed_unit_id"] = loop.item_id
+        loop.entry["status"] = "pending"
+        if mark_error_time:
+            loop.entry["last_error_at"] = utc_now_iso()
+        loop.journal["status"] = journal_status
+        loop.journal["updated_at"] = utc_now_iso()
+        _write_json_atomic(loop.journal_file, loop.journal)
 
     def _begin_item(
         self,
