@@ -268,6 +268,9 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             self.assertIn("never restate a\n  `QR-*` as a `BR-*`", prompts[2])
             self.assertIn("`verifies` may list any requirement IDs", prompts[2])
             self.assertIn("Return every scenario `open_question_refs` as an empty list", prompts[2])
+            # Same source boundary as the coverage reviewer: no questions about unmentioned validation or mechanisms.
+            self.assertIn("Apply this test only to a decision that the source introduces", prompts[2])
+            self.assertIn("how the system stores or compares identities belongs to Design", prompts[2])
             self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])

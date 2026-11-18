@@ -50,6 +50,8 @@ For every decision-bearing clause:
 
 Use this counterfactual test: if two implementations can both satisfy the literal source text but disagree about which input is accepted, which records match, who is authorized, whether a limit is exceeded, which state follows, or whether an acceptance test passes, the source contains a material unresolved decision and the model must not return a false-clear result.
 
+Apply this test only to a decision that the source introduces: a check, limit, match, authorization, or outcome that the source mentions. If two implementations disagree only after adding a validation, policy, or constraint that the source never mentions, that is not a gap. When the source states in product terms who may act or what matches (for example, the author is the user who wrote the item), that statement is the criterion; how the system stores or compares identities belongs to Design.
+
 ## Minimum necessary question and precision rules
 
 - Ask for the missing product decision, not the implementation mechanism.
