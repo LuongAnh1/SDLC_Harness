@@ -23,6 +23,7 @@ from sdlc_harness.sync.github import (
 )
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
 from sdlc_harness.workflows.phase4 import PhaseFourWorkflow
+from sdlc_harness.workflows.phase4_browser import _worktree_fingerprint
 from sdlc_harness.workspaces import RunWorkspaceManager
 from tests._support import GitRepositoryTemplate, create_fast_run_workspace, populate_typescript_target
 
@@ -402,7 +403,7 @@ class GitHubSyncTest(unittest.TestCase):
         self.assertEqual(result["evidence_only_paths"], [evidence_path])
         self.assertEqual(self._git_output(target, "ls-files", "--others", "--exclude-standard"), evidence_path)
 
-    def test_workflow_publishes_qa_tested_run_and_writes_artifact(self) -> None:
+    def test_workflow_publishes_approved_run_and_writes_artifact(self) -> None:
         settings, store, run_id = self._workflow_fixture()
         publisher = RecordingPublisher()
         workflow = PhaseFourWorkflow(settings)
@@ -657,14 +658,18 @@ class GitHubSyncTest(unittest.TestCase):
             path = artifacts / f"{name}_v1{suffix}"
             path.write_text(value + "\n", encoding="utf-8")
             latest[name] = store.relative(path)
+        documentation = artifacts / "documentation_closure_v1.json"
+        documentation.write_text(json.dumps({"context": {}}) + "\n", encoding="utf-8")
         store.write_state(
             {
                 "ok": True,
                 "run_id": run_id,
                 "source_ref": "jira_issue:SDLC-1",
-                "current_phase": "qa_testing",
-                "status": "qa_tested",
+                "current_phase": "code_review_publishing",
+                "status": "publication_approved",
                 "latest_artifacts": latest,
+                "documentation_closure": {"mode": "enforce", "artifact": store.relative(documentation)},
+                "final_verification": {"worktree_sha256": _worktree_fingerprint(worktree)["sha256"]},
                 "profile_snapshot": profile_snapshot,
                 "quality_reports": {
                     "implementation_traceability": {

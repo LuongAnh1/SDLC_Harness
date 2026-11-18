@@ -72,9 +72,6 @@ class Settings:
     design_step_review_enabled: bool
     design_step_review_input_enabled: bool
     design_step_review_output_enabled: bool
-    runtime_closure_mode: str
-    browser_stages_mode: str
-    documentation_closure_mode: str
     browser_readiness_repair_limit: int
     browser_polish_repair_limit: int
     browser_qa_repair_limit: int
@@ -92,7 +89,6 @@ class Settings:
     implementation_validation_step_review_enabled: bool
     implementation_validation_step_review_input_enabled: bool
     implementation_validation_step_review_output_enabled: bool
-    qa_repair_limit: int
     sync_mode: str
     atlassian_base_url: str
     atlassian_email: str
@@ -448,17 +444,6 @@ def load_settings(
     if llm_thinking_mode not in {"disabled", "enabled"}:
         llm_thinking_mode = "disabled"
     project_profile_raw = merged.get("SDLC_PROJECT_PROFILE", "typescript_fullstack_v1").strip()
-    runtime_closure_mode = merged.get("SDLC_RUNTIME_CLOSURE_MODE", "off").strip().lower() or "off"
-    if runtime_closure_mode not in {"off", "enforce"}:
-        runtime_closure_mode = "off"
-    # Only consulted at `runtime_closed`, which a run reaches only with closure enforced (L5.4).
-    browser_stages_mode = merged.get("SDLC_BROWSER_STAGES_MODE", "off").strip().lower() or "off"
-    if browser_stages_mode not in {"off", "enforce"}:
-        browser_stages_mode = "off"
-    # Only consulted at `qa_tested` of a run whose browser stages passed (L5.5).
-    documentation_closure_mode = merged.get("SDLC_DOCUMENTATION_CLOSURE_MODE", "off").strip().lower() or "off"
-    if documentation_closure_mode not in {"off", "enforce"}:
-        documentation_closure_mode = "off"
     verification_policy_version = merged.get(
         "SDLC_VERIFICATION_POLICY_VERSION",
         "verification_stage_policy_v1",
@@ -553,9 +538,6 @@ def load_settings(
             merged.get("SDLC_DESIGN_STEP_REVIEW_OUTPUT_ENABLED"),
             default=True,
         ),
-        runtime_closure_mode=runtime_closure_mode,
-        browser_stages_mode=browser_stages_mode,
-        documentation_closure_mode=documentation_closure_mode,
         browser_readiness_repair_limit=_int_value(
             merged.get("SDLC_BROWSER_READINESS_REPAIR_LIMIT"), default=2, minimum=0
         ),
@@ -602,7 +584,6 @@ def load_settings(
             merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED"),
             default=True,
         ),
-        qa_repair_limit=_int_value(merged.get("SDLC_QA_REPAIR_LIMIT"), default=1, minimum=0),
         sync_mode=sync_mode,
         atlassian_base_url=merged.get("ATLASSIAN_BASE_URL", "").rstrip("/"),
         atlassian_email=merged.get("ATLASSIAN_EMAIL", ""),

@@ -271,11 +271,8 @@ plan; không coi canonical checkout bên ngoài worktree là nguồn sự thật
 | `requirement_design_code_trace_v<N>.json` | Code Trace Validator | Mapping Requirement -> Design -> code/test cùng missing links/blocker | Implementation repair gate; chỉ khi pass mới sang QA |
 | `implementation_validation_ledger_v<N>.json` | Code contract/trace validation | Ledger ổn định qua nhiều vòng validation để theo dõi finding và evidence | Lần revalidate/repair kế tiếp và quyết định hội tụ |
 | `implementation_repair_feedback_v<N>.json` | Harness từ test failure hoặc Code Trace blocker | Feedback máy đọc được, phạm vi liên quan và yêu cầu sửa | Developer implementation repair tool-loop |
-| `qa_generated_tests_v<N>.json` | QA/Tester Agent | Danh sách acceptance/system test được sinh, nội dung và requirement refs | Harness áp test vào worktree và Verification Runner chạy đúng các file đó |
-| `qa_test_execution_v<N>.md` | Verification Runner sau khi áp QA tests | Bằng chứng test QA thực sự được chạy: selected/verified files và kết quả stage | QA/Tester đánh giá cuối, repair decision và PR evidence |
-| `qa_test_report_v<N>.md` | QA/Tester Agent | Kết luận từng acceptance scenario, evidence, risk và coverage | QA gate; khi pass dùng để publish Draft PR và sync |
-| `qa_tester_raw_response_v<N>.txt` | QA/Tester khi cần lưu raw output | Nội dung LLM gốc, đặc biệt hữu ích khi parse lỗi/cắt output | Chỉ debug và retry diagnostics |
-| `qa_repair_feedback_v<N>.json` | Harness khi QA fail | Scenario thất bại, test liên quan và repair scope | Developer QA-repair tool-loop rồi chạy lại verification/QA |
+| `qa_generated_tests_v<N>.json` | Harness khi Browser QA cuối pass | Scenario/requirement refs và spec browser đã chạy, ở dạng publication đọc được | Manifest và PR body của Draft PR |
+| `qa_test_execution_v<N>.json` | Harness khi Browser QA cuối pass | Bằng chứng suite browser đã chạy: verification nguồn, evidence manifest, file đã xác minh | PR evidence và sync |
 
 Mã nguồn và test thật mà Developer/QA tạo **không nằm trong `.runtime`**. Chúng
 nằm trong Git worktree riêng của run; runtime chỉ giữ identity, packet, journal,
@@ -287,7 +284,6 @@ report và evidence để điều phối an toàn.
 runs/<run_id>/developer_execution/
   act_v1/
   implementation_repair_v<N>/
-  qa_repair_v<N>/
     manifest.json
     journal.json
     snapshots/<execution_unit_id>.json

@@ -414,12 +414,6 @@ class PhaseFourBrowserStagesCycle:
 
     # ------------------------------------------------------------------ routing
 
-    def _browser_stages_enforced(self, state: dict[str, object]) -> bool:
-        pinned_mode = str(_dict_value(state.get("browser_stages")).get("mode") or "")
-        if pinned_mode:
-            return pinned_mode == "enforce"
-        return self.settings.browser_stages_mode == "enforce"
-
     def _browser_execution_active(self, state: dict[str, object]) -> bool:
         return str(_dict_value(state.get("developer_execution")).get("mode") or "") in _DEVELOPER_MODES
 

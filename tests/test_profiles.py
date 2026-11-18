@@ -24,6 +24,7 @@ from sdlc_harness.profiles import (
     public_allowed_actions,
     public_run_summary,
     read_profile_snapshot,
+    retired_contract_pins,
 )
 
 
@@ -323,6 +324,14 @@ class ProfileRegistryTests(unittest.TestCase):
             ["sync_run"],
         )
         self.assertIn("ghim contract đã retire", str(public_run_summary(state, "Continue this run.")))
+
+    def test_a_lane_pinned_off_retires_the_run_and_an_unpinned_lane_does_not(self) -> None:
+        current = dict(CURRENT_CONTRACT_PINS)
+        self.assertEqual(retired_contract_pins({**current, "runtime_closure": {"mode": "enforce"}}), [])
+        self.assertEqual(
+            retired_contract_pins({**current, "browser_stages": {"mode": "off"}, "documentation_closure": {}}),
+            ["browser_stages.mode"],
+        )
 
     def test_profiled_paused_design_advertises_restart_for_persisted_runs(self) -> None:
         state = {

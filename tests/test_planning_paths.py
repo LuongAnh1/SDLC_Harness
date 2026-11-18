@@ -136,19 +136,8 @@ def test_policy_routes_typescript_components_and_test_suffixes():
             expected_path,
             expected_component,
         )
-    assert (
-        policy.test_path_for_source("apps/web/src/HeritagePage.tsx", "HeritagePage")
-        == "apps/web/src/HeritagePage.test.tsx"
-    )
-    assert (
-        policy.test_path_for_source("packages/db/src/HeritageRepository.ts", "HeritageRepository")
-        == "packages/db/src/HeritageRepository.test.ts"
-    )
     assert policy.normalize_mapping_path("apps/web/src/health-client.ts") == (
         "apps/web/src/health-client.ts"
-    )
-    assert policy.test_path_for_source("apps/web/src/health-client.ts", "health-client") == (
-        "apps/web/src/health-client.test.ts"
     )
     assert policy.source_path_for_test("apps/web/src/health-client.test.ts") == (
         "apps/web/src/health-client.ts"

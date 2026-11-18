@@ -15,7 +15,6 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from sdlc_harness.agents.tester.qa import QA_STATUSES
 from sdlc_harness.application.action_specs import public_dashboard_schema
 from sdlc_harness.application.commands import ApplicationCommand
 from sdlc_harness.application.service import ApplicationService
@@ -39,17 +38,12 @@ WORKFLOW_CLASSES = {
 INSTANCE_LEAVES = (
     "_browser_execution_active",
     "_runtime_closure_execution_active",
-    "_qa_generation_retry_allowed",
     "_runtime_closure_retry_allowed",
     "_browser_retry_stage",
     "_final_verification_retry_allowed",
-    "_runtime_closure_enforced",
-    "_browser_stages_enforced",
-    "_documentation_closure_enforced",
 )
 MODULE_LEAVES = ("developer_execution_retry_allowed", "developer_transport_retry_allowed")
 BLOCKED_LEAVES = (
-    "_qa_generation_retry_allowed",
     "_runtime_closure_retry_allowed",
     "_runtime_closure_execution_active",
     "_browser_retry_stage",
@@ -58,8 +52,8 @@ BLOCKED_LEAVES = (
     "developer_execution_retry_allowed",
     "developer_transport_retry_allowed",
 )
-MODES = ("", "runtime_closure_repair", "qa_repair", "implementation_repair", "developer_act")
-PHASES = ("", "qa_repair", "implementation_repair")
+MODES = ("", "runtime_closure_repair", "implementation_repair", "developer_act")
+PHASES = ("", "implementation_repair")
 RUN_STATE_KEYS = {"allowed_next_actions", "current_phase", "summary_for_user"}
 
 
@@ -86,8 +80,7 @@ def _run_statuses_written_by_code() -> set[str]:
                 target = node.targets[0]
                 if isinstance(target, ast.Name) and target.id in {"status", "resume_status"}:
                     found.update(constants(node.value))
-    # A QA result (`pass`/`fail`/`skipped`) is also held in a local named `status`; it is never a run status.
-    return found - set(QA_STATUSES)
+    return found
 
 
 class WorkflowGraphShapeTest(unittest.TestCase):
@@ -221,13 +214,13 @@ class WorkflowGraphParityTest(unittest.TestCase):
                 expected = new if node.workflow == graph.PHASE_FOUR else ""
                 self.assertEqual(old, expected, f"{node.status} leaves={leaves} mode={mode!r} phase={phase!r}")
                 checked += 1
-        self.assertGreater(checked, 3000)
+        self.assertGreater(checked, 1000)
 
     def test_priority_order_of_the_replaced_if_chain_is_kept(self) -> None:
         # Frozen from the if-chain G1.2 replaced: these orders are behavior, not table layout.
         cases = [
-            ("blocked", {"_qa_generation_retry_allowed": True, "_runtime_closure_retry_allowed": True}, "", "",
-             "_continue_qa_test"),
+            ("blocked", {"_runtime_closure_retry_allowed": True, "_browser_retry_stage": True}, "", "",
+             "_resume_runtime_closure_stage"),
             ("blocked", {"_browser_retry_stage": True, "_final_verification_retry_allowed": True}, "", "",
              "_resume_browser_stage"),
             ("blocked", {"_final_verification_retry_allowed": True, "_browser_execution_active": True,
@@ -235,7 +228,6 @@ class WorkflowGraphParityTest(unittest.TestCase):
             ("blocked", {"_runtime_closure_execution_active": True, "developer_transport_retry_allowed": True},
              "runtime_closure_repair", "", "_continue_runtime_closure_repair"),
             ("blocked", {"developer_execution_retry_allowed": True}, "developer_act", "", "_continue_developer_act"),
-            ("blocked", {"developer_execution_retry_allowed": True}, "developer_act", "qa_repair", "_continue_qa_repair"),
             ("blocked", {"developer_execution_retry_allowed": True}, "", "", "_continue_implementation_repair"),
             ("blocked", {"developer_transport_retry_allowed": True}, "implementation_repair", "",
              "_continue_implementation_repair"),
@@ -248,10 +240,9 @@ class WorkflowGraphParityTest(unittest.TestCase):
              "_continue_runtime_closure_repair"),
             ("implementation_paused", {}, "", "implementation_repair", "_continue_implementation_repair"),
             ("implementation_paused", {}, "", "", "_continue_developer_act"),
-            ("qa_tested", {"_documentation_closure_enforced": True}, "", "", "_continue_documentation_closure"),
-            ("qa_tested", {}, "", "", "_continue_code_review_publish"),
-            ("runtime_closed", {}, "", "", "_continue_qa_test"),
-            ("implementation_traced", {"_runtime_closure_enforced": True}, "", "", "_continue_runtime_closure_planning"),
+            ("qa_tested", {}, "", "", "_continue_documentation_closure"),
+            ("runtime_closed", {}, "", "", "_continue_browser_readiness"),
+            ("implementation_traced", {}, "", "", "_continue_runtime_closure_planning"),
             ("waiting_design_approval", {}, "", "", ""),
         ]
         for status, leaves, mode, phase, expected in cases:
@@ -339,7 +330,6 @@ class WorkflowGraphParityTest(unittest.TestCase):
                     (
                         "code_validation_step_review",
                         "developer_step_review",
-                        "qa_step_review",
                         "runtime_closure_step_review",
                     ),
                 )

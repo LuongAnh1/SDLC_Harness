@@ -39,7 +39,6 @@ from ..agents.developer import (
 )
 from ..agents.developer.closure_planner import RuntimeClosurePlanner
 from ..agents.developer.polish_planner import UiPolishPlanner
-from ..agents.tester import QaGeneratedTestSuite, QaTestResult, QaTesterAgent
 from ..agents.tester.journey_planner import BrowserJourneyPlanner
 from ..agents.validator.closure_review import RuntimeClosureValidator
 from ..agents.validator.browser_review import BrowserQaValidator, UiPolishValidator
@@ -57,11 +56,9 @@ from ..profiles.runtime_config import unsupported_runtime_config_changes
 from ..profiles import (
     CodeTracePolicy,
     PlanningPathPolicy,
-    QaTestPolicy,
     VerificationStagePolicy,
     code_trace_policy_from_snapshot,
     planning_path_policy_from_snapshot,
-    qa_test_policy_from_snapshot,
     read_profile_snapshot,
     verification_stage_policy_from_snapshot,
 )
@@ -125,12 +122,6 @@ REVALIDATABLE_IMPLEMENTATION_ERROR_CODES = {
     "implementation_traceability_llm_failed",
     "implementation_validation_inconclusive",
 }
-RETRYABLE_QA_GENERATION_ERROR_CODES = {
-    "qa_tester_llm_failed",
-    "qa_requirement_coverage_invalid",
-    # Fail-closed provider output (L5.4.3): no repair call, a later continue_run tries again.
-    "qa_tester_inconclusive",
-}
 CODE_TRACE_APPROVED_CONTEXT_LIMITS = {
     "requirement_packet": 12000,
     "design_artifact": 20000,
@@ -154,7 +145,6 @@ class _PhaseFourCore:
         *,
         developer_step_review: dict[str, object] | None = None,
         code_validation_step_review: dict[str, object] | None = None,
-        qa_step_review: dict[str, object] | None = None,
         runtime_closure_step_review: dict[str, object] | None = None,
         browser_stage_step_review: dict[str, object] | None = None,
     ):
@@ -171,11 +161,7 @@ class _PhaseFourCore:
             **validation_review_defaults,
             **dict(code_validation_step_review or {}),
         }
-        # QA and closure reuse the Phase 4 validation review settings; no separate settings.
-        self.qa_step_review = {
-            **validation_review_defaults,
-            **dict(qa_step_review or {}),
-        }
+        # Closure and browser stages reuse the Phase 4 validation review settings; no separate settings.
         self.runtime_closure_step_review = {
             **validation_review_defaults,
             **dict(runtime_closure_step_review or {}),
@@ -205,7 +191,6 @@ class _PhaseFourCore:
             self.llm_client,
             llm_call_budget=settings.implementation_validation_call_budget,
         )
-        self.qa_tester = QaTesterAgent(self.llm_client)
         self.github_publisher = GitHubCodeReviewPublisher()
         self.github_approver = GitHubCodeReviewApprover()
         self.workspace_manager = RunWorkspaceManager(settings)
@@ -623,9 +608,6 @@ class _PhaseFourCore:
     def _runtime_closure_repair_mode(self, state: dict[str, object]) -> bool:
         return self._execution_mode(state) == "runtime_closure_repair"
 
-    def _qa_repair_mode(self, state: dict[str, object]) -> bool:
-        return str(state.get("current_phase")) == "qa_repair" or self._execution_mode(state) == "qa_repair"
-
     def _implementation_repair_mode(self, state: dict[str, object]) -> bool:
         return (
             self._execution_mode(state) == "implementation_repair"
@@ -804,28 +786,6 @@ class _PhaseFourCore:
             return getattr(self, handler)(state=state, run_id=run_id)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _require_code_review_checkpoint(
         self,
         state: dict[str, object],
@@ -951,8 +911,6 @@ class _PhaseFourCore:
 
     def _status_response(self, state: dict[str, object], *, created_new_run: bool) -> dict[str, object]:
         allowed_next_actions = list(state.get("allowed_next_actions", []))
-        if self._qa_generation_retry_allowed(state) and "continue_run" not in allowed_next_actions:
-            allowed_next_actions.insert(0, "continue_run")
         if self._runtime_closure_retry_allowed(state) and "continue_run" not in allowed_next_actions:
             allowed_next_actions.insert(0, "continue_run")
         if developer_execution_retry_allowed(state) and "continue_run" not in allowed_next_actions:
@@ -984,32 +942,12 @@ class _PhaseFourCore:
                 "implementation_repair_total_iterations",
                 state.get("implementation_repair_iterations", 0),
             ),
-            "qa_repair_iterations": state.get("qa_repair_iterations", 0),
             "workspace": state.get("workspace"),
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
             "developer_execution": state.get("developer_execution", {}),
         }
-
-    @staticmethod
-    def _qa_generation_retry_allowed(state: dict[str, object]) -> bool:
-        """Retry malformed QA generation without rerunning Developer or Validator."""
-
-        if str(state.get("status") or "") != "blocked":
-            return False
-        if str(state.get("current_phase") or "") != "qa_testing":
-            return False
-        last_error = _dict_value(state.get("last_error"))
-        error_code = str(last_error.get("error_code") or "")
-        if error_code in RETRYABLE_QA_GENERATION_ERROR_CODES:
-            return True
-        message = str(last_error.get("message") or "")
-        return (
-            error_code == "developer_act_unsafe_path"
-            and message.startswith("Unsafe or unsupported Developer.act path:")
-            and bool(_dict_value(state.get("profile_snapshot")))
-        )
 
 class _TargetRepoInfo:
     def __init__(self, *, path: Path, remote: str, current_branch: str, source_files: list[str]):
@@ -1095,123 +1033,6 @@ def _positive_int_or_none(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
-def _qa_review_context(
-    *,
-    store: RuntimeStore,
-    state: dict[str, object],
-    artifact_paths: dict[str, str],
-    run_id: str,
-    target_repo: str,
-    branch: str,
-    work_packet: dict[str, object],
-    planning_policy: PlanningPathPolicy,
-) -> dict[str, object]:
-    """Đóng gói context QA ngắn, có metadata truncation để tránh prompt quá dài."""
-
-    requirement_path = _required_phase4_artifact(artifact_paths, "requirement_packet", run_id=run_id)
-    verification_path = _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
-    trace_path = _required_phase4_artifact(artifact_paths, "requirement_design_code_trace", run_id=run_id)
-    design_path = _required_phase4_artifact(artifact_paths, "design_artifact", run_id=run_id)
-    implementation_plan_path = _required_phase4_artifact(artifact_paths, "implementation_plan", run_id=run_id)
-    requirement = _bounded_artifact_section(
-        store=store,
-        relative_path=requirement_path,
-        label="Accepted requirement/use-case packet",
-        limit=MAX_QA_REQUIREMENT_CHARS,
-    )
-    verification = _bounded_artifact_section(
-        store=store,
-        relative_path=verification_path,
-        label="Verification Runner report",
-        limit=MAX_QA_VERIFICATION_CHARS,
-    )
-    trace_report = _read_json_artifact(store.repo_root / trace_path, run_id=run_id)
-    code_under_test = _qa_code_under_test(
-        target_repo=Path(target_repo),
-        work_packet=work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    )
-    qa_contract_slices = _qa_contract_slices(work_packet=work_packet, run_id=run_id)
-    traceability = _qa_traceability_summary(trace_report=trace_report, trace_path=trace_path)
-    requirement_contract = _dict_value(work_packet.get("requirement_contract"))
-    v2 = requirement_contract.get("version") == "v2"
-    canonical_requirements = _dict_items(work_packet.get("canonical_requirements")) if v2 else []
-    accepted_requirement: dict[str, object] = requirement
-    if v2:
-        accepted_requirement = {
-            "label": "Canonical Requirement V2 stable-ID set",
-            "requirement_contract": requirement_contract,
-            "requirements": canonical_requirements,
-            "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")),
-            "requirement_packet_reference": requirement,
-        }
-    chars_sent = (
-        int(requirement.get("chars_sent") or 0)
-        + int(verification.get("chars_sent") or 0)
-        + int(code_under_test.get("chars_sent") or 0)
-    )
-    chars_total = (
-        int(requirement.get("chars_total") or 0)
-        + int(verification.get("chars_total") or 0)
-        + int(code_under_test.get("chars_total") or 0)
-    )
-    return {
-        "task": "qa_acceptance_review_v1",
-        "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
-        "run_id": run_id,
-        "source_ref": state.get("source_ref"),
-        "issue_key": work_packet.get("issue_key"),
-        "target_repo": target_repo,
-        "branch": branch,
-        "work_packet_summary": {
-            "implementation_steps": work_packet.get("implementation_steps"),
-            "proposed_files": work_packet.get("proposed_files"),
-            "test_intents": work_packet.get("test_intents"),
-            "qa_test_intents": work_packet.get("qa_test_intents"),
-        },
-        "accepted_requirement": accepted_requirement,
-        "requirement_contract": requirement_contract,
-        "canonical_requirements": canonical_requirements,
-        "requirement_coverage": _dict_items(work_packet.get("requirement_coverage")) if v2 else [],
-        "qa_contract_slices": qa_contract_slices,
-        "approved_runtime_decisions": _dict_items(work_packet.get("approved_runtime_decisions")),
-        "code_under_test": code_under_test,
-        "verification": verification,
-        "traceability": traceability,
-        "artifact_references": {
-            "design_artifact": design_path,
-            "implementation_plan": implementation_plan_path,
-            "requirement_design_code_trace": trace_path,
-        },
-        "context_budget": {
-            "packet_mode": "trace_dev_style_compact_qa_packet_v2" if v2 else "trace_dev_style_compact_qa_packet_v1",
-            "section_count": 4,
-            "code_file_count": len(_dict_items(code_under_test.get("files"))),
-            "chars_sent": chars_sent,
-            "chars_total": chars_total,
-            "any_truncated": (
-                bool(requirement.get("content_truncated"))
-                or bool(verification.get("content_truncated"))
-                or bool(code_under_test.get("any_truncated"))
-            ),
-            "requirement_limit_chars": MAX_QA_REQUIREMENT_CHARS,
-            "verification_limit_chars": MAX_QA_VERIFICATION_CHARS,
-            "code_file_limit_chars": MAX_QA_CODE_FILE_CHARS,
-            "code_total_limit_chars": MAX_QA_CODE_TOTAL_CHARS,
-            "omitted_full_artifacts": ["design_artifact", "implementation_plan", "requirement_design_code_trace"],
-        },
-        "guardrails": [
-            "QA/Tester generates acceptance/system tests from current code and test evidence.",
-            "qa_contract_slices are the exact approved per-unit UI/runtime/obligation/boundary authority.",
-            "Only accepted D-* decisions in approved_runtime_decisions may authorize demo fixtures.",
-            "Full design, implementation plan, and trace report are references only; use summaries unless a future slice fetches them.",
-            "QA/Tester must not request requirement/design edits in this slice.",
-            "QA-generated test fail/skipped enters the bounded Developer QA repair loop.",
-        ],
-    }
-
-
 def _bounded_artifact_section(
     *,
     store: RuntimeStore,
@@ -1234,540 +1055,6 @@ def _bounded_artifact_section(
         "content_truncated": len(excerpt) < len(text),
         "chars_total": len(text),
         "chars_sent": len(excerpt),
-    }
-
-
-def _qa_code_under_test(
-    *,
-    target_repo: Path,
-    work_packet: dict[str, object],
-    run_id: str,
-    planning_policy: PlanningPathPolicy,
-) -> dict[str, object]:
-    """Lay source/test code hien tai tu target repo, khong dung snapshot cu trong packet."""
-
-    files: list[dict[str, object]] = []
-    chars_sent = 0
-    chars_total = 0
-    for rel_path in _qa_code_paths(
-        work_packet=work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    ):
-        target_file = (target_repo / rel_path).resolve()
-        try:
-            target_file.relative_to(target_repo.resolve())
-        except ValueError as exc:
-            raise HarnessError(
-                "developer_act_unsafe_path",
-                f"QA code path escapes target repo: {rel_path}",
-                run_id=run_id,
-            ) from exc
-        if not target_file.exists():
-            files.append(
-                {
-                    "path": rel_path,
-                    "role": _qa_code_role(rel_path),
-                    "exists": False,
-                    "content": "",
-                    "content_truncated": False,
-                    "chars_total": 0,
-                    "chars_sent": 0,
-                }
-            )
-            continue
-        text = target_file.read_text(encoding="utf-8", errors="replace")
-        chars_total += len(text)
-        remaining_total = max(MAX_QA_CODE_TOTAL_CHARS - chars_sent, 0)
-        excerpt_limit = min(MAX_QA_CODE_FILE_CHARS, remaining_total)
-        excerpt = text[:excerpt_limit]
-        chars_sent += len(excerpt)
-        files.append(
-            {
-                "path": rel_path,
-                "role": _qa_code_role(rel_path),
-                "exists": True,
-                "content": excerpt,
-                "content_truncated": len(excerpt) < len(text),
-                "chars_total": len(text),
-                "chars_sent": len(excerpt),
-            }
-        )
-    return {
-        "source": "target_repo_allowed_paths",
-        "files": files,
-        "file_count": len(files),
-        "chars_sent": chars_sent,
-        "chars_total": chars_total,
-        "any_truncated": any(bool(item.get("content_truncated")) for item in files),
-    }
-
-
-def _qa_code_paths(
-    *,
-    work_packet: dict[str, object],
-    run_id: str,
-    planning_policy: PlanningPathPolicy,
-) -> list[str]:
-    allowed_paths = _allowed_paths(
-        work_packet,
-        run_id=run_id,
-        planning_policy=planning_policy,
-    )
-    allowed = set(allowed_paths)
-    paths: list[str] = []
-    seen: set[str] = set()
-
-    def add(raw_paths: list[str]) -> None:
-        for raw_path in raw_paths:
-            if raw_path not in allowed or raw_path in seen:
-                continue
-            paths.append(raw_path)
-            seen.add(raw_path)
-
-    units = _dict_items(work_packet.get("execution_units"))
-    by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
-    qa_units = [unit for unit in units if _dict_items(unit.get("qa_test_intents"))]
-    for unit in sorted(qa_units, key=lambda row: int(row.get("order") or 0)):
-        add(_qa_unit_runtime_paths(unit))
-        add(
-            [
-                str(target.get("path") or "")
-                for target in _dict_items(unit.get("planned_code_targets"))
-            ]
-        )
-    dependency_units = [
-        by_id[dependency_id]
-        for unit in qa_units
-        for dependency_id in _string_items(unit.get("depends_on"))
-        if dependency_id in by_id
-    ]
-    dependency_units = sorted(
-        {str(unit.get("unit_id") or ""): unit for unit in dependency_units}.values(),
-        key=lambda row: (
-            0 if str(row.get("component_id") or "") in {"api", "contracts"} else 1,
-            int(row.get("order") or 0),
-        ),
-    )
-    for unit in dependency_units:
-        add(_qa_unit_runtime_paths(unit))
-        add(
-            [
-                str(target.get("path") or "")
-                for target in _dict_items(unit.get("planned_code_targets"))
-            ]
-        )
-    add(allowed_paths)
-    if paths:
-        return paths
-    for item in _dict_items(work_packet.get("proposed_files")) + _dict_items(work_packet.get("current_files")):
-        rel_path = _normalize_code_path(
-            str(item.get("path") or ""),
-            run_id=run_id,
-            planning_policy=planning_policy,
-        )
-        if rel_path not in seen:
-            paths.append(rel_path)
-            seen.add(rel_path)
-    return paths
-
-
-def _qa_unit_runtime_paths(unit: dict[str, object]) -> list[str]:
-    return list(
-        dict.fromkeys(
-            path
-            for binding in _dict_items(unit.get("runtime_bindings"))
-            for path in (
-                str(_dict_value(binding.get("target")).get("path") or ""),
-                str(_dict_value(binding.get("attachment")).get("owner_path") or ""),
-            )
-            if path
-        )
-    )
-
-
-def _qa_contract_slices(
-    *,
-    work_packet: dict[str, object],
-    run_id: str,
-) -> list[dict[str, object]]:
-    units = _dict_items(work_packet.get("execution_units"))
-    qa_units = [unit for unit in units if _dict_items(unit.get("qa_test_intents"))]
-    if _dict_items(work_packet.get("qa_test_intents")) and not qa_units:
-        raise HarnessError(
-            "qa_context_incomplete",
-            "QA intents exist but no execution-unit contract slice owns them.",
-            run_id=run_id,
-        )
-    accepted = {
-        str(item.get("id") or ""): item
-        for item in _dict_items(work_packet.get("approved_runtime_decisions"))
-        if str(item.get("id") or "").startswith("D-")
-        and str(item.get("status") or "").strip().lower() == "accepted"
-    }
-    slices: list[dict[str, object]] = []
-    for unit in qa_units:
-        unit_id = str(unit.get("unit_id") or "").strip()
-        runtime_bindings = _dict_items(unit.get("runtime_bindings"))
-        surface_contracts = _dict_items(unit.get("surface_contracts"))
-        ui_contracts = [
-            item for item in surface_contracts
-            if str(item.get("surface") or "").strip().lower() == "ui"
-        ]
-        if not unit_id or not runtime_bindings or (
-            "ui" in {value.strip().lower() for value in _string_items(unit.get("surfaces"))}
-            and not ui_contracts
-        ):
-            raise HarnessError(
-                "qa_context_incomplete",
-                f"QA execution-unit slice is missing exact UI/runtime contracts: {unit_id or '<missing>'}",
-                run_id=run_id,
-            )
-        cited_decisions = {
-            ref
-            for binding in ui_contracts
-            for runtime in [
-                _dict_value(_dict_value(binding.get("surface_contract")).get("runtime_surface"))
-            ]
-            for required_input in _dict_items(runtime.get("required_inputs"))
-            if str(required_input.get("source") or "") == "demo_fixture"
-            for ref in [
-                str(required_input.get("binding") or ""),
-                *_string_items(required_input.get("requirement_refs")),
-            ]
-            if ref.startswith("D-")
-        }
-        missing_decisions = cited_decisions - set(accepted)
-        if missing_decisions:
-            raise HarnessError(
-                "qa_context_incomplete",
-                f"QA runtime slice cites unaccepted fixture decisions: {sorted(missing_decisions)}",
-                run_id=run_id,
-            )
-        slices.append(
-            {
-                "unit_id": unit_id,
-                "scenario_id": unit.get("scenario_id"),
-                "component_id": unit.get("component_id"),
-                "requirement_refs": _string_items(unit.get("requirement_refs")),
-                "acceptance_refs": _string_items(unit.get("acceptance_refs")),
-                "qa_test_intents": _dict_items(unit.get("qa_test_intents")),
-                "ui_obligations": _dict_items(unit.get("ui_obligations")),
-                "ui_surface_contracts": ui_contracts,
-                "runtime_bindings": runtime_bindings,
-                "boundary_contracts": _dict_items(unit.get("boundary_contracts")),
-                "accepted_fixture_decisions": [accepted[ref] for ref in sorted(cited_decisions)],
-            }
-        )
-    return slices
-
-
-def _qa_code_role(rel_path: str) -> str:
-    return (
-        "test"
-        if rel_path.endswith((".test.ts", ".test.tsx", ".spec.ts", ".spec.tsx"))
-        else "production"
-    )
-
-
-def _qa_traceability_summary(*, trace_report: dict[str, object], trace_path: str) -> dict[str, object]:
-    edges = _dict_items(trace_report.get("graph_edges"))
-    missing_links = _dict_items(trace_report.get("missing_links"))
-    risks = _string_items(trace_report.get("risks"))
-    llm_review = _dict_value(trace_report.get("llm_review"))
-    review_context = _dict_value(llm_review.get("review_context"))
-    return {
-        "path": trace_path,
-        "ok": bool(trace_report.get("ok")),
-        "confidence": trace_report.get("confidence"),
-        "summary": trace_report.get("summary"),
-        "graph_edge_count": len(edges),
-        "sample_graph_edges": edges[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "missing_link_count": len(missing_links),
-        "sample_missing_links": missing_links[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "risks": risks[:MAX_QA_TRACE_SAMPLE_EDGES],
-        "review_context": {
-            "code_snippet_count": review_context.get("code_snippet_count"),
-            "code_snippets_total_chars": review_context.get("code_snippets_total_chars"),
-            "code_snippets_truncated": review_context.get("code_snippets_truncated"),
-        },
-    }
-
-
-def _apply_qa_generated_tests(
-    *,
-    generated: QaGeneratedTestSuite,
-    target_path: Path,
-    run_id: str,
-    qa_policy: QaTestPolicy,
-    prior_qa_paths: set[str] | None = None,
-) -> list[dict[str, object]]:
-    """Apply QA-generated files trong path policy của run."""
-
-    applied: list[dict[str, object]] = []
-    target_root = target_path.resolve()
-    prior_paths = prior_qa_paths or set()
-    seen_paths: set[str] = set()
-    for item in generated.test_files:
-        rel_path = _normalize_qa_test_path(
-            str(item.get("path") or ""),
-            run_id=run_id,
-            qa_policy=qa_policy,
-        )
-        if rel_path in seen_paths:
-            raise HarnessError(
-                "qa_test_path_duplicate",
-                f"QA generated the same test path more than once: {rel_path}",
-                run_id=run_id,
-            )
-        seen_paths.add(rel_path)
-        target_file = (target_root / rel_path).resolve()
-        try:
-            target_file.relative_to(target_root)
-        except ValueError as exc:
-            raise HarnessError(
-                "qa_test_unsafe_path",
-                f"QA-generated test path escapes target repo: {rel_path}",
-                run_id=run_id,
-            ) from exc
-        if target_file.exists() and rel_path not in prior_paths:
-            raise HarnessError(
-                "qa_test_existing_file_conflict",
-                f"QA cannot overwrite a test file it does not own for this run: {rel_path}",
-                run_id=run_id,
-            )
-        content = str(item.get("content") or "").strip()
-        if not content:
-            raise HarnessError(
-                "qa_test_empty_content",
-                f"QA-generated test file has empty content: {rel_path}",
-                run_id=run_id,
-            )
-        target_file.parent.mkdir(parents=True, exist_ok=True)
-        target_file.write_text(content.rstrip() + "\n", encoding="utf-8")
-        applied.append(
-            {
-                "path": rel_path,
-                "operation": "create_or_update",
-                "scenarios": _string_items(item.get("scenarios")),
-            }
-        )
-    if not applied:
-        raise HarnessError("qa_test_files_missing", "QA did not generate any test file.", run_id=run_id)
-    return applied
-
-
-def _normalize_qa_test_path(
-    raw_path: str,
-    *,
-    run_id: str,
-    qa_policy: QaTestPolicy,
-) -> str:
-    rel_path = qa_policy.normalize_test_path(raw_path) or qa_policy.normalize_browser_test_path(raw_path)
-    if not rel_path:
-        raise HarnessError(
-            "qa_test_out_of_scope",
-            f"QA-generated test is outside the immutable project policy: {raw_path}",
-            run_id=run_id,
-        )
-    return rel_path
-
-
-def _qa_repair_dirty_paths(
-    *,
-    store: RuntimeStore,
-    artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy,
-    run_id: str,
-) -> set[str]:
-    """Đọc tập QA-owned path làm dirty baseline, không mở rộng quyền ghi Developer."""
-
-    return _previous_qa_owned_paths(
-        store=store,
-        artifact_paths=artifact_paths,
-        qa_policy=qa_policy,
-        run_id=run_id,
-    )
-
-
-def _previous_qa_owned_paths(
-    *,
-    store: RuntimeStore,
-    artifact_paths: dict[str, str],
-    qa_policy: QaTestPolicy,
-    run_id: str,
-) -> set[str]:
-    artifact_ref = str(artifact_paths.get("qa_generated_tests") or "")
-    if not artifact_ref:
-        return set()
-    artifact_path = Path(artifact_ref)
-    if not artifact_path.is_absolute():
-        artifact_path = store.repo_root / artifact_path
-    if not artifact_path.is_file():
-        return set()
-    payload = _read_json_artifact(artifact_path, run_id=run_id)
-    generation_profile = _dict_value(payload.get("generation_profile"))
-    if generation_profile != qa_policy.metadata():
-        raise HarnessError(
-            "qa_test_policy_invalid",
-            "Prior QA-generated tests do not match the immutable QA policy.",
-            run_id=run_id,
-        )
-    owned: set[str] = set()
-    for item in _dict_items(payload.get("test_files")):
-        path = qa_policy.normalize_test_path(item.get("path")) or qa_policy.normalize_browser_test_path(
-            item.get("path")
-        )
-        if not path:
-            raise HarnessError(
-                "qa_test_policy_invalid",
-                "Prior QA-generated test artifact contains an out-of-policy path.",
-                run_id=run_id,
-            )
-        owned.add(path)
-    return owned
-
-
-def _qa_result_from_generated_execution(
-    *,
-    generated: QaGeneratedTestSuite,
-    execution: object,
-    execution_path: str,
-    generated_path: str,
-    applied_tests: list[dict[str, object]],
-    qa_policy: QaTestPolicy,
-) -> QaTestResult:
-    status = _qa_status_from_verification(str(getattr(execution, "status", "")))
-    reason = str(getattr(execution, "reason", "") or "")
-    expected_test_files = tuple(str(item.get("path") or "") for item in applied_tests)
-    selected_test_files = tuple(getattr(execution, "selected_test_files", ()) or ())
-    verified_test_files = tuple(getattr(execution, "verified_test_files", ()) or ())
-    if (
-        selected_test_files != expected_test_files
-        or verified_test_files != expected_test_files
-    ):
-        status = "fail"
-        reason = (
-            "QA execution evidence does not prove every generated test file ran; "
-            f"expected={list(expected_test_files)}, selected={list(selected_test_files)}, "
-            f"verified={list(verified_test_files)}."
-        )
-    scenarios: list[dict[str, object]] = []
-    for item in generated.scenarios:
-        scenarios.append(
-            {
-                "name": str(item.get("name") or ""),
-                "result": status,
-                "evidence": reason or str(item.get("expected_result") or ""),
-                "risk": str(item.get("risk") or ""),
-                "requirement_ids": _string_items(item.get("requirement_ids")),
-            }
-        )
-    if not scenarios:
-        scenarios = [
-            {
-                "name": "QA-generated acceptance tests",
-                "result": status,
-                "evidence": reason,
-                "risk": "",
-                "requirement_ids": [],
-            }
-        ]
-    if status == "pass":
-        summary = f"QA-generated acceptance tests passed: {reason}"
-    elif status == "skipped":
-        summary = f"QA-generated acceptance tests were skipped: {reason}"
-    else:
-        summary = f"QA-generated acceptance tests failed: {reason}"
-    evidence = [
-        f"Generated tests artifact: {generated_path}",
-        f"QA execution artifact: {execution_path}",
-        f"Applied QA test files: {len(applied_tests)}",
-        f"Verification Runner status: {getattr(execution, 'status', '')}",
-        f"Selected QA test files: {list(selected_test_files)}",
-        f"Verified QA test files: {list(verified_test_files)}",
-    ]
-    risks = list(generated.risks)
-    if status != "pass":
-        risks.append("QA-generated acceptance test execution did not pass.")
-    review_context = {
-        **(generated.generation_context or {}),
-        "generated_test_file_count": len(generated.test_files),
-        "applied_test_file_count": len(applied_tests),
-        "execution_status": getattr(execution, "status", ""),
-        "selected_test_files": list(selected_test_files),
-        "verified_test_files": list(verified_test_files),
-    }
-    return QaTestResult(
-        status=status,
-        summary=summary,
-        scenarios=scenarios,
-        evidence=evidence,
-        risks=risks,
-        raw_response=generated.raw_response,
-        review_context=review_context,
-        requirement_contract=generated.requirement_contract,
-    )
-
-
-def _qa_status_from_verification(status: str) -> str:
-    if status == "passed":
-        return "pass"
-    if status == "skipped":
-        return "skipped"
-    return "fail"
-
-def _qa_repair_feedback(
-    *,
-    run_id: str,
-    state: dict[str, object],
-    work_packet: dict[str, object],
-    qa_result: QaTestResult,
-    qa_run: dict[str, object],
-    target_repo: str,
-    branch: str,
-    feedback_version: int,
-    repair_iteration: int,
-) -> dict[str, object]:
-    """Build machine-readable QA feedback for Developer.repair."""
-
-    output_contract = _dict_value(work_packet.get("output_contract"))
-    failing_scenarios = [
-        item for item in qa_result.scenarios if str(item.get("result") or "").strip().lower() != "pass"
-    ]
-    if not failing_scenarios:
-        failing_scenarios = list(qa_result.scenarios)
-    return {
-        "version": f"qa_repair_feedback_v{feedback_version}",
-        "run_id": run_id,
-        "source_ref": state.get("source_ref"),
-        "issue_key": work_packet.get("issue_key"),
-        "status": "qa_repair_needed",
-        "repair_iteration": repair_iteration,
-        "repair_scope": "code_or_test",
-        "severity": "repair_required",
-        "summary": qa_result.summary,
-        "required_action": (
-            "Developer must repair code/test behavior within allowed_paths so the QA-generated "
-            "acceptance tests pass. Requirement, approved design, implementation plan, branch, "
-            "and tool-sync records must not be edited in this slice."
-        ),
-        "target_repo": target_repo,
-        "branch": branch,
-        "qa_artifacts": {
-            "qa_generated_tests": qa_run.get("generated_path"),
-            "qa_test_execution": qa_run.get("execution_path"),
-            "qa_test_report": qa_run.get("report_path"),
-        },
-        "failing_scenarios": failing_scenarios,
-        "evidence": qa_result.evidence,
-        "risks": qa_result.risks,
-        "applied_tests": qa_run.get("applied_tests", []),
-        "developer_constraints": {
-            "allowed_paths": output_contract.get("allowed_paths", []),
-            "changed_files_only": output_contract.get("changed_files_only"),
-            "format": output_contract.get("format"),
-        },
     }
 
 
@@ -2091,23 +1378,6 @@ def _verification_policy_for_state(
     return verification_stage_policy_from_snapshot(snapshot, run_id=run_id)
 
 
-def _qa_policy_for_state(
-    state: dict[str, object],
-    *,
-    run_id: str,
-) -> QaTestPolicy:
-    """Resolve QA test policy chỉ từ run snapshot bất biến."""
-
-    snapshot = read_profile_snapshot(state, run_id=run_id)
-    if snapshot is None:
-        raise HarnessError(
-            "legacy_execution_profile_retired",
-            "Phase 4 QA requires an immutable project profile snapshot.",
-            run_id=run_id,
-        )
-    return qa_test_policy_from_snapshot(snapshot, run_id=run_id)
-
-
 def _code_trace_policy_for_state(
     state: dict[str, object],
     *,
@@ -2198,8 +1468,6 @@ def _next_qa_artifact_version(store: RuntimeStore, run_id: str) -> int:
         "qa_generated_tests_",
         "qa_test_execution_",
         "qa_test_report_",
-        "qa_tester_raw_response_",
-        "qa_repair_feedback_",
     )
     max_version = 0
     if not artifact_dir.exists():
@@ -2577,9 +1845,6 @@ def _implementation_repair_feedback(
     }
 
 
-
-
-
 from .phase4_automation import PhaseFourAutomation
 from .phase4_browser import PhaseFourBrowserStagesCycle
 from .phase4_browser_journey import PhaseFourBrowserJourneyCycle
@@ -2591,7 +1856,6 @@ from .phase4_documentation import PhaseFourDocumentationCycle
 from .phase4_final_verification import PhaseFourFinalVerificationCycle
 from .phase4_implementation import PhaseFourImplementationCycle
 from .phase4_publication import PhaseFourPublicationCycle
-from .phase4_qa import PhaseFourQaCycle
 from .phase4_rewind import PhaseFourRewind
 
 
@@ -2607,10 +1871,8 @@ class PhaseFourWorkflow(
     PhaseFourBrowserReadinessCycle,
     PhaseFourBrowserStagesCycle,
     PhaseFourRuntimeClosureCycle,
-    PhaseFourQaCycle,
     PhaseFourImplementationCycle,
     _PhaseFourCore,
 ):
     """Stable public facade composed from the Phase 4 behavior cycles."""
-
 

@@ -138,7 +138,6 @@ class ApplicationReadService:
             "created_at",
             "updated_at",
             "implementation_repair_iterations",
-            "qa_repair_iterations",
         ):
             if key not in payload and key in state:
                 payload[key] = state[key]

@@ -104,7 +104,6 @@ class PhaseFourAutomation:
     def _per_call_review_enabled(self) -> bool:
         reviews = (
             self.code_validation_step_review,
-            self.qa_step_review,
             self.runtime_closure_step_review,
             self.browser_stage_step_review,
             self.developer_tool_loop.step_review,
@@ -113,7 +112,6 @@ class PhaseFourAutomation:
 
     def _disable_per_call_review(self) -> None:
         self.code_validation_step_review = {"enabled": False}
-        self.qa_step_review = {"enabled": False}
         self.runtime_closure_step_review = {"enabled": False}
         self.browser_stage_step_review = {"enabled": False}
         self.developer_tool_loop.step_review = {}
@@ -187,33 +185,30 @@ class PhaseFourAutomation:
         components = {
             "developer_implementation": session(implementation_units) * (1 + implementation_repairs),
             "code_validation": validation * code_changes,
-            "qa_generation": 2 * (1 + max(0, int(settings.qa_repair_limit))),
         }
-        if self._runtime_closure_enforced(state):
-            closure_units = _dict_items(artifact("runtime_closure_contract").get("closure_units"))
-            components.update(
-                {
-                    # planner and validator, each with one contract retry per gate round
-                    "closure_planning": 2 * 2 * plan_rounds,
-                    "developer_closure": session(closure_units) * (1 + closure_repairs),
-                    "closure_code_review": validation * (1 + closure_repairs),
-                }
-            )
-        if self._browser_stages_enforced(state):
-            polish_units = _dict_items(artifact("ui_polish_contract").get("polish_units"))
-            readiness = self._repair_limit(state, "browser_readiness_repair")
-            components.update(
-                {
-                    "developer_readiness": session([{}]) * (1 + readiness),
-                    "journey_planning": 2 * plan_rounds * (1 + patches),
-                    "journey_review": 2 * scenarios * review_rounds,
-                    "polish_planning": 2 * 2 * plan_rounds,
-                    "developer_polish": session(polish_units) * (1 + polish_repairs),
-                    "polish_result_review": 2 * (1 + polish_repairs),
-                    "developer_browser_repair": session(implementation_units) * browser_repairs,
-                    "browser_qa_review": 2 * scenarios * review_rounds,
-                }
-            )
+        closure_units = _dict_items(artifact("runtime_closure_contract").get("closure_units"))
+        components.update(
+            {
+                # planner and validator, each with one contract retry per gate round
+                "closure_planning": 2 * 2 * plan_rounds,
+                "developer_closure": session(closure_units) * (1 + closure_repairs),
+                "closure_code_review": validation * (1 + closure_repairs),
+            }
+        )
+        polish_units = _dict_items(artifact("ui_polish_contract").get("polish_units"))
+        readiness = self._repair_limit(state, "browser_readiness_repair")
+        components.update(
+            {
+                "developer_readiness": session([{}]) * (1 + readiness),
+                "journey_planning": 2 * plan_rounds * (1 + patches),
+                "journey_review": 2 * scenarios * review_rounds,
+                "polish_planning": 2 * 2 * plan_rounds,
+                "developer_polish": session(polish_units) * (1 + polish_repairs),
+                "polish_result_review": 2 * (1 + polish_repairs),
+                "developer_browser_repair": session(implementation_units) * browser_repairs,
+                "browser_qa_review": 2 * scenarios * review_rounds,
+            }
+        )
         return components
 
     def _automation_stop(self, state: dict[str, object]) -> str:

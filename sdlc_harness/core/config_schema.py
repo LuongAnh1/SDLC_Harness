@@ -102,13 +102,6 @@ PHASE4_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
         "max_tokens": 32768,
         "timeout": 600,
     },
-    "qa_tester": {
-        "label": "QA tester (legacy Vitest QA)",
-        "model": "deepseek-flash",
-        "effort": "high",
-        "max_tokens": 32768,
-        "timeout": 600,
-    },
     "journey_planner": {
         "label": "Browser journey planner",
         "model": "deepseek-flash",
@@ -434,31 +427,6 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_INPUT_ENABLED", "Review Code Validator input", "boolean", True, "Dừng trước khi gửi từng task Code Validator."),
             _field("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_OUTPUT_ENABLED", "Review Code Validator output", "boolean", True, "Dừng sau khi nhận từng output Code Validator."),
             _field(
-                "SDLC_RUNTIME_CLOSURE_MODE",
-                "Runtime closure mode",
-                "enum",
-                "off",
-                "Off giữ đường QA cũ; enforce đưa run implementation_traced qua Runtime/Integration Closure (pin theo run).",
-                options=("off", "enforce"),
-            ),
-            _field(
-                "SDLC_BROWSER_STAGES_MODE",
-                "Browser stages mode",
-                "enum",
-                "off",
-                "Off giữ QA cũ sau runtime_closed; enforce đưa run qua Browser Readiness, UI Polish và Browser QA (pin theo run).",
-                options=("off", "enforce"),
-            ),
-            _field(
-                "SDLC_DOCUMENTATION_CLOSURE_MODE",
-                "Documentation closure mode",
-                "enum",
-                "off",
-                "Off đi thẳng publication cũ sau qa_tested; enforce đưa run có browser stage qua Documentation Closure "
-                "và Final Verification trước publication (pin theo run).",
-                options=("off", "enforce"),
-            ),
-            _field(
                 "SDLC_BROWSER_READINESS_REPAIR_LIMIT",
                 "Browser readiness repair limit",
                 "integer",
@@ -498,7 +466,6 @@ CONFIG_SECTIONS: tuple[dict[str, object], ...] = (
                 "Số ảnh browser tối đa được gửi trong một LLM call.",
                 minimum=1,
             ),
-            _field("SDLC_QA_REPAIR_LIMIT", "QA repair limit", "integer", 1, "Số vòng sửa code sau QA.", minimum=0),
         ),
     },
     {

@@ -300,7 +300,6 @@ class ApplicationService:
                 settings,
                 developer_step_review=developer_review or None,
                 code_validation_step_review=developer_review or None,
-                qa_step_review=developer_review or None,
                 runtime_closure_step_review=developer_review or None,
             ).continue_until_implementation_checkpoint(
                 run_id=run_id

@@ -224,10 +224,9 @@ class PhaseFourPublicationCycle:
             artifact_paths=artifact_paths,
             qa_generated=qa_generated,
         )
-        if self._documentation_pin(state).get("mode") == "enforce":
-            pr_body = pr_body + "\n\n" + self._release_evidence_markdown(
-                state=state, run_id=run_id, paths=publication_paths, evidence_only=evidence_only_paths
-            )
+        pr_body = pr_body + "\n\n" + self._release_evidence_markdown(
+            state=state, run_id=run_id, paths=publication_paths, evidence_only=evidence_only_paths
+        )
         return {
             "target_info": target_info,
             "branch": branch,
@@ -375,7 +374,7 @@ class PhaseFourPublicationCycle:
         paths: list[str],
         evidence_only: list[str],
     ) -> str:
-        """PR body sections for runs pinned to Documentation Closure (owner D8); every line comes from an artifact."""
+        """PR body release-evidence sections (owner D8); every line comes from an artifact."""
 
         artifact_paths = _string_dict(state.get("latest_artifacts"))
 

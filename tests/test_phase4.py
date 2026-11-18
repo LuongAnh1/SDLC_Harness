@@ -23,7 +23,6 @@ from sdlc_harness.agents.developer import (
     DeveloperExecutionResult,
     build_developer_work_packet,
 )
-from sdlc_harness.agents.tester import QaGeneratedTestSuite, QaTesterAgent
 from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence, TypeScriptAstExtractor
 from sdlc_harness.core.config import load_settings
@@ -47,7 +46,6 @@ from sdlc_harness.llm.fake import (
     fake_browser_qa_review,
     fake_ui_polish_plan,
     fake_ui_polish_review,
-    fake_qa_generated_tests,
     fake_runtime_closure_plan,
     fake_runtime_closure_review,
 )
@@ -55,7 +53,6 @@ from sdlc_harness.profiles.signature import implementation_signature_contract_di
 from sdlc_harness.profiles import (
     build_code_trace_policy,
     build_planning_path_policy,
-    build_qa_test_policy,
     build_verification_stage_policy,
     get_language_profile,
     get_project_profile,
@@ -206,83 +203,6 @@ class ProseWrappedCodeTraceLlm:
             "Here is the review:\n"
             + json.dumps(_code_validation_task_response(prompt))
         )
-
-
-class FailingQaTester:
-    def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
-        assert qa_policy is not None
-        path = "apps/api/src/FailingQaAcceptance.test.ts"
-        requirement_ids = [
-            str(item.get("id"))
-            for item in context.get("canonical_requirements", [])
-            if isinstance(item, dict) and item.get("id")
-        ]
-        return QaGeneratedTestSuite(
-            summary="QA generated a failing acceptance test for workflow state coverage.",
-            test_files=[
-                {
-                    "path": path,
-                    "content": 'import { describe, expect, it } from "vitest";\n',
-                    "scenarios": ["Delete confirmation"],
-                }
-            ],
-            scenarios=[
-                {
-                    "name": "Delete confirmation",
-                    "expected_result": "The runner should surface the QA acceptance failure.",
-                    "test_file": path,
-                    "risk": "User may delete without confirmation.",
-                    "requirement_ids": requirement_ids,
-                }
-            ],
-            risks=["Confirmation behavior is unclear."],
-            generation_context={"section_count": 1, "chars_sent": 10, "chars_total": 10, "any_truncated": False},
-            requirement_contract=context.get("requirement_contract"),
-            generation_profile=qa_policy.metadata(),
-        )
-
-
-class RecordingQaTester:
-    def __init__(self):
-        self.context: dict[str, object] = {}
-
-    def generate_tests(self, *, context: dict[str, object], qa_policy=None) -> QaGeneratedTestSuite:
-        assert qa_policy is not None
-        self.context = context
-        path = "apps/api/src/RecordingQaAcceptance.test.ts"
-        requirement_ids = [
-            str(item.get("id"))
-            for item in context.get("canonical_requirements", [])
-            if isinstance(item, dict) and item.get("id")
-        ]
-        return QaGeneratedTestSuite(
-            summary="Recording QA generated compact acceptance tests.",
-            test_files=[
-                {
-                    "path": path,
-                    "content": 'import { describe, expect, it } from "vitest";\n',
-                    "scenarios": ["Compact QA packet"],
-                }
-            ],
-            scenarios=[
-                {
-                    "name": "Compact QA packet",
-                    "expected_result": "Packet includes accepted requirement, code, verification, and trace summary.",
-                    "test_file": path,
-                    "risk": "",
-                    "requirement_ids": requirement_ids,
-                }
-            ],
-            risks=[],
-            generation_context=context.get("context_budget") if isinstance(context.get("context_budget"), dict) else {},
-            requirement_contract=context.get("requirement_contract"),
-            generation_profile=qa_policy.metadata(),
-        )
-
-
-class InvalidQaLlm:
-    def complete(self, *, system: str, prompt: str) -> str:
-        return '{"status": "pass", "summary": "cut off before scenarios"'
 
 
 class ScriptedClosureLlm:
@@ -582,48 +502,6 @@ def polish_result_blocker(prompt: str) -> str:
             "observations": [],
         }
     )
-
-
-class CountingQaLlm:
-    """Count provider calls; serve queued responses, then the fake QA generator."""
-
-    def __init__(self, responses: list[str] | None = None):
-        self.calls = 0
-        self.prompts: list[str] = []
-        self.responses = list(responses or [])
-
-    def complete(self, *, system: str, prompt: str) -> str:
-        del system
-        self.calls += 1
-        self.prompts.append(prompt)
-        # The fake generator only understands the first-attempt prompt, not the repair prompt.
-        return self.responses.pop(0) if self.responses else fake_qa_generated_tests(self.prompts[0])
-
-
-class MissingRequirementQaLlm:
-    def complete(self, *, system: str, prompt: str) -> str:
-        return json.dumps(
-            {
-                "summary": "incomplete coverage",
-                "test_files": [
-                    {
-                        "path": "apps/api/src/V2Acceptance.test.ts",
-                        "content": 'import { describe, expect, it } from "vitest";',
-                        "scenarios": ["one"],
-                    }
-                ],
-                "scenarios": [
-                    {
-                        "name": "one",
-                        "expected_result": "one",
-                        "test_file": "apps/api/src/V2Acceptance.test.ts",
-                        "risk": "",
-                        "requirement_ids": ["REQ-1"],
-                    }
-                ],
-                "risks": [],
-            }
-        )
 
 
 class FinalVerificationRunnerStub(BrowserVerificationRunnerStub):
@@ -1613,23 +1491,6 @@ class PhaseFourTest(unittest.TestCase):
             "implementation_plan_review_binding_invalid",
         )
 
-    def test_profiled_qa_legacy_java_path_block_can_retry_after_policy_fix(self) -> None:
-        state = {
-            "status": "blocked",
-            "current_phase": "qa_testing",
-            "profile_snapshot": {"project_profile_id": "typescript_fullstack_v1"},
-            "last_error": {
-                "error_code": "developer_act_unsafe_path",
-                "message": (
-                    "Unsafe or unsupported Developer.act path: "
-                    "packages/contracts/src/CulturalHeritage.ts"
-                ),
-            },
-        }
-
-        self.assertTrue(PhaseFourWorkflow._qa_generation_retry_allowed(state))
-        state.pop("profile_snapshot")
-        self.assertFalse(PhaseFourWorkflow._qa_generation_retry_allowed(state))
 
     def test_v2_code_trace_emits_one_mapping_per_stable_requirement(self) -> None:
         source_path = "apps/api/src/CulturalHeritage.ts"
@@ -1688,36 +1549,6 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual([item["requirement_ref"] for item in payload["mappings"]], ["REQ-1"])
         self.assertEqual(payload["stats"]["requirements_covered"], 1)
 
-    def test_v2_qa_requires_exact_stable_requirement_coverage(self) -> None:
-        context = {
-            "requirement_contract": {"version": "v2", "revision": 1},
-            "canonical_requirements": [
-                {"id": "REQ-1", "content": "First"},
-                {"id": "REQ-2", "content": "Second"},
-            ],
-        }
-        qa_policy = build_qa_test_policy(
-            planning_policy=build_planning_path_policy(
-                project=get_project_profile("typescript_fullstack_v1"),
-                language=get_language_profile("typescript_v1"),
-            )
-        )
-
-        with self.assertRaises(HarnessError) as caught:
-            QaTesterAgent(MissingRequirementQaLlm()).generate_tests(
-                context=context,
-                qa_policy=qa_policy,
-            )
-
-        self.assertEqual(caught.exception.error_code, "qa_requirement_coverage_invalid")
-
-        generated = QaTesterAgent().generate_tests(context=context, qa_policy=qa_policy)
-        covered = {
-            requirement_id
-            for scenario in generated.scenarios
-            for requirement_id in scenario["requirement_ids"]
-        }
-        self.assertEqual(covered, {"REQ-1", "REQ-2"})
 
     def test_v2_pr_body_reports_contract_and_stable_id_coverage(self) -> None:
         body = _code_review_pr_body(
@@ -2293,8 +2124,6 @@ class PhaseFourTest(unittest.TestCase):
                     str(ready["run_id"]),
                     "--llm-mode",
                     "fake",
-                    "--qa-repair-limit",
-                    "3",
                     "--runtime-root",
                     str(self.runtime_root),
                 ]
@@ -2434,346 +2263,6 @@ class PhaseFourTest(unittest.TestCase):
             {"status": "implementation_tested", "current_phase": "implementation_testing"},
         )
 
-    def test_continue_run_runs_qa_after_implementation_traced(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        recorder = RecordingQaTester()
-        workflow.qa_tester = recorder
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-
-        response = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        self.assertTrue(response["ok"])
-        self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "qa_tested", response)
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
-        self.assertIn("qa_generated_tests", response["latest_artifacts"])
-        self.assertIn("qa_test_execution", response["latest_artifacts"])
-        self.assertIn("qa_test_report", response["latest_artifacts"])
-        self.assertTrue(response["quality_reports"]["qa_acceptance"]["ok"])
-        report_path = self.repo_root / str(response["latest_artifacts"]["qa_test_report"])
-        report = report_path.read_text(encoding="utf-8")
-        self.assertIn("QA Test Report V1", report)
-        self.assertIn("Status: `pass`", report)
-        self.assertIn("Generated Test Execution", report)
-        self.assertIn("Packet mode:", report)
-        self.assertIn("Any truncated:", report)
-        self.assertTrue(
-            (
-                self._workspace_path(response)
-                / "apps"
-                / "api"
-                / "src"
-                / "RecordingQaAcceptance.test.ts"
-            ).exists()
-        )
-        self.assertEqual(recorder.context["packet_mode"], "trace_dev_style_compact_qa_packet_v2")
-        self.assertIn("accepted_requirement", recorder.context)
-        self.assertIn("code_under_test", recorder.context)
-        self.assertIn("verification", recorder.context)
-        self.assertIn("traceability", recorder.context)
-        self.assertIn("artifact_references", recorder.context)
-        self.assertNotIn("artifacts", recorder.context)
-        self.assertNotIn("content", recorder.context["artifact_references"])
-        self.assertGreaterEqual(len(recorder.context["code_under_test"]["files"]), 1)
-        self.assertEqual(
-            recorder.context["context_budget"]["omitted_full_artifacts"],
-            ["design_artifact", "implementation_plan", "requirement_design_code_trace"],
-        )
-
-    def test_continue_run_moves_to_qa_repair_needed_when_qa_fails(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-
-        response = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        self.assertEqual(response["current_phase"], "qa_repair")
-        self.assertEqual(response["status"], "qa_repair_needed")
-        self.assertIsNone(response["last_error"])
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "get_status", "cancel_run"])
-        self.assertEqual(response["qa_repair_iterations"], 0)
-        self.assertIn("qa_generated_tests", response["latest_artifacts"])
-        self.assertIn("qa_test_execution", response["latest_artifacts"])
-        self.assertIn("qa_test_report", response["latest_artifacts"])
-        self.assertIn("qa_repair_feedback", response["latest_artifacts"])
-        self.assertFalse(response["quality_reports"]["qa_acceptance"]["ok"])
-        self.assertTrue(response["quality_reports"]["qa_repair"]["needed"])
-        feedback_path = self.repo_root / str(response["latest_artifacts"]["qa_repair_feedback"])
-        feedback = json.loads(feedback_path.read_text(encoding="utf-8"))
-        self.assertEqual(feedback["version"], "qa_repair_feedback_v1")
-        self.assertEqual(feedback["repair_scope"], "code_or_test")
-        self.assertTrue(feedback["failing_scenarios"])
-
-    def test_continue_run_blocks_when_qa_fails_with_zero_repair_limit(self) -> None:
-        self.settings = self._settings(SDLC_QA_REPAIR_LIMIT="0")
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-
-        response = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "qa_repair_limit_exceeded")
-        self.assertEqual(response["qa_repair_iterations"], 0)
-        self.assertNotIn("qa_repair_feedback", response["latest_artifacts"])
-
-    def test_continue_run_from_qa_repair_needed_repairs_and_retests_to_pass(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
-
-        self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "qa_tested")
-        self.assertEqual(response["qa_repair_iterations"], 1)
-        self.assertTrue(response["quality_reports"]["qa_acceptance"]["ok"])
-        self.assertFalse(response["quality_reports"]["qa_repair"]["needed"])
-        self.assertIn("code_change_report_v2.md", response["latest_artifacts"]["code_change_report"])
-        self.assertIn("test_report_v2.md", response["latest_artifacts"]["test_report"])
-        self.assertIn("requirement_design_code_trace_v2.json", response["latest_artifacts"]["requirement_design_code_trace"])
-        self.assertIn("qa_generated_tests_v2.json", response["latest_artifacts"]["qa_generated_tests"])
-
-    def test_repairable_code_trace_failure_after_qa_repair_returns_to_implementation_repair(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        qa_repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-        workflow.code_trace_validator = CodeTraceValidator(RejectingCodeTraceLlm())
-        response = workflow.continue_run(run_id=str(qa_repair_needed["run_id"]))
-
-        self.assertEqual(response["current_phase"], "implementation_repair")
-        self.assertEqual(response["status"], "implementation_repair_needed", response)
-        self.assertEqual(response["allowed_next_actions"], ["continue_run", "revalidate_implementation", "get_status", "cancel_run"])
-        self.assertEqual(response["implementation_repair_iterations"], 0)
-        self.assertEqual(response["qa_repair_iterations"], 1)
-        self.assertIsNone(response["last_error"])
-        self.assertIn("implementation_repair_feedback", response["latest_artifacts"])
-        self.assertTrue(response["quality_reports"]["implementation_repair"]["needed"])
-
-    def test_qa_repair_uses_tool_loop_and_records_durable_artifacts(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        workflow = PhaseFourWorkflow(
-            self._settings()
-        )
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
-
-        self.assertEqual(response["status"], "qa_tested", response)
-        self.assertEqual(response["qa_repair_iterations"], 1)
-        self.assertEqual(response["developer_execution"]["executor"], "tool_loop")
-        self.assertEqual(response["developer_execution"]["mode"], "qa_repair")
-        self.assertEqual(response["developer_execution"]["status"], "completed")
-        self.assertIn("developer_qa_repair_execution_manifest", response["latest_artifacts"])
-        self.assertIn("developer_qa_repair_execution_journal", response["latest_artifacts"])
-        self.assertNotIn("developer_repair_raw_response_v2", json.dumps(response["latest_artifacts"]))
-
-    def test_continue_run_from_qa_repair_needed_blocks_when_qa_still_fails_at_limit(self) -> None:
-        self.settings = self._settings(SDLC_QA_REPAIR_LIMIT="1")
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "failed"])
-        response = workflow.continue_run(run_id=str(repair_needed["run_id"]))
-
-        self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "blocked")
-        self.assertEqual(response["last_error"]["error_code"], "qa_repair_limit_exceeded")
-        self.assertEqual(response["qa_repair_iterations"], 1)
-        self.assertTrue(response["quality_reports"]["qa_repair"]["limit_exceeded"])
-    def test_continue_run_blocks_and_records_raw_response_when_qa_json_is_invalid(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = QaTesterAgent(InvalidQaLlm())
-
-        response = workflow.continue_run(run_id=str(traced["run_id"]))
-
-        self.assertEqual(response["current_phase"], "qa_testing")
-        self.assertEqual(response["status"], "blocked")
-        # Unparsable output is inconclusive (L5.4.3): blocked, retryable, no repair-prompt call.
-        self.assertEqual(response["last_error"]["error_code"], "qa_tester_inconclusive")
-        self.assertIn("continue_run", response["allowed_next_actions"])
-        self.assertIn("qa_tester_raw_response", response["latest_artifacts"])
-        raw_path = self.repo_root / str(response["latest_artifacts"]["qa_tester_raw_response"])
-        self.assertIn("cut off before scenarios", raw_path.read_text(encoding="utf-8"))
-
-    def _qa_review_workflow(self, llm: "CountingQaLlm", **review: object) -> PhaseFourWorkflow:
-        workflow = PhaseFourWorkflow(
-            self.settings,
-            qa_step_review={"enabled": True, "review_input": False, "review_output": True, **review},
-        )
-        workflow.qa_tester = QaTesterAgent(llm)
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-        return workflow
-
-    def _set_packet_runtime_surface(self, run: dict[str, object], runnable_status: str) -> None:
-        packet_path = self.repo_root / str(run["latest_artifacts"]["developer_work_packet"])
-        packet = json.loads(packet_path.read_text(encoding="utf-8"))
-        packet["execution_units"][0].setdefault("surface_contracts", []).append(
-            {
-                "design_node_id": "VDN-GATE-SCREEN",
-                "surface": "screen",
-                "surface_contract": {"runtime_surface": {"runnable_status": runnable_status, "required_inputs": []}},
-            }
-        )
-        packet_path.write_text(json.dumps(packet, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    def test_qa_step_review_pauses_input_before_provider_then_replays_approved_output(self) -> None:
-        traced = self._create_phase4_traced_run()
-        run_id = str(traced["run_id"])
-        llm = CountingQaLlm()
-
-        input_pending = self._qa_review_workflow(llm, review_input=True).continue_run(run_id=run_id)
-        self.assertEqual(input_pending["status"], "qa_step_review_required", input_pending)
-        self.assertEqual(input_pending["pending_step_review"]["review_stage"], "input")
-        self.assertEqual(input_pending["pending_step_review"]["call_id"], "qa-generation-0001-a01-input")
-        self.assertIn("qa_execution/step_review/v1/", input_pending["pending_step_review"]["exchange_path"].replace("\\", "/"))
-        self.assertEqual(llm.calls, 0)
-        self.assertNotIn("qa_generated_tests", input_pending["latest_artifacts"])
-        with self.assertRaises(HarnessError) as not_resumable:
-            PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
-        self.assertEqual(not_resumable.exception.error_code, "run_not_continuable")
-
-        output_pending = self._qa_review_workflow(
-            llm,
-            review_input=True,
-            call_id=input_pending["pending_step_review"]["call_id"],
-            decision="approve",
-        ).continue_qa_step_review(run_id=run_id)
-        self.assertEqual(output_pending["status"], "qa_step_review_required", output_pending)
-        self.assertEqual(output_pending["pending_step_review"]["review_stage"], "output")
-        self.assertEqual(llm.calls, 1)
-
-        replay_llm = CountingQaLlm()
-        tested = self._qa_review_workflow(
-            replay_llm,
-            call_id=output_pending["pending_step_review"]["call_id"],
-            decision="approve",
-        ).continue_qa_step_review(run_id=run_id)
-        self.assertEqual(tested["status"], "qa_tested", tested)
-        self.assertEqual(replay_llm.calls, 0)
-        self.assertIsNone(tested["pending_step_review"])
-        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
-        self.assertIsNone(state["qa_resume"])
-
-    def test_qa_step_review_second_agent_attempt_is_a_separate_ordinal(self) -> None:
-        traced = self._create_phase4_traced_run()
-        run_id = str(traced["run_id"])
-        # Parseable but contract-invalid output is the only kind that gets a second attempt.
-        llm = CountingQaLlm(responses=['{"summary": "no scenarios", "test_files": [], "scenarios": []}'])
-
-        first = self._qa_review_workflow(llm).continue_run(run_id=run_id)
-        self.assertEqual(first["pending_step_review"]["call_id"], "qa-generation-0001-a01")
-        second = self._qa_review_workflow(
-            llm,
-            call_id="qa-generation-0001-a01",
-            decision="approve",
-        ).continue_qa_step_review(run_id=run_id)
-        self.assertEqual(second["status"], "qa_step_review_required", second)
-        self.assertEqual(second["pending_step_review"]["call_id"], "qa-generation-0002-a01")
-        self.assertEqual(llm.calls, 2)
-
-        tested = self._qa_review_workflow(
-            llm,
-            call_id="qa-generation-0002-a01",
-            decision="approve",
-        ).continue_qa_step_review(run_id=run_id)
-        self.assertEqual(tested["status"], "qa_tested", tested)
-        self.assertEqual(llm.calls, 2)
-
-    def test_qa_step_review_after_qa_repair_resumes_qa_not_developer(self) -> None:
-        traced = self._create_phase4_traced_run()
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.qa_tester = FailingQaTester()
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        repair_needed = workflow.continue_run(run_id=str(traced["run_id"]))
-        run_id = str(repair_needed["run_id"])
-        feedback_path = str(repair_needed["latest_artifacts"]["qa_repair_feedback"])
-
-        llm = CountingQaLlm()
-        workflow = self._qa_review_workflow(llm)
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-        paused = workflow.continue_run(run_id=run_id)
-        self.assertEqual(paused["status"], "qa_step_review_required", paused)
-        self.assertEqual(paused["qa_repair_iterations"], 1)
-        self.assertIn("code_change_report_v2.md", paused["latest_artifacts"]["code_change_report"])
-        self.assertIn("requirement_design_code_trace_v2.json", paused["latest_artifacts"]["requirement_design_code_trace"])
-
-        resume = self._qa_review_workflow(
-            llm,
-            call_id=paused["pending_step_review"]["call_id"],
-            decision="approve",
-        )
-        resume.developer_tool_loop = None  # Any Developer call would fail loudly.
-        tested = resume.continue_qa_step_review(run_id=run_id)
-
-        self.assertEqual(tested["status"], "qa_tested", tested)
-        self.assertEqual(tested["qa_repair_iterations"], 1)
-        self.assertEqual(llm.calls, 1)
-        self.assertEqual(resume.verification_runner.calls, ["passed"])
-        self.assertIn("code_change_report_v2.md", tested["latest_artifacts"]["code_change_report"])
-        self.assertEqual(tested["quality_reports"]["qa_repair"]["repaired_from"], feedback_path)
-        generated = json.loads(
-            (self.repo_root / str(tested["latest_artifacts"]["qa_generated_tests"])).read_text(encoding="utf-8")
-        )
-        self.assertEqual(generated["repaired_from"], feedback_path)
-
-    def test_qa_requires_runtime_closure_for_unbound_runtime_surface(self) -> None:
-        traced = self._create_phase4_traced_run()
-        run_id = str(traced["run_id"])
-        self._set_packet_runtime_surface(traced, "externally_blocked")
-        llm = CountingQaLlm()
-
-        response = self._qa_review_workflow(llm, review_input=True).continue_run(run_id=run_id)
-
-        self.assertEqual(response["status"], "blocked", response)
-        self.assertEqual(response["last_error"]["error_code"], "qa_requires_runtime_closure")
-        self.assertIn("VDN-GATE-SCREEN", response["last_error"]["message"])
-        self.assertEqual(response["allowed_next_actions"], ["get_status", "cancel_run"])
-        self.assertEqual(llm.calls, 0)
-        self.assertNotIn("qa_generated_tests", response["latest_artifacts"])
-        self.assertFalse((self.store_run_dir(run_id) / "qa_execution").exists())
-
-    def test_qa_runs_when_runtime_surfaces_are_bound(self) -> None:
-        bound = self._create_phase4_traced_run()
-        self._set_packet_runtime_surface(bound, "bound")
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-        self.assertEqual(workflow.continue_run(run_id=str(bound["run_id"]))["status"], "qa_tested")
-
-    def test_qa_runs_for_unbound_runtime_surface_after_runtime_closure(self) -> None:
-        closed = self._create_phase4_traced_run()
-        self._set_packet_runtime_surface(closed, "externally_blocked")
-        store = PhaseOneWorkflow(self.settings).store
-        state = store.read_state(str(closed["run_id"]))
-        # Gate only: no pinned mode, so the dispatcher keeps the QA path and the gate sees runtime_closed.
-        state["runtime_closure"] = {"status": "runtime_closed"}
-        store.write_state(state)
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.verification_runner = SequenceVerificationRunner(["passed"])
-        self.assertEqual(workflow.continue_run(run_id=str(closed["run_id"]))["status"], "qa_tested")
 
     def store_run_dir(self, run_id: str) -> Path:
         return PhaseOneWorkflow(self.settings).store.run_dir(run_id)
@@ -2860,20 +2349,9 @@ class PhaseFourTest(unittest.TestCase):
     def _closure_contract_exists(self, run_id: str) -> bool:
         return any((self.store_run_dir(run_id) / "artifacts").glob("runtime_closure_contract_v*.json"))
 
-    def test_runtime_closure_off_keeps_qa_path_then_enforce_recovers_qa_gate_block(self) -> None:
-        run_id = self._create_closure_run()
-
-        blocked = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
-        self.assertEqual(blocked["last_error"]["error_code"], "qa_requires_runtime_closure", blocked)
-        self.assertNotIn("runtime_closure", PhaseOneWorkflow(self.settings).store.read_state(run_id))
-        self.assertNotIn("continue_run", blocked["allowed_next_actions"])
-
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
-        waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
-        self.assertEqual(waiting["status"], "waiting_runtime_closure_review", waiting)
 
     def test_runtime_closure_enforce_pins_run_and_reaches_owner_checkpoint(self) -> None:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
 
         waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
@@ -2925,7 +2403,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(state["runtime_closure"]["approved_contract"], checkpoint["contract_path"])
 
     def _approved_closure_run(self) -> str:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
         waiting = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
         CheckpointApprovalWorkflow(self.settings).approve_checkpoint(
@@ -3056,7 +2534,7 @@ class PhaseFourTest(unittest.TestCase):
 
     def _written_closure_run(self, *, outcomes=None, validator=None, **settings) -> tuple[str, ClosureVerificationRunnerStub]:
         if settings:
-            self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce", **settings)
+            self.settings = self._settings(**settings)
         run_id = self._approved_closure_run() if not settings else self._approved_closure_run_with_current_settings()
         written = PhaseFourWorkflow(self.settings).continue_run(run_id=run_id)
         self.assertEqual(written["status"], "runtime_closure_written", written)
@@ -3081,7 +2559,7 @@ class PhaseFourTest(unittest.TestCase):
         state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
         return Path(json.loads((self.repo_root / state["latest_artifacts"]["run_workspace"]).read_text(encoding="utf-8"))["worktree_path"])
 
-    def test_runtime_closure_fake_run_goes_from_written_to_runtime_closed_then_qa(self) -> None:
+    def test_runtime_closure_fake_run_goes_from_written_to_runtime_closed(self) -> None:
         run_id, runner = self._written_closure_run()
         validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
 
@@ -3123,9 +2601,6 @@ class PhaseFourTest(unittest.TestCase):
         )
         self.assertIn("apps/web/src/closure-provider-1.ts", publication)
         self.assertIn("tests/e2e/runtime-closure.probe.spec.ts", publication)
-
-        qa = self._closure_step(run_id, runner, validator=validator)
-        self.assertEqual(qa["status"], "qa_tested", qa)
 
     def test_runtime_closure_environment_failure_blocks_without_counting_then_retries(self) -> None:
         run_id, runner = self._written_closure_run(outcomes=["env", "passed"])
@@ -3339,7 +2814,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "runtime_closure_v2").exists())
 
     def test_runtime_closure_inconclusive_outputs_fail_closed_and_retry_on_a_new_attempt(self) -> None:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
         invalid_contract = json.dumps({"resolutions": "not a list", "closure_units": [], "runtime_probes": []})
         planner = ScriptedClosureLlm(
@@ -3374,7 +2849,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertTrue(self._closure_contract_exists(run_id))
 
     def test_runtime_closure_validator_blocker_gets_one_planner_patch_round(self) -> None:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
         planner = ScriptedClosureLlm(default=fake_runtime_closure_plan)
         validator = ScriptedClosureLlm([closure_blocker_review], default=fake_runtime_closure_review)
@@ -3391,7 +2866,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(len(review["rounds"]), 2)
 
     def test_runtime_closure_unsupported_config_kind_blocks_before_checkpoint(self) -> None:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
 
         def with_compose(prompt: str) -> str:
@@ -3412,7 +2887,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertFalse(self._closure_contract_exists(run_id))
 
     def test_runtime_closure_step_review_pauses_each_call_and_replays_approved_ones(self) -> None:
-        self.settings = self._settings(SDLC_RUNTIME_CLOSURE_MODE="enforce")
+        self.settings = self._settings()
         run_id = self._create_closure_run()
         planner = ScriptedClosureLlm(default=fake_runtime_closure_plan)
         validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
@@ -3449,7 +2924,7 @@ class PhaseFourTest(unittest.TestCase):
     def _closed_run(self, *, static_import: bool, **settings: str) -> str:
         """A fake run at runtime_closed with browser stages enforced; the demo provider holds one literal."""
 
-        run_id, runner = self._written_closure_run(SDLC_BROWSER_STAGES_MODE="enforce", **settings)
+        run_id, runner = self._written_closure_run(**settings)
         validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
         self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closure_verified")
         self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closed")
@@ -3505,14 +2980,6 @@ class PhaseFourTest(unittest.TestCase):
     def _artifact(self, response: dict[str, object], key: str) -> dict[str, object]:
         return json.loads((self.repo_root / str(response["latest_artifacts"][key])).read_text(encoding="utf-8"))
 
-    def test_browser_stages_off_keeps_the_qa_path_after_runtime_closed(self) -> None:
-        run_id, runner = self._written_closure_run()
-        validator = ScriptedClosureLlm(default=fake_runtime_closure_review)
-        self._closure_step(run_id, runner, validator=validator)
-        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "runtime_closed")
-
-        self.assertEqual(self._closure_step(run_id, runner, validator=validator)["status"], "qa_tested")
-        self.assertNotIn("browser_stages", PhaseOneWorkflow(self.settings).store.read_state(run_id))
 
     def test_browser_readiness_without_static_importer_verifies_and_reaches_browser_ready(self) -> None:
         run_id = self._closed_run(static_import=False)
@@ -4863,7 +4330,7 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(validator.calls, 3)
 
     def _documented_run(self, runner: BrowserVerificationRunnerStub, readme: bytes) -> tuple[str, dict[str, object]]:
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
         self.assertEqual(tested["status"], "qa_tested", tested)
         (self._closure_worktree(run_id) / "README.md").write_bytes(readme)
@@ -4983,7 +4450,7 @@ class PhaseFourTest(unittest.TestCase):
         # r9 (2026-11-17): the QA repair verification is F1's source and must carry a worktree fingerprint.
         runner = FinalVerificationRunnerStub()
         runner.outcomes = ["passed", "passed", "passed", "repo_e2e"]
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
         changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
         validator = ScriptedClosureLlm(default=fake_browser_qa_review)
@@ -5234,7 +4701,7 @@ class PhaseFourTest(unittest.TestCase):
         # G1.4: the generic form of the r9 recovery browser_qa_verification_fingerprint_rerun.
         runner = FinalVerificationRunnerStub()
         runner.outcomes = ["passed", "passed", "passed", "repo_e2e"]
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         changed = self._closure_worktree(run_id) / self.DEMO_IMPORTER
         changed.write_text(changed.read_text(encoding="utf-8") + "// changed after polish capture\n", encoding="utf-8")
         validator = ScriptedClosureLlm(default=fake_browser_qa_review)
@@ -5321,19 +4788,6 @@ class PhaseFourTest(unittest.TestCase):
         self.assertEqual(blocked["last_error"]["error_code"], "publication_tree_changed")
         self.assertEqual(publisher.publishes, [])
 
-    def test_documentation_closure_off_keeps_qa_tested_on_the_publication_path(self) -> None:
-        runner = BrowserVerificationRunnerStub()
-        run_id = self._polished_run(runner)
-        tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
-        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
-
-        self.assertEqual(state["status"], "qa_tested")
-        self.assertNotIn("documentation_closure", state)
-        self.assertFalse(self._browser_workflow(runner)._documentation_closure_enforced(state))
-        paths, evidence_only = self._publication_manifest(run_id, tested)
-        self.assertEqual(evidence_only, [])
-        self.assertIn("tests/e2e/sdlc-browser-capture.spec.ts", paths)
-        self.assertNotIn("README.md", paths)
 
     def test_browser_qa_cache_rechecks_only_a_scenario_whose_prompt_changed(self) -> None:
         runner = BrowserVerificationRunnerStub()
@@ -5527,7 +4981,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_run_until_checkpoint_steps_through_machine_work_and_stops_for_the_owner(self) -> None:
         # U1.1: one owner action per checkpoint instead of one continue_run per step.
         runner, publisher = FinalVerificationRunnerStub(), PreviewRecordingPublisher()
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         tested = self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))
         self.assertEqual(tested["status"], "qa_tested", tested)
 
@@ -5565,7 +5019,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_run_until_checkpoint_stops_at_the_llm_call_ceiling_and_the_owner_raises_it(self) -> None:
         # U1.2 (owner option A): the ceiling is the sum of per-component caps; the owner can set it per run.
         runner = FinalVerificationRunnerStub()
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         self.assertEqual(
             self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))["status"],
             "qa_tested",
@@ -5641,7 +5095,7 @@ class PhaseFourTest(unittest.TestCase):
     def test_run_until_checkpoint_needs_the_owner_to_turn_configured_per_call_review_off(self) -> None:
         # U1.3 (owner Q3): configured per-call review is never dropped silently; the owner turns it off per run.
         runner = FinalVerificationRunnerStub()
-        run_id = self._polished_run(runner, SDLC_DOCUMENTATION_CLOSURE_MODE="enforce")
+        run_id = self._polished_run(runner)
         self.assertEqual(
             self._browser_qa_step(run_id, runner, ScriptedClosureLlm(default=fake_browser_qa_review))["status"],
             "qa_tested",

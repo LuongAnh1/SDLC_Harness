@@ -153,7 +153,16 @@ def _has_retired_developer_executor(state: Mapping[str, object]) -> bool:
     return isinstance(execution, Mapping) and execution.get("executor") == "legacy"
 
 
+# Phase 4 lanes pin their mode when the run enters them; every lane is always on (2026-11-18).
+LANE_PINS = ("runtime_closure", "browser_stages", "documentation_closure")
+
+
 def retired_contract_pins(state: Mapping[str, object]) -> list[str]:
     """The run's contract pins that differ from the current set (a missing pin is a pre-pin legacy run)."""
 
-    return [key for key, current in CURRENT_CONTRACT_PINS.items() if state.get(key) != current]
+    retired = [key for key, current in CURRENT_CONTRACT_PINS.items() if state.get(key) != current]
+    for lane in LANE_PINS:
+        pin = state.get(lane)
+        if isinstance(pin, Mapping) and pin.get("mode") not in (None, "enforce"):
+            retired.append(f"{lane}.mode")
+    return retired

@@ -24,7 +24,6 @@ from typing import Any
 from ..core.errors import HarnessError
 from ..events import emit_current
 from ..profiles import (
-    QaTestPolicy,
     VerificationStagePolicy,
     is_profiled_work_packet_schema,
     profiled_execution_field_paths,
@@ -214,7 +213,6 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
-        qa_policy: QaTestPolicy | None = None,
         runtime_probe: RuntimeProbeRun | None = None,
         browser_capture: BrowserCaptureRun | None = None,
     ) -> VerificationResult:
@@ -225,7 +223,6 @@ class VerificationRunner:
             work_packet=work_packet,
             required_test_files=required_test_files,
             verification_policy=verification_policy,
-            qa_policy=qa_policy,
             runtime_probe=runtime_probe,
             browser_capture=browser_capture,
         )
@@ -273,7 +270,6 @@ class VerificationRunner:
             work_packet=work_packet,
             required_test_files=None,
             verification_policy=verification_policy,
-            qa_policy=None,
             selected_stage_ids=(stage_id,),
             demo_flag_stage=(stage_id, demo_flag_env_key),
         )
@@ -321,7 +317,6 @@ class VerificationRunner:
             work_packet=work_packet,
             required_test_files=required_test_files,
             verification_policy=verification_policy,
-            qa_policy=None,
             selected_stage_ids=(stage_id,),
             developer_unit_scope=True,
         )
@@ -346,7 +341,6 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None = None,
         verification_policy: VerificationStagePolicy | None = None,
-        qa_policy: QaTestPolicy | None = None,
         runtime_probe: RuntimeProbeRun | None = None,
         browser_capture: BrowserCaptureRun | None = None,
     ) -> VerificationResult:
@@ -363,7 +357,6 @@ class VerificationRunner:
             work_packet=work_packet,
             required_test_files=required_test_files,
             verification_policy=verification_policy,
-            qa_policy=qa_policy,
             runtime_probe=runtime_probe,
             browser_capture=browser_capture,
         )
@@ -375,7 +368,6 @@ class VerificationRunner:
         work_packet: dict[str, object],
         required_test_files: list[str] | None,
         verification_policy: VerificationStagePolicy,
-        qa_policy: QaTestPolicy | None,
         selected_stage_ids: tuple[str, ...] | None = None,
         developer_unit_scope: bool = False,
         runtime_probe: RuntimeProbeRun | None = None,
@@ -430,7 +422,6 @@ class VerificationRunner:
             required_test_files=required_test_files or [],
             work_packet=work_packet,
             verification_policy=verification_policy,
-            qa_policy=qa_policy,
             run_id=run_id,
             developer_unit_scope=developer_unit_scope,
         )
@@ -579,17 +570,7 @@ class VerificationRunner:
             elif spec.stage_id == "browser_capture":
                 stage_selected_files = (BROWSER_CAPTURE_SPEC_PATH,)
             elif spec.stage_id == "unit":
-                stage_selected_files = tuple(
-                    path
-                    for path in selected_test_files
-                    if qa_policy is None or qa_policy.normalize_test_path(path)
-                )
-            elif spec.stage_id == "browser_e2e":
-                stage_selected_files = tuple(
-                    path
-                    for path in selected_test_files
-                    if qa_policy is not None and qa_policy.normalize_browser_test_path(path)
-                )
+                stage_selected_files = selected_test_files
             else:
                 stage_selected_files = ()
             logical_argv = spec.argv
@@ -597,15 +578,6 @@ class VerificationRunner:
             report_directory: tempfile.TemporaryDirectory[str] | None = None
             report_path: Path | None = None
             if stage_selected_files and spec.stage_id == "unit":
-                if (
-                    not developer_unit_scope
-                    and (qa_policy is None or qa_policy.framework != spec.required_test_framework)
-                ):
-                    raise HarnessError(
-                        "qa_test_policy_invalid",
-                        "QA framework does not match the reviewed unit-stage reporter.",
-                        run_id=run_id,
-                    )
                 if not spec.machine_reporter_args:
                     raise HarnessError(
                         "verification_stage_policy_invalid",
@@ -909,22 +881,15 @@ def _profiled_required_test_files(
     required_test_files: list[str],
     work_packet: dict[str, object],
     verification_policy: VerificationStagePolicy,
-    qa_policy: QaTestPolicy | None,
     run_id: str | None,
     developer_unit_scope: bool = False,
 ) -> tuple[str, ...]:
     if not required_test_files:
         return ()
-    if qa_policy is None and not developer_unit_scope:
+    if not developer_unit_scope:
         raise HarnessError(
             "qa_test_policy_invalid",
-            "Profiled required test execution requires the immutable QA test policy.",
-            run_id=run_id,
-        )
-    if qa_policy is not None and qa_policy.project_profile_id != verification_policy.project_profile_id:
-        raise HarnessError(
-            "qa_test_policy_invalid",
-            "QA test policy does not belong to the verification project profile.",
+            "Only a Developer unit may select required test files.",
             run_id=run_id,
         )
     selected: list[str] = []
@@ -938,17 +903,8 @@ def _profiled_required_test_files(
         if isinstance(path, str) and path.strip()
     }
     for raw_path in required_test_files:
-        path = (
-            str(raw_path).strip().replace("\\", "/")
-            if developer_unit_scope
-            else (
-                qa_policy.normalize_test_path(raw_path)
-                or qa_policy.normalize_browser_test_path(raw_path)
-                if qa_policy is not None
-                else ""
-            )
-        )
-        if developer_unit_scope and (
+        path = str(raw_path).strip().replace("\\", "/")
+        if (
             not path
             or path.startswith("/")
             or Path(path).is_absolute()
@@ -959,12 +915,6 @@ def _profiled_required_test_files(
             raise HarnessError(
                 "developer_unit_test_out_of_scope",
                 f"Developer unit test path is outside the approved packet scope: {raw_path}",
-                run_id=run_id,
-            )
-        if not path:
-            raise HarnessError(
-                "qa_test_out_of_scope",
-                f"Required QA test path is outside the profiled QA policy: {raw_path}",
                 run_id=run_id,
             )
         if path in selected:

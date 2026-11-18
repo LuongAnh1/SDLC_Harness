@@ -102,17 +102,14 @@ _PLAN_RESUME = (PHASE_THREE, "continue_implementation_plan_step_review")
 
 # A blocked run moves on only through these retry rules (order matters: the first match wins).
 BLOCKED_ROUTES = (
-    Route("_continue_qa_test", ("_qa_generation_retry_allowed",)),
     Route("_resume_runtime_closure_stage", ("_runtime_closure_retry_allowed",)),
     Route("_continue_runtime_closure_repair", ("_closure_developer_retry_allowed", "_runtime_closure_repair_mode")),
     Route("_continue_runtime_closure_act", ("_closure_developer_retry_allowed",)),
     Route("_resume_browser_stage", ("_browser_retry_stage",)),
     Route("_continue_final_verification", ("_final_verification_retry_allowed",)),
     Route("_continue_browser_developer", ("_browser_developer_retry_allowed",)),
-    Route("_continue_qa_repair", ("_developer_retry_allowed", "_qa_repair_mode")),
     Route("_continue_developer_act", ("_developer_retry_allowed", "_developer_act_mode")),
     Route("_continue_implementation_repair", ("_developer_retry_allowed",)),
-    Route("_continue_qa_repair", ("_developer_transport_retry_allowed", "_qa_repair_mode")),
     Route("_continue_implementation_repair", ("_developer_transport_retry_allowed", "_implementation_repair_execution_mode")),
     Route("_continue_developer_act", ("_developer_transport_retry_allowed",)),
 )
@@ -122,7 +119,6 @@ DEVELOPER_SESSION_ROUTES = (
     Route("_continue_browser_developer", ("_browser_execution_active",)),
     Route("_continue_runtime_closure_repair", ("_runtime_closure_repair_mode",)),
     Route("_continue_runtime_closure_act", ("_runtime_closure_execution_active",)),
-    Route("_continue_qa_repair", ("_qa_repair_mode",)),
     Route("_continue_implementation_repair", ("_implementation_repair_mode",)),
     Route("_continue_developer_act"),
 )
@@ -165,7 +161,7 @@ NODES: tuple[Node, ...] = (
                  StepReview(PHASE_THREE, "plan_step_review", "continue_implementation_plan_step_review")),
     _human("waiting_implementation_plan_review", "plan",
            Approval(PHASE_FOUR, "approve_implementation_plan_checkpoint"), phase="implementation_planning"),
-    # Phase 4: implementation, verification, Code Validator, QA
+    # Phase 4: implementation, verification, Code Validator, then the lanes (always on since 2026-11-18)
     _phase_four("implementation_ready", "developer", "agent", Route("_continue_developer_act"),
                 phase="implementation_preparing"),
     _phase_four("implementation_executing", "developer", "agent", *DEVELOPER_SESSION_ROUTES,
@@ -174,21 +170,16 @@ NODES: tuple[Node, ...] = (
                 phase="implementation_writing"),
     _phase_four("implementation_repair_needed", "developer", "agent", Route("_continue_implementation_repair"),
                 phase="implementation_repair"),
-    _phase_four("qa_repair_needed", "developer", "agent", Route("_continue_qa_repair"), phase="qa_repair"),
     _phase_four("implementation_written", "verification", "deterministic", Route("_continue_verification"),
                 phase="implementation_testing"),
     _phase_four("implementation_tested", "validator", "evaluate", Route("_continue_code_trace"),
                 phase="implementation_testing"),
     _step_review("implementation_validation_step_review_required", "validator",
                  StepReview(PHASE_FOUR, "code_validation_step_review", "continue_code_validation_step_review")),
-    _phase_four("implementation_traced", "qa", "generate",
-                Route("_continue_runtime_closure_planning", ("_runtime_closure_enforced",)),
-                Route("_continue_qa_test"), phase="qa_testing"),
-    _step_review("qa_step_review_required", "qa",
-                 StepReview(PHASE_FOUR, "qa_step_review", "continue_qa_step_review")),
-    _phase_four("qa_tested", "qa", "deterministic",
-                Route("_continue_documentation_closure", ("_documentation_closure_enforced",)),
-                Route("_continue_code_review_publish"), phase="qa_testing"),
+    _phase_four("implementation_traced", "qa", "generate", Route("_continue_runtime_closure_planning"),
+                phase="qa_testing"),
+    # Browser QA passed; Documentation Closure starts.
+    _phase_four("qa_tested", "qa", "deterministic", Route("_continue_documentation_closure"), phase="qa_testing"),
     # Phase 4: runtime closure (L5.3)
     _human("waiting_runtime_closure_review", "runtime_closure",
            Approval(PHASE_FOUR, "approve_runtime_closure_checkpoint")),
@@ -201,7 +192,7 @@ NODES: tuple[Node, ...] = (
     _phase_four("runtime_closure_repair_needed", "runtime_closure", "agent",
                 Route("_continue_runtime_closure_repair")),
     _phase_four("runtime_closed", "runtime_closure", "deterministic",
-                Route("_continue_browser_readiness", ("_browser_stages_enforced",)), Route("_continue_qa_test")),
+                Route("_continue_browser_readiness")),
     # Phase 4: browser stages (L5.4)
     _step_review("browser_stage_step_review_required", "browser",
                  StepReview(PHASE_FOUR, "browser_stage_step_review", "continue_browser_stage_step_review")),
@@ -315,7 +306,6 @@ PHASE_STAGES = {
     "implementation_preparing": "developer",
     "implementation_writing": "developer",
     "implementation_repair": "developer",
-    "qa_repair": "developer",
     "implementation_testing": "verification",
     "qa_testing": "qa",
     "runtime_closure": "runtime_closure",

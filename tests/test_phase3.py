@@ -1046,7 +1046,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(workflow.store.read_state(run_id), state_before)
 
     @pytest.mark.journey
-    def test_v2_phase4_runs_canonical_ids_through_qa(self) -> None:
+    def test_v2_phase4_traces_every_canonical_id(self) -> None:
         approved = self._create_phase2_run_fresh()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
@@ -1062,101 +1062,22 @@ class PhaseThreeTest(unittest.TestCase):
         for _ in range(3):
             response = workflow.continue_run(run_id=run_id)
             self.assertNotEqual(response["status"], "blocked", response)
-        workflow.verification_runner.run = lambda **kwargs: VerificationResult(
-            status="passed",
-            command="fixture QA runner",
-            cwd=str(kwargs["target_path"]),
-            exit_code=0,
-            duration_seconds=0.01,
-            stdout="fixture QA passed",
-            stderr="",
-            reason="Fixture QA execution passed.",
-            selected_test_files=tuple(kwargs.get("required_test_files") or []),
-            verified_test_files=tuple(kwargs.get("required_test_files") or []),
-        )
-        response = workflow.continue_run(run_id=run_id)
 
-        self.assertEqual(response["status"], "qa_tested", response)
+        self.assertEqual(response["status"], "implementation_traced", response)
         self.assertEqual(response["requirement_contract_version"], "v2")
         trace = json.loads(
             (self.repo_root / response["latest_artifacts"]["requirement_design_code_trace"]).read_text(
                 encoding="utf-8"
             )
         )
-        qa_generated = json.loads(
-            (self.repo_root / response["latest_artifacts"]["qa_generated_tests"]).read_text(encoding="utf-8")
-        )
         trace_ids = {item["requirement_ref"] for item in trace["mappings"]}
-        qa_ids = {
-            requirement_id
-            for scenario in qa_generated["scenarios"]
-            for requirement_id in scenario["requirement_ids"]
-        }
         self.assertEqual(trace["mode"], "scenario_boundary_code_validation_v1")
-        self.assertEqual(trace_ids, qa_ids)
+        self.assertEqual(trace_ids, {item["id"] for item in packet["canonical_requirements"]})
         self.assertEqual(trace["stats"]["requirements_covered"], trace["stats"]["requirement_count"])
 
-    @pytest.mark.journey
-    def test_v2_phase4_runs_to_code_review_approved_with_stable_ids(self) -> None:
-        approved = self._create_phase2_run_fresh()
-        phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
-        run_id = str(phase3["run_id"])
-        response = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=run_id)
-        packet = json.loads(
-            (self.repo_root / response["latest_artifacts"]["developer_work_packet"]).read_text(encoding="utf-8")
-        )
-        canonical_ids = {item["id"] for item in packet["canonical_requirements"]}
-        revision = packet["requirement_contract"]["revision"]
-        workflow = PhaseFourWorkflow(self.settings)
-        workflow.code_trace_validator.symbol_extractor = WorkPacketTypeScriptAstExtractor(packet)
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-
-        statuses = []
-        for _ in range(4):
-            response = workflow.continue_run(run_id=run_id)
-            self.assertNotEqual(response["status"], "blocked", response)
-            statuses.append(response["status"])
-        self.assertEqual(
-            statuses,
-            ["implementation_written", "implementation_tested", "implementation_traced", "qa_tested"],
-        )
-
-        workflow.github_publisher = RecordingPublisher()
-        with patch(
-            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
-            return_value="example/target",
-        ):
-            published = workflow.continue_run(run_id=run_id)
-        ready = workflow.continue_run(run_id=run_id)
-        workflow.github_approver = RecordingApprover()
-        with patch(
-            "sdlc_harness.workflows.phase4_publication.github_repository_from_remote",
-            return_value="example/target",
-        ):
-            final = workflow.approve_code_review_checkpoint(
-                run_id=run_id,
-                checkpoint_id=str(ready["pending_checkpoint"]["checkpoint_id"]),
-            )
-
-        self.assertEqual(published["status"], "code_review_published")
-        self.assertEqual(ready["status"], "code_review_ready")
-        self.assertEqual(final["status"], "code_review_approved")
-        self.assertEqual(final["requirement_contract_version"], "v2")
-        pr_body = (self.repo_root / final["latest_artifacts"]["github_pr_body"]).read_text(encoding="utf-8")
-        jira_sync = (self.runtime_root / "runs" / run_id / "sync" / "code-review-jira-comment.md").read_text(
-            encoding="utf-8"
-        )
-        confluence_sync = (
-            self.runtime_root / "runs" / run_id / "sync" / "code-review-confluence-page.md"
-        ).read_text(encoding="utf-8")
-        self.assertIn(f"Requirement contract: `v2` revision `{revision}`", pr_body)
-        for requirement_id in canonical_ids:
-            self.assertIn(requirement_id, pr_body)
-            self.assertIn(requirement_id, jira_sync)
-            self.assertIn(requirement_id, confluence_sync)
 
     @pytest.mark.journey
-    def test_v2_phase4_repair_loops_preserve_contract_and_stable_ids(self) -> None:
+    def test_v2_phase4_repair_loop_preserves_contract_and_stable_ids(self) -> None:
         approved = self._create_phase2_run_fresh()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
         run_id = str(phase3["run_id"])
@@ -1193,36 +1114,7 @@ class PhaseThreeTest(unittest.TestCase):
         self.assertEqual(repaired_packet["requirement_contract"]["revision"], revision)
         self.assertEqual({item["id"] for item in repaired_packet["canonical_requirements"]}, canonical_ids)
         self.assertEqual({item["requirement_ref"] for item in repaired_trace["mappings"]}, canonical_ids)
-
-        workflow.verification_runner = SequenceVerificationRunner(["failed"])
-        qa_repair_needed = workflow.continue_run(run_id=run_id)
-        self.assertEqual(qa_repair_needed["status"], "qa_repair_needed")
-        workflow.verification_runner = SequenceVerificationRunner(["passed", "passed"])
-        qa_tested = workflow.continue_run(run_id=run_id)
-
-        self.assertEqual(qa_tested["status"], "qa_tested")
-        final_packet = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["developer_work_packet"]).read_text(encoding="utf-8")
-        )
-        final_trace = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["requirement_design_code_trace"]).read_text(
-                encoding="utf-8"
-            )
-        )
-        qa_generated = json.loads(
-            (self.repo_root / qa_tested["latest_artifacts"]["qa_generated_tests"]).read_text(encoding="utf-8")
-        )
-        qa_ids = {
-            requirement_id
-            for scenario in qa_generated["scenarios"]
-            for requirement_id in scenario["requirement_ids"]
-        }
-        self.assertEqual(final_packet["requirement_contract"]["revision"], revision)
-        self.assertEqual({item["id"] for item in final_packet["canonical_requirements"]}, canonical_ids)
-        self.assertEqual({item["requirement_ref"] for item in final_trace["mappings"]}, canonical_ids)
-        self.assertEqual(qa_ids, canonical_ids)
-        self.assertEqual(qa_tested["implementation_repair_iterations"], 1)
-        self.assertEqual(qa_tested["qa_repair_iterations"], 1)
+        self.assertEqual(traced["implementation_repair_iterations"], 1)
 
     def test_cli_approve_checkpoint_rejects_legacy_design_run(self) -> None:
         approved = self._create_phase2_run()

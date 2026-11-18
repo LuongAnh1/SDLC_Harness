@@ -250,19 +250,6 @@ class PlanningPathPolicy:
             return False
         return path.endswith(tuple(sorted(self.language_test_suffixes, key=len, reverse=True)))
 
-    def test_path_for_source(self, source_path: str, test_stem: str) -> str:
-        path = self.normalize_mapping_path(source_path)
-        if not path:
-            return ""
-        component_id = self.component_for_path(path, mapping_only=True)
-        rule = self.rule(component_id)
-        parent = path.rsplit("/", 1)[0]
-        test_suffix = next(
-            (test for source, test in rule.suffix_pairs if path.endswith(source)),
-            rule.test_suffix,
-        )
-        return f"{parent}/{test_stem}{test_suffix}"
-
     def source_path_for_test(self, test_path: str) -> str:
         path = self.normalize_editable_path(test_path)
         if not path or not self.is_test_path(path):

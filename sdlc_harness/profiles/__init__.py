@@ -65,13 +65,6 @@ from .signature import (
     normalize_typescript_type,
     signature_shape,
 )
-from .qa import (
-    QA_TEST_POLICY_VERSION,
-    QaComponentTestRule,
-    QaTestPolicy,
-    build_qa_test_policy,
-    qa_test_policy_from_snapshot,
-)
 from .code_trace import (
     CODE_TRACE_POLICY_VERSION,
     CodeTracePolicy,
@@ -118,9 +111,6 @@ __all__ = [
     "BrowserStageFacts",
     "browser_stage_facts",
     "build_browser_stage_policy",
-    "QA_TEST_POLICY_VERSION",
-    "QaComponentTestRule",
-    "QaTestPolicy",
     "CODE_TRACE_POLICY_VERSION",
     "CodeTracePolicy",
     "build_profile_snapshot",
@@ -128,7 +118,6 @@ __all__ = [
     "build_verification_stage_policy",
     "build_verification_stage_policy_version",
     "build_implementation_signature_contract",
-    "build_qa_test_policy",
     "build_code_trace_policy",
     "get_language_profile",
     "get_prompt_directive",
@@ -148,7 +137,6 @@ __all__ = [
     "prompt_directive_from_snapshot",
     "resolve_language_prompt_directive",
     "verification_stage_policy_from_snapshot",
-    "qa_test_policy_from_snapshot",
     "code_trace_policy_from_snapshot",
     "LEGACY_RETIRED_ALLOWED_COMMANDS",
     "public_allowed_actions",

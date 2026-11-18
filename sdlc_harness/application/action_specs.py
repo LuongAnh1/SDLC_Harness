@@ -47,7 +47,7 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
         "command": "continue-run",
         "required": set(),
         "optional": {"step_review_call_id", "step_review_decision", "step_review_note"},
-        "overrides": {"implementation_repair_limit", "qa_repair_limit"},
+        "overrides": {"implementation_repair_limit"},
         "confirmation": "standard",
     },
     "sync_run": {
@@ -142,7 +142,6 @@ OVERRIDE_SETTINGS = {
     "design_llm_call_budget": ("SDLC_DESIGN_LLM_CALL_BUDGET", 1),
     "implementation_plan_repair_limit": ("SDLC_IMPLEMENTATION_PLAN_REPAIR_LIMIT", 0),
     "implementation_repair_limit": ("SDLC_IMPLEMENTATION_REPAIR_LIMIT", 0),
-    "qa_repair_limit": ("SDLC_QA_REPAIR_LIMIT", 0),
 }
 
 
@@ -171,7 +170,6 @@ def public_dashboard_schema(settings: Settings) -> dict[str, object]:
                 "design": settings.design_repair_limit,
                 "plan": settings.implementation_plan_repair_limit,
                 "implementation": settings.implementation_repair_limit,
-                "qa": settings.qa_repair_limit,
             },
         },
         "refresh_seconds": {"snapshot": 5, "active_run": 3, "operation": 2},

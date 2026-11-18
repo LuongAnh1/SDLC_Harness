@@ -47,16 +47,6 @@ HARNESS_EVIDENCE_PATHS = (RUNTIME_PROBE_SPEC_PATH, BROWSER_CAPTURE_SPEC_PATH)
 class PhaseFourDocumentationCycle:
     """Own `qa_tested` -> `documentation_approved` for runs pinned to Documentation Closure."""
 
-    def _documentation_closure_enforced(self, state: dict[str, object]) -> bool:
-        pinned = str(_dict_value(state.get("documentation_closure")).get("mode") or "")
-        if pinned:
-            return pinned == "enforce"
-        # The section is built from browser-stage evidence: a run without passed browser stages keeps the old path.
-        return (
-            self.settings.documentation_closure_mode == "enforce"
-            and str(_dict_value(state.get("browser_stages")).get("status") or "") == "browser_qa_passed"
-        )
-
     def _documentation_pin(self, state: dict[str, object]) -> dict[str, object]:
         return _dict_value(state.get("documentation_closure"))
 
@@ -220,15 +210,13 @@ class PhaseFourDocumentationCycle:
         run_id: str,
         work_packet: dict[str, object],
     ) -> tuple[list[str], list[str]]:
-        """(paths to add to the publication manifest, Harness evidence kept out of it) for pinned runs.
+        """(paths to add to the publication manifest, Harness evidence kept out of it).
 
         Adds the env file the approved runtime configuration owns, the package files the dependency tool owns
-        (owner D5) and the approved README section (D2). Runs without the pin keep the old manifest.
+        (owner D5) and the approved README section (D2).
         """
 
         pin = self._documentation_pin(state)
-        if str(pin.get("mode") or "") != "enforce":
-            return [], []
         added: set[str] = set()
         receipt_ref = str(_string_dict(state.get("latest_artifacts")).get("runtime_config_execution") or "")
         if receipt_ref:

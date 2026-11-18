@@ -258,7 +258,6 @@ class RuntimeStore:
             "design_repair_needed": ("design", "design_repair_iterations"),
             "implementation_plan_repair_needed": ("implementation_plan", "implementation_plan_repair_iterations"),
             "implementation_repair_needed": ("implementation", "implementation_repair_iterations"),
-            "qa_repair_needed": ("qa", "qa_repair_iterations"),
         }
         if previous_status in repair_states and previous_status != status:
             repair_phase, counter_key = repair_states[previous_status]
@@ -273,7 +272,6 @@ class RuntimeStore:
             "design": "design_repair_iterations",
             "implementation_plan": "implementation_plan_repair_iterations",
             "implementation": "implementation_repair_iterations",
-            "qa": "qa_repair_iterations",
         }.items():
             before = int(previous.get(counter_key) or 0) if previous else 0
             after = int(state.get(counter_key) or 0)
@@ -327,7 +325,6 @@ class RuntimeStore:
                     "scenario_count": int(qa_report.get("scenario_count") or len(scenario_items)),
                     "passed_count": passed,
                     "failed_count": failed,
-                    "repair_iterations": int(state.get("qa_repair_iterations") or 0),
                 },
                 category="qa",
             )

@@ -10,7 +10,6 @@ from sdlc_harness.agents.developer.profile_context import developer_generation_c
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import (
     fake_code_trace_review,
-    fake_qa_generated_tests,
 )
 from sdlc_harness.profiles import (
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
@@ -194,29 +193,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
     ]
 
 
-def test_profiled_fake_qa_and_code_trace_have_no_java_paths() -> None:
-    qa_prompt = (
-        "QA Test Policy:\n"
-        + json.dumps(
-            {
-                **PROFILE,
-                "framework": "vitest",
-                "components": [
-                    {
-                        "component_id": "api",
-                        "test_root": "apps/api/src",
-                        "test_suffix": ".test.ts",
-                    }
-                ],
-            }
-        )
-        + "\n\nQA Generation Packet:\n"
-        + json.dumps({"canonical_requirements": [{"id": "REQ-1"}]})
-    )
-    qa = json.loads(fake_qa_generated_tests(qa_prompt))
-    assert qa["test_files"][0]["path"].endswith(".test.ts")
-    assert "vitest" in qa["test_files"][0]["content"]
-
+def test_profiled_fake_code_trace_has_no_java_paths() -> None:
     trace_prompt = (
         "Code Trace LLM Review v1\nReturn only valid JSON. Do not wrap the JSON in markdown.\n\n"
         + json.dumps(

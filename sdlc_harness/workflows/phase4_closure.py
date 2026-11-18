@@ -92,21 +92,12 @@ class PhaseFourRuntimeClosureCycle:
 
     # ------------------------------------------------------------------ routing
 
-    def _runtime_closure_enforced(self, state: dict[str, object]) -> bool:
-        pinned_mode = str(_dict_value(state.get("runtime_closure")).get("mode") or "")
-        if pinned_mode:
-            return pinned_mode == "enforce"
-        return self.settings.runtime_closure_mode == "enforce"
-
     def _runtime_closure_retry_stage(self, state: dict[str, object]) -> str:
         """The closure stage a continue_run retries from a retryable block, or ``""``."""
 
         if str(state.get("status") or "") != "blocked":
             return ""
         error_code = str(_dict_value(state.get("last_error")).get("error_code") or "")
-        # QA refused an unbound run; once closure is enforced the run can enter closure instead.
-        if error_code == "qa_requires_runtime_closure" and self._runtime_closure_enforced(state):
-            return "planning"
         if str(state.get("current_phase") or "") != "runtime_closure":
             return ""
         blocked_from = str(_dict_value(state.get("runtime_closure")).get("blocked_from") or "planning")
