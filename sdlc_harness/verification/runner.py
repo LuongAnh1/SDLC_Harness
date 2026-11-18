@@ -409,6 +409,8 @@ class VerificationRunner:
             work_packet,
             verification_policy=verification_policy,
             run_id=run_id,
+            developer_unit_scope=developer_unit_scope,
+            selected_stage_ids=selected_stage_ids,
         )
         planned_stage_ids = tuple(spec.stage_id for spec in specs)
         target_root = target_path.resolve()
@@ -777,6 +779,8 @@ def _validate_profiled_work_packet(
     *,
     verification_policy: VerificationStagePolicy,
     run_id: str | None,
+    developer_unit_scope: bool = False,
+    selected_stage_ids: tuple[str, ...] | None = None,
 ) -> None:
     if not is_profiled_work_packet_schema(work_packet.get("schema_version")):
         raise HarnessError(
@@ -785,7 +789,15 @@ def _validate_profiled_work_packet(
             run_id=run_id,
         )
     actual_stage_ids = tuple(_string_items(work_packet.get("verification_stage_ids")))
-    if actual_stage_ids != verification_policy.stage_ids:
+    if developer_unit_scope:
+        # A lane packet (closure, readiness) declares only the stages its units may run: an ordered subsequence of
+        # the pinned suite that contains the requested stage.
+        pinned = iter(verification_policy.stage_ids)
+        declared = bool(actual_stage_ids) and all(stage_id in pinned for stage_id in actual_stage_ids)
+        declared = declared and set(selected_stage_ids or ()) <= set(actual_stage_ids)
+    else:
+        declared = actual_stage_ids == verification_policy.stage_ids
+    if not declared:
         raise HarnessError(
             "verification_stage_policy_invalid",
             "Developer Work Packet verification stages do not match the immutable run policy.",

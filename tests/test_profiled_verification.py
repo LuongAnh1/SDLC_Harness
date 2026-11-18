@@ -414,6 +414,37 @@ class ProfiledVerificationTest(unittest.TestCase):
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.args[0], ["npm", "run", "typecheck"])
 
+    def test_lane_packet_declaring_a_subset_of_the_suite_runs_one_stage(self) -> None:
+        # Closure and readiness packets declare only (typecheck, unit) of the pinned v2 suite.
+        lane_packet = {**self.packet, "verification_stage_ids": ["typecheck", "unit"]}
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout="passed", stderr="")
+        with (
+            patch("sdlc_harness.verification.runner.shutil.which", return_value="npm"),
+            patch("sdlc_harness.verification.runner._run_bounded", return_value=completed),
+        ):
+            result = VerificationRunner().run_stage(
+                target_path=self.target, work_packet=lane_packet, stage_id="typecheck", verification_policy=self.policy
+            )
+        self.assertEqual(result.executed_stage_ids, ("typecheck",))
+
+        for declared, stage_id in (
+            (["unit", "typecheck"], "typecheck"),  # out of the suite's order
+            (["typecheck", "lint"], "typecheck"),  # a stage the suite does not have
+            (["typecheck"], "unit"),  # the requested stage is not declared
+            ([], "typecheck"),
+        ):
+            with self.subTest(declared=declared, stage_id=stage_id), self.assertRaises(HarnessError) as caught:
+                VerificationRunner().run_stage(
+                    target_path=self.target,
+                    work_packet={**self.packet, "verification_stage_ids": declared},
+                    stage_id=stage_id,
+                    verification_policy=self.policy,
+                )
+            self.assertEqual(caught.exception.error_code, "verification_stage_policy_invalid")
+        # The full suite still needs the exact pinned stage list.
+        with self.assertRaises(HarnessError):
+            VerificationRunner().run(target_path=self.target, work_packet=lane_packet, verification_policy=self.policy)
+
     def test_runner_stops_after_first_failed_stage(self) -> None:
         failed = subprocess.CompletedProcess(args=[], returncode=2, stdout="", stderr="type error")
         with (
