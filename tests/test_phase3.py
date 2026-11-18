@@ -18,7 +18,6 @@ from sdlc_harness.application import ApplicationCommand, ApplicationService
 from sdlc_harness.cli import main as cli_main
 from sdlc_harness.agents.designer import GRAPH_VERSION
 from sdlc_harness.agents.developer import DeveloperPlanAgent, ImplementationPlanDraft
-from sdlc_harness.agents.developer.planner import _parse_developer_plan_payload
 from sdlc_harness.agents.validator import (
     ImplementationPlanReview,
     ImplementationPlanValidator,
@@ -27,9 +26,7 @@ from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.profiles import (
-    build_planning_path_policy,
     build_verification_stage_policy,
-    get_language_profile,
     get_project_profile,
 )
 from sdlc_harness.verification import VerificationResult
@@ -627,52 +624,6 @@ class PhaseThreeTest(unittest.TestCase):
             session["calls"][0]["superseded_reason"],
             "upstream_design_checkpoint_changed",
         )
-
-    def test_revalidate_recovers_failed_plan_step_review_drift(self) -> None:
-        self._create_phase2_run()
-        store = PhaseOneWorkflow(self.settings).store
-        execution_root = store.run_dir(self.run_id) / "implementation_plan_execution"
-        execution_root.mkdir(parents=True, exist_ok=True)
-        stale = {
-            "call_id": "implementation-plan-0001-a01",
-            "ordinal": 1,
-            "attempt": 1,
-            "status": "approved",
-            "prompt_hash": "sha256:stale",
-            "resume_prompt_hash": "sha256:stale",
-            "raw_completion": "{}",
-        }
-        (execution_root / "step_review_session_v1.json").write_text(
-            json.dumps({"calls": [stale]}), encoding="utf-8"
-        )
-        (execution_root / "exchange_implementation-plan-0001-a01.json").write_text(
-            json.dumps(stale), encoding="utf-8"
-        )
-        state = store.read_state(self.run_id)
-        state.update(
-            {
-                "current_phase": "implementation_planning",
-                "status": "failed",
-                "pending_checkpoint": None,
-                "last_error": {
-                    "error_code": "implementation_plan_step_review_drift",
-                    "message": "stale approved plan exchange",
-                },
-            }
-        )
-        store.write_state(state)
-
-        response = PhaseThreeWorkflow(
-            self.settings,
-            plan_step_review={"enabled": True},
-        ).revalidate_implementation_plan(run_id=self.run_id)
-
-        self.assertEqual(response["status"], "implementation_plan_step_review_required")
-        self.assertEqual(response["pending_step_review"]["review_stage"], "input")
-        session = json.loads(
-            (execution_root / "step_review_session_v1.json").read_text(encoding="utf-8")
-        )
-        self.assertEqual([item["status"] for item in session["calls"]], ["superseded", "input_pending"])
 
     def _create_phase3_run_from_template(self) -> dict[str, object]:
         manager = RunWorkspaceManager(self.settings)
@@ -1311,83 +1262,6 @@ class PhaseThreeTest(unittest.TestCase):
 
         self.assertEqual(settings.implementation_plan_repair_limit, 0)
 
-    def test_developer_plan_parser_accepts_fenced_json_with_prose(self) -> None:
-        payload = _parse_developer_plan_payload(
-            """Here is the plan:
-```json
-{
-  "summary": "Implement approved delete flow",
-  "repo_evidence": ["CulturalHeritage.java exists"],
-  "implementation_steps": [
-    {
-      "order": 1,
-      "title": "Add delete service",
-      "description": "Implement deletion",
-      "files": ["src/main/java/DeleteService.java"],
-      "design_refs": ["method:DeleteService.delete"]
-    }
-  ],
-  "proposed_files": [],
-  "design_mappings": [],
-  "test_intents": [],
-  "assumptions": [],
-  "open_questions": []
-}
-```
-Thanks."""
-        )
-
-        self.assertEqual(payload["summary"], "Implement approved delete flow")
-        self.assertEqual(payload["repo_evidence"], ["CulturalHeritage.java exists"])
-        self.assertEqual(payload["implementation_steps"][0]["order"], 1)
-
-    def test_developer_plan_falls_back_when_llm_returns_invalid_json(self) -> None:
-        project = get_project_profile("typescript_fullstack_v1")
-        planning_policy = build_planning_path_policy(
-            project=project,
-            language=get_language_profile(project.language_profile_id),
-        )
-        draft = DeveloperPlanAgent(BadJsonLlm()).plan(
-            run_id="run_test",
-            source_ref="jira_issue:SDLC-1",
-            issue_key="SDLC-1",
-            requirement_packet="# Requirement\nDelete an item.",
-            design_artifact="# Design\nDeleteCulturalHeritageService.deleteHeritage",
-            requirement_design_trace={
-                "version": "requirement_design_trace_v1",
-                "class_trace": [],
-                "sequence_trace": [],
-            },
-            class_graph={
-                "version": "class_diagram_graph_v1",
-                "nodes": [
-                    {
-                        "id": "DeleteCulturalHeritageService",
-                        "className": "DeleteCulturalHeritageService",
-                        "methods": [{"name": "deleteHeritage"}],
-                    }
-                ],
-            },
-            sequence_graph={"version": "sequence_diagram_graph_v1", "sequenceDiagrams": []},
-            target_repo_path=str(self.target_repo),
-            target_repo_remote=self.remote_url,
-            target_base_branch="main",
-            planned_branch="feature/sdlc-1-implementation",
-            target_files=[
-                "apps/api/src/DeleteCulturalHeritageService.ts"
-            ],
-            repo_context={"mode": "fake_codegraph_context_v1", "evidence": "service exists"},
-            planning_policy=planning_policy,
-            verification_policy=build_verification_stage_policy(project=project),
-        )
-
-        self.assertEqual(
-            draft.structured["planning_mode"],
-            "deterministic_graph_mapping_after_llm_parse_error_v1",
-        )
-        self.assertIn("Developer.plan LLM did not return valid JSON", draft.structured["developer_llm"]["parse_error"])
-        self.assertTrue(draft.structured["implementation_steps"])
-
     def test_sync_run_resyncs_implementation_plan_checkpoint(self) -> None:
         approved = self._create_phase2_run()
         phase3 = CheckpointApprovalWorkflow(self.settings).approve_checkpoint(run_id=str(approved["run_id"]))
@@ -1950,95 +1824,6 @@ Thanks."""
         self.assertIn("did not return valid JSON", report["llm_review"]["reason"])
         self.assertEqual(report["versions"], ["v1"])
         self.assertTrue(response["latest_artifacts"]["implementation_plan_review"].endswith("implementation_plan_review_v1.json"))
-
-    def test_validator_review_detects_scope_violation(self) -> None:
-        review = ImplementationPlanValidator().review(
-            structured_plan={
-                "target_repository": {
-                    "local_path": str(self.target_repo),
-                    "remote": self.remote_url,
-                    "base_branch": "main",
-                    "planned_branch": "feature/test",
-                },
-                "design_mappings": [
-                    {
-                        "design_element_id": "class:InventedService",
-                        "design_element_name": "InventedService",
-                        "planned_code_target": "src/main/java/com/sdlc/etour/heritage/InventedService.java",
-                        "test_intent": "test invented behavior",
-                    }
-                ],
-                "test_intents": [{"scope": "unit", "intent": "run tests", "command": "scripts/test.ps1"}],
-            },
-            requirement_design_trace={"class_trace": [], "sequence_trace": []},
-            class_graph={"nodes": []},
-            sequence_graph={"sequenceDiagrams": []},
-        )
-
-        self.assertFalse(review.ok)
-        self.assertTrue(review.scope_issues)
-
-    def test_v2_validator_hard_gates_malformed_requirement_coverage(self) -> None:
-        review = ImplementationPlanValidator().review_rules(
-            structured_plan={
-                "target_repository": {
-                    "local_path": str(self.target_repo),
-                    "remote": self.remote_url,
-                    "base_branch": "main",
-                    "planned_branch": "feature/test",
-                },
-                "design_mappings": [
-                    {
-                        "design_element_id": "class:ApprovedService",
-                        "design_element_name": "ApprovedService",
-                        "planned_code_target": "src/main/java/ApprovedService.java",
-                        "test_intent": "test approved behavior",
-                    }
-                ],
-                "test_intents": [{"scope": "unit", "intent": "run tests", "command": "scripts/test.ps1"}],
-                "requirement_coverage": [
-                    {
-                        "requirement_id": "R-1",
-                        "content": "approved",
-                        "design_targets": ["InventedService"],
-                        "design_element_ids": [],
-                        "planned_code_targets": [],
-                        "test_intents": [],
-                    },
-                    {
-                        "requirement_id": "R-UNKNOWN",
-                        "content": "invented",
-                        "design_targets": ["InventedService"],
-                        "design_element_ids": [],
-                        "planned_code_targets": [],
-                        "test_intents": [],
-                    }
-                ],
-            },
-            requirement_design_trace={
-                "class_trace": [
-                    {"requirement": "R-1", "links": [{"target": "ApprovedService", "reason": "covered"}]}
-                ],
-                "sequence_trace": [{"requirement": "R-1", "links": []}],
-            },
-            class_graph={"nodes": [{"id": "ApprovedService", "className": "ApprovedService", "methods": []}]},
-            sequence_graph={"sequenceDiagrams": []},
-            requirement_graph={
-                "requirements": [
-                    {"id": "R-1", "content": "approved"},
-                    {"id": "R-2", "content": "also approved"},
-                ]
-            },
-            requirement_contract_version="v2",
-        )
-
-        self.assertFalse(review.ok)
-        self.assertEqual(review.mode, "implementation_plan_rule_review_v2")
-        self.assertTrue(any("Missing requirement coverage" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("invented unknown" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("outside its approved trace" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("no planned code target" in item for item in review.requirement_coverage_issues))
-        self.assertTrue(any("no test intent" in item for item in review.requirement_coverage_issues))
 
     def test_direct_phase2_still_rejects_design_checkpoint(self) -> None:
         approved = self._create_phase2_run()

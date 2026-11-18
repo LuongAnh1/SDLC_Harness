@@ -7,8 +7,6 @@ from pathlib import PurePosixPath
 from ...core.errors import HarnessError
 from ...profiles import (
     IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION,
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     get_language_profile,
     implementation_signature_contract_digest,
     is_profiled_work_packet_schema,
@@ -34,7 +32,7 @@ def developer_generation_context(work_packet: dict[str, object]) -> dict[str, ob
 
     output_contract = _dict_value(work_packet.get("output_contract"))
     path_policy = _dict_value(output_contract.get("path_policy"))
-    if not path_policy and schema_version != PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION:
+    if not path_policy:
         path_policy = _dict_value(work_packet.get("planning_profile"))
     project_profile_id = str(path_policy.get("project_profile_id") or "").strip()
     language_profile_id = str(path_policy.get("language_profile_id") or "").strip()
@@ -51,25 +49,21 @@ def developer_generation_context(work_packet: dict[str, object]) -> dict[str, ob
         raise _profile_error(exc.message) from exc
 
     signature_contract = _dict_value(work_packet.get("implementation_signature_contract"))
-    if schema_version in {
-        PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    }:
-        if (
-            signature_contract.get("version") != IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION
-            or signature_contract.get("digest")
-            != implementation_signature_contract_digest(signature_contract)
-        ):
-            raise _profile_error("Developer signature contract version or digest is invalid.")
-        expected_profile = {
-            "project_profile_id": project_profile_id,
-            "language_profile_id": language_profile_id,
-            "policy_version": policy_version,
-        }
-        if signature_contract.get("profile") != expected_profile:
-            raise _profile_error(
-                "Developer signature contract does not match the frozen editable path policy."
-            )
+    if (
+        signature_contract.get("version") != IMPLEMENTATION_SIGNATURE_CONTRACT_VERSION
+        or signature_contract.get("digest")
+        != implementation_signature_contract_digest(signature_contract)
+    ):
+        raise _profile_error("Developer signature contract version or digest is invalid.")
+    expected_profile = {
+        "project_profile_id": project_profile_id,
+        "language_profile_id": language_profile_id,
+        "policy_version": policy_version,
+    }
+    if signature_contract.get("profile") != expected_profile:
+        raise _profile_error(
+            "Developer signature contract does not match the frozen editable path policy."
+        )
 
     signatures_by_file: dict[str, list[dict[str, object]]] = {}
     for entry in _dict_items(signature_contract.get("entries")):

@@ -32,14 +32,7 @@ _CATALOG_STAGE_ALIASES = {
     "browser_capture": "browser_e2e",
     "repository_e2e": "browser_e2e",
 }
-LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v2"
-PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v3"
-PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION = PROFILED_IMPLEMENTATION_PLAN_VERSION
-PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v4"
 COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION = "implementation_plan_structured_v5"
-LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v1"
-PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v2"
-PREVIOUS_UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v3"
 UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION = "developer_work_packet_profiled_v3"
 _ACTIVE_STAGE_IDS_BY_POLICY = {
     LEGACY_VERIFICATION_STAGE_POLICY_VERSION: {
@@ -249,25 +242,15 @@ def profiled_plan_contract_issues(
     planning_policy: PlanningPathPolicy,
     verification_policy: VerificationStagePolicy,
     class_graph: dict[str, object] | None = None,
-    allow_legacy: bool = False,
 ) -> list[str]:
     """Kiểm contract profiled plan tại cả Validator và ranh giới Phase 4."""
 
     issues: list[str] = []
     if verification_policy.project_profile_id != planning_policy.project_profile_id:
         issues.append("Verification stages do not belong to the planning project profile.")
-    plan_version = structured_plan.get("version")
-    current = plan_version in {
-        PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    }
-    compatible = plan_version == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    if not current and not (allow_legacy and compatible):
+    if structured_plan.get("version") != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
         issues.append(
-            "Profiled implementation plan version must be "
-            f"`{PROFILED_IMPLEMENTATION_PLAN_VERSION}` or "
-            f"`{COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
+            f"Profiled implementation plan version must be `{COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION}`."
         )
     planning_profile = structured_plan.get("planning_profile")
     if not isinstance(planning_profile, dict) or planning_profile != planning_policy.metadata():
@@ -296,45 +279,24 @@ def profiled_plan_contract_issues(
                 f"Developer test intent cannot claim verification stage owned by "
                 f"{verification_policy.owner_for_stage(stage_id)}: {stage_id}"
             )
-    if plan_version != LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-        issues.extend(
-            implementation_signature_contract_issues(
-                structured_plan.get("implementation_signature_contract"),
-                planning_policy=planning_policy,
-                mappings=_dict_items(structured_plan.get("design_mappings")),
-                class_graph=class_graph,
-                enforce_design_method_arity=(
-                    plan_version not in {
-                        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                    }
-                ),
-                reject_placeholder_only=(
-                    plan_version in {
-                        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                    }
-                ),
-                bind_to_mapped_symbol=(
-                    plan_version in {
-                        COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-                    }
-                ),
-            )
+    issues.extend(
+        implementation_signature_contract_issues(
+            structured_plan.get("implementation_signature_contract"),
+            planning_policy=planning_policy,
+            mappings=_dict_items(structured_plan.get("design_mappings")),
+            class_graph=class_graph,
+            enforce_design_method_arity=False,
+            reject_placeholder_only=True,
+            bind_to_mapped_symbol=True,
         )
+    )
     return issues
 
 
 def is_profiled_work_packet_schema(value: object) -> bool:
     """Nhận diện cả packet hiện hành và packet profiled lịch sử."""
 
-    return value in {
-        UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        PREVIOUS_UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    }
+    return value == UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
 
 
 def profiled_execution_field_paths(value: object, *, path: str = "$") -> list[str]:

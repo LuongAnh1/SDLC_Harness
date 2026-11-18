@@ -26,6 +26,7 @@ from sdlc_harness.profiles import (
     get_language_profile,
     get_project_profile,
 )
+from sdlc_harness.profiles.signature import implementation_signature_contract_digest
 from sdlc_harness.storage.runtime import RuntimeStore
 
 
@@ -189,7 +190,8 @@ class CodeValidationTaskTest(unittest.TestCase):
         test.write_text("import { it } from 'vitest';\nit('runs', () => {});\n", encoding="utf-8")
         self.packet = {
             "run_id": "run-code-validation",
-            "schema_version": "developer_work_packet_profiled_v1",
+            "schema_version": "developer_work_packet_profiled_v3",
+            "implementation_signature_contract": {"version": "implementation_signature_contract_v1", "entries": []},
             "requirement_contract": {"version": "v2", "revision": 1},
             "canonical_requirements": [{"id": "REQ-1", "content": "Run the behavior."}],
             "requirement_coverage": [
@@ -224,6 +226,8 @@ class CodeValidationTaskTest(unittest.TestCase):
                 }
             ],
         }
+        contract = self.packet["implementation_signature_contract"]
+        contract["digest"] = implementation_signature_contract_digest(contract)
         project = get_project_profile("typescript_fullstack_v1")
         planning = build_planning_path_policy(
             project=project,

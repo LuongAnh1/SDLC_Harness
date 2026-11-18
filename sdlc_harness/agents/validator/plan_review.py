@@ -17,7 +17,6 @@ from ...core.errors import HarnessError
 from ...llm.client import strip_code_fence
 from ...llm.step_review import LlmStepReviewRequired
 from ...profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     LanguagePromptDirective,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -46,128 +45,6 @@ _PLAN_FINDING_FIELDS = {
     "test": "test_issues",
     "scope": "scope_issues",
 }
-
-
-def _expected_design_elements(
-    *,
-    class_graph: dict[str, object],
-    sequence_graph: dict[str, object],
-) -> dict[str, dict[str, str]]:
-    expected: dict[str, dict[str, str]] = {}
-    for node in _dict_items(class_graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        if not class_name:
-            continue
-        expected[f"class:{class_name}"] = {"type": "class", "name": class_name}
-        for method in _dict_items(node.get("methods")):
-            method_name = str(method.get("name") or "").strip()
-            if method_name:
-                full_name = f"{class_name}.{method_name}"
-                expected[f"method:{full_name}"] = {"type": "method", "name": full_name}
-
-    for diagram in _dict_items(sequence_graph.get("sequenceDiagrams")):
-        diagram_id = str(diagram.get("id") or "sequence_diagram").strip()
-        for index, message in enumerate(_dict_items(diagram.get("messages")), start=1):
-            source = str(message.get("from") or "").strip()
-            target = str(message.get("to") or "").strip()
-            text = str(message.get("message") or "").strip()
-            if text:
-                name = f"{source}->{target}: {text}"
-                expected[f"sequence:{diagram_id}:{index}"] = {
-                    "type": "sequence_message",
-                    "name": name,
-                    "message_type": str(message.get("type") or "synchronous").strip().lower(),
-                    "message": text,
-                }
-    return expected
-
-
-def _traceability_issues(
-    *,
-    requirement_design_trace: dict[str, object],
-    mapped_names: set[str],
-    allowed_names: set[str],
-) -> list[str]:
-    issues: list[str] = []
-    for trace_key in ("class_trace", "sequence_trace"):
-        for item in _dict_items(requirement_design_trace.get(trace_key)):
-            requirement = str(item.get("requirement") or "").strip()
-            for link in _dict_items(item.get("links")):
-                target = str(link.get("target") or "").strip()
-                if not target:
-                    continue
-                if target in allowed_names and target not in mapped_names:
-                    issues.append(f"Trace target `{target}` for {requirement} is not reflected in the plan.")
-    return issues
-
-
-def _requirement_coverage_issues(
-    *,
-    structured_plan: dict[str, object],
-    requirement_graph: dict[str, object],
-    requirement_design_trace: dict[str, object],
-) -> list[str]:
-    """Hard-gate the canonical V2 requirement coverage produced by Python."""
-
-    issues: list[str] = []
-    contract = structured_plan.get("requirement_contract")
-    contract = contract if isinstance(contract, dict) else {}
-    if contract.get("version") != "v2":
-        issues.append("Structured plan requirement contract version must be v2.")
-    if contract.get("revision") != requirement_graph.get("revision"):
-        issues.append("Structured plan requirement revision does not match the canonical graph.")
-    artifact_refs = contract.get("artifact_refs")
-    artifact_refs = artifact_refs if isinstance(artifact_refs, dict) else {}
-    for key in ("requirement_model", "requirement_packet", "formal_use_case"):
-        if not str(artifact_refs.get(key) or "").strip():
-            issues.append(f"Structured plan requirement contract is missing artifact ref: {key}")
-    requirements = _dict_items(requirement_graph.get("requirements"))
-    expected_ids = [str(item.get("id") or "").strip() for item in requirements]
-    expected_ids = [item for item in expected_ids if item]
-    expected_set = set(expected_ids)
-    coverage = _dict_items(structured_plan.get("requirement_coverage"))
-    actual_ids = [str(item.get("requirement_id") or "").strip() for item in coverage]
-    actual_set = {item for item in actual_ids if item}
-
-    if len(actual_ids) != len(actual_set):
-        issues.append("Requirement coverage contains duplicate requirement IDs.")
-    for requirement_id in sorted(expected_set - actual_set):
-        issues.append(f"Missing requirement coverage for canonical ID: {requirement_id}")
-    for requirement_id in sorted(actual_set - expected_set):
-        issues.append(f"Requirement coverage invented unknown canonical ID: {requirement_id}")
-
-    allowed_targets: dict[str, set[str]] = {requirement_id: set() for requirement_id in expected_set}
-    for trace_key in ("class_trace", "sequence_trace"):
-        for trace_item in _dict_items(requirement_design_trace.get(trace_key)):
-            requirement_id = str(trace_item.get("requirement") or "").strip()
-            if requirement_id not in allowed_targets:
-                continue
-            for link in _dict_items(trace_item.get("links")):
-                target = str(link.get("target") or "").strip()
-                if target:
-                    allowed_targets[requirement_id].add(target)
-
-    for item in coverage:
-        requirement_id = str(item.get("requirement_id") or "").strip()
-        if requirement_id not in expected_set:
-            continue
-        targets = set(_string_items(item.get("design_targets")))
-        if targets != allowed_targets[requirement_id]:
-            extra = sorted(targets - allowed_targets[requirement_id])
-            missing = sorted(allowed_targets[requirement_id] - targets)
-            if extra:
-                issues.append(
-                    f"Requirement {requirement_id} references design targets outside its approved trace: {extra}"
-                )
-            if missing:
-                issues.append(f"Requirement {requirement_id} omits approved design targets: {missing}")
-        if not _string_items(item.get("design_element_ids")):
-            issues.append(f"Requirement {requirement_id} has no resolved design element IDs.")
-        if not _string_items(item.get("planned_code_targets")):
-            issues.append(f"Requirement {requirement_id} has no planned code target.")
-        if not _string_items(item.get("test_intents")):
-            issues.append(f"Requirement {requirement_id} has no test intent.")
-    return issues
 
 
 def _component_requirement_coverage_issues(
@@ -219,158 +96,6 @@ def _component_requirement_coverage_issues(
     return issues
 
 
-def _executability_issues(
-    *,
-    structured_plan: dict[str, object],
-    mappings: list[dict[str, Any]],
-    class_graph: dict[str, object] | None = None,
-    planning_policy: PlanningPathPolicy | None = None,
-    verification_policy: VerificationStagePolicy | None = None,
-) -> list[str]:
-    issues: list[str] = []
-    repo = structured_plan.get("target_repository")
-    if not isinstance(repo, dict):
-        issues.append("Target repository block is missing.")
-        repo = {}
-    for key in ("local_path", "remote", "base_branch", "planned_branch"):
-        if not str(repo.get(key) or "").strip():
-            issues.append(f"Target repository `{key}` is missing.")
-
-    if planning_policy and not verification_policy:
-        planning_profile = structured_plan.get("planning_profile")
-        planning_profile = planning_profile if isinstance(planning_profile, dict) else {}
-        if planning_profile != planning_policy.metadata():
-            issues.append("Structured plan planning_profile does not match the frozen run profile.")
-
-    if not mappings:
-        issues.append("Implementation plan has no design mappings.")
-    for item in mappings:
-        target = str(item.get("planned_code_target") or "").strip()
-        if not target:
-            issues.append(f"Mapping `{item.get('design_element_id')}` has no planned code target.")
-            continue
-        path = target.split("#", 1)[0]
-        normalized = _normalized_plan_path(path, planning_policy=planning_policy, mapping_only=True)
-        if not normalized:
-            issues.append(f"Planned code target is outside approved planning roots: {target}")
-        elif planning_policy:
-            component_id = str(item.get("component_id") or "").strip()
-            expected_component = planning_policy.component_for_path(normalized, mapping_only=True)
-            if component_id != expected_component:
-                issues.append(
-                    f"Mapping component does not match target path: {item.get('design_element_id')} "
-                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
-                )
-        if not str(item.get("test_intent") or "").strip():
-            issues.append(f"Mapping `{item.get('design_element_id')}` has no test intent.")
-
-    test_intents = _dict_items(structured_plan.get("test_intents"))
-    if verification_policy:
-        if planning_policy is None:
-            issues.append("Profiled implementation plan is missing its planning path policy.")
-        else:
-            issues.extend(
-                profiled_plan_contract_issues(
-                    structured_plan,
-                    planning_policy=planning_policy,
-                    verification_policy=verification_policy,
-                    class_graph=class_graph,
-                )
-            )
-    else:
-        if not test_intents:
-            issues.append("Implementation plan has no test intent block.")
-        for item in test_intents:
-            if not str(item.get("command") or "").strip():
-                issues.append("A test intent is missing the command.")
-
-    proposed = _dict_items(structured_plan.get("proposed_files"))
-    proposed_paths = {
-        _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
-        for item in proposed
-    }
-    proposed_paths.discard("")
-    for item in proposed:
-        path = _normalized_plan_path(item.get("path"), planning_policy=planning_policy)
-        if not path:
-            issues.append(f"Proposed file is outside approved planning roots: {item.get('path')}")
-        elif planning_policy:
-            component_id = str(item.get("component_id") or "").strip()
-            expected_component = planning_policy.component_for_path(path)
-            if component_id != expected_component:
-                issues.append(
-                    f"Proposed file component does not match its path: {path} "
-                    f"expects `{expected_component}`, got `{component_id or 'missing'}`."
-                )
-    step_paths: set[str] = set()
-    for step in _dict_items(structured_plan.get("implementation_steps")):
-        raw_files = step.get("files") if isinstance(step.get("files"), list) else []
-        for raw_path in raw_files:
-            path = _normalized_plan_path(raw_path, planning_policy=planning_policy)
-            if not path:
-                issues.append(f"Implementation step file is outside approved planning roots: {raw_path}")
-                continue
-            step_paths.add(path)
-    for path in sorted(step_paths - proposed_paths):
-        issues.append(f"Implementation step file is missing from proposed_files: {path}")
-    mapping_paths = {
-        _normalized_plan_path(
-            str(item.get("planned_code_target") or "").split("#", 1)[0],
-            planning_policy=planning_policy,
-            mapping_only=True,
-        )
-        for item in mappings
-    }
-    mapping_paths.discard("")
-    for path in sorted(mapping_paths - proposed_paths):
-        issues.append(f"Design mapping file is missing from proposed_files: {path}")
-
-    class_targets = {
-        str(item.get("design_element_name") or ""): str(item.get("planned_code_target") or "").split("#", 1)[0]
-        for item in mappings
-        if item.get("design_element_type") == "class"
-    }
-    if any(item.get("design_element_type") == "sequence_message" for item in mappings):
-        controller = next(
-            (
-                (name, path)
-                for name, path in class_targets.items()
-                if name.endswith("Controller") or (planning_policy and name.endswith("Boundary"))
-            ),
-            None,
-        )
-        if controller:
-            name, main_path = controller
-            if planning_policy:
-                test_stem = name.removesuffix("Controller").removesuffix("Boundary") + "Flow"
-                expected_flow_test = planning_policy.test_path_for_source(main_path, test_stem)
-            else:
-                parent = main_path.rsplit("/", 1)[0].replace("src/main/java/", "src/test/java/", 1)
-                expected_flow_test = f"{parent}/{name.removesuffix('Controller')}FlowTest.java"
-            if expected_flow_test not in proposed_paths:
-                issues.append(f"Approved sequence flow has no editable flow-test path: {expected_flow_test}")
-
-    if planning_policy:
-        repository = next(
-            ((name, path) for name, path in class_targets.items() if name.endswith("Repository")),
-            None,
-        )
-        if repository:
-            name, main_path = repository
-            expected_repository_test = planning_policy.test_path_for_source(main_path, name)
-            if expected_repository_test not in proposed_paths:
-                issues.append(
-                    f"Approved repository has no editable test path: {expected_repository_test}"
-                )
-
-    for adjustment in _dict_items(structured_plan.get("design_adjustments")):
-        if adjustment.get("action") == "unresolved" or adjustment.get("status") == "conflict":
-            issues.append(
-                f"Design/repository conflict is unresolved: {adjustment.get('design_element_id')}"
-            )
-    return issues
-
-
 def _resolve_verification_policy(
     *,
     planning_policy: PlanningPathPolicy | None,
@@ -390,97 +115,6 @@ def _resolve_verification_policy(
             "Verification stages do not belong to the planning project profile.",
         )
     return verification_policy
-
-
-def _mapping_contract_issues(
-    *,
-    mappings: list[dict[str, Any]],
-    expected: dict[str, dict[str, str]],
-    class_graph: dict[str, object],
-    planning_policy: PlanningPathPolicy | None = None,
-) -> list[str]:
-    issues: list[str] = []
-    ids = [str(item.get("design_element_id") or "").strip() for item in mappings]
-    if len([item for item in ids if item]) != len(set(item for item in ids if item)):
-        issues.append("Implementation plan contains duplicate design mapping IDs.")
-    class_methods: dict[str, set[str]] = {}
-    for node in _dict_items(class_graph.get("nodes")):
-        class_name = str(node.get("className") or node.get("id") or "").strip()
-        class_methods[class_name] = {
-            str(method.get("name") or "").strip()
-            for method in _dict_items(node.get("methods"))
-            if str(method.get("name") or "").strip()
-        }
-    allowed_policies = {
-        "synchronous": {"direct_symbol", "boundary_interaction"},
-        "return": {"direct_symbol", "return_behavior", "semantic_side_effect"},
-        "lost_or_exception": {"exception_path"},
-        "exception": {"exception_path"},
-        "lost": {"exception_path"},
-    }
-    for mapping in mappings:
-        element_id = str(mapping.get("design_element_id") or "").strip()
-        expected_item = expected.get(element_id)
-        if not expected_item:
-            continue
-        if str(mapping.get("design_element_type") or "") != expected_item["type"]:
-            issues.append(f"Mapping type does not match approved graph: {element_id}")
-        if str(mapping.get("design_element_name") or "") != expected_item["name"]:
-            issues.append(f"Mapping name does not match approved graph: {element_id}")
-        if expected_item["type"] == "method":
-            if mapping.get("implementation_status") == "waived_by_design_adjustment":
-                continue
-            target = str(mapping.get("planned_code_target") or "").strip()
-            if "#" not in target:
-                issues.append(f"Method mapping does not target an approved method symbol: {element_id}")
-            else:
-                path, symbol = target.split("#", 1)
-                owner = _symbol_owner(path, planning_policy=planning_policy)
-                if symbol not in class_methods.get(owner, set()):
-                    issues.append(f"Method target is not an approved class method: {target}")
-            continue
-        if expected_item["type"] != "sequence_message":
-            continue
-        message_type = str(mapping.get("message_type") or "").strip().lower()
-        trace_policy = str(mapping.get("trace_policy") or "").strip()
-        if message_type != expected_item.get("message_type"):
-            issues.append(f"Sequence message type does not match approved graph: {element_id}")
-        if trace_policy not in allowed_policies.get(message_type, set()):
-            issues.append(f"Sequence trace policy `{trace_policy}` is invalid for {message_type}: {element_id}")
-        target = str(mapping.get("planned_code_target") or "").strip()
-        if "#" not in target or trace_policy != "direct_symbol":
-            continue
-        path, symbol = target.split("#", 1)
-        owner = _symbol_owner(path, planning_policy=planning_policy)
-        if symbol not in class_methods.get(owner, set()):
-            issues.append(f"Direct sequence target is not an approved class method: {target}")
-    return issues
-
-
-def _normalized_java_path(value: object) -> str:
-    path = str(value or "").strip().replace("\\", "/")
-    return path if path.startswith(("src/main/java/", "src/test/java/")) and path.endswith(".java") else ""
-
-
-def _normalized_plan_path(
-    value: object,
-    *,
-    planning_policy: PlanningPathPolicy | None,
-    mapping_only: bool = False,
-) -> str:
-    if planning_policy:
-        return (
-            planning_policy.normalize_mapping_path(value)
-            if mapping_only
-            else planning_policy.normalize_editable_path(value)
-        )
-    return _normalized_java_path(value)
-
-
-def _symbol_owner(path: str, *, planning_policy: PlanningPathPolicy | None) -> str:
-    if planning_policy:
-        return planning_policy.symbol_owner(path)
-    return path.rsplit("/", 1)[-1].removesuffix(".java")
 
 
 def _dict_items(value: object) -> list[dict[str, Any]]:
@@ -634,9 +268,8 @@ class ImplementationPlanValidator:
             llm_payload=llm_payload,
             repair_iterations=repair_iterations,
         )
-        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-            # Repair input contains blocking findings only; warnings stay in llm_review for audit.
-            review = replace(review, developer_feedback="\n".join(review.issues))
+        # Repair input contains blocking findings only; warnings stay in llm_review for audit.
+        review = replace(review, developer_feedback="\n".join(review.issues))
         return review
 
     def review_rules(
@@ -661,132 +294,62 @@ class ImplementationPlanValidator:
             planning_policy=planning_policy,
             verification_policy=verification_policy,
         )
-        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-            requirement_coverage_issues = (
-                _component_requirement_coverage_issues(
-                    structured_plan=structured_plan,
-                    requirement_graph=requirement_graph or {},
-                )
-                if requirement_contract_version == "v2"
-                else []
-            )
-            if planning_policy is None or verification_policy is None:
-                issues = ["Component-aware plan requires frozen planning and verification policies."]
-            else:
-                from ..developer.component_plan import (
-                    build_component_work_units,
-                    component_plan_issues,
-                )
-
-                expected_units = build_component_work_units(
-                    design_graph=vertical_design_graph or {},
-                    trace_graph=vertical_trace_graph or {},
-                    repo_landscape=repo_landscape or {},
-                    planning_policy=planning_policy,
-                )
-                issues = component_plan_issues(
-                    structured_plan=structured_plan,
-                    expected_units=expected_units,
-                    expected_inputs=component_plan_inputs or {},
-                    planning_policy=planning_policy,
-                    verification_stage_ids=list(verification_policy.stage_ids),
-                    verification_stage_ownership={
-                        stage_id: verification_policy.owner_for_stage(stage_id)
-                        for stage_id in verification_policy.stage_ids
-                    },
-                    design_graph=vertical_design_graph or {},
-                    trace_graph=vertical_trace_graph or {},
-                    repo_landscape=repo_landscape or {},
-                )
-                issues.extend(
-                    profiled_plan_contract_issues(
-                        structured_plan,
-                        planning_policy=planning_policy,
-                        verification_policy=verification_policy,
-                        class_graph=class_graph,
-                    )
-                )
-            repo = structured_plan.get("target_repository")
-            if not isinstance(repo, dict):
-                issues.append("Target repository block is missing.")
-            else:
-                for key in ("local_path", "remote", "base_branch", "planned_branch"):
-                    if not str(repo.get(key) or "").strip():
-                        issues.append(f"Target repository `{key}` is missing.")
-            issues = list(dict.fromkeys(issues))
-            ok = not issues and not requirement_coverage_issues
-            return ImplementationPlanReview(
-                ok=ok,
-                mode="implementation_plan_rule_review_v4",
-                requirement_coverage_issues=requirement_coverage_issues,
-                executability_issues=issues,
-                summary="Rule review passed." if ok else "Rule review found blocking issues.",
-                requirement_contract_version=requirement_contract_version,
-            )
-        expected = _expected_design_elements(
-            class_graph=class_graph,
-            sequence_graph=sequence_graph,
-        )
-        mappings = _dict_items(structured_plan.get("design_mappings"))
-        mapped_ids = {str(item.get("design_element_id") or "") for item in mappings}
-        mapped_names = {str(item.get("design_element_name") or "") for item in mappings}
-        allowed_ids = set(expected)
-        allowed_names = {item["name"] for item in expected.values()}
-
-        coverage_issues = [
-            f"Missing implementation mapping for design element: {item['name']} ({element_id})"
-            for element_id, item in expected.items()
-            if element_id not in mapped_ids
-        ]
-        traceability_issues = _traceability_issues(
-            requirement_design_trace=requirement_design_trace,
-            mapped_names=mapped_names,
-            allowed_names=allowed_names,
-        )
-        executability_issues = _executability_issues(
-            structured_plan=structured_plan,
-            mappings=mappings,
-            class_graph=class_graph,
-            planning_policy=planning_policy,
-            verification_policy=verification_policy,
-        )
-        executability_issues.extend(
-            _mapping_contract_issues(
-                mappings=mappings,
-                expected=expected,
-                class_graph=class_graph,
-                planning_policy=planning_policy,
-            )
-        )
-        scope_issues = [
-            f"Plan references design element outside approved graph: {element_id}"
-            for element_id in sorted(mapped_ids)
-            if element_id and element_id not in allowed_ids
-        ]
         requirement_coverage_issues = (
-            _requirement_coverage_issues(
+            _component_requirement_coverage_issues(
                 structured_plan=structured_plan,
                 requirement_graph=requirement_graph or {},
-                requirement_design_trace=requirement_design_trace,
             )
-            if requirement_contract_version == "v2"
-            else []
         )
-        ok = not (
-            coverage_issues
-            or requirement_coverage_issues
-            or traceability_issues
-            or executability_issues
-            or scope_issues
-        )
+        if planning_policy is None or verification_policy is None:
+            issues = ["Component-aware plan requires frozen planning and verification policies."]
+        else:
+            from ..developer.component_plan import (
+                build_component_work_units,
+                component_plan_issues,
+            )
+
+            expected_units = build_component_work_units(
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+                planning_policy=planning_policy,
+            )
+            issues = component_plan_issues(
+                structured_plan=structured_plan,
+                expected_units=expected_units,
+                expected_inputs=component_plan_inputs or {},
+                planning_policy=planning_policy,
+                verification_stage_ids=list(verification_policy.stage_ids),
+                verification_stage_ownership={
+                    stage_id: verification_policy.owner_for_stage(stage_id)
+                    for stage_id in verification_policy.stage_ids
+                },
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
+                repo_landscape=repo_landscape or {},
+            )
+            issues.extend(
+                profiled_plan_contract_issues(
+                    structured_plan,
+                    planning_policy=planning_policy,
+                    verification_policy=verification_policy,
+                    class_graph=class_graph,
+                )
+            )
+        repo = structured_plan.get("target_repository")
+        if not isinstance(repo, dict):
+            issues.append("Target repository block is missing.")
+        else:
+            for key in ("local_path", "remote", "base_branch", "planned_branch"):
+                if not str(repo.get(key) or "").strip():
+                    issues.append(f"Target repository `{key}` is missing.")
+        issues = list(dict.fromkeys(issues))
+        ok = not issues and not requirement_coverage_issues
         return ImplementationPlanReview(
             ok=ok,
-            mode=f"implementation_plan_rule_review_{requirement_contract_version}",
-            coverage_issues=coverage_issues,
+            mode="implementation_plan_rule_review_v4",
             requirement_coverage_issues=requirement_coverage_issues,
-            traceability_issues=traceability_issues,
-            executability_issues=executability_issues,
-            scope_issues=scope_issues,
+            executability_issues=issues,
             summary="Rule review passed." if ok else "Rule review found blocking issues.",
             requirement_contract_version=requirement_contract_version,
         )
@@ -839,9 +402,8 @@ class ImplementationPlanValidator:
             "Treat approved Requirement and Design as immutable, review the final merged Plan "
             "state once, and be strict about implementation clarity and tests."
         )
-        component_aware = structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
         contract_error = ""
-        for attempt in range(2 if component_aware else 1):
+        for attempt in range(2):
             request_prompt = prompt
             if contract_error:
                 request_prompt += (
@@ -882,15 +444,13 @@ class ImplementationPlanValidator:
             if not raw.strip():
                 return {"ok": False, "inconclusive": True, "reason": "provider output was empty."}
             try:
-                if component_aware:
-                    return _parse_v4_llm_review_payload(
-                        raw,
-                        structured_plan=structured_plan,
-                        canonical_requirement=canonical_requirement or {},
-                        vertical_design_graph=vertical_design_graph or {},
-                        vertical_trace_graph=vertical_trace_graph or {},
-                    )
-                return _parse_llm_review_payload(raw)
+                return _parse_v4_llm_review_payload(
+                    raw,
+                    structured_plan=structured_plan,
+                    canonical_requirement=canonical_requirement or {},
+                    vertical_design_graph=vertical_design_graph or {},
+                    vertical_trace_graph=vertical_trace_graph or {},
+                )
             except HarnessError as exc:
                 if exc.error_code == "implementation_plan_review_contract_invalid" and attempt == 0:
                     contract_error = exc.message
@@ -1044,7 +604,6 @@ def _llm_review_prompt(
         if canonical_requirement
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
-    component_aware = structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
     # V5 projections are rendered from work_units and checked by the rule review; unit contract
     # copies duplicate the Vertical Design nodes/edges below.
     omitted = {"requirement_coverage", "repair_history", "repo_context"} | (
@@ -1055,79 +614,76 @@ def _llm_review_prompt(
             "test_intents",
             "qa_test_intents",
         }
-        if component_aware
-        else set()
     )
     compact_plan = {key: value for key, value in structured_plan.items() if key not in omitted}
-    if component_aware:
-        from ..developer.component_plan import unit_write_scope
+    from ..developer.component_plan import unit_write_scope
 
-        design_nodes = {
-            str(item.get("id") or ""): item
-            for item in _dict_items((vertical_design_graph or {}).get("nodes"))
+    design_nodes = {
+        str(item.get("id") or ""): item
+        for item in _dict_items((vertical_design_graph or {}).get("nodes"))
+    }
+    design_edges = {
+        str(item.get("id") or ""): item
+        for item in _dict_items((vertical_design_graph or {}).get("edges"))
+    }
+    compact_plan["work_units"] = [
+        {
+            **{
+                key: value
+                for key, value in unit.items()
+                if key not in {"surface_contracts", "boundary_contracts", "ui_obligations"}
+            },
+            # The Validator sees what the Planner may touch, so its expected changes stay doable.
+            **(
+                {"write_scope": unit_write_scope(unit, planning_policy)}
+                if planning_policy and unit_write_scope(unit, planning_policy)
+                else {}
+            ),
+            "approved_design_contracts": {
+                "nodes": [
+                    {
+                        key: node.get(key)
+                        for key in (
+                            "id",
+                            "scenario_id",
+                            "component_id",
+                            "kind",
+                            "surface",
+                            "name",
+                            "contract",
+                            "surface_contract",
+                        )
+                        if key in node
+                    }
+                    for design_id in _string_items(unit.get("design_node_ids"))
+                    if (node := design_nodes.get(design_id)) is not None
+                ],
+                "edges": [
+                    {
+                        key: edge.get(key)
+                        for key in (
+                            "id",
+                            "scenario_id",
+                            "from",
+                            "to",
+                            "kind",
+                            "label",
+                            "guard",
+                            "terminal",
+                            "branch_group",
+                            "order",
+                            "boundary_contract",
+                        )
+                        if key in edge
+                    }
+                    for design_id in _string_items(unit.get("design_edge_ids"))
+                    if (edge := design_edges.get(design_id)) is not None
+                ],
+            },
         }
-        design_edges = {
-            str(item.get("id") or ""): item
-            for item in _dict_items((vertical_design_graph or {}).get("edges"))
-        }
-        compact_plan["work_units"] = [
-            {
-                **{
-                    key: value
-                    for key, value in unit.items()
-                    if key not in {"surface_contracts", "boundary_contracts", "ui_obligations"}
-                },
-                # The Validator sees what the Planner may touch, so its expected changes stay doable.
-                **(
-                    {"write_scope": unit_write_scope(unit, planning_policy)}
-                    if planning_policy and unit_write_scope(unit, planning_policy)
-                    else {}
-                ),
-                "approved_design_contracts": {
-                    "nodes": [
-                        {
-                            key: node.get(key)
-                            for key in (
-                                "id",
-                                "scenario_id",
-                                "component_id",
-                                "kind",
-                                "surface",
-                                "name",
-                                "contract",
-                                "surface_contract",
-                            )
-                            if key in node
-                        }
-                        for design_id in _string_items(unit.get("design_node_ids"))
-                        if (node := design_nodes.get(design_id)) is not None
-                    ],
-                    "edges": [
-                        {
-                            key: edge.get(key)
-                            for key in (
-                                "id",
-                                "scenario_id",
-                                "from",
-                                "to",
-                                "kind",
-                                "label",
-                                "guard",
-                                "terminal",
-                                "branch_group",
-                                "order",
-                                "boundary_contract",
-                            )
-                            if key in edge
-                        }
-                        for design_id in _string_items(unit.get("design_edge_ids"))
-                        if (edge := design_edges.get(design_id)) is not None
-                    ],
-                },
-            }
-            for unit in structured_plan.get("work_units", [])
-            if isinstance(unit, dict)
-        ]
+        for unit in structured_plan.get("work_units", [])
+        if isinstance(unit, dict)
+    ]
     previous_round_section = (
         """Previous review round (check it first):
 - For each blocking issue below, decide whether this plan now resolves it and keep every
@@ -1138,47 +694,19 @@ def _llm_review_prompt(
 """
         + json.dumps(previous_round, ensure_ascii=False, indent=2)
         + "\n\n"
-        if component_aware and previous_round
+        if previous_round
         else ""
     )
-    compact_trace = {
-        key: requirement_design_trace.get(key, [])
-        for key in ("version", "class_trace", "sequence_trace")
-    }
     # V5 binds Design to code through work units and Harness-owned signature targets, so the
     # legacy trace and class/sequence graphs are not semantic review input.
     legacy_trace_section = (
         ""
-        if component_aware
-        else "Requirement-design trace JSON:\n"
-        + json.dumps(compact_trace, ensure_ascii=False, separators=(",", ":"))
-        + "\n\n"
     )
     legacy_graph_section = (
         ""
-        if component_aware
-        else "Class graph JSON:\n"
-        + json.dumps(class_graph, ensure_ascii=False, separators=(",", ":"))
-        + "\n\nSequence graph JSON:\n"
-        + json.dumps(sequence_graph, ensure_ascii=False, separators=(",", ":"))
-        + "\n\n"
     )
-    vertical_context = {
-        "design": {
-            key: (vertical_design_graph or {}).get(key)
-            for key in ("schema_version", "artifact_digest", "nodes", "edges")
-        },
-        "trace": {
-            key: (vertical_trace_graph or {}).get(key)
-            for key in ("schema_version", "artifact_digest", "nodes", "edges")
-        },
-    }
     vertical_section = (
         ""
-        if component_aware
-        else "Vertical Design/Trace JSON:\n"
-        + json.dumps(vertical_context, ensure_ascii=False, separators=(",", ":"))
-        + "\n\n"
     )
     if planning_policy:
         if prompt_directive is None:
@@ -1297,8 +825,6 @@ Component-aware V5 boundaries:
   signatures or runtime configuration. It must not prescribe changes to Harness-owned fields.
 - Warnings remain audit context only. They never stand in for a blocker and never feed repair.
 """.strip()
-        if structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-        else ""
     )
     output_contract = (
         """Return JSON only with this shape:
@@ -1318,19 +844,6 @@ Component-aware V5 boundaries:
 }
 
 Do not return `ok` or `developer_feedback`; Harness derives both from validated findings."""
-        if component_aware
-        else """Return JSON only with this shape:
-{
-  "ok": true,
-  "summary": "short review summary",
-  "coverage_issues": [],
-  "requirement_coverage_issues": [],
-  "traceability_issues": [],
-  "implementation_quality_issues": [],
-  "test_issues": [],
-  "scope_issues": [],
-  "developer_feedback": "actionable feedback for Developer.plan if repair is needed"
-}"""
     )
     return f"""Implementation Plan LLM Review V5
 
@@ -1516,59 +1029,6 @@ def _stable_ids(value: object) -> set[str]:
         for item in value:
             result.update(_stable_ids(item))
     return result
-
-
-def _parse_llm_review_payload(raw: str) -> dict[str, object]:
-    try:
-        parsed = _parse_first_json_object(raw, expected_keys={"ok", "summary", "developer_feedback"})
-    except json.JSONDecodeError as exc:
-        raise HarnessError(
-            "implementation_plan_llm_review_failed",
-            "Implementation plan LLM review did not return valid JSON.",
-        ) from exc
-    if not isinstance(parsed, dict):
-        raise HarnessError(
-            "implementation_plan_llm_review_failed",
-            "Implementation plan LLM review must return a JSON object.",
-        )
-    payload = {
-        "ok": parsed.get("ok") if isinstance(parsed.get("ok"), bool) else False,
-        "summary": str(parsed.get("summary") or "").strip(),
-        "coverage_issues": _string_items(parsed.get("coverage_issues")),
-        "requirement_coverage_issues": _string_items(parsed.get("requirement_coverage_issues")),
-        "traceability_issues": _string_items(parsed.get("traceability_issues")),
-        "implementation_quality_issues": _string_items(parsed.get("implementation_quality_issues")),
-        "test_issues": _string_items(parsed.get("test_issues")),
-        "scope_issues": _string_items(parsed.get("scope_issues")),
-        "developer_feedback": str(parsed.get("developer_feedback") or "").strip(),
-    }
-    if payload["ok"] and any(
-        payload[key]
-        for key in (
-            "coverage_issues",
-            "requirement_coverage_issues",
-            "traceability_issues",
-            "implementation_quality_issues",
-            "test_issues",
-            "scope_issues",
-        )
-    ):
-        payload["ok"] = False
-    if not payload["ok"] and not any(
-        payload[key]
-        for key in (
-            "coverage_issues",
-            "requirement_coverage_issues",
-            "traceability_issues",
-            "implementation_quality_issues",
-            "test_issues",
-            "scope_issues",
-        )
-    ):
-        payload["implementation_quality_issues"] = ["LLM review rejected the plan without issue details."]
-    if not payload["summary"]:
-        payload["summary"] = "LLM review did not provide a summary."
-    return payload
 
 
 def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, object]:

@@ -18,6 +18,7 @@ CURRENT_CONTRACT_PINS = {
     "designer_uiux_contract_version": "uiux_pro_max_search_v1",
     "designer_ui_layout_contract": "layered_layout_v1",
     "vertical_trace_mode": "enforce",
+    "implementation_plan_contract_version": "implementation_plan_structured_v5",
 }
 
 LEGACY_RETIRED_ALLOWED_COMMANDS = frozenset(

@@ -10,8 +10,6 @@ from typing import Any
 from ...core.errors import HarnessError
 from ...profiles import (
     COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     DEVELOPER_INTENT_STAGE_OWNER,
     QA_INTENT_STAGE_OWNER,
     PlanningPathPolicy,
@@ -49,25 +47,6 @@ _IMMUTABLE_UNIT_FIELDS = {
     "code_entities",
     "ui_obligations",
 }
-
-
-def resolve_implementation_plan_contract(state: dict[str, object]) -> str:
-    """Resolve the plan schema pinned to a run; missing markers are historical V3."""
-
-    value = str(state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY) or "").strip()
-    if not value:
-        return PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    if value not in {
-        COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
-        PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        PREVIOUS_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    }:
-        raise HarnessError(
-            "implementation_plan_contract_invalid",
-            f"Unsupported implementation plan contract: {value}",
-            run_id=str(state.get("run_id") or "") or None,
-        )
-    return value
 
 
 def build_component_work_units(

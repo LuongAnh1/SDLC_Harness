@@ -15,12 +15,6 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     PlanningPathPolicy,
     VerificationStagePolicy,
@@ -57,7 +51,6 @@ def build_developer_work_packet(
         structured_plan,
         planning_policy=planning_policy,
         verification_policy=verification_policy,
-        allow_legacy=True,
     )
     if contract_issues:
         raise HarnessError(
@@ -113,34 +106,12 @@ def build_developer_work_packet(
     runtime_config_impact = canonical_runtime_config_impact(
         structured_plan.get("runtime_config_impact")
     )
-    current_component_aware_contract = (
-        structured_plan.get("version") == COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    )
-    previous_component_aware_contract = (
-        structured_plan.get("version")
-        == PREVIOUS_COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    )
-    component_aware_contract = current_component_aware_contract or previous_component_aware_contract
-    current_profiled_contract = structured_plan.get("version") == PROFILED_IMPLEMENTATION_PLAN_VERSION
-    legacy_profiled_contract = (
-        structured_plan.get("version") == LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    )
     return {
         "version": (
             "developer_work_packet_v3"
-            if component_aware_contract
-            else "developer_work_packet_v2"
-            if current_profiled_contract
-            else "developer_work_packet_v1"
         ),
         "schema_version": (
             UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if component_aware_contract
-            else PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if current_profiled_contract
-            else LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-            if legacy_profiled_contract
-            else "developer_work_packet_legacy_v1"
         ),
         "mode": "approved_implementation_plan_to_developer_act_v1",
         "run_id": run_id,
@@ -185,8 +156,6 @@ def build_developer_work_packet(
                     package_dependencies=package_dependencies,
                 )
             }
-            if component_aware_contract
-            else {}
         ),
         "proposed_files": enriched_files,
         "package_dependency_requirements": package_dependencies,
@@ -200,8 +169,6 @@ def build_developer_work_packet(
                     structured_plan.get("implementation_signature_contract")
                 )
             }
-            if component_aware_contract or current_profiled_contract
-            else {}
         ),
         "verification_stage_ids": _string_items(structured_plan.get("verification_stage_ids")),
         "test_intents": _dict_items(structured_plan.get("test_intents")),

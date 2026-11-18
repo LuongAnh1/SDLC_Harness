@@ -10,6 +10,7 @@ import tempfile
 import pytest
 
 from sdlc_harness.agents.validator import CodeTraceValidator
+from sdlc_harness.profiles.signature import implementation_signature_contract_digest
 from sdlc_harness.agents.validator.typescript_ast import (
     TYPESCRIPT_AST_EVIDENCE_VERSION,
     TypeScriptAstEvidence,
@@ -142,7 +143,14 @@ def _work_packet(*, source_path: str, test_path: str, symbol: str) -> dict[str, 
         },
         "proposed_files": [{"path": source_path}, {"path": test_path}],
         "output_contract": {"allowed_paths": [source_path, test_path]},
+        "implementation_signature_contract": _signature_contract(),
     }
+
+
+def _signature_contract() -> dict[str, object]:
+    contract: dict[str, object] = {"version": "implementation_signature_contract_v1", "entries": []}
+    contract["digest"] = implementation_signature_contract_digest(contract)
+    return contract
 
 
 def test_code_trace_policy_accepts_only_profiled_source_and_colocated_tests(

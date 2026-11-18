@@ -51,6 +51,7 @@ from sdlc_harness.llm.fake import (
     fake_runtime_closure_plan,
     fake_runtime_closure_review,
 )
+from sdlc_harness.profiles.signature import implementation_signature_contract_digest
 from sdlc_harness.profiles import (
     build_code_trace_policy,
     build_planning_path_policy,
@@ -1659,7 +1660,11 @@ class PhaseFourTest(unittest.TestCase):
                 ]
             },
             "proposed_files": [{"path": test_path}],
+            "implementation_signature_contract": {"version": "implementation_signature_contract_v1", "entries": []},
         }
+        packet["implementation_signature_contract"]["digest"] = implementation_signature_contract_digest(
+            packet["implementation_signature_contract"]
+        )
 
         result = CodeTraceValidator(
             CapturingCodeTraceLlm(),

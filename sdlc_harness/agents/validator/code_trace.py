@@ -23,8 +23,6 @@ from ...llm.json_utils import parse_first_json_object
 from ...llm.step_review import LlmStepReviewRequired
 from ...profiles import (
     CodeTracePolicy,
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
 )
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
@@ -295,17 +293,10 @@ class CodeTraceValidator:
                         "test_covered": bool(existing_test_paths),
                     }
                 )
-
-        if work_packet.get("schema_version") in {
-            PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-            UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-        }:
-            deterministic_findings = deterministic_typescript_contract_findings(
-                work_packet=work_packet,
-                ast_evidence=ast_evidence,
-            )
-        else:
-            deterministic_findings = []
+        deterministic_findings = deterministic_typescript_contract_findings(
+            work_packet=work_packet,
+            ast_evidence=ast_evidence,
+        )
         static_missing_links = [*missing_links, *deterministic_findings]
         validation_claims = build_validation_claims(
             work_packet=work_packet,

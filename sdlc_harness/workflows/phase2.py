@@ -48,8 +48,6 @@ from ..llm.client import BudgetedLlmClient, LlmClient
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..profiles import (
     CURRENT_CONTRACT_PINS,
-    build_planning_path_policy,
-    read_profile_snapshot,
     retired_contract_pins,
 )
 from ..storage.runtime import RuntimeStore, utc_now_iso
@@ -1503,31 +1501,6 @@ def _vertical_snapshot_binding(
         "workspace_ref": "run_workspace_v1",
         "base_sha": getattr(workspace, "base_sha", ""),
     }
-
-
-def _profile_component_routing_directive(*, state: dict[str, object], run_id: str) -> str:
-    snapshot = read_profile_snapshot(state, run_id=run_id)
-    if snapshot is None:
-        return ""
-    project, language = snapshot.resolve_profiles(run_id=run_id)
-    policy = build_planning_path_policy(project=project, language=language)
-    component_ids = ", ".join(f"`<<{rule.component_id}>>`" for rule in policy.component_rules)
-    return "\n".join(
-        [
-            "# Project Component Routing Contract (Designer-only instruction)",
-            f"Project profile: `{policy.project_profile_id}`; language profile: `{policy.language_profile_id}`.",
-            (
-                "Every class, interface, abstract class, and enum declaration in the PlantUML class diagram "
-                f"must declare exactly one ownership stereotype from: {component_ids}."
-            ),
-            "The PlantUML declaration keyword still defines the symbol kind; the stereotype defines component ownership.",
-            "Use `<<web>>` for views/pages/forms/UI components.",
-            "Use `<<api>>` for controllers/services/use cases/validators/gateways/adapters/guards.",
-            "Use `<<contracts>>` for DTOs/requests/responses/results and shared domain models.",
-            "Use `<<database>>` for repositories/entities/records/stores.",
-            "Do not invent a component and do not leave ownership implicit.",
-        ]
-    )
 
 
 def _bundle_design_findings(items: list[dict[str, object]]) -> list[DesignFinding]:

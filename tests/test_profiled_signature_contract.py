@@ -8,17 +8,13 @@ from pathlib import Path
 
 import pytest
 
-from sdlc_harness.agents.developer.work_packet import build_developer_work_packet
 from sdlc_harness.agents.validator import CodeTraceValidator
 from sdlc_harness.agents.validator.code_contract import (
     deterministic_typescript_contract_findings,
 )
 from sdlc_harness.agents.validator.typescript_ast import TypeScriptAstEvidence
 from sdlc_harness.profiles import (
-    LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION,
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
-    PROFILED_IMPLEMENTATION_PLAN_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     build_implementation_signature_contract,
     build_code_trace_policy,
     build_planning_path_policy,
@@ -459,58 +455,6 @@ def test_signature_contract_does_not_infer_types_when_phase3_omits_entry(policie
     assert issues == [f"Missing implementation signature contract for approved method: {DESIGN_ID}"]
 
 
-def test_work_packet_v2_carries_contract_and_legacy_v1_remains_readable(
-    tmp_path,
-    policies,
-) -> None:
-    planning, verification = policies
-    source = tmp_path / SOURCE_PATH
-    source.parent.mkdir(parents=True)
-    source.write_text("export class HealthService {}\n", encoding="utf-8")
-    current_plan = {
-        "version": PROFILED_IMPLEMENTATION_PLAN_VERSION,
-        "planning_profile": planning.metadata(),
-        "target_repository": {},
-        "implementation_steps": [{"order": 1, "files": [SOURCE_PATH]}],
-        "proposed_files": [{"path": SOURCE_PATH}],
-        "design_mappings": [_mapping()],
-        "implementation_signature_contract": _contract(planning),
-        "verification_stage_ids": list(verification.stage_ids),
-        "test_intents": [{"stage_id": "unit"}],
-    }
-    packet = build_developer_work_packet(
-        run_id="run-signature",
-        source_ref="fixture:signature",
-        issue_key="SDLC-1",
-        structured_plan=current_plan,
-        target_repo_path=tmp_path,
-        run_workspace={},
-        approved_plan_refs={"structured_plan_sha256": "sha256:approved"},
-        planning_policy=planning,
-        verification_policy=verification,
-    )
-    assert packet["schema_version"] == PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-    assert packet["implementation_signature_contract"] == current_plan[
-        "implementation_signature_contract"
-    ]
-
-    legacy_plan = {key: value for key, value in current_plan.items() if key != "implementation_signature_contract"}
-    legacy_plan["version"] = LEGACY_PROFILED_IMPLEMENTATION_PLAN_VERSION
-    legacy_packet = build_developer_work_packet(
-        run_id="run-signature-legacy",
-        source_ref="fixture:signature",
-        issue_key="SDLC-1",
-        structured_plan=legacy_plan,
-        target_repo_path=tmp_path,
-        run_workspace={},
-        approved_plan_refs={},
-        planning_policy=planning,
-        verification_policy=verification,
-    )
-    assert legacy_packet["schema_version"] == LEGACY_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION
-    assert "implementation_signature_contract" not in legacy_packet
-
-
 def test_typescript_signature_comparator_accepts_exact_and_matching_overload(policies) -> None:
     planning, _ = policies
     contract = _contract(planning)
@@ -809,7 +753,7 @@ def test_code_trace_keeps_deterministic_signature_blocker_when_llm_accepts(
     actual["return_type"] = "Promise<boolean>"
     packet = {
         "run_id": "run-signature-trace",
-        "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
         "implementation_signature_contract": _contract(planning),
         "requirement_contract": {"version": "v2", "revision": 1},
         "canonical_requirements": [{"id": "REQ-1", "content": "Read health."}],

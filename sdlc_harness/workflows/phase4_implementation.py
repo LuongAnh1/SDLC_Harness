@@ -33,7 +33,6 @@ from ..artifacts.writers import (
 from ..core.errors import HarnessError
 from ..llm.step_review import LlmStepReviewRequired
 from ..profiles import (
-    COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
 )
 from ..storage.runtime import utc_now_iso
@@ -1224,8 +1223,6 @@ class PhaseFourImplementationCycle:
             self._existing_artifact_path(structured_ref, run_id=run_id),
             run_id=run_id,
         )
-        if structured_plan.get("version") != COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION:
-            return work_packet, ""
         target_info = self._workspace_target_info(
             run_id=run_id,
             work_packet=work_packet,

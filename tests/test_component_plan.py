@@ -25,7 +25,6 @@ from sdlc_harness.agents.developer import (
     component_plan_projections,
     merge_work_unit_updates,
     rebind_legacy_mappings_to_work_units,
-    resolve_implementation_plan_contract,
 )
 from sdlc_harness.agents.developer.planner import (
     _markdown_plan,
@@ -35,7 +34,6 @@ from sdlc_harness.agents.developer.planner import (
 from sdlc_harness.agents.requirements import RequirementModelV2
 from sdlc_harness.agents.validator import build_requirement_graph_v2, build_vertical_trace_graph
 from sdlc_harness.profiles import (
-    PROFILED_IMPLEMENTATION_PLAN_VERSION,
     build_planning_path_policy,
     build_verification_stage_policy,
     get_language_profile,
@@ -1203,13 +1201,6 @@ def test_markdown_verification_plan_renders_exact_targets() -> None:
     assert "- None:" not in markdown
 
 
-def test_missing_contract_marker_keeps_historical_v3() -> None:
-    assert resolve_implementation_plan_contract({}) == PROFILED_IMPLEMENTATION_PLAN_VERSION
-    assert resolve_implementation_plan_contract(
-        {"implementation_plan_contract_version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION}
-    ) == COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
-
-
 def _graph_with_main_and_branch(contract_version: str) -> tuple[dict[str, object], dict[str, object]]:
     """Main SC-1 UI, an exception SC-3 UI that depends on it, and a SC-3 API node with no edge."""
 
@@ -1415,7 +1406,6 @@ def test_r9_planner_calls_one_construction_prompt_per_scenario() -> None:
         requirement_graph={},
         planning_policy=planning,
         verification_policy=verification,
-        contract_version=COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
         vertical_design_graph=load("vertical_design_graph"),
         vertical_trace_graph=load("vertical_trace_graph"),
         repo_landscape=load("repo_landscape"),
@@ -1741,7 +1731,6 @@ def test_repair_that_removes_a_target_rebinds_legacy_mappings_to_final_units() -
         requirement_graph={},
         planning_policy=planning,
         verification_policy=verification,
-        contract_version=COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
         vertical_design_graph=load("vertical_design_graph"),
         vertical_trace_graph=load("vertical_trace_graph"),
         repo_landscape=load("repo_landscape"),
@@ -2006,7 +1995,6 @@ def test_repair_re_signs_only_targets_of_the_cited_units() -> None:
         requirement_graph={},
         planning_policy=planning,
         verification_policy=verification,
-        contract_version=COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
         vertical_design_graph=load("vertical_design_graph"),
         vertical_trace_graph=load("vertical_trace_graph"),
         repo_landscape=load("repo_landscape"),

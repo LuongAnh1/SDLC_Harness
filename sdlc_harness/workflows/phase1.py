@@ -28,11 +28,9 @@ from ..sources.jira import load_jira_issue_source
 from ..llm.client import LlmClient
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..agents.developer import (
-    COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
     IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     developer_transport_retry_allowed,
     developer_execution_retry_allowed,
-    resolve_implementation_plan_contract,
 )
 from ..agents.requirements import (
     RequirementClarificationUpdater,
@@ -207,9 +205,6 @@ class PhaseOneWorkflow:
         }
         state.update(CURRENT_CONTRACT_PINS)
         state[VERTICAL_TRACE_STATE_KEY] = VERTICAL_TRACE_GRAPH_VERSION
-        state[IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY] = (
-            COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
-        )
         if self.settings.project_profile_id:
             state["profile_snapshot"] = build_profile_snapshot(
                 project_profile_id=self.settings.project_profile_id,
@@ -1540,7 +1535,7 @@ class PhaseOneWorkflow:
             UIUX_MODE_STATE_KEY: state.get(UIUX_MODE_STATE_KEY, "off"),
             UIUX_CONTRACT_STATE_KEY: state.get(UIUX_CONTRACT_STATE_KEY, ""),
             VERTICAL_TRACE_STATE_KEY: state.get(VERTICAL_TRACE_STATE_KEY),
-            IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: resolve_implementation_plan_contract(state),
+            IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY: state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY),
             "vertical_trace_mode": state.get("vertical_trace_mode"),
             "execution_profile": profile_status_metadata(state),
             "current_phase": state.get("current_phase"),

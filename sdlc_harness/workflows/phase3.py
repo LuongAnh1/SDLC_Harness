@@ -18,12 +18,11 @@ import re
 
 from ..agents.developer import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY,
     DeveloperPlanAgent,
-    resolve_implementation_plan_contract,
 )
 from ..agents.designer import (
     DESIGNER_CONTRACT_STATE_KEY,
-    GRAPH_VERSION,
     design_bundle_findings,
     validate_vertical_design_graph,
 )
@@ -167,17 +166,9 @@ class PhaseThreeWorkflow:
 
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
-        last_error = _dict_value(state.get("last_error"))
-        recoverable_step_review_drift = (
-            status == "failed"
-            and str(last_error.get("error_code") or "") == "implementation_plan_step_review_drift"
-        )
         if (
             str(state.get("current_phase") or "") != "implementation_planning"
-            or (
-                status not in {"waiting_implementation_plan_review", "blocked"}
-                and not recoverable_step_review_drift
-            )
+            or status not in {"waiting_implementation_plan_review", "blocked"}
         ):
             raise HarnessError(
                 "implementation_plan_revalidation_not_allowed",
@@ -237,7 +228,6 @@ class PhaseThreeWorkflow:
         )
         component_plan_inputs = _with_runtime_config(
             component_plan_inputs,
-            contract_version=plan_contract_version,
             planning_policy=planning_policy,
             target_path=target_path,
             target_files=target_files,
@@ -278,7 +268,6 @@ class PhaseThreeWorkflow:
             planning_policy=planning_policy,
             prompt_directive=prompt_directive,
             verification_policy=verification_policy,
-            contract_version=plan_contract_version,
             vertical_design_graph=vertical_design_graph,
             vertical_trace_graph=vertical_trace_graph,
             repo_landscape=repo_landscape,
@@ -410,7 +399,6 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
-                contract_version=plan_contract_version,
                 vertical_design_graph=vertical_design_graph,
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
@@ -560,7 +548,6 @@ class PhaseThreeWorkflow:
             )
             component_plan_inputs = _with_runtime_config(
                 component_plan_inputs,
-                contract_version=plan_contract_version,
                 planning_policy=planning_policy,
                 target_path=target_path,
                 target_files=target_files,
@@ -598,7 +585,6 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 prompt_directive=prompt_directive,
                 verification_policy=verification_policy,
-                contract_version=plan_contract_version,
                 vertical_design_graph=vertical_design_graph,
                 vertical_trace_graph=vertical_trace_graph,
                 repo_landscape=repo_landscape,
@@ -754,7 +740,6 @@ class PhaseThreeWorkflow:
                     planning_policy=planning_policy,
                     prompt_directive=prompt_directive,
                     verification_policy=verification_policy,
-                    contract_version=plan_contract_version,
                     vertical_design_graph=vertical_design_graph,
                     vertical_trace_graph=vertical_trace_graph,
                     repo_landscape=repo_landscape,
@@ -898,18 +883,7 @@ class PhaseThreeWorkflow:
     ]:
         """Load the immutable Vertical Design inputs only for V5 runs."""
 
-        contract_version = resolve_implementation_plan_contract(state)
-        if (
-            str(state.get(DESIGNER_CONTRACT_STATE_KEY) or "") == GRAPH_VERSION
-            and contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
-        ):
-            raise HarnessError(
-                "implementation_plan_contract_invalid",
-                "Vertical Design Graph V2 requires Component-aware Plan V5.",
-                run_id=run_id,
-            )
-        if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION:
-            return contract_version, {}, {}, {}, {}
+        contract_version = COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION
         if (
             str(state.get(VERTICAL_TRACE_STATE_KEY) or "") != VERTICAL_TRACE_GRAPH_VERSION
             or str(state.get(VERTICAL_TRACE_MODE_STATE_KEY) or "") != "enforce"
@@ -1150,21 +1124,20 @@ class PhaseThreeWorkflow:
             "summary_for_user": state.get("summary_for_user"),
             "llm": state.get("llm"),
             "requirement_contract_version": state.get("requirement_contract_version", "v2"),
-            "implementation_plan_contract_version": resolve_implementation_plan_contract(state),
+            "implementation_plan_contract_version": state.get(IMPLEMENTATION_PLAN_CONTRACT_STATE_KEY),
         }
 
 
 def _with_runtime_config(
     inputs: dict[str, object],
     *,
-    contract_version: str,
     planning_policy,
     target_path: Path,
     target_files: list[str],
 ) -> dict[str, object]:
     """Bind a V5 plan to the runtime config facts the Planner and Validator both see."""
 
-    if contract_version != COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION or not runtime_config_policy(
+    if not runtime_config_policy(
         planning_policy.project_profile_id
     ):
         return inputs

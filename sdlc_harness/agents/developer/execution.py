@@ -243,7 +243,6 @@ class DeveloperToolLoopExecutor:
         scope_reopen_reason = ""
         scope_reopened_item_ids: list[str] = []
         persisted_required_paths_for_migration: set[str] = set()
-        legacy_file_manifest_migrated = False
         manifest = _build_manifest(
             run_id=run_id,
             work_packet=work_packet,
@@ -283,19 +282,6 @@ class DeveloperToolLoopExecutor:
                 }
         if manifest_file.exists():
             existing = _read_json(manifest_file, run_id=run_id)
-            if (
-                existing.get("version") == "developer_execution_manifest_v1"
-                and _manifest_paths(existing) == _manifest_paths(manifest)
-            ):
-                legacy_manifest_file = session_dir / "manifest_file_items_v1.json"
-                legacy_journal_file = session_dir / "journal_file_items_v1.json"
-                if not legacy_manifest_file.exists():
-                    _write_json_atomic(legacy_manifest_file, existing)
-                if journal_file.exists() and not legacy_journal_file.exists():
-                    _write_json_atomic(legacy_journal_file, _read_json(journal_file, run_id=run_id))
-                _write_json_atomic(manifest_file, manifest)
-                legacy_file_manifest_migrated = True
-                existing = manifest
             if existing.get("input_hash") != manifest.get("input_hash"):
                 compatible_manifest = None
                 persisted_paths: set[str] = set()
@@ -308,20 +294,6 @@ class DeveloperToolLoopExecutor:
                 dependency_scope_upgrade = _merge_dependency_manifest_scope_manifest(
                     existing,
                     manifest,
-                )
-                legacy_context_schema = (
-                    bool(repair_feedback)
-                    and existing.get("version") in {
-                        "developer_execution_manifest_v3",
-                        "developer_execution_manifest_v4",
-                        "developer_execution_manifest_v5",
-                        "developer_execution_manifest_v6",
-                    }
-                    and manifest.get("version") == "developer_execution_manifest_v7"
-                    and existing.get("mode") == manifest.get("mode")
-                    and existing.get("repair_iteration") == manifest.get("repair_iteration")
-                    and existing.get("repair_feedback") == manifest.get("repair_feedback")
-                    and _manifest_paths(existing) == _manifest_paths(manifest)
                 )
                 if repair_feedback:
                     persisted_paths = _manifest_context_paths(existing)
@@ -349,8 +321,6 @@ class DeveloperToolLoopExecutor:
                     existing, scope_reopened_item_ids = dependency_scope_upgrade
                     dependency_scope_migrated = True
                     scope_reopen_reason = "package_dependency_scope"
-                elif legacy_context_schema:
-                    existing = compatible_manifest or manifest
                 elif not compatible_manifest or existing.get("input_hash") != compatible_manifest.get("input_hash"):
                     raise DeveloperExecutionError(
                         "developer_input_drift",
@@ -390,18 +360,9 @@ class DeveloperToolLoopExecutor:
 
         journal = (
             _read_json(journal_file, run_id=run_id)
-            if journal_file.exists() and not legacy_file_manifest_migrated
+            if journal_file.exists()
             else _new_journal(run_id=run_id, manifest=manifest, mode=mode, repair_iteration=repair_iteration)
         )
-        if legacy_file_manifest_migrated:
-            journal["migrations"] = [
-                {
-                    "code": "file_items_replaced_by_execution_unit",
-                    "legacy_manifest": self.store.relative(session_dir / "manifest_file_items_v1.json"),
-                    "legacy_journal": self.store.relative(session_dir / "journal_file_items_v1.json"),
-                    "migrated_at": utc_now_iso(),
-                }
-            ]
         if selection_policy_migrated:
             journal["manifest_input_hash"] = manifest.get("input_hash")
             for current_item in _dict_items(manifest.get("items")):
@@ -923,17 +884,6 @@ class DeveloperToolLoopExecutor:
                 reason = str(generated_file.get("reason") or "")
                 if reason:
                     reasons.append(reason)
-            unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
-            if not mutated_paths and not repair_feedback and not unit_aware:
-                raise DeveloperExecutionError(
-                    "developer_execution_incomplete",
-                    "Fake Developer did not mutate any approved implementation path.",
-                    run_id=run_id,
-                    retriable=False,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                    progress=_progress(journal),
-                )
             entry["inspected_paths"] = sorted(inspected_paths)
             entry["unchanged_paths"] = sorted(unchanged_paths)
             fake_evidence = [
@@ -955,7 +905,7 @@ class DeveloperToolLoopExecutor:
                 session_dir=session_dir,
                 summary="; ".join(reasons) or "Deterministic fake Developer completed the execution unit.",
                 mutated_paths=mutated_paths,
-                no_change_required=bool(not mutated_paths and (repair_feedback or unit_aware)),
+                no_change_required=bool(not mutated_paths),
                 verification_evidence=fake_evidence,
             )
             journal["updated_at"] = utc_now_iso()
@@ -1178,7 +1128,7 @@ class DeveloperToolLoopExecutor:
             }
 
         try:
-            if not history and manifest.get("version") == "developer_execution_manifest_v8":
+            if not history:
                 seed_context = _codegraph_seed_context(
                     target_path=target_path,
                     item=item,
@@ -1339,10 +1289,7 @@ class DeveloperToolLoopExecutor:
                             progress=_progress(journal),
                         ) from exc
                     continue
-                if (
-                    manifest.get("version") == "developer_execution_manifest_v8"
-                    and action.get("action") not in _UNIT_ACTION_NAMES
-                ):
+                if action.get("action") not in _UNIT_ACTION_NAMES:
                     history.append(
                         {
                             "action": "rejected",
@@ -1702,26 +1649,25 @@ class DeveloperToolLoopExecutor:
                         continue
                     declared_unchanged.add(path)
                     declared_dispositions[path] = {"status": "verified_unchanged", "reason": reason}
-                if manifest.get("version") == "developer_execution_manifest_v8":
-                    for row in _dict_items(complete_arguments.get("path_dispositions")):
-                        path = str(row.get("path") or "").replace("\\", "/")
-                        status = str(row.get("status") or "").strip()
-                        reason = str(row.get("reason") or "").strip()
-                        valid = (
-                            path in item_paths
-                            and status in {"mutated", "verified_unchanged", "not_required"}
-                            and bool(reason)
-                            and (
-                                (status == "mutated" and path in mutated_paths)
-                                or (status != "mutated" and path in inspected_paths)
-                            )
+                for row in _dict_items(complete_arguments.get("path_dispositions")):
+                    path = str(row.get("path") or "").replace("\\", "/")
+                    status = str(row.get("status") or "").strip()
+                    reason = str(row.get("reason") or "").strip()
+                    valid = (
+                        path in item_paths
+                        and status in {"mutated", "verified_unchanged", "not_required"}
+                        and bool(reason)
+                        and (
+                            (status == "mutated" and path in mutated_paths)
+                            or (status != "mutated" and path in inspected_paths)
                         )
-                        if not valid:
-                            invalid_unchanged.append(path or "<missing>")
-                            continue
-                        declared_dispositions[path] = {"status": status, "reason": reason}
-                        if status != "mutated":
-                            declared_unchanged.add(path)
+                    )
+                    if not valid:
+                        invalid_unchanged.append(path or "<missing>")
+                        continue
+                    declared_dispositions[path] = {"status": status, "reason": reason}
+                    if status != "mutated":
+                        declared_unchanged.add(path)
                 handled_paths = (mutated_paths & set(context_paths)) | declared_unchanged
                 entry["handled_paths"] = sorted(handled_paths)
                 entry["unchanged_paths"] = sorted(declared_unchanged)
@@ -1729,8 +1675,6 @@ class DeveloperToolLoopExecutor:
                 unresolved_paths = set(item_paths) - covered_paths
                 entry["unresolved_paths"] = (
                     sorted(unresolved_paths)
-                    if manifest.get("version") == "developer_execution_manifest_v8"
-                    else []
                 )
                 entry["path_dispositions"] = {
                     path: declared_dispositions.get(
@@ -1741,8 +1685,7 @@ class DeveloperToolLoopExecutor:
                 }
                 existing_paths = {path for path in item_paths if (target_path / path).is_file()}
                 verified_unchanged_completion = (
-                    manifest.get("version") == "developer_execution_manifest_v8"
-                    and bool(item_paths)
+                    bool(item_paths)
                     and set(item_paths) <= existing_paths
                     and not invalid_unchanged
                     and not unresolved_paths
@@ -1783,8 +1726,6 @@ class DeveloperToolLoopExecutor:
                     and mutated_paths <= existing_paths
                     and (
                         not unresolved_paths
-                        if manifest.get("version") == "developer_execution_manifest_v8"
-                        else True
                     )
                 )
                 if not completed_unit and not no_change_allowed:
@@ -1910,7 +1851,7 @@ class DeveloperToolLoopExecutor:
                 error_code,
                 message,
                 run_id=run_id,
-                retriable=manifest.get("version") != "developer_execution_manifest_v8",
+                retriable=False,
                 manifest_path=manifest_path,
                 journal_path=journal_path,
                 progress=_progress(journal),
@@ -1976,27 +1917,6 @@ class DeveloperToolLoopExecutor:
                     cursor=max(0, int(getattr(llm_client, "cursor", 1)) - 1),
                 )
                 journal.pop("pending_step_review", None)
-                journal["last_failed_unit_id"] = item_id
-                entry["status"] = "review_required"
-                entry["last_error_at"] = utc_now_iso()
-                journal["status"] = "paused"
-                journal["updated_at"] = utc_now_iso()
-                _write_json_atomic(journal_file, journal)
-                raise DeveloperExecutionError(
-                    exc.error_code,
-                    exc.message,
-                    run_id=run_id,
-                    retriable=True,
-                    manifest_path=manifest_path,
-                    journal_path=journal_path,
-                    progress=_progress(journal),
-                ) from exc
-            if exc.error_code == "developer_step_review_drift":
-                pending_action_index = locals().get("action_index", next_action_index)
-                persist_working_state(
-                    int(pending_action_index),
-                    cursor=max(0, int(getattr(llm_client, "cursor", 1)) - 1),
-                )
                 journal["last_failed_unit_id"] = item_id
                 entry["status"] = "review_required"
                 entry["last_error_at"] = utc_now_iso()
@@ -2373,7 +2293,6 @@ def developer_execution_retry_allowed(state: dict[str, object]) -> bool:
         "developer_patch_out_of_scope",
         "developer_patch_invalid",
         "developer_input_drift",
-        "developer_step_review_drift",
         "developer_action_limit_exceeded",
         "developer_repair_budget_exhausted",
         "developer_repair_stalled",
@@ -2988,7 +2907,7 @@ def _build_manifest(
         **({"expected_dirty_paths": [item["path"] for item in expected_dirty_files]} if expected_dirty_files else {}),
     }
     return {
-        "version": "developer_execution_manifest_v8" if execution_units else "developer_execution_manifest_v7",
+        "version": "developer_execution_manifest_v8",
         "run_id": run_id,
         "mode": mode,
         "repair_iteration": repair_iteration,
@@ -3056,8 +2975,6 @@ def _new_journal(*, run_id: str, manifest: dict[str, object], mode: str, repair_
     return {
         "version": (
             "developer_execution_journal_v4"
-            if manifest.get("version") == "developer_execution_manifest_v8"
-            else "developer_execution_journal_v3"
         ),
         "run_id": run_id,
         "mode": mode,
@@ -3109,7 +3026,6 @@ def _action_prompt(
     visual_app_scope_id: str = "",
     journal: dict[str, object] | None = None,
 ) -> str:
-    unit_aware = manifest.get("version") == "developer_execution_manifest_v8"
     repair_mode = str(manifest.get("mode") or "").endswith("_repair")
     context_repair = str(manifest.get("mode") or "") == "implementation_repair"
     feedback_source = str(_dict_value(manifest.get("repair_feedback")).get("feedback_source") or "")
@@ -3117,8 +3033,7 @@ def _action_prompt(
     # A Validator or browser-stage repair also runs the dependency closure of the cited units. When no finding is
     # projected onto this unit, nothing authorizes a mutation unless one of its own required stages fails.
     dependency_context_only = (
-        unit_aware
-        and repair_mode
+        repair_mode
         and (
             (context_repair and feedback_source == "validator_code_trace")
             or _repair_feedback_unit_scoped(manifest.get("repair_feedback"))
@@ -3284,8 +3199,6 @@ def _action_prompt(
     action_schema = {
         "action": (
             unit_action_names
-            if unit_aware
-            else "list_files|read_file|search_code|read_diff|write_file|apply_patch|complete"
         ),
         "arguments": {},
         "summary": (
@@ -3293,13 +3206,13 @@ def _action_prompt(
             "never claim more than the tool evidence proves"
         ),
     }
-    if unit_aware and verification_forced_stage_ids:
+    if verification_forced_stage_ids:
         action_schema["action"] = "verification.run_stage"
-    if unit_aware and no_change_verification_stage_ids:
+    if no_change_verification_stage_ids:
         action_schema["action"] = "verification.run_stage"
-    if unit_aware and pending_package_dependency_ids:
+    if pending_package_dependency_ids:
         action_schema["action"] = "package.ensure_workspace_dependency"
-    if unit_aware and visual_profile_pending:
+    if visual_profile_pending:
         action_schema["action"] = (
             "uiux.search_visual_profile|uiux.commit_visual_profile"
             if visual_profile_candidates
@@ -3421,8 +3334,6 @@ def _action_prompt(
     qa_acceptance = _developer_read_only_qa_acceptance(item=item, manifest=manifest)
     if qa_acceptance:
         context["read_only_qa_acceptance"] = qa_acceptance
-    if not unit_aware:
-        context["approved_signatures"] = _item_approved_signatures(item)
     if timeout_diagnostic or timeout_cleanup_paths:
         context["timeout_diagnostic_protocol"] = {
             "version": "timeout_diagnostic_v1",
@@ -3550,148 +3461,135 @@ def _action_prompt(
             f"Remove timeout diagnostic instrumentation from {timeout_cleanup_paths} before completion, then rerun "
             "the required verification stages against the cleaned source."
         )
-    if unit_aware:
-        work_instruction = work_instruction.replace("call complete", "call execution.complete_unit")
+    work_instruction = work_instruction.replace("call complete", "call execution.complete_unit")
+    phase_instruction = (
+        phase_instruction
+        .replace(
+            "write_file, replace_text, or apply_patch",
+            "repo.write_file, repo.replace_text, or repo.apply_patch",
+        )
+        .replace("call complete", "run required verification stages, then call execution.complete_unit")
+    )
+    uiux_action_help = (
+        "- uiux.search_guidance: optional UI implementation guidance, at most two successful calls per "
+        "screen; arguments {query, mode: domain|stack, domain?: ux|icons|react, stack?: react}. Use generic "
+        "ASCII technical terms only. Guidance may help implement the approved contract but may never redesign it\n"
+        if uiux_available
+        else ""
+    )
+    visual_profile_action_help = (
+        "- uiux.search_visual_profile: required app-level presentation candidate for a new stylesheet; arguments "
+        "{query, variance?: 1-10, motion?: 1-10, density?: 1-10}. Query uses 3-8 generic ASCII product/style "
+        "terms and no private names or paths; defaults are variance=3, motion=3, density=6\n"
+        "- uiux.commit_visual_profile: commit one validated candidate app-wide; arguments {candidate_id, rationale}. "
+        "Commit does not change Design authority or repository files\n"
+        if visual_profile_pending
+        else ""
+    )
+    available_actions = (
+        "- repo.list: arguments {prefix?, limit?}; results are limited to execution_unit_contract.read_context_paths\n"
+        "- repo.read: arguments {path, start_line?, end_line?}; path must be in execution_unit_contract.read_context_paths\n"
+        f"- repo.read_batch: arguments {{requests: [{{path, start_line?, end_line?}}]}}; 1-{_MAX_BATCH_OBSERVATIONS} "
+        "read-only requests, each path must be in execution_unit_contract.read_context_paths and each result is independent\n"
+        "- repo.search: arguments {query, prefix?, limit?}; query is one case-insensitive literal substring, "
+        "not regex or Boolean syntax; only read_context_paths are searched even when prefix is broader\n"
+        f"- repo.search_batch: arguments {{queries: [string], prefix?, limit_per_query?}}; 1-{_MAX_BATCH_OBSERVATIONS} "
+        "case-insensitive literal substrings, use this instead of OR syntax; only read_context_paths are searched\n"
+        "- repo.read_diff: arguments {path}; path must be in execution_unit_contract.read_context_paths\n"
+        "- codegraph.query: arguments {operation, query?, symbol?, file?, files?, kind?, limit?, depth?, "
+        "file_filter?, pattern?}; operation is symbols|node|callers|callees|impact|affected_tests|files|explore\n"
+        "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
+        "capability. node requires symbol or file; explore requires query.\n"
+        "- codegraph.query_readonly: legacy alias with arguments {query}; use codegraph.query for new work\n"
+        f"{visual_profile_action_help}"
+        f"{uiux_action_help}"
+        "- repo.write_file: arguments {path, expected_sha256, content}; approved unit write path only\n"
+        "- repo.replace_text: arguments {path, expected_sha256, old_text, new_text}; replace one exact unique "
+        "block in an existing approved unit path\n"
+        "- repo.apply_patch: arguments {path, expected_sha256, patch}; unified diff for an approved unit path\n"
+        "- verification.run_stage: arguments {stage_id}; stage_id must be listed in required_stage_ids\n"
+        "- execution.complete_unit: arguments {summary, path_dispositions: [{path, status, reason}]}; status is "
+        "mutated|verified_unchanged|not_required. Every unit path needs a disposition, non-mutated paths need "
+        "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes. "
+        + (
+            "Every listed required_test_mutation_path must be mutated in this unit; a passing pre-existing test "
+            "file is not coverage evidence for a directly affected intent\n"
+            if _required_test_mutation_paths(item, repair_mode=repair_mode)
+            else "This recovery reuses previously authored test intents. Do not mutate tests merely to recreate "
+            "coverage evidence; run the required stages against the current tests instead.\n"
+        )
+    )
+    context["execution_unit_contract"] = {
+        "unit_id": item.get("id"),
+        "depends_on": item.get("depends_on", []),
+        "write_paths": _item_paths(item),
+        "read_context_paths": _item_context_paths(item),
+        "contract_anchor_paths": _item_contract_anchor_paths(item),
+        "requirement_refs": item.get("requirement_refs", []),
+        "acceptance_refs": item.get("acceptance_refs", []),
+        "design_node_ids": item.get("design_node_ids", []),
+        "planned_code_targets": _dict_items(item.get("planned_code_targets")),
+        "migration_impact": _dict_value(item.get("migration_impact")),
+        "behavior_contract_source": "active_focus.mandatory_obligations",
+        "required_stage_ids": item.get("required_stage_ids", []),
+        "test_target_paths": item.get("test_target_paths", []),
+        "required_test_mutation_paths": _required_test_mutation_paths(
+            item,
+            repair_mode=repair_mode,
+        ),
+        "test_intent_mutation_required": item.get(
+            "test_intent_mutation_required", True
+        ),
+        "package_dependencies": _dict_items(item.get("package_dependencies")),
+        "package_dependency_statuses": package_dependency_statuses,
+        "package_tool_owned_paths": _item_dependency_paths(item),
+        "approved_signatures": _item_approved_signatures(item),
+        "hard_constraints": [
+            "Approved signatures are immutable API-shape constraints, not authorization to implement behavior. They override conflicting prose only for qualified name, parameters, async shape, and return type.",
+            "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
+            "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
+            "Implement behavior only when active_focus.mandatory_obligations for this unit requires it. A parameter or result type present only in an approved signature may reserve compatibility for another unit; it must not by itself create a branch, side effect, result value, or domain error.",
+            "For non-UI work, preserve every exact entity field, operation, relation, constraint, and migration intent in active_focus.mandatory_obligations.approved_non_ui_contracts; never invent convenience fields or sibling API behavior.",
+            "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
+            "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
+            "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
+            "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+            "Repository reads, diffs, listings and searches are confined to read_context_paths. CodeGraph topology may name a connected out-of-unit path, but it does not grant source access to that path; leave its inspection and repair to the later unit that declares it as context.",
+            "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
+            "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
+        ],
+    }
+    forced_stage_ids = verification_forced_stage_ids or no_change_verification_stage_ids
+    if forced_stage_ids:
+        available_actions = (
+            "- verification.run_stage: arguments {stage_id}; stage_id MUST be one of "
+            f"{forced_stage_ids}\n"
+        )
+        if verification_forced_stage_ids:
+            phase_instruction = (
+                "Harness rejected an exact no-effect mutation. Your next and only allowed action MUST be "
+                f"verification.run_stage for one of {verification_forced_stage_ids}."
+            )
+    if pending_package_dependency_ids:
+        available_actions = (
+            "- package.ensure_workspace_dependency: arguments {dependency_id}; dependency_id MUST be one of "
+            f"{pending_package_dependency_ids}\n"
+        )
         phase_instruction = (
-            phase_instruction
-            .replace(
-                "write_file, replace_text, or apply_patch",
-                "repo.write_file, repo.replace_text, or repo.apply_patch",
-            )
-            .replace("call complete", "run required verification stages, then call execution.complete_unit")
+            "An approved local workspace dependency is not synchronized between its consumer manifest and "
+            "npm lockfile. Your next and only allowed action MUST be package.ensure_workspace_dependency for "
+            f"one of {pending_package_dependency_ids}. Do not inspect node_modules or edit package metadata "
+            "with repo.write_file."
         )
-        uiux_action_help = (
-            "- uiux.search_guidance: optional UI implementation guidance, at most two successful calls per "
-            "screen; arguments {query, mode: domain|stack, domain?: ux|icons|react, stack?: react}. Use generic "
-            "ASCII technical terms only. Guidance may help implement the approved contract but may never redesign it\n"
-            if uiux_available
-            else ""
+    if visual_profile_pending:
+        available_actions = visual_profile_action_help
+        work_instruction = (
+            "Establish one app-level presentation profile before reading or changing this new UI. The profile "
+            "fills only visual implementation details; it must not reinterpret the approved flow or Design contract."
         )
-        visual_profile_action_help = (
-            "- uiux.search_visual_profile: required app-level presentation candidate for a new stylesheet; arguments "
-            "{query, variance?: 1-10, motion?: 1-10, density?: 1-10}. Query uses 3-8 generic ASCII product/style "
-            "terms and no private names or paths; defaults are variance=3, motion=3, density=6\n"
-            "- uiux.commit_visual_profile: commit one validated candidate app-wide; arguments {candidate_id, rationale}. "
-            "Commit does not change Design authority or repository files\n"
-            if visual_profile_pending
-            else ""
-        )
-        available_actions = (
-            "- repo.list: arguments {prefix?, limit?}; results are limited to execution_unit_contract.read_context_paths\n"
-            "- repo.read: arguments {path, start_line?, end_line?}; path must be in execution_unit_contract.read_context_paths\n"
-            f"- repo.read_batch: arguments {{requests: [{{path, start_line?, end_line?}}]}}; 1-{_MAX_BATCH_OBSERVATIONS} "
-            "read-only requests, each path must be in execution_unit_contract.read_context_paths and each result is independent\n"
-            "- repo.search: arguments {query, prefix?, limit?}; query is one case-insensitive literal substring, "
-            "not regex or Boolean syntax; only read_context_paths are searched even when prefix is broader\n"
-            f"- repo.search_batch: arguments {{queries: [string], prefix?, limit_per_query?}}; 1-{_MAX_BATCH_OBSERVATIONS} "
-            "case-insensitive literal substrings, use this instead of OR syntax; only read_context_paths are searched\n"
-            "- repo.read_diff: arguments {path}; path must be in execution_unit_contract.read_context_paths\n"
-            "- codegraph.query: arguments {operation, query?, symbol?, file?, files?, kind?, limit?, depth?, "
-            "file_filter?, pattern?}; operation is symbols|node|callers|callees|impact|affected_tests|files|explore\n"
-            "  symbols requires query or file; symbols+file returns the file symbol map through the bounded node "
-            "capability. node requires symbol or file; explore requires query.\n"
-            "- codegraph.query_readonly: legacy alias with arguments {query}; use codegraph.query for new work\n"
-            f"{visual_profile_action_help}"
-            f"{uiux_action_help}"
-            "- repo.write_file: arguments {path, expected_sha256, content}; approved unit write path only\n"
-            "- repo.replace_text: arguments {path, expected_sha256, old_text, new_text}; replace one exact unique "
-            "block in an existing approved unit path\n"
-            "- repo.apply_patch: arguments {path, expected_sha256, patch}; unified diff for an approved unit path\n"
-            "- verification.run_stage: arguments {stage_id}; stage_id must be listed in required_stage_ids\n"
-            "- execution.complete_unit: arguments {summary, path_dispositions: [{path, status, reason}]}; status is "
-            "mutated|verified_unchanged|not_required. Every unit path needs a disposition, non-mutated paths need "
-            "fresh repo.read/repo.read_diff evidence, and every required stage must pass against current hashes. "
-            + (
-                "Every listed required_test_mutation_path must be mutated in this unit; a passing pre-existing test "
-                "file is not coverage evidence for a directly affected intent\n"
-                if _required_test_mutation_paths(item, repair_mode=repair_mode)
-                else "This recovery reuses previously authored test intents. Do not mutate tests merely to recreate "
-                "coverage evidence; run the required stages against the current tests instead.\n"
-            )
-        )
-        context["execution_unit_contract"] = {
-            "unit_id": item.get("id"),
-            "depends_on": item.get("depends_on", []),
-            "write_paths": _item_paths(item),
-            "read_context_paths": _item_context_paths(item),
-            "contract_anchor_paths": _item_contract_anchor_paths(item),
-            "requirement_refs": item.get("requirement_refs", []),
-            "acceptance_refs": item.get("acceptance_refs", []),
-            "design_node_ids": item.get("design_node_ids", []),
-            "planned_code_targets": _dict_items(item.get("planned_code_targets")),
-            "migration_impact": _dict_value(item.get("migration_impact")),
-            "behavior_contract_source": "active_focus.mandatory_obligations",
-            "required_stage_ids": item.get("required_stage_ids", []),
-            "test_target_paths": item.get("test_target_paths", []),
-            "required_test_mutation_paths": _required_test_mutation_paths(
-                item,
-                repair_mode=repair_mode,
-            ),
-            "test_intent_mutation_required": item.get(
-                "test_intent_mutation_required", True
-            ),
-            "package_dependencies": _dict_items(item.get("package_dependencies")),
-            "package_dependency_statuses": package_dependency_statuses,
-            "package_tool_owned_paths": _item_dependency_paths(item),
-            "approved_signatures": _item_approved_signatures(item),
-            "hard_constraints": [
-                "Approved signatures are immutable API-shape constraints, not authorization to implement behavior. They override conflicting prose only for qualified name, parameters, async shape, and return type.",
-                "Preserve each qualified_name, parameter type/order/optional/rest shape, async flag, and return_type exactly. Parameter names are evidence, not contract; destructuring is allowed when that shape is preserved.",
-                "Treat planned code targets, migration impact, and active_focus.mandatory_obligations as approved execution constraints.",
-                "Implement behavior only when active_focus.mandatory_obligations for this unit requires it. A parameter or result type present only in an approved signature may reserve compatibility for another unit; it must not by itself create a branch, side effect, result value, or domain error.",
-                "For non-UI work, preserve every exact entity field, operation, relation, constraint, and migration intent in active_focus.mandatory_obligations.approved_non_ui_contracts; never invent convenience fields or sibling API behavior.",
-                "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
-                "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
-                "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
-                "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
-                "Repository reads, diffs, listings and searches are confined to read_context_paths. CodeGraph topology may name a connected out-of-unit path, but it does not grant source access to that path; leave its inspection and repair to the later unit that declares it as context.",
-                "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
-                "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",
-            ],
-        }
-        forced_stage_ids = verification_forced_stage_ids or no_change_verification_stage_ids
-        if forced_stage_ids:
-            available_actions = (
-                "- verification.run_stage: arguments {stage_id}; stage_id MUST be one of "
-                f"{forced_stage_ids}\n"
-            )
-            if verification_forced_stage_ids:
-                phase_instruction = (
-                    "Harness rejected an exact no-effect mutation. Your next and only allowed action MUST be "
-                    f"verification.run_stage for one of {verification_forced_stage_ids}."
-                )
-        if pending_package_dependency_ids:
-            available_actions = (
-                "- package.ensure_workspace_dependency: arguments {dependency_id}; dependency_id MUST be one of "
-                f"{pending_package_dependency_ids}\n"
-            )
-            phase_instruction = (
-                "An approved local workspace dependency is not synchronized between its consumer manifest and "
-                "npm lockfile. Your next and only allowed action MUST be package.ensure_workspace_dependency for "
-                f"one of {pending_package_dependency_ids}. Do not inspect node_modules or edit package metadata "
-                "with repo.write_file."
-            )
-        if visual_profile_pending:
-            available_actions = visual_profile_action_help
-            work_instruction = (
-                "Establish one app-level presentation profile before reading or changing this new UI. The profile "
-                "fills only visual implementation details; it must not reinterpret the approved flow or Design contract."
-            )
-            phase_instruction = (
-                "Call uiux.search_visual_profile when no valid candidate exists. After reviewing a validated candidate, "
-                "call uiux.commit_visual_profile with its exact candidate_id. At most two candidates may be evaluated."
-            )
-    else:
-        available_actions = (
-            "- list_files: arguments {prefix?, limit?}\n"
-            "- read_file: arguments {path, start_line?, end_line?}\n"
-            "- search_code: arguments {query, prefix?, limit?}\n"
-            "- read_diff: arguments {path}\n"
-            "- write_file: arguments {path, expected_sha256, content}; any approved execution-unit path\n"
-            "- apply_patch: arguments {path, expected_sha256, patch}; unified diff for an approved path. A "
-            "headerless patch MUST begin with a complete hunk header such as @@ -10,2 +10,3 @@. Bare @@ is invalid.\n"
-            "- complete: arguments {summary, no_change_required?, unchanged_paths?: [{path, reason}]}; normally "
-            "after at least one successful mutation. no_change_required=true requires fresh inspected evidence.\n"
+        phase_instruction = (
+            "Call uiux.search_visual_profile when no valid candidate exists. After reviewing a validated candidate, "
+            "call uiux.commit_visual_profile with its exact candidate_id. At most two candidates may be evaluated."
         )
     context["next_action"] = {
         "response_scope": (
@@ -3720,11 +3618,9 @@ def _action_prompt(
     }
     signature_contract_ref = (
         "execution_unit_contract.approved_signatures"
-        if unit_aware
-        else "approved_signatures"
     )
     return (
-        f"Developer Tool Action {'v2' if unit_aware else 'v1'}\n\n"
+        f"Developer Tool Action {'v2'}\n\n"
         "Return exactly one JSON object matching this shape:\n"
         f"{json.dumps(action_schema, ensure_ascii=False)}\n\n"
         "Available actions:\n"
@@ -4201,9 +4097,6 @@ def _new_test_context_policy_error(
     item_paths: list[str],
 ) -> dict[str, object] | None:
     """Require repository evidence before the first write of a new TypeScript test."""
-
-    if manifest.get("version") != "developer_execution_manifest_v8":
-        return None
     if str(action.get("action") or "") not in _MUTATION_ACTIONS:
         return None
     action_path = str(_dict_value(action.get("arguments")).get("path") or "").replace("\\", "/")
@@ -6938,10 +6831,6 @@ def _inspected_paths(history: list[dict[str, object]], *, required_paths: list[s
     return {path for path in required_paths if _has_successful_target_inspection(history, item_path=path)}
 
 
-def _manifest_paths(manifest: dict[str, object]) -> set[str]:
-    return {path for item in _dict_items(manifest.get("items")) for path in _item_paths(item)}
-
-
 def _merge_runtime_authority_manifest(
     existing: dict[str, object],
     candidate: dict[str, object],
@@ -7882,8 +7771,6 @@ def _write_session(
             "session_id": path.parent.name,
             "contract_version": (
                 "developer_execution_units_v1"
-                if manifest.get("version") == "developer_execution_manifest_v8"
-                else "developer_execution_legacy_v1"
             ),
             "manifest_input_hash": manifest.get("input_hash"),
             "mode": manifest.get("mode"),
@@ -7895,7 +7782,7 @@ def _write_session(
 
 
 def _failure_classification(error_code: str, *, retriable: bool) -> dict[str, object]:
-    if error_code in {"developer_step_review_required", "developer_step_review_drift"}:
+    if error_code in {"developer_step_review_required"}:
         failure_class, owner, route = "operator_review", "harness_operator", "pause_and_resume"
     elif error_code in {"llm_transport_failed", "requirement_refiner_failed"}:
         failure_class, owner, route = "transport_failure", "llm_transport", "pause_and_resume"

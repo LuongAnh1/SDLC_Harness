@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -14,7 +13,7 @@ from sdlc_harness.llm.fake import (
     fake_qa_generated_tests,
 )
 from sdlc_harness.profiles import (
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+    UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     implementation_signature_contract_digest,
 )
 
@@ -57,7 +56,7 @@ def _packet() -> dict[str, object]:
     signature["digest"] = implementation_signature_contract_digest(signature)
     return {
         "run_id": "run-profiled-developer",
-        "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+        "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
         "approved_plan": {"structured_plan_sha256": "sha256:approved"},
         "effective_design_contract": {},
         "requirement_contract": {"version": "v2"},
@@ -135,7 +134,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
         repair_iteration=0,
     )
 
-    assert manifest["version"] == "developer_execution_manifest_v7"
+    assert manifest["version"] == "developer_execution_manifest_v8"
     assert manifest["items"][0]["paths"] == [SOURCE_PATH, TEST_PATH]
     source = manifest["items"][0]["files"][0]
     assert source["approved_signatures"][0]["qualified_name"] == "HealthService.check"

@@ -18,7 +18,6 @@ import urllib.parse
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.artifacts.writers import _test_report_markdown
 from sdlc_harness.profiles import (
-    PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     QA_TEST_POLICY_VERSION,
     UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
     VERIFICATION_STAGE_POLICY_VERSION,
@@ -116,7 +115,7 @@ class ProfiledVerificationTest(unittest.TestCase):
         )
         self.packet = {
             "run_id": "run_profiled_verification",
-            "schema_version": PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
+            "schema_version": UNIT_AWARE_PROFILED_DEVELOPER_WORK_PACKET_SCHEMA_VERSION,
             "verification_stage_ids": ["typecheck", "unit"],
             "test_intents": [
                 {"stage_id": "typecheck", "purpose": "Check TypeScript contracts."},
