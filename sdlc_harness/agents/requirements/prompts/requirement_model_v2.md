@@ -65,7 +65,7 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 
 - `acceptance_criteria` must not be empty when the source describes a success outcome, a material business rule, or a source-mentioned alternative/exception outcome.
 - Create at least one evidence-backed acceptance criterion for the primary source-supported success outcome.
-- Every material business rule must be referenced by at least one acceptance criterion through `verifies`.
+- Every material business rule must be referenced by at least one acceptance criterion through `verifies`. `verifies` may list any requirement IDs the criterion tests: `BR-*`, `QR-*`, flow steps (`MF-*`, `AF-*`, `EF-*`), `PRE-*`, or `POST-*`.
 - Cover each source-mentioned alternative or exception whose result changes externally observable behavior.
 - An explicit acceptance criterion must contain an objective condition and observable expected outcome supported by source evidence. Merely saying “verify”, “check”, “process”, “handle”, or repeating an undefined term such as “valid” is not testable coverage.
 - When the outcome is fully specified, create an `explicit` acceptance criterion directly and do not ask a question.
@@ -76,12 +76,14 @@ Use this counterfactual test: if two implementations can both satisfy the litera
 - Return `scenario_contract.schema_version="requirement_scenario_surface_v1"` and at least one scenario.
 - Split source behavior into stable `SC-*` main, alternative, and exception scenarios. Every `MF-*`, `AF-*`, `EF-*`, `BR-*`, and `AC-*` must be covered by at least one scenario.
 - Every scenario must reference at least one behavior item, one acceptance criterion, and source evidence.
-- `scenario.requirement_refs` may contain only scenario behavior IDs (`MF-*`, `AF-*`,
-  `EF-*`, or `BR-*`). `scenario.acceptance_refs` may contain only `AC-*` IDs. Never put
+- `scenario.requirement_refs` may contain only scenario behavior and constraint IDs (`MF-*`,
+  `AF-*`, `EF-*`, `POST-*`, `BR-*`, or `QR-*`). A quality requirement needs no scenario of its
+  own: list each `QR-*` in the scenarios whose behavior it constrains, and never restate a
+  `QR-*` as a `BR-*`. `scenario.acceptance_refs` may contain only `AC-*` IDs. Never put
   an `AC-*` ID in `scenario.requirement_refs`. Together those two lists form the
   scenario-local allowlist; every surface `requirement_refs` entry must occur in one of them.
-- A scenario `open_question_refs` list must contain every open question whose `affects`
-  intersects the scenario-local allowlist, and must not contain unrelated questions.
+- Return every scenario `open_question_refs` as an empty list: Python fills it with the open
+  questions whose `affects` intersect the scenario-local allowlist.
 - Every scenario must contain exactly four surfaces: `ui`, `api`, `business_rule`, and `data`.
 
 Treat these as functional surfaces, not as claims that a particular file or technology already exists:
@@ -112,10 +114,12 @@ Surface classification rules:
 - `not_applicable` requires a reason and empty requirement/question references.
 - Use `clarification_required` only when the human answer can change whether that surface participates. It must reference affected behavior and an open question.
 - A known required surface may still list open questions about its detailed behavior without changing its status to `clarification_required`.
-- Map every scenario open question to at least one surface. Do not create file names, routes, classes, database tables, framework choices, or repository claims.
+- A `clarification_required` surface lists the open question that decides whether it participates.
+  When you leave an open question unmapped in a scenario, Python maps it to that scenario's
+  `required` surfaces whose `requirement_refs` it intersects; one surface per scenario is enough.
+  Do not create file names, routes, classes, database tables, framework choices, or repository claims.
 - Put a question in a surface `open_question_refs` only when that question's `affects`
-  intersects that surface's `requirement_refs`. Otherwise map it to the related surface;
-  never attach a question merely to satisfy the mapping requirement.
+  intersects that surface's `requirement_refs`.
 
 ## Exact encoding for unknown content
 

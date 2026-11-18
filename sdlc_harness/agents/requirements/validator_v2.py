@@ -272,6 +272,52 @@ def _normalize_python_owned_fields(
                     "policy_version": REASONABLE_DEFAULT_POLICY_VERSION,
                     "reason_codes": list(classification["reason_codes"]),
                 }
+    _bind_open_questions_to_scenarios(data)
+
+
+def _bind_open_questions_to_scenarios(data: dict[str, Any]) -> None:
+    """Python owns the question bookkeeping that follows from `affects` alone.
+
+    A scenario's `open_question_refs` keeps only questions whose `affects` meet its allowlist (an earlier edit may
+    have removed the link) and gains every open question that does. An open question the model left unmapped in a
+    scenario goes to that scenario's `required` surfaces it affects; `clarification_required` surfaces stay the
+    model's choice, so which questions block clarification never changes here.
+    """
+    contract = data.get("scenario_contract")
+    if not isinstance(contract, dict):
+        return
+    affects_by_id = {
+        str(question.get("id")): set(_string_list(question.get("affects")))
+        for question in _dict_list(data.get("open_questions"))
+        if _non_empty(question.get("id"))
+    }
+    open_questions = [
+        (str(question.get("id")), affects_by_id[str(question.get("id"))])
+        for question in _dict_list(data.get("open_questions"))
+        if _non_empty(question.get("id")) and question.get("status") == QuestionStatus.OPEN.value
+    ]
+    for scenario in _dict_list(contract.get("scenarios")):
+        scope = set(_string_list(scenario.get("requirement_refs")) + _string_list(scenario.get("acceptance_refs")))
+        surfaces = scenario.get("surfaces") if isinstance(scenario.get("surfaces"), dict) else {}
+        surface_items = [surface for surface in surfaces.values() if isinstance(surface, dict)]
+        refs = [
+            question_id
+            for question_id in _string_list(scenario.get("open_question_refs"))
+            if affects_by_id.get(question_id, set()).intersection(scope)
+        ]
+        for question_id, affects in open_questions:
+            if not affects.intersection(scope):
+                continue
+            if question_id not in refs:
+                refs.append(question_id)
+            if any(question_id in _string_list(surface.get("open_question_refs")) for surface in surface_items):
+                continue
+            for surface in surface_items:
+                if surface.get("status") == "required" and affects.intersection(
+                    _string_list(surface.get("requirement_refs"))
+                ):
+                    surface["open_question_refs"] = [*_string_list(surface.get("open_question_refs")), question_id]
+        scenario["open_question_refs"] = refs
 
 
 def _validate_schema(data: dict[str, Any], issues: list[RequirementModelV2Issue]) -> None:

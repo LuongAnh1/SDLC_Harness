@@ -9,6 +9,15 @@ Review each category exactly once: `functional_scope`, `domain_data`,
 `constraints_tradeoffs`, `terminology`, `completion_signals`, and `placeholders`.
 Use only `clear`, `partial`, or `missing` for coverage status.
 
+- `integrations` means an external system or service outside the application that
+  the source names. The application's own request/API boundary is not an integration.
+- `placeholders` means model content still waiting for a decision (an `unknown` item
+  with empty `text`, or a flow branch without steps or outcome) and placeholder wording
+  in the source such as TBD or TODO.
+- When an open question in the canonical model already captures a category's
+  source-scoped gap, mark that category `partial`, cite the IDs the question affects,
+  and do not add a candidate for the same gap.
+
 ## Source-boundary gate
 
 Coverage is evaluated only within behavior that the supplied source has put in
@@ -29,7 +38,9 @@ not mention, do not create the candidate.
   because an actor is logged in or performs an action.
 - Treat a source-stated observable result such as deletion as the product contract;
   do not ask about hard delete, soft delete, retention, archive, or audit unless the
-  source introduces that concern.
+  source introduces that concern. This limits how the deleted item itself is removed;
+  what happens on deletion to other records that the source names in relation to that
+  item is source-scoped (the Requirement Refiner asks it under the same counterfactual test).
 - Do not invent a failure, cancellation path, integration scenario, security/privacy
   rule, compliance rule, or quality target merely because a real system might need it.
   A named failure does not put other possible failures in scope.

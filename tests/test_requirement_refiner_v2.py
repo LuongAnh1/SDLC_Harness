@@ -263,6 +263,11 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             # The model contract must not contradict the action envelope (Conduit UC1: bare models returned).
             self.assertIn('{"action":"complete","arguments":{"requirement_model":{...}}', prompts[2])
             self.assertNotIn("Return exactly one JSON object", prompts[2])
+            # Prompt matches the validator: QR may join scenarios, verifies targets are listed, Python binds questions.
+            self.assertIn("`POST-*`, `BR-*`, or `QR-*`", prompts[2])
+            self.assertIn("never restate a\n  `QR-*` as a `BR-*`", prompts[2])
+            self.assertIn("`verifies` may list any requirement IDs", prompts[2])
+            self.assertIn("Return every scenario `open_question_refs` as an empty list", prompts[2])
             self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])

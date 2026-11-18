@@ -153,6 +153,11 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     assert "A named failure does not put other possible failures in scope" in prompt
     assert "Apply this counterfactual test" in prompt
     assert "exists only after adding a choice" in prompt
+    # Conduit UC1: undefined categories and a stricter deletion rule than the Refiner's made the reviewer guess.
+    assert "`integrations` means an external system" in prompt
+    assert "`placeholders` means model content still waiting for a decision" in prompt
+    assert "already captures a category's\n  source-scoped gap, mark that category `partial`" in prompt
+    assert "other records that the source names in relation to that\n  item is source-scoped" in prompt
     assert result.analysis["review_mode"] == "hybrid"
 
 
