@@ -1,5 +1,5 @@
 Use case name: RestrictArticleChangesToAuthor
-Description: Only the author of an article can edit or delete it. Other signed-in users and visitors can still read the article, follow its author and favorite it, but they cannot change or remove it.
+Description: Only the author of an article can edit or delete it. Other signed-in users can still read the article, follow its author and favorite it; visitors can still read it. Neither can change or remove it.
 Participating Actors:
 - Author: a signed-in user who wrote the article.
 - Other User: a signed-in user who did not write the article.
