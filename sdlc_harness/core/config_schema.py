@@ -16,7 +16,8 @@ PHASE1_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     "refiner_synthesis": {"label": "Refiner synthesis", "effort": "high", "max_tokens": 65536, "timeout": 300},
     "refiner_repair": {"label": "Refiner repair", "effort": "high", "max_tokens": 32768, "timeout": 180},
     "refiner_final_repair": {"label": "Refiner final repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
-    "coverage": {"label": "Requirement coverage", "effort": "high", "max_tokens": 24576, "timeout": 180},
+    "coverage": {"label": "Requirement coverage", "effort": "high", "max_tokens": 49152, "timeout": 300},
+    "interpretation_repair": {"label": "Interpretation repair", "effort": "high", "max_tokens": 32768, "timeout": 300},
     "clarification": {"label": "Clarification update", "effort": "high", "max_tokens": 16384, "timeout": 180},
     "clarification_repair": {"label": "Clarification repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
 }

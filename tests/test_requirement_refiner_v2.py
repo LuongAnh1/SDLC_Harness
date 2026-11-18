@@ -272,6 +272,11 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             self.assertIn("Apply this test only to a decision that the source introduces", prompts[2])
             self.assertIn("how the system stores or compares identities belongs to Design", prompts[2])
             self.assertIn("A question's `affects` lists every requirement whose text or pass/fail result", prompts[2])
+            # No silent choices inside `explicit` items, and a checklist for overlaps and related records.
+            self.assertIn("`explicit` text says no more than its quoted evidence", prompts[2])
+            self.assertIn("Check every pair of clauses that can apply to the same situation", prompts[2])
+            self.assertIn("names other records related to it, check that the model states", prompts[2])
+            self.assertIn("two clauses whose conditions can hold at\n  the same time", prompts[2])
             self.assertNotIn('"effective_blocking"', prompts[2])
             self.assertIn('"key":"stable_key","answer":"User-facing answer"', prompts[2])
             self.assertIn("internal application API or service endpoint", prompts[2])

@@ -158,7 +158,41 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     assert "`placeholders` means model content still waiting for a decision" in prompt
     assert "already captures a category's\n  source-scoped gap, mark that category `partial`" in prompt
     assert "other records that the source names in relation to that\n  item is source-scoped" in prompt
+    # Silent interpretations are judged (accepted / needs_fix) and never become questions.
+    assert "## Interpretation check" in prompt
+    assert "An interpretation is never a question candidate" in prompt
+    assert '"interpretations": [{"requirement_ids"' in prompt
     assert result.analysis["review_mode"] == "hybrid"
+
+
+def test_interpretation_findings_are_checked_and_needs_fix_ones_are_selected() -> None:
+    from sdlc_harness.agents.requirements import needs_fix_interpretations
+
+    source_text = (ROOT / "fixtures/etour/UC2.txt").read_text(encoding="utf-8")
+    model = normalize_and_validate_requirement_model_v2(
+        json.loads((ROOT / "tests/fixtures/requirement_v2/uc2.json").read_text(encoding="utf-8")),
+        {"SRC-1": source_text},
+    ).model
+    accepted = {"requirement_ids": ["BR-1"], "evidence_refs": [], "choice": "c", "verdict": "accepted", "reason": "r", "fix": None}
+    wrong = {**accepted, "requirement_ids": ["AC-2", "BR-1"], "verdict": "needs_fix", "fix": "Narrow AC-2."}
+    payload = _deterministic_analysis(model)
+    payload["interpretations"] = [accepted, wrong]
+
+    assert needs_fix_interpretations(_validate_analysis(payload, model)) == [wrong]
+
+    for broken, message in (
+        ({**wrong, "fix": " "}, "fix must say what to change"),
+        ({**accepted, "verdict": "maybe"}, "verdict must be accepted or needs_fix"),
+        ({**accepted, "requirement_ids": []}, "requirement_ids must not be empty"),
+        ({**accepted, "requirement_ids": ["BR-99"]}, "dangling refs: BR-99"),
+        ({**accepted, "reason": ""}, "non-empty choice and reason"),
+    ):
+        payload["interpretations"] = [broken]
+        with pytest.raises(HarnessError, match=message):
+            _validate_analysis(payload, model)
+    payload.pop("interpretations")
+    with pytest.raises(HarnessError, match="interpretations must be an array"):
+        _validate_analysis(payload, model)
 
 
 def test_semantic_candidate_expands_existing_open_question_refs_to_stable_requirements() -> None:

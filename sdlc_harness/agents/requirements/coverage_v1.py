@@ -324,9 +324,20 @@ def _deterministic_analysis(model: RequirementModelV2) -> dict[str, Any]:
         "requirement_revision": model.revision,
         "coverage": coverage,
         "question_candidates": candidates,
+        "interpretations": [],
         "deferred": [],
         "review_mode": "deterministic",
     }
+
+
+def needs_fix_interpretations(analysis: dict[str, Any]) -> list[dict[str, Any]]:
+    """Interpretations the reviewer judged wrong: they go to a bounded repair, never to the user."""
+
+    return [
+        item
+        for item in analysis.get("interpretations", [])
+        if isinstance(item, dict) and item.get("verdict") == "needs_fix"
+    ]
 
 
 def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> dict[str, Any]:
@@ -393,6 +404,23 @@ def _validate_analysis(payload: dict[str, Any], model: RequirementModelV2) -> di
         _validate_candidate(item, index, known_requirements, known_evidence, issues)
     if not isinstance(data.get("deferred"), list):
         issues.append("deferred must be an array")
+    interpretations = data.get("interpretations")
+    if not isinstance(interpretations, list):
+        issues.append("interpretations must be an array")
+        interpretations = []
+    for index, item in enumerate(interpretations):
+        path = f"interpretations[{index}]"
+        if not isinstance(item, dict):
+            issues.append(f"{path} must be an object")
+            continue
+        _validate_refs(item.get("requirement_ids"), known_requirements, f"{path}.requirement_ids", issues, required=True)
+        _validate_refs(item.get("evidence_refs"), known_evidence, f"{path}.evidence_refs", issues)
+        if item.get("verdict") not in {"accepted", "needs_fix"}:
+            issues.append(f"{path}.verdict must be accepted or needs_fix")
+        if not _non_empty(item.get("choice")) or not _non_empty(item.get("reason")):
+            issues.append(f"{path} needs a non-empty choice and reason")
+        if item.get("verdict") == "needs_fix" and not _non_empty(item.get("fix")):
+            issues.append(f"{path}.fix must say what to change")
     if issues:
         raise HarnessError("requirement_coverage_invalid", "; ".join(issues), run_id=model.run_id)
     if normalizations:

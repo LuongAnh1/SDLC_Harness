@@ -11,6 +11,7 @@ Source ref: `{{SOURCE_REF}}`
 - Use only facts supported by an exact quote from the source snapshot.
 - Every `explicit` item must reference one or more evidence IDs.
 - A broad source statement supports only the behavior it literally states. It does not support any unstated criterion, threshold, field, role, transition, outcome, or implementation choice.
+- `explicit` text says no more than its quoted evidence. Never settle inside an `explicit` item a point the source leaves open, such as which of two clauses wins, a wider scope ("regardless of who sends it"), or what happens to related records; represent it as an open question instead.
 - Do not write an agent-selected assumption directly. Represent every unresolved choice as an open question and propose its disposition; Python creates any approved `ASM-*`.
 - Never use an assumption to replace a missing validation criterion, matching or identity rule, limit, authorization rule, state-transition condition, or acceptance-test decision introduced by the source.
 - Use `unknown` only for a material product decision that the source does not answer and link it to an open question.
@@ -36,6 +37,8 @@ Before reducing or merging questions, account for every source clause that intro
 - Map each source-supported clause to at least one explicit goal, actor, condition, flow, postcondition, business rule, acceptance criterion, or quality requirement.
 - Do not silently omit a source-mentioned decision because its deciding criteria are missing. Preserve the supported high-level behavior as `explicit`, then represent the missing criterion through one linked open question and an unknown acceptance criterion when pass/fail depends on it.
 - Copying or paraphrasing a vague source clause does not make it operationally complete.
+- Check every pair of clauses that can apply to the same situation (for example an outcome stated for one actor and an outcome stated for anyone). When their outcomes differ and the source does not say which wins, that is a source conflict.
+- When the source changes or deletes an item and names other records related to it, check that the model states what happens to those records; when the source does not say, that is a decision the source introduces.
 - Perform question reduction only after source coverage and acceptance coverage are complete.
 
 ## Mandatory operational-decision check
@@ -144,8 +147,9 @@ Surface classification rules:
 - Do not turn a failed source tool call, unread source, missing quote, or ungrounded claim
   into a human question. Use `source.search`/`source.read` and repair the evidence first.
 - Use `category="source_conflict"` only when at least two grounded evidence items state
-  incompatible facts that require a human choice. Cite both evidence IDs; source conflict
-  is always blocking.
+  incompatible facts that require a human choice; two clauses whose conditions can hold at
+  the same time but whose outcomes differ are incompatible. Cite both evidence IDs; source
+  conflict is always blocking.
 - All other open questions represent a missing business/product decision. Every question
   must cite source evidence showing the supported clause whose deciding detail is absent.
 - Never ask a human to repair a snapshot, catalog, fingerprint, tool argument, JSON shape,

@@ -16,11 +16,14 @@ from unittest.mock import patch
 
 from sdlc_harness.agents.requirements import (
     RequirementClarificationUpdater,
+    RequirementCoverageResult,
+    RequirementInterpretationRepairer,
     RequirementModelV2,
     RequirementModelV2RefinementResult,
     normalize_and_validate_requirement_model_v2,
     select_current_requirement_question,
 )
+from sdlc_harness.agents.requirements.coverage_v1 import _deterministic_analysis
 from sdlc_harness.artifacts import (
     read_source_snapshot_v2,
     write_requirement_v2_artifacts,
@@ -517,6 +520,95 @@ class RequirementClarificationV2Test(unittest.TestCase):
             self.assertEqual(updated["pending_checkpoint"]["current_question"]["id"], "Q-1")
             self.assertTrue(str(updated["latest_artifacts"]["requirement_model"]).endswith("_r2.json"))
             self.assertEqual(len(client.calls), 1)
+
+    def _workflow_with_interpretation_reviews(
+        self,
+        directory: str,
+        reviews: list[list[dict[str, object]]],
+        repairs: list[dict[str, object]],
+    ) -> PhaseOneWorkflow:
+        settings = load_settings(
+            root=self.root,
+            runtime_root=Path(directory),
+            overrides={"SDLC_LLM_MODE": "fake", "SDLC_SYNC_MODE": "mock"},
+        )
+        workflow = PhaseOneWorkflow(settings)
+        workflow.refiner_v2 = StubV2Refiner(self)
+        pending_reviews = list(reviews)
+
+        class StubCoverage:
+            def review(self, *, model, source_text_by_id, validation_report, semantic=True, question_limit=5):
+                analysis = _deterministic_analysis(model)
+                analysis["interpretations"] = pending_reviews.pop(0)
+                return RequirementCoverageResult(
+                    model=model,
+                    validation_report=validation_report,
+                    analysis=analysis,
+                    added_question_ids=[],
+                )
+
+        workflow.coverage_reviewer = StubCoverage()
+        workflow.interpretation_repairer = RequirementInterpretationRepairer(ScriptedClient(repairs))
+        return workflow
+
+    def test_wrong_interpretation_is_repaired_without_asking_the_user(self) -> None:
+        finding = {
+            "requirement_ids": ["AC-2"],
+            "evidence_refs": [],
+            "choice": "AC-2 stores any valid data.",
+            "verdict": "needs_fix",
+            "reason": "BR-1 rejects duplicates.",
+            "fix": "Store only non-duplicate data.",
+        }
+        accepted = {**finding, "verdict": "accepted", "fix": None}
+        update = {
+            "updates": [
+                {
+                    "requirement_id": "AC-2",
+                    "fields": {"text": "After valid, non-duplicate data is confirmed, the system stores it."},
+                    "reason": "Resolves the AC-2 finding.",
+                }
+            ]
+        }
+        with TemporaryDirectory() as directory:
+            workflow = self._workflow_with_interpretation_reviews(directory, [[finding], [accepted]], [update])
+            response = workflow.start_or_get_run(dataset="eTour", use_case="UC2", requested_by="owner")
+
+            self.assertEqual(response["status"], "waiting_requirement_clarification")
+            artifacts = response["latest_artifacts"]
+            self.assertTrue(str(artifacts["requirement_model"]).endswith("_r2.json"))
+            model = json.loads((self.root / str(artifacts["requirement_model"])).read_text(encoding="utf-8"))
+            criterion = next(item for item in model["acceptance_criteria"] if item["id"] == "AC-2")
+            self.assertIn("non-duplicate", criterion["text"])
+            audit = json.loads((self.root / str(artifacts["requirement_interpretation_repair"])).read_text(encoding="utf-8"))
+            self.assertEqual((audit["base_revision"], audit["result_revision"]), (1, 2))
+            self.assertEqual(audit["findings"], [finding])
+            # The repair never adds a question: the user still sees only the original blocking questions.
+            self.assertEqual(
+                [question["id"] for question in model["open_questions"] if question["status"] == "open"],
+                ["Q-1", "Q-2", "Q-3", "Q-4"],
+            )
+
+    def test_interpretation_still_wrong_after_bounded_repairs_blocks_the_run(self) -> None:
+        finding = {
+            "requirement_ids": ["AC-2"],
+            "evidence_refs": [],
+            "choice": "c",
+            "verdict": "needs_fix",
+            "reason": "r",
+            "fix": "f",
+        }
+        update = {"updates": [{"requirement_id": "AC-2", "fields": {"text": "Stores data."}, "reason": "Finding."}]}
+        with TemporaryDirectory() as directory:
+            workflow = self._workflow_with_interpretation_reviews(
+                directory, [[finding], [finding], [finding]], [update, update]
+            )
+            with self.assertRaises(HarnessError) as raised:
+                workflow.start_or_get_run(dataset="eTour", use_case="UC2", requested_by="owner")
+            state = workflow.store.read_state(str(raised.exception.run_id))
+
+        self.assertEqual(raised.exception.error_code, "requirement_interpretation_unresolved")
+        self.assertEqual((state["status"], state["last_error"]["error_code"]), ("failed", "requirement_interpretation_unresolved"))
 
     def test_wrong_question_and_empty_answer_fail_with_stable_errors(self) -> None:
         updater = RequirementClarificationUpdater(ScriptedClient([]))

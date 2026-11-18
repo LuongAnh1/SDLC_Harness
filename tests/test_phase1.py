@@ -518,6 +518,7 @@ class PhaseOneTest(unittest.TestCase):
                     "placeholders",
                 )
             ],
+            "interpretations": [],
             "question_candidates": [
                 {
                     "category": "completion_signals",

@@ -7,6 +7,7 @@ render các projection và lưu checkpoint để Niko có thể kiểm soát t�
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any
 
 from ..artifacts.writers import write_use_case_packet
 from ..artifacts import (
@@ -35,6 +36,8 @@ from ..agents.developer import (
 from ..agents.requirements import (
     RequirementClarificationUpdater,
     RequirementCoverageReviewer,
+    RequirementInterpretationRepairer,
+    needs_fix_interpretations,
     RequirementModelV2,
     RequirementModelV2Refiner,
     RequirementSourceCatalog,
@@ -102,6 +105,7 @@ ALLOWED_REQUIREMENT_CLARIFICATION_ACTIONS = [
     "cancel_run",
 ]
 ALLOWED_REQUIREMENT_DRAFTING_ACTIONS = ["continue_run", "get_status", "cancel_run"]
+INTERPRETATION_REPAIR_LIMIT = 2
 ALLOWED_REQUIREMENT_CLARIFICATION_CONTINUE_ACTIONS = [
     "clarify_more",
     "revalidate_requirement",
@@ -135,6 +139,83 @@ class PhaseOneWorkflow:
         )
         self.clarification_updater = RequirementClarificationUpdater(self.llm_client)
         self.coverage_reviewer = RequirementCoverageReviewer(self.llm_client)
+        self.interpretation_repairer = RequirementInterpretationRepairer(self.llm_client)
+
+    def _interpretation_repairer_for(self, *, run_id: str, revision: int) -> RequirementInterpretationRepairer:
+        if not bool(self.requirement_step_review.get("enabled")):
+            return self.interpretation_repairer
+        return RequirementInterpretationRepairer(
+            ReviewableLlmClient(
+                self.llm_client,
+                store=self.store,
+                run_id=run_id,
+                review=self.requirement_step_review,
+                call_prefix=f"requirement-interpretation-r{revision}",
+                execution_dir=f"requirement_execution/interpretation_r{revision}_step_review",
+                error_prefix="requirement_interpretation",
+                label="Requirement Interpretation Repair",
+            )
+        )
+
+    def _repair_interpretations(
+        self,
+        *,
+        run_id: str,
+        state: dict[str, Any],
+        refinement: Any,
+        coverage: Any,
+        source_text_by_id: dict[str, str],
+    ) -> tuple[Any, Any, list[str]]:
+        """Coverage judges the model's silent interpretations; wrong ones go back for a bounded fix, never to the user."""
+
+        audit_paths: list[str] = []
+        for _ in range(INTERPRETATION_REPAIR_LIMIT):
+            findings = needs_fix_interpretations(coverage.analysis)
+            if not findings:
+                return refinement, coverage, audit_paths
+            base_revision = refinement.model.revision
+            repair = self._interpretation_repairer_for(run_id=run_id, revision=base_revision).apply(
+                model=refinement.model,
+                source_text_by_id=source_text_by_id,
+                findings=findings,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            audit_paths.append(
+                self.store.relative(
+                    self.store.write_json_artifact(
+                        run_id,
+                        f"requirement_interpretation_repair_v1_r{base_revision}.json",
+                        {
+                            "artifact_version": "requirement_interpretation_repair_v1",
+                            "base_revision": base_revision,
+                            "result_revision": repair.model.revision,
+                            "findings": findings,
+                            "updates": repair.updates,
+                            "attempts": [attempt.to_dict() for attempt in repair.attempts],
+                        },
+                    )
+                )
+            )
+            coverage = self._coverage_reviewer_for(run_id=run_id, revision=repair.model.revision).review(
+                model=repair.model,
+                source_text_by_id=source_text_by_id,
+                validation_report=repair.report,
+                semantic=True,
+                question_limit=5,
+            )
+            policy_validation = normalize_and_validate_requirement_model_v2(
+                coverage.model,
+                source_text_by_id,
+                clarification_policy_version=self._clarification_policy_version(state),
+            )
+            refinement = replace(refinement, model=policy_validation.model, final_report=policy_validation.report)
+        if needs_fix_interpretations(coverage.analysis):
+            raise HarnessError(
+                "requirement_interpretation_unresolved",
+                f"The coverage reviewer still finds wrong interpretations after {INTERPRETATION_REPAIR_LIMIT} repairs.",
+                run_id=run_id,
+            )
+        return refinement, coverage, audit_paths
 
     def _coverage_reviewer_for(
         self,
@@ -359,6 +440,13 @@ class PhaseOneWorkflow:
                 model=policy_validation.model,
                 final_report=policy_validation.report,
             )
+            refinement, coverage, interpretation_repairs = self._repair_interpretations(
+                run_id=run_id,
+                state=state,
+                refinement=refinement,
+                coverage=coverage,
+                source_text_by_id=source_catalog.source_text_by_id,
+            )
             quality_checklist = build_requirement_quality_checklist(
                 model=refinement.model,
                 validation_report=refinement.final_report,
@@ -393,6 +481,11 @@ class PhaseOneWorkflow:
                     else {}
                 ),
                 **({"requirement_loop_session": refinement.session_path} if refinement.session_path else {}),
+                **(
+                    {"requirement_interpretation_repair": interpretation_repairs[-1]}
+                    if interpretation_repairs
+                    else {}
+                ),
                 "requirement_clarification_analysis": self.store.relative(
                     self.store.write_json_artifact(
                         run_id,

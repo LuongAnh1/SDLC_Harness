@@ -79,6 +79,25 @@ such as `UC-*`, `GOAL-*`, `ACT-*`, `PRE-*`, `MF-*`, `AF-*`, `EF-*`, `POST-*`,
 in `affects`. Do not return a new candidate for an ambiguity already represented
 by an open question in the canonical model.
 
+## Interpretation check
+
+The model may settle a point the source leaves open only honestly and consistently.
+Compare every `explicit` item with its quoted evidence and with the other explicit
+items, and find each place where the model settled such a point without an open
+question or decision: text that says more than its evidence (a wider scope, a
+precedence between clauses, an outcome for records the source names), or two items
+that give different outcomes for one situation. Return one `interpretations` entry
+for each place:
+
+- `verdict="accepted"` when the choice follows the source and every requirement
+  agrees with it;
+- `verdict="needs_fix"` when a requirement contradicts the source or another
+  requirement; `fix` says what must change in which requirement.
+
+An interpretation is never a question candidate: an accepted one passes as is, and
+one that needs a fix goes back to the Requirement model for correction. Return an
+empty list when the model settled nothing silently.
+
 Return one JSON object with this shape and no markdown fence:
 
 {
@@ -87,6 +106,7 @@ Return one JSON object with this shape and no markdown fence:
   "requirement_revision": {{REQUIREMENT_REVISION}},
   "coverage": [{"category":"functional_scope","status":"clear","requirement_refs":["UC-1"],"evidence_refs":["E-1"],"rationale":"Reason."}],
   "question_candidates": [{"category":"edge_failures","decision_category":"observable_behavior","question":"What observable outcome follows?","why_it_matters":"Changes acceptance tests.","proposed_disposition":"human_required","answer_mode":"short","options":[],"recommended_option":null,"suggested_answer":null,"why_it_is_safe":null,"reversible":false,"impact":"high","uncertainty":"high","affects":["EF-1"],"evidence_refs":["E-1"]}],
+  "interpretations": [{"requirement_ids":["BR-1","BR-2"],"evidence_refs":["E-1","E-2"],"choice":"What the model settled.","verdict":"needs_fix","reason":"Why it is or is not consistent with the source.","fix":"What must change in which requirement, or null when accepted."}],
   "deferred": [{"category":"quality_attributes","reason":"Lower impact than current blockers."}]
 }
 
