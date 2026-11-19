@@ -56,6 +56,16 @@ class RequirementModelV2Test(unittest.TestCase):
         self.assertIn("[SC-1] Insert a cultural heritage record successfully", packet)
         self.assertIn("business_rule: `required`", packet)
 
+    def test_flow_target_is_labelled_instead_of_appended_to_the_action(self) -> None:
+        payload = deepcopy(self.payload)
+        payload["flows"]["main"][1]["target"] = "form"
+        model = self.validate(payload).model
+
+        expected = "[MF-2] System Displays the corresponding form. (target: form)"
+        self.assertIn(f"- {expected}", render_requirement_packet_v2(model))
+        self.assertIn(expected, render_formal_use_case_v2(model))
+        self.assertIn("[MF-1] ACT-1 Activate the feature for the insertion of a new cultural good.\n", render_formal_use_case_v2(model))
+
     def test_round_trip_returns_a_detached_copy(self) -> None:
         model = RequirementModelV2.from_dict(self.payload)
         serialized = model.to_dict()

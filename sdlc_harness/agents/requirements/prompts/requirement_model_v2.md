@@ -116,7 +116,8 @@ Surface classification rules:
 - Required surfaces describe one end-to-end scenario path, not separate independent features.
 
 - Each surface uses exactly one status: `required`, `not_applicable`, or `clarification_required`, plus a non-empty reason.
-- `required` means the product behavior must address that surface; it does not mean new code must be created. Reference the scenario-local behavior or acceptance criteria that justify it.
+- `required` means the product behavior must address that surface; it does not mean new code must be created. List in its `requirement_refs` every scenario-local behavior or acceptance criterion this surface takes part in realizing; an item may appear on several surfaces (for example a step the actor performs through the interface belongs to `ui` and to the surfaces it triggers). Design uses these lists as each surface's scope.
+- Never leave an item off a surface to keep an open question away from it: an attached question only means that surface's details may change with the answer.
 - `not_applicable` requires a reason and empty requirement/question references.
 - Use `clarification_required` only when the human answer can change whether that surface participates. It must reference affected behavior and an open question.
 - A known required surface may still list open questions about its detailed behavior without changing its status to `clarification_required`.

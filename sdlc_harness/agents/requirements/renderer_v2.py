@@ -61,9 +61,8 @@ def render_formal_use_case_v2(model: RequirementModelV2) -> str:
         for item in main:
             action = _content(item, "action")
             actor = str(item.get("actor") or "").strip()
-            target = str(item.get("target") or "").strip()
-            text = " ".join(part for part in (actor, action, target) if part).strip()
-            lines.append(f"[{item.get('id', '')}] {text}")
+            text = " ".join(part for part in (actor, action) if part).strip()
+            lines.append(f"[{item.get('id', '')}] {text}{_target_suffix(item)}")
     else:
         lines.append("[NONE]")
     lines.append("Alternative Flows:")
@@ -110,11 +109,16 @@ def _packet_main_flow(lines: list[str], items: Any) -> None:
     lines.extend(["## Main Flow", ""])
     values = _dict_items(items)
     for item in values:
-        target = f" {item.get('target')}" if item.get("target") else ""
-        lines.append(f"- [{item.get('id', '')}] {item.get('actor', '')} {_content(item, 'action')}{target}".rstrip())
+        lines.append(f"- [{item.get('id', '')}] {item.get('actor', '')} {_content(item, 'action')}".rstrip() + _target_suffix(item))
     if not values:
         lines.append("- none")
     lines.append("")
+
+
+def _target_suffix(item: dict[str, object]) -> str:
+    # The action usually already names its object, so the target is labelled instead of appended to the sentence.
+    target = str(item.get("target") or "").strip()
+    return f" (target: {target})" if target else ""
 
 
 def _packet_branch_flows(lines: list[str], title: str, items: Any) -> None:

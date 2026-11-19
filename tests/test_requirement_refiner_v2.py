@@ -284,6 +284,11 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
                 "Do not mark `api` as `not_applicable` merely because the source omits",
                 prompts[2],
             )
+            # Surface requirement_refs are each surface's scope (Design reads them so), not a justifying sample.
+            self.assertIn("every scenario-local behavior or acceptance criterion this surface takes part in", prompts[2])
+            self.assertIn("a step the actor performs through the interface belongs to `ui`", prompts[2])
+            self.assertIn("Never leave an item off a surface to keep an open question away from it", prompts[2])
+            self.assertNotIn("criteria that justify it", prompts[2])
 
             unrelated_model = replace(
                 result.model,
