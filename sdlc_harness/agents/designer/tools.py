@@ -20,6 +20,8 @@ MAX_FILE_CHARS = 8_000
 MAX_OUTPUT_CHARS = 12_000
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9_.$:/# -]{1,200}$")
 _SAFE_FILE_FILTER = re.compile(r"^[A-Za-z0-9_./*-]{0,200}$")
+# A compound name: camelCase/PascalCase boundary, acronym run, separator or digit.
+_CODE_IDENTIFIER = re.compile(r"[a-z][A-Z]|[A-Z]{2}[a-z]|[_\-.$\d]")
 
 
 class DesignerToolRegistry:
@@ -307,20 +309,27 @@ class DesignerToolRegistry:
                 "uiux.search_guidance is unavailable for this run.",
                 run_id=self.run_id,
             )
-        query = str(args.get("query") or "").strip().casefold()
-        private_terms = {
-            value.casefold()
+        # Only compound code identifiers (ArticlePage, getFeed, article-page) are repository-private: a plain word
+        # such as "article" or "state" is generic UX vocabulary even when a file happens to be named after it.
+        private_names = {
+            value.casefold(): value
             for anchor in self.anchors.values()
             for value in (
                 str(anchor.get("symbol") or "").strip(),
                 Path(str(anchor.get("path") or "")).stem.strip(),
             )
-            if len(value.strip()) >= 4
+            if len(value) >= 4 and _CODE_IDENTIFIER.search(value)
         }
-        if any(term in query for term in private_terms):
+        hits = sorted(
+            {private_names[word] for word in str(args.get("query") or "").casefold().split() if word in private_names}
+        )
+        if hits:
             raise HarnessError(
                 "designer_tool_input_invalid",
-                "uiux.search_guidance query must not contain repository-private paths or symbols.",
+                (
+                    f"uiux.search_guidance query must not contain repository names: {', '.join(hits)}. "
+                    "Describe the UX intent in generic words."
+                ),
                 run_id=self.run_id,
             )
         output = self.uiux_provider.search(args)

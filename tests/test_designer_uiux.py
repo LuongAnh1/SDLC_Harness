@@ -17,6 +17,7 @@ from sdlc_harness.agents.designer import (
     DesignerToolLoopExecutor,
 )
 from sdlc_harness.agents.designer.projections import render_design_projections
+from sdlc_harness.agents.designer.tools import DesignerToolRegistry
 from sdlc_harness.core.config import load_settings
 from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.repo_context.codegraph import (
@@ -56,6 +57,54 @@ def test_uiux_search_rejects_unbounded_or_unsupported_input(arguments: dict[str,
         provider.search(arguments)
 
     assert error.value.error_code == "designer_tool_input_invalid"
+
+
+def _uiux_registry() -> DesignerToolRegistry:
+    anchors = [
+        {"anchor_id": "RLA-1", "component_id": "web", "path": "apps/web/src/types/article.ts", "symbol": "Article"},
+        {"anchor_id": "RLA-2", "component_id": "web", "path": "apps/web/src/state/store.ts", "symbol": "State"},
+        {
+            "anchor_id": "RLA-3",
+            "component_id": "web",
+            "path": "apps/web/src/components/Pages/ArticlePage/ArticlePage.tsx",
+            "symbol": "OwnerArticleMeta",
+        },
+        {"anchor_id": "RLA-4", "component_id": "web", "path": "apps/web/src/article-feed.ts", "symbol": "getFeed"},
+    ]
+    return DesignerToolRegistry(
+        run_id="run-1",
+        target_path=Path("."),
+        landscape={"components": [], "anchors": anchors},
+        graph={"nodes": []},
+        fake_mode=True,
+        uiux_provider=UiUxGuidanceProvider(skill_root=None, fake_mode=True),
+    )
+
+
+def test_uiux_search_allows_plain_words_that_name_repository_files() -> None:
+    output, refs = _uiux_registry().execute(
+        "uiux.search_guidance",
+        {"query": "article owner edit delete state", "mode": "domain", "domain": "ux"},
+    )
+
+    assert output["no_match"] is False
+    assert refs and refs[0].startswith("uiux:sha256:")
+
+
+@pytest.mark.parametrize(
+    ("query", "names"),
+    [
+        ("articlepage edit actions", "ArticlePage"),
+        ("OwnerArticleMeta getfeed layout", "OwnerArticleMeta, getFeed"),
+        ("article-feed loading feedback", "article-feed"),
+    ],
+)
+def test_uiux_search_rejects_compound_repository_names_and_names_them(query: str, names: str) -> None:
+    with pytest.raises(HarnessError) as error:
+        _uiux_registry().execute("uiux.search_guidance", {"query": query, "mode": "domain", "domain": "ux"})
+
+    assert error.value.error_code == "designer_tool_input_invalid"
+    assert f"must not contain repository names: {names}." in error.value.message
 
 
 def test_fake_codegraph_prepare_writes_fresh_snapshot() -> None:
