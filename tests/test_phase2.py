@@ -382,7 +382,16 @@ class PhaseTwoTest(unittest.TestCase):
 
         self.assertEqual(context.exception.error_code, "design_restart_not_allowed")
 
-    def test_restart_design_recovers_run_blocked_before_any_design_graph(self) -> None:
+    def test_restart_design_recovers_run_blocked_with_only_the_empty_base_graph(self) -> None:
+        run_id = self._run_blocked_by_designer_hard_cap()
+        empty_base_graph = {"revision": 0, "nodes": [], "edges": [], "partitions": []}
+
+        with patch.object(PhaseTwoWorkflow, "_blocked_session_graph", return_value=empty_base_graph):
+            restarted = PhaseTwoWorkflow(self.settings).restart_design(run_id=run_id)
+
+        self.assertEqual(restarted["status"], "waiting_design_approval")
+
+    def _run_blocked_by_designer_hard_cap(self) -> str:
         run_id = str(self._create_phase1_run()["run_id"])
         capped = load_settings(
             root=self.repo_root,
@@ -400,6 +409,10 @@ class PhaseTwoTest(unittest.TestCase):
         with self.assertRaises(HarnessError) as context:
             PhaseTwoWorkflow(self.settings).revalidate_design(run_id=run_id)
         self.assertEqual(context.exception.error_code, "vertical_design_graph_missing")
+        return run_id
+
+    def test_restart_design_recovers_run_blocked_before_any_design_graph(self) -> None:
+        run_id = self._run_blocked_by_designer_hard_cap()
 
         restarted = PhaseTwoWorkflow(self.settings).restart_design(run_id=run_id)
 

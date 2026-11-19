@@ -497,11 +497,14 @@ class PhaseTwoWorkflow:
         self._reset_design_runtime()
         state = self.store.read_state(run_id)
         status = str(state.get("status") or "")
-        # A run blocked before any Design graph exists (e.g. budget hard cap) has nothing to revalidate or lose.
-        blocked_without_graph = (
-            status == "design_blocked"
-            and self._blocked_session_graph(state=state, run_id=run_id) is None
-            and self._latest_vertical_graph(state, run_id=run_id, required=False) is None
+        # A run blocked before any Design content exists (budget hard cap, or invalid actions before the first delta,
+        # which leaves only the empty base graph) has nothing to revalidate or lose.
+        blocked_without_graph = status == "design_blocked" and not any(
+            graph and (graph.get("nodes") or graph.get("edges") or graph.get("partitions"))
+            for graph in (
+                self._blocked_session_graph(state=state, run_id=run_id),
+                self._latest_vertical_graph(state, run_id=run_id, required=False),
+            )
         )
         # `design_restarting`: an interrupted restart restarts again (versions come from the files on disk).
         if status not in {"design_paused", "design_restarting"} and not blocked_without_graph:
