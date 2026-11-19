@@ -47,7 +47,10 @@ def _uiux_guidance_status(
     active_guidance: list[dict[str, object]],
     *,
     source_inspected: bool,
+    delta_required: bool = False,
 ) -> dict[str, object]:
+    read_actions = [{"action": "repo.read"}, {"action": "codegraph.query"}]
+
     def lane(mode: str, selector: str) -> dict[str, object]:
         attempts = [
             item
@@ -70,7 +73,7 @@ def _uiux_guidance_status(
     allowed_next: list[dict[str, object]] = []
     blocked_reason = ""
     if not source_inspected:
-        allowed_next = [{"action": "repo.read"}, {"action": "codegraph.query"}]
+        allowed_next = read_actions
     elif not bool(domain["has_evidence"]):
         if int(domain["retry_remaining"]) > 0:
             required_next = {
@@ -92,13 +95,17 @@ def _uiux_guidance_status(
             }
         else:
             blocked_reason = "stack=react guidance produced no usable evidence after two attempts"
+    elif delta_required:
+        required_next = {"action": "design.propose_delta", "arguments": {}}
+    # Guidance done: the Designer may still read source it has not seen (observation_policy bounds it) or propose.
     elif int(stack["attempts"]) == 1:
         allowed_next = [
             {"action": "uiux.search_guidance", "arguments": {"mode": "stack", "stack": "react"}},
+            *read_actions,
             {"action": "design.propose_delta"},
         ]
     else:
-        required_next = {"action": "design.propose_delta", "arguments": {}}
+        allowed_next = [*read_actions, {"action": "design.propose_delta"}]
     return {
         "source_inspected": source_inspected,
         "domain": domain,
@@ -108,6 +115,22 @@ def _uiux_guidance_status(
         "retry_policy": "Retry the same selector once only when its result is empty or off-topic.",
         "blocked_reason": blocked_reason,
     }
+
+
+def _uiux_call_allowed(status: dict[str, object], *, mode: str, selector: str) -> bool:
+    """A guidance call must match required_next_action, or an allowed_next_actions entry when none is required."""
+
+    required = _dict(status.get("required_next_action"))
+    candidates = [required] if required else [_dict(item) for item in status.get("allowed_next_actions") or []]
+    for item in candidates:
+        arguments = _dict(item.get("arguments"))
+        if (
+            str(item.get("action") or "") == "uiux.search_guidance"
+            and str(arguments.get("mode") or "") == mode
+            and str(arguments.get("domain") or arguments.get("stack") or "") == selector
+        ):
+            return True
+    return False
 
 
 def _required_surface_set(scenario: dict[str, object]) -> set[str]:

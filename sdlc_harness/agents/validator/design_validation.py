@@ -296,41 +296,16 @@ class DesignValidator:
         retry_calls = 0
         metric_start = len(_llm_call_metrics(self.llm_client))
         try:
-            for task in tasks:
+            def run_task(task: dict[str, object]) -> tuple[bool, int]:
+                """Review one task; return (served from the task cache, contract retries)."""
+
+                nonlocal skipped_calls, retry_calls
                 task_id = str(task.get("task_id") or "")
                 task_type = str(task.get("task_type") or "")
                 scenario_ids = _string_items(task.get("scenario_ids"))
                 primary_ids = set(_string_items(task.get("primary_claim_ids")))
                 context_ids = set(_string_items(task.get("context_claim_ids")))
                 task_claims = [claim for claim in claims if str(claim.get("claim_id") or "") in primary_ids]
-                blocked_by = sorted(
-                    finding_id for scenario_id in scenario_ids for finding_id in runtime_blockers.get(scenario_id, [])
-                )
-                if task_type == "scenario_behavior" and blocked_by:
-                    # Harness gate: behavior is not reviewed on a runtime path already known to be blocked.
-                    skipped_calls += 1
-                    task_results.append(
-                        {
-                            "task_id": task_id,
-                            "task_type": task_type,
-                            "status": "deferred_runtime_blocked",
-                            "ok": False,
-                            "summary": "Behavior review deferred until the scenario runtime blockers are repaired.",
-                            "assessments": [
-                                {
-                                    "claim_id": claim_id,
-                                    "status": "deferred",
-                                    "design_refs": [],
-                                    "blocked_by": blocked_by,
-                                    "reason": "Scenario runtime review reported blocking findings.",
-                                }
-                                for claim_id in sorted(primary_ids)
-                            ],
-                            "findings": [],
-                            "deferred_claim_ids": sorted(primary_ids),
-                        }
-                    )
-                    continue
                 task_context = materialize_task_context(
                     task,
                     claims=claims,
@@ -410,6 +385,41 @@ class DesignValidator:
                         "deferred_claim_ids": [],
                     }
                 )
+                return cache_hit, retries
+
+            for task in tasks:
+                primary_ids = set(_string_items(task.get("primary_claim_ids")))
+                blocked_by = sorted(
+                    finding_id
+                    for scenario_id in _string_items(task.get("scenario_ids"))
+                    for finding_id in runtime_blockers.get(scenario_id, [])
+                )
+                if str(task.get("task_type") or "") == "scenario_behavior" and blocked_by:
+                    # Harness gate: behavior is not reviewed on a runtime path already known to be blocked.
+                    skipped_calls += 1
+                    task_results.append(
+                        {
+                            "task_id": str(task.get("task_id") or ""),
+                            "task_type": "scenario_behavior",
+                            "status": "deferred_runtime_blocked",
+                            "ok": False,
+                            "summary": "Behavior review deferred until the scenario runtime blockers are repaired.",
+                            "assessments": [
+                                {
+                                    "claim_id": claim_id,
+                                    "status": "deferred",
+                                    "design_refs": [],
+                                    "blocked_by": blocked_by,
+                                    "reason": "Scenario runtime review reported blocking findings.",
+                                }
+                                for claim_id in sorted(primary_ids)
+                            ],
+                            "findings": [],
+                            "deferred_claim_ids": sorted(primary_ids),
+                        }
+                    )
+                    continue
+                run_task(task)
 
             shared_surfaces = _dict_items(review_plan.get("shared_surfaces"))
             shared_node_ids = {
@@ -649,6 +659,23 @@ class DesignValidator:
                     for finding in adjudicated
                 )
                 actual_calls += 1
+            # A behavior review deferred by a runtime blocker that adjudication then dropped runs now, so a scenario
+            # never reaches the checkpoint with unreviewed behavior claims (r7 SC-1). A task still deferred keeps a
+            # retained blocking finding, so the result stays not ok.
+            remaining_blocking = {finding.finding_id for finding in semantic_findings if finding.severity == "blocking"}
+            tasks_by_id = {str(task.get("task_id") or ""): task for task in tasks}
+            for result in [item for item in task_results if item.get("status") == "deferred_runtime_blocked"]:
+                blocked_by = {
+                    ref
+                    for assessment in _dict_items(result.get("assessments"))
+                    for ref in _string_items(assessment.get("blocked_by"))
+                }
+                if blocked_by & remaining_blocking:
+                    continue
+                task_results.remove(result)
+                skipped_calls -= 1
+                cache_hit, retries = run_task(tasks_by_id[str(result.get("task_id") or "")])
+                actual_calls += (0 if cache_hit else 1) + retries
         except LlmStepReviewRequired:
             raise
         except HarnessError as exc:
@@ -1687,8 +1714,18 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   starts; do not assume one.
 - approved_context holds approved Requirement preconditions and the Requirement text behind each declared external
   input. Treat them as facts the scenario may rely on.
-- ui_repo_context describes the current AS-IS repository. disposition=add or modify describes planned implementation,
-  so absence from AS-IS is not a defect by itself.
+- ui_repo_context describes the current AS-IS repository (auth, data clients and the composition hops of this packet's
+  UI nodes). disposition=add or modify describes planned implementation, so absence from AS-IS is not a defect by
+  itself.
+- harness_established: facts the Harness proved mechanically for this packet, per boundary edge and per scenario;
+  not_established lists the questions those checks leave to this review.
+- surface_placements: the Designer put the scenario's business_rule in component_id because, by its reason and
+  evidence_refs, that code makes the decision. It is correct only when that component's code makes this scenario's rule
+  decision; a rule the approved Requirement says the server must enforce still needs a server-side Design node.
+- surface_not_exercised: the Designer states this scenario runs nothing on that required surface (reason,
+  evidence_refs). It is correct only when no step of this scenario reads, writes or decides on that surface (for example
+  a request refused before any data access) and its requirement_refs are realized by the scenario's other nodes; a
+  surface the scenario does use can never be declared not exercised.
 """.strip()
 
 _BEHAVIOR_PACKET_FIELD_GUIDE = """
@@ -1708,6 +1745,15 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   that all ran on this pass. parent_transitions_after_entry have not run when the branch starts.
 - trace_mappings connect supplied Requirement ids and surface claims to exact Design ids.
 - approved_context contains approved Requirement preconditions and external facts; treat them as given.
+- harness_established: facts the Harness proved mechanically for this packet; not_established lists the questions
+  those checks leave to this review.
+- surface_placements: the Designer put the scenario's business_rule in component_id because, by its reason and
+  evidence_refs, that code makes the decision. It is correct only when that component's code makes this scenario's rule
+  decision; a rule the approved Requirement says the server must enforce still needs a server-side Design node.
+- surface_not_exercised: the Designer states this scenario runs nothing on that required surface (reason,
+  evidence_refs). It is correct only when no step of this scenario reads, writes or decides on that surface (for example
+  a request refused before any data access) and its requirement_refs are realized by the scenario's other nodes; a
+  surface the scenario does use can never be declared not exercised.
 """.strip()
 
 _SEVERITY_GUIDE = """
@@ -1746,16 +1792,19 @@ validates exact ids and performs the route mechanically.
 _DETERMINISTIC_REVIEW_NOTE = """
 Deterministic review: before this call the Harness already enforced graph schema and stable IDs, edge endpoints,
 partition coverage, boundary_contract shape, composition forwarded-input propagation, branch parent wiring and
-Requirement-to-Design trace coverage. The object below adds class/sequence projection traceability and structure.
-None of these checks judges whether a value exists at the right time or whether behavior satisfies a claim, so ok=true
-is not evidence that this Design is semantically sound:
+Requirement-to-Design trace coverage; packet.harness_established lists the facts it proved for this packet (mapping
+names, operation and paired-edge facts of each listed boundary, path order). Treat those facts as true and do not
+re-verify them; spend the review on packet.harness_established.not_established and on this task's own questions. None
+of these checks judges whether a value exists at the right time or whether behavior satisfies a claim, so they are not
+evidence that this Design is semantically sound. The object below adds class/sequence projection traceability:
 """.strip()
 
 _BEHAVIOR_DETERMINISTIC_REVIEW_NOTE = """
 Deterministic review: the Harness already enforced graph schema, stable IDs, endpoints and partition coverage, plus
-branch parent wiring and Requirement-to-Design trace coverage. A separate runtime specialist passed this scenario without a
-blocker, so runtime-only wiring is intentionally absent from this packet. These checks do not judge whether the
-remaining behavior and UI contracts satisfy the primary claims:
+branch parent wiring and Requirement-to-Design trace coverage; packet.harness_established lists the facts it proved
+for this packet (graph schema and ids, path order). Treat those facts as true and do not re-verify them. A separate
+runtime specialist passed this scenario without a blocker, so runtime-only wiring is intentionally absent from this
+packet. These checks do not judge whether the remaining behavior and UI contracts satisfy the primary claims:
 """.strip()
 
 _RUNTIME_RULES = """

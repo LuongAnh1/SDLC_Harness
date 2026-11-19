@@ -9,6 +9,7 @@ from typing import Any
 
 from ...core.errors import HarnessError
 from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
+from ..designer.graph import established_facts
 
 
 
@@ -248,6 +249,16 @@ def materialize_task_context(
     task_type = str(task.get("task_type") or "")
     selected_nodes = [node for node in nodes if str(node.get("id") or "") in node_ids]
     approved_context = _approved_context(claims=claims, nodes=selected_nodes)
+    placements = [
+        item
+        for item in _dict_items(graph.get("surface_placements"))
+        if not scenario_ids or str(item.get("scenario_id") or "") in scenario_ids
+    ]
+    not_exercised = [
+        item
+        for item in _dict_items(graph.get("surface_not_exercised"))
+        if not scenario_ids or str(item.get("scenario_id") or "") in scenario_ids
+    ]
     return {
         "graph_digest": graph.get("artifact_digest"),
         "task": task,
@@ -266,18 +277,49 @@ def materialize_task_context(
         "unresolved_items": graph.get("unresolved_items") or [],
         **({"branch_entries": branch_entries} if branch_entries else {}),
         **({"approved_context": approved_context} if approved_context else {}),
+        **({"surface_placements": placements} if placements else {}),
+        **({"surface_not_exercised": not_exercised} if not_exercised else {}),
+        # What the Harness already proved for this packet, so the review spends its reasoning on what it did not.
+        "harness_established": established_facts(
+            graph,
+            scenario_ids=sorted(scenario_ids),
+            edge_ids=sorted(edge_ids) if task_type == "scenario_runtime" else [],
+        ),
         **(
-            {
-                "ui_repo_context": {
-                    key: ui_context.get(key)
-                    for key in ("entrypoint", "composition_chain", "data_clients", "auth", "styles", "verification")
-                    if key in ui_context
-                }
-            }
-            if ui_context and task_type != "scenario_behavior"
+            {"ui_repo_context": review_ui_repo_context(ui_context, nodes=selected_nodes)}
+            if ui_context and task_type != "scenario_behavior" and _ui_nodes(selected_nodes)
             else {}
         ),
     }
+
+
+def _ui_nodes(nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [node for node in nodes if str(node.get("surface") or "") == "ui"]
+
+
+def review_ui_repo_context(ui_context: dict[str, Any], *, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """The AS-IS UI facts a runtime review can use: auth, data clients and the composition hops of its UI nodes.
+
+    The composition and forwarded inputs are already checked by the Harness, and styles/verification do not bear on a
+    runtime path, so the rest of the repository's component tree only adds tokens (r7: 20.5k of a 45k runtime packet).
+    """
+
+    on_path = {
+        str(hop)
+        for node in _ui_nodes(nodes)
+        for hop in _string_items(
+            _dict_value(_dict_value(node.get("surface_contract")).get("runtime_surface")).get("composition_path")
+        )
+    }
+    view = {key: ui_context.get(key) for key in ("entrypoint", "auth", "data_clients") if key in ui_context}
+    chain = [
+        item
+        for item in _dict_items(ui_context.get("composition_chain"))
+        if str(item.get("ref") or "") in on_path
+    ]
+    if chain:
+        view["composition_chain"] = chain
+    return view
 
 
 # Audit and provenance fields support artifact review, not semantic judgement; they only add tokens to a review call.

@@ -38,6 +38,7 @@ from sdlc_harness.agents.designer.graph import (
     graph_digest,
 )
 from sdlc_harness.agents.designer.projections import render_design_projections, render_ui_feature_experience
+from sdlc_harness.agents.designer.prompting import designer_prompt_payload
 from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.agents.designer import UI_CONTRACT_STATE_KEY
 from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
@@ -618,6 +619,8 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
         self.assertEqual(scaffold["entrypoint"], ENTRY)
         self.assertEqual(scaffold["composition_path"][0], ENTRY)
         self.assertEqual(node["surface_contract"]["experience_contract"]["schema_version"], UI_EXPERIENCE_CONTRACT_V2)
+        # With a composition chain, UI gets no arbitrary top-3 anchor guesses; the chain itself is in the prompt.
+        self.assertEqual(partition["surface_work"][0]["candidate_anchors"], [])
 
         prompt = _designer_prompt(
             requirement_model=self.REQUIREMENT,
@@ -630,7 +633,7 @@ class FakeDesignerRuntimeSurfaceTest(unittest.TestCase):
             observations_since_delta=0,
             last_invalid_action="",
         )
-        payload = json.loads(prompt[prompt.index('{"active_partition"'):])
+        payload = designer_prompt_payload(prompt)
         self.assertEqual(payload["ui_runtime_context"]["entrypoint"], ENTRY)
         self.assertEqual(
             payload["ui_runtime_context"]["dependency_refs"],
@@ -1311,7 +1314,20 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         raw = '{"action":"design.propose_delta","arguments":{"delta":{"operations":[{"op":"add_node"}},"completion_claims":[]}}}'
         with self.assertRaises(json.JSONDecodeError):
             _parse_designer_tool_action(raw, require_runtime_binding=True)
-        self.assertIn("'operations' array was closed", _json_structure_hint(raw))
+        self.assertIn("innermost container still open there is the 'operations' array", _json_structure_hint(raw))
+        # Real DeepSeek slips: closers swapped at the end of the operations, or a node closed one level short
+        # before the next operation; both leave the add_node operation open where parsing stops.
+        node = '{"op":"add_node","node":{"surface_contract":{"refs":["a"]}}'
+        swapped = '{"action":"design.propose_delta","arguments":{"delta":{"operations":[' + node + ']},"completion_claims":[]}}}'
+        short = (
+            '{"action":"design.propose_delta","arguments":{"delta":{"operations":[' + node
+            + ',{"op":"add_edge","edge":{}}],"completion_claims":[]}}}'
+        )
+        for broken_raw in (swapped, short):
+            hint = _json_structure_hint(broken_raw)
+            self.assertIn("Parsing stopped at character", hint)
+            self.assertIn(f"the add_node operation object opened at character {broken_raw.index(node)}", hint)
+        self.assertEqual(_json_structure_hint('{"action":"x","arguments":{}}'), "")
 
 
 def _populate_with_web_shell(target: Path) -> None:

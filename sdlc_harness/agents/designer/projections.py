@@ -850,6 +850,16 @@ def _surface_view(
         **grouped,
         "coverage": coverage,
         "not_applicable": not_applicable,
+        # Where the Designer placed a scenario's business rule (e.g. in the UI), shown to the owner at approval.
+        "surface_placements": [
+            {key: item.get(key) for key in ("scenario_id", "surface", "component_id", "reason")}
+            for item in _dicts(graph.get("surface_placements"))
+        ],
+        # Required surfaces the Designer declared this scenario never reaches, shown to the owner at approval.
+        "surface_not_exercised": [
+            {key: item.get(key) for key in ("scenario_id", "surface", "reason")}
+            for item in _dicts(graph.get("surface_not_exercised"))
+        ],
         "ui_state_diagrams": _ui_state_diagrams(grouped["ui"]),
         "data_model_plantuml": _data_model_plantuml(grouped["data"]),
         "change_impact": projected,

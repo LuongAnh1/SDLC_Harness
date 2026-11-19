@@ -20,6 +20,7 @@ from .graph import (
     BOUNDARY_CONTRACT_VERSION,
     DELTA_VERSION,
     EXTERNAL_DEPENDENCY_REF_PREFIXES,
+    PLACEABLE_SURFACES,
     GRAPH_VERSION,
     RUNTIME_BINDING_VERSION,
     SURFACE_CONTRACT_VERSION,
@@ -45,6 +46,7 @@ from .facts import (
     _scenarios,
     _strings,
     _ui_guidance_required,
+    _uiux_call_allowed,
     _uiux_guidance_status,
 )
 from .prompting import (
@@ -1051,7 +1053,27 @@ class DesignerToolLoopExecutor:
                         parse_error = {}
                 decision = _step_review_decision(self.step_review, call_id=call_id)
                 if decision == "approve" and parse_error:
-                    decision = ""
+                    # Approving unparsable output confirms the Harness rejection: retried as in unattended mode,
+                    # with the Harness's own hint, so no operator has to write the correction.
+                    raw = str(_read_json(exchange_path, run_id=run_id).get("raw_completion") or "")
+                    invalid_json_message = "Designer returned invalid JSON." + _json_structure_hint(raw)
+                    session["pending_step_review"] = None
+                    session["status"] = "running"
+                    self._invalid_action(session, session_file, message=invalid_json_message)
+                    self._record_observation(
+                        session,
+                        {"tool_id": "llm", "status": "rejected", "message": invalid_json_message},
+                    )
+                    _update_designer_exchange(
+                        exchange_path,
+                        {
+                            "status": "rejected",
+                            "rejection": {"code": "invalid_json", "message": invalid_json_message},
+                            "operator_review": {"decision": "approve", "note": str(self.step_review.get("note") or "").strip()},
+                        },
+                    )
+                    _write_json_atomic(session_file, session)
+                    continue
                 if not decision:
                     raise self._step_review_required(
                         run_id=run_id,
@@ -1340,21 +1362,18 @@ class DesignerToolLoopExecutor:
                     _guidance_observations(session, guidance_key),
                     source_inspected=bool(source_refs),
                 )
-                required_next = _dict(guidance_status.get("required_next_action"))
-                required_arguments = _dict(required_next.get("arguments"))
-                required_selector = str(
-                    required_arguments.get("domain") or required_arguments.get("stack") or ""
-                )
-                if required_next and (
-                    str(required_next.get("action") or "") != tool_id
-                    or str(required_arguments.get("mode") or "") != mode
-                    or required_selector != selector
-                ):
-                    expected = json.dumps(required_next, ensure_ascii=True, separators=(",", ":"))
+                if not _uiux_call_allowed(guidance_status, mode=mode, selector=selector):
+                    required_next = guidance_status.get("required_next_action")
+                    expected = json.dumps(
+                        required_next or guidance_status.get("allowed_next_actions") or [],
+                        ensure_ascii=True,
+                        separators=(",", ":"),
+                    )
+                    label = "Required next action" if required_next else "Allowed next actions"
                     self._invalid_action(
                         session,
                         session_file,
-                        message=f"UI/UX guidance step mismatch. Required next action: {expected}",
+                        message=f"UI/UX guidance step mismatch. {label}: {expected}",
                     )
                     self._record_observation(
                         session,
@@ -1493,7 +1512,8 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
-            if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id != "design.propose_delta":
+            # inspect_partition only shows designed graph nodes, so it stays allowed after the quota (S5-B).
+            if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id not in {"design.propose_delta", "design.inspect_partition"}:
                 self._invalid_action(
                     session,
                     session_file,
@@ -1591,6 +1611,14 @@ class DesignerToolLoopExecutor:
                         arguments=arguments,
                         repair_task=repair_task,
                         graph=registry.graph,
+                        run_id=run_id,
+                    )
+                if tool_id == "design.propose_delta":
+                    _reject_unbound_new_nodes(arguments, run_id=run_id)
+                    arguments = _validate_surface_placement_ops(
+                        arguments,
+                        requirement_model=requirement_model,
+                        landscape=landscape,
                         run_id=run_id,
                     )
                 self._execute_tool_action(
@@ -1840,7 +1868,7 @@ class DesignerToolLoopExecutor:
         )
         if tool_id == "design.propose_delta":
             session["observation_actions_since_delta"] = 0
-        elif tool_id in OBSERVATION_TOOL_IDS:
+        elif tool_id in OBSERVATION_TOOL_IDS and tool_id != "design.inspect_partition":
             session["observation_actions_since_delta"] = int(session.get("observation_actions_since_delta") or 0) + 1
         cursor["pending_call"] = None
         cursor["next_action_index"] = int(cursor.get("next_action_index") or 1) + 1
@@ -1967,7 +1995,17 @@ class DesignerToolLoopExecutor:
         }
         observations = _dicts(session.get("observations"))
         observations.append(recorded)
-        session["observations"] = observations[-12:]
+        # Never trim what a prompt still shows (the active partition's items, reads pinned as source
+        # observations): trimming them lost context mid-partition and broke the prompt prefix cache.
+        pinned = {ref for refs in _dict(session.get("source_observations")).values() for ref in _strings(refs)}
+        trimmable = [
+            index
+            for index, item in enumerate(observations)
+            if not (partition_key and item.get("partition_key") == partition_key)
+            and not pinned.intersection(_strings(item.get("evidence_refs")))
+        ]
+        dropped = set(trimmable[:-12])
+        session["observations"] = [item for index, item in enumerate(observations) if index not in dropped]
         if target_id:
             by_target = _dict(session.get("repair_observations"))
             target_observations = _dicts(by_target.get(target_id))
@@ -2110,11 +2148,21 @@ def _repair_unbalanced_closers(text: str) -> str | None:
 
 
 def _json_structure_hint(raw: str) -> str:
-    """Name the array that was closed with '}' so the next Designer call can fix its own nesting."""
+    """Point the next Designer call at the exact place its JSON broke so it can fix its own nesting."""
 
-    stack: list[tuple[str, int]] = []
+    start = raw.find("{")
+    if start < 0:
+        return ""
+    try:
+        json.JSONDecoder().raw_decode(raw, start)
+        return ""
+    except json.JSONDecodeError as error:
+        position, reason = error.pos, error.msg
+    # Containers still open where parsing stopped, innermost last.
+    stack: list[int] = []
     in_string = escaped = False
-    for index, char in enumerate(raw):
+    for index in range(start, position):
+        char = raw[index]
         if in_string:
             if escaped:
                 escaped = False
@@ -2126,19 +2174,27 @@ def _json_structure_hint(raw: str) -> str:
         if char == '"':
             in_string = True
         elif char in "{[":
-            stack.append((char, index))
+            stack.append(index)
         elif char in "}]" and stack:
-            opener, opened_at = stack.pop()
-            if opener == "[" and char == "}":
-                key = re.findall(r'"([A-Za-z_]+)"\s*:\s*$', raw[max(0, opened_at - 80):opened_at])
-                name = key[-1] if key else "an array"
-                return (
-                    f" The '{name}' array was closed with '}}' instead of ']'. Close every array with ']' and "
-                    "every object with '}', and keep completion_claims and unresolved_items inside delta after operations."
-                )
-    if stack:
+            stack.pop()
+    if position >= len(raw.rstrip()):
         return f" The JSON ended with {len(stack)} unclosed bracket(s); output the complete action object."
-    return ""
+    hint = f" Parsing stopped at character {position} ({reason}) near {raw[max(0, position - 40):position + 40]!r}."
+    if stack:
+        hint += (
+            f" The innermost container still open there is {_json_container_label(raw, stack[-1])} opened at "
+            f"character {stack[-1]}."
+        )
+    return hint + " Close every object with '}' and every array with ']', innermost first."
+
+
+def _json_container_label(raw: str, opened_at: int) -> str:
+    kind = "array" if raw[opened_at] == "[" else "object"
+    key = re.findall(r'"([A-Za-z_]+)"\s*:\s*$', raw[max(0, opened_at - 80):opened_at])
+    if key:
+        return f"the '{key[-1]}' {kind}"
+    operation = re.match(r'\{\s*"op"\s*:\s*"([A-Za-z_]+)"', raw[opened_at:opened_at + 60])
+    return f"the {operation.group(1)} operation object" if operation else f"an {kind}"
 
 
 def _remove_redundant_closers(text: str, *, require_runtime_binding: bool, limit: int = 3) -> dict[str, object] | None:
@@ -2287,21 +2343,32 @@ def _prompt_observations(
     active_component_id: str = "",
 ) -> list[dict[str, object]]:
     all_observations = _dicts(session.get("observations"))
-    if repair_task is None:
-        partition_key = str(session.get("active_partition_key") or "")
-        selected = [
-            item
-            for item in all_observations
-            if (not partition_key or str(item.get("partition_key") or "") == partition_key)
-            and str(item.get("tool_id") or "") != "uiux.search_guidance"
-            and str(item.get("status") or "") != "operator_rejected"
-        ][-8:]
-    else:
-        target_id = str(repair_task.get("target_id") or "")
-        selected = _dicts(_dict(session.get("repair_observations")).get(target_id))
     source_refs = set(
         _strings(_dict(session.get("source_observations")).get(active_component_id))
     )
+    if repair_task is None:
+        partition_key = str(session.get("active_partition_key") or "")
+        # Chronological and append-only (no sliding window, pinned sources not moved first): each prompt of a
+        # partition then extends the previous one, so DeepSeek's prefix cache covers every observation already sent.
+        # The partition action budget bounds how many observations a partition adds.
+        chronological: list[dict[str, object]] = []
+        seen: set[str] = set()
+        for item in all_observations:
+            if str(item.get("status") or "") == "operator_rejected":
+                continue
+            in_partition = (
+                (not partition_key or str(item.get("partition_key") or "") == partition_key)
+                and str(item.get("tool_id") or "") != "uiux.search_guidance"
+            )
+            if not in_partition and not source_refs.intersection(_strings(item.get("evidence_refs"))):
+                continue
+            fingerprint = canonical_json_hash(item)
+            if fingerprint not in seen:
+                seen.add(fingerprint)
+                chronological.append(item)
+        return chronological
+    target_id = str(repair_task.get("target_id") or "")
+    selected = _dicts(_dict(session.get("repair_observations")).get(target_id))
     pinned = [
         item
         for item in all_observations
@@ -2763,7 +2830,12 @@ def _runtime_binding_scaffold(
     candidate_anchors: list[dict[str, object]],
     owner_anchors: list[dict[str, object]],
 ) -> dict[str, object]:
-    owner = owner_anchors[0] if owner_anchors else {}
+    # A UI owner is the composition_path hop just before the target, and a business rule's owner is the code that
+    # calls it; only the Designer knows either once it picks the target: a pre-filled guess (e.g. the app root)
+    # contradicts that rule, so both keep placeholders.
+    owner = owner_anchors[0] if owner_anchors and surface not in {"ui", "business_rule"} else {}
+    if surface == "ui":
+        candidate_anchors = []
     component_id = str(component.get("component_id") or "<component_id>")
     runtime_kind = {
         "ui": "ui_component",
@@ -2788,9 +2860,22 @@ def _runtime_binding_scaffold(
         },
         "attachment": {
             "relation": relation,
-            "owner_ref": str(owner.get("anchor_id") or "<RLA-* or runtime-bound VDN-*>") ,
-            "owner_path": str(owner.get("path") or "<composition owner path>"),
-            "owner_symbol": str(owner.get("symbol") or "<composition owner symbol>"),
+            "owner_ref": str(
+                owner.get("anchor_id") or "<RLA-*, runtime-bound VDN-*, or the temp_ref of a node this delta adds>"
+            ),
+            "owner_path": str(
+                owner.get("path")
+                or {
+                    "ui": "<path of the composition_path hop just before the target>",
+                    "business_rule": "<path of the code that calls this target>",
+                }.get(surface, "<composition owner path>")
+            ),
+            "owner_symbol": str(
+                owner.get("symbol")
+                or {"ui": "<symbol of that hop>", "business_rule": "<symbol of that caller>"}.get(
+                    surface, "<composition owner symbol>"
+                )
+            ),
         },
         "evidence_refs": list(
             dict.fromkeys(
@@ -3081,6 +3166,7 @@ def _reconcile_stale_placeholder_partitions(
                 matches=matches,
                 anchors=anchors,
                 landscape=landscape,
+                placements=_surface_placements(graph),
             )
             == component_id
         }
@@ -3118,13 +3204,23 @@ def _active_partition(
     partitions = _dicts(graph.get("partitions"))
     nodes = _dicts(graph.get("nodes"))
     surface_order = ("ui", "api", "business_rule", "data", "interaction")
+    placements = _surface_placements(graph)
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
+        for item in _dicts(graph.get("surface_not_exercised"))
+    }
+    placeable_component_ids = sorted(
+        str(item.get("component_id") or "")
+        for item in _dicts(landscape.get("components"))
+        if _strings(item.get("roots"))
+    )
 
     for scenario in _scenarios(requirement_model):
         scenario_id = str(scenario.get("id") or "")
         required = _required_surface_set(scenario)
         missing: list[str] = []
         for surface in surface_order:
-            if surface not in required:
+            if surface not in required or (scenario_id, surface) in not_exercised:
                 continue
             covered = any(
                 str(item.get("scenario_id") or "") == scenario_id
@@ -3147,6 +3243,7 @@ def _active_partition(
             matches=matches,
             anchors=anchors,
             landscape=landscape,
+            placements=placements,
         )
         grouped_surfaces = [
             surface
@@ -3158,6 +3255,7 @@ def _active_partition(
                 matches=matches,
                 anchors=anchors,
                 landscape=landscape,
+                placements=placements,
             )
             == component_id
         ]
@@ -3185,6 +3283,18 @@ def _active_partition(
                 "data": {"data_model", "data_operation"},
                 "interaction": {"service_symbol"},
             }.get(surface, set())
+            chain_refs = _ui_chain_refs(graph) if surface == "ui" else []
+            component_anchor_ids = {
+                ref for ref, item in anchors.items() if ref and str(item.get("component_id") or "") == component_id
+            }
+            matched_ids = {str(item.get("anchor_id") or "") for item in candidate_anchors}
+            # A match that lists every anchor of the component does not discriminate, so cutting it to the top 3 is an
+            # arbitrary hash-order pick (e.g. a DELETE route for an edit scenario): the Designer searches instead.
+            # For UI, ui_runtime_context.composition_chain already lists every mounted component.
+            if chain_refs or (
+                len(candidate_anchors) > 3 and component_anchor_ids and matched_ids >= component_anchor_ids
+            ):
+                candidate_anchors = []
             candidate_anchors.sort(
                 key=lambda item: (
                     0 if str(item.get("kind") or "") in preferred_kinds else 1,
@@ -3196,6 +3306,7 @@ def _active_partition(
                 surface=surface,
                 component_id=component_id,
                 landscape=landscape,
+                chain_refs=chain_refs,
             )
             surface_work.append(
                 {
@@ -3282,6 +3393,62 @@ def _active_partition(
         ]
         if branch_parent is not None:
             operations.append({"op": "add_edge", "edge": branch_parent["edge"]})
+        # The scenario's surfaces designed by later partitions, so the Designer knows its terminal edge comes later.
+        later: dict[str, list[str]] = {}
+        for surface in missing:
+            if surface not in grouped_surfaces:
+                later_component = _component_for_missing_surface(
+                    scenario_id=scenario_id,
+                    surface=surface,
+                    required_surfaces=required,
+                    matches=matches,
+                    anchors=anchors,
+                    landscape=landscape,
+                    placements=placements,
+                )
+                later.setdefault(later_component, []).append(surface)
+        later_partitions = [{"component_id": key, "surfaces": value} for key, value in later.items()]
+        # Where a business rule runs is only known from the code: show the default and let the Designer place it.
+        placeable_surfaces: list[dict[str, object]] = []
+        for surface in sorted(PLACEABLE_SURFACES):
+            if surface not in missing:
+                continue
+            placed = next(
+                (item for item in _dicts(graph.get("surface_placements"))
+                 if item.get("scenario_id") == scenario_id and item.get("surface") == surface),
+                None,
+            )
+            work = next((item for item in surface_work if item["surface"] == surface), None)
+            if placed is not None:
+                if work is not None:
+                    work["placement"] = {key: placed.get(key) for key in ("component_id", "reason", "placed_in_partition")}
+                continue
+            default_component = _component_for_missing_surface(
+                scenario_id=scenario_id,
+                surface=surface,
+                required_surfaces=required,
+                matches=matches,
+                anchors=anchors,
+                landscape=landscape,
+            )
+            option = {
+                "harness_routing_guess": default_component,
+                "routing_guess_note": "guessed from the scenario's required surfaces, not a decision",
+                "placeable_component_ids": placeable_component_ids,
+            }
+            if work is not None:
+                work["placement"] = {
+                    **option,
+                    "if_placed_elsewhere": (
+                        "drop business_rule from the delta_scaffold set_partition_coverage and completion_claims and "
+                        "add no business_rule node"
+                    ),
+                }
+            elif "ui" in grouped_surfaces:
+                surface_contract = _dict(_dict(scenario.get("surfaces")).get(surface))
+                placeable_surfaces.append(
+                    {"surface": surface, "requirement_refs": _strings(surface_contract.get("requirement_refs")), **option}
+                )
         return {
             "partition": partition,
             "component": component,
@@ -3299,6 +3466,8 @@ def _active_partition(
                 "unresolved_items": [],
             },
             **({"harness_wiring_operations": wiring_templates} if wiring_templates else {}),
+            **({"later_partitions": later_partitions} if later_partitions else {}),
+            **({"placeable_surfaces": placeable_surfaces} if placeable_surfaces else {}),
         }
     return None
 
@@ -4128,6 +4297,10 @@ def _applicable_repair_feedback(
         if str(status or "") in {"covered", "no_change"}
         and (str(partition.get("scenario_id") or "").casefold(), str(surface).casefold())
         in node_surface_keys
+    } | {
+        # A surface declared not exercised needs no node: its required_surface_missing feedback no longer applies.
+        (str(item.get("scenario_id") or "").casefold(), str(item.get("surface") or "").casefold())
+        for item in _dicts(graph.get("surface_not_exercised"))
     }
     materialized_partition_keys = {
         f"{scenario_id}@{component_id}".casefold()
@@ -4623,6 +4796,81 @@ def _required_surfaces(requirement_model: dict[str, object]) -> dict[str, set[st
     return {str(item.get("id") or ""): _required_surface_set(item) for item in _scenarios(requirement_model)}
 
 
+def _reject_unbound_new_nodes(arguments: object, *, run_id: str) -> None:
+    """The completion rule (runtime_binding_missing) applied when the node is proposed, while its partition is active."""
+
+    for operation in _dicts(_dict(_dict(arguments).get("delta")).get("operations")):
+        if str(operation.get("op") or "") != "add_node":
+            continue
+        node = _dict(operation.get("node"))
+        if str(node.get("kind") or "") == "interaction_step" or _dict(node.get("runtime_binding")):
+            continue
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Node {node.get('temp_ref') or node.get('semantic_key') or '<unnamed>'} has no runtime_binding; every node "
+            "except an interaction_step realized by a runtime-bound node needs runtime_binding_v1 (start from the "
+            "delta_scaffold one).",
+            run_id=run_id,
+        )
+
+
+def _surface_placements(graph: dict[str, object]) -> dict[tuple[str, str], str]:
+    return {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or "")): str(item.get("component_id") or "")
+        for item in _dicts(graph.get("surface_placements"))
+    }
+
+
+def _validate_surface_placement_ops(
+    arguments: object,
+    *,
+    requirement_model: dict[str, object],
+    landscape: dict[str, object],
+    run_id: str,
+) -> object:
+    """place_surface / not_exercised may only name a surface the Requirement requires (and place_surface a component
+    the landscape owns). Returns the arguments with each not_exercised op carrying that surface's Requirement ids."""
+
+    delta = _dict(_dict(arguments).get("delta"))
+    scenario_id = str(_dict(delta.get("partition")).get("scenario_id") or "")
+    required = _required_surfaces(requirement_model).get(scenario_id, set())
+    scenario = next((item for item in _scenarios(requirement_model) if str(item.get("id") or "") == scenario_id), {})
+    components = {
+        str(item.get("component_id") or "")
+        for item in _dicts(landscape.get("components"))
+        if _strings(item.get("roots"))
+    }
+    operations = _dicts(delta.get("operations"))
+    changed = False
+    for index, operation in enumerate(operations):
+        op = str(operation.get("op") or "")
+        if op not in {"place_surface", "not_exercised"}:
+            continue
+        surface = str(operation.get("surface") or "")
+        component_id = str(operation.get("component_id") or "")
+        if surface not in required:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"{op} {surface or '<missing>'}: the approved Requirement does not require it for {scenario_id}.",
+                run_id=run_id,
+            )
+        if op == "not_exercised":
+            refs = _strings(_dict(_dict(scenario.get("surfaces")).get(surface)).get("requirement_refs"))
+            operations[index] = {**operation, "requirement_refs": refs}
+            changed = True
+            continue
+        if component_id not in components:
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"place_surface component_id {component_id or '<missing>'} is not a landscape component; use one of "
+                f"{', '.join(sorted(components))}.",
+                run_id=run_id,
+            )
+    if not changed:
+        return arguments
+    return {**_dict(arguments), "delta": {**delta, "operations": operations}}
+
+
 def _component_for_missing_surface(
     *,
     scenario_id: str,
@@ -4631,7 +4879,12 @@ def _component_for_missing_surface(
     matches: dict[tuple[str, str], list[str]],
     anchors: dict[str, dict[str, object]],
     landscape: dict[str, object],
+    placements: dict[tuple[str, str], str] | None = None,
 ) -> str:
+    # The Designer's place_surface (from repository evidence) overrides the default routing below.
+    placed = (placements or {}).get((scenario_id, surface))
+    if placed:
+        return placed
     local_ui_rule = (
         surface == "business_rule"
         and "ui" in (required_surfaces or set())
@@ -4689,8 +4942,15 @@ def _composition_owner_candidates(
     surface: str,
     component_id: str,
     landscape: dict[str, object],
+    chain_refs: list[str] | None = None,
 ) -> list[dict[str, object]]:
-    """Prefer real composition roots over feature/demo anchors used only as evidence."""
+    """Prefer real composition roots over feature/demo anchors used only as evidence.
+
+    For UI, components on ui_repo_context's composition chain come first in chain order (entrypoint first), so the
+    scaffolds that mount from the first owner keep starting at the entrypoint.
+    """
+
+    chain_position = {ref: index for index, ref in enumerate(chain_refs or [])}
 
     preferred_kinds = {
         "ui": ("ui_component", "ui_entrypoint", "source_file"),
@@ -4708,7 +4968,7 @@ def _composition_owner_candidates(
         and str(item.get("kind") or "") not in {"test", "manifest", "verification_config", "migration"}
     ]
 
-    def rank(item: dict[str, object]) -> tuple[int, int, int, str]:
+    def rank(item: dict[str, object]) -> tuple[int, int, int, int, str]:
         kind = str(item.get("kind") or "")
         haystack = " ".join(
             [str(item.get("path") or ""), str(item.get("symbol") or "")]
@@ -4721,9 +4981,25 @@ def _composition_owner_candidates(
             )
         )
         kind_rank = preferred_kinds.index(kind) if kind in preferred_kinds else len(preferred_kinds)
-        return incidental, composition_hint, kind_rank, str(item.get("anchor_id") or "")
+        on_chain = chain_position.get(_anchor_ref(item), len(chain_position))
+        return on_chain, incidental, composition_hint, kind_rank, str(item.get("anchor_id") or "")
 
     return sorted(anchors, key=rank)
+
+
+def _anchor_ref(anchor: dict[str, object]) -> str:
+    return f"{anchor.get('path') or ''}#{anchor.get('symbol') or ''}"
+
+
+def _ui_chain_refs(graph: dict[str, object]) -> list[str]:
+    """Entrypoint, then every mounted component of ui_repo_context's composition chain, in chain order."""
+
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    refs = [
+        str(_dict(context.get("entrypoint")).get("ref") or ""),
+        *(str(hop.get("ref") or "") for hop in _dicts(context.get("composition_chain"))),
+    ]
+    return [ref for ref in dict.fromkeys(refs) if ref]
 
 
 def _default_component(landscape: dict[str, object], *, hint: str = "") -> str:

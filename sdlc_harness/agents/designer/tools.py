@@ -341,10 +341,14 @@ class DesignerToolRegistry:
     def _inspect_partition(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         scenario_id = str(args.get("scenario_id") or "").strip()
         component_id = str(args.get("component_id") or "").strip()
+        # node_ids fetches exact rows listed in the prompt's graph.index; scenario/component filters still apply.
+        wanted = {str(item).strip() for item in _strings(args.get("node_ids")) if str(item).strip()}
         node_ids = {
             str(item.get("id") or "")
             for item in _dicts(self.graph.get("nodes"))
-            if str(item.get("scenario_id") or "") == scenario_id
+            if (scenario_id or wanted)
+            and (not scenario_id or str(item.get("scenario_id") or "") == scenario_id)
+            and (not wanted or str(item.get("id") or "") in wanted)
             and (not component_id or str(item.get("component_id") or "") == component_id)
         }
         return {
@@ -353,7 +357,8 @@ class DesignerToolRegistry:
             "partitions": [
                 item
                 for item in _dicts(self.graph.get("partitions"))
-                if str(item.get("scenario_id") or "") == scenario_id
+                if scenario_id
+                and str(item.get("scenario_id") or "") == scenario_id
                 and (not component_id or str(item.get("component_id") or "") == component_id)
             ],
             "nodes": [item for item in _dicts(self.graph.get("nodes")) if str(item.get("id") or "") in node_ids],

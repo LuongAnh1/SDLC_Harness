@@ -745,6 +745,43 @@ def test_runtime_blocker_skips_behavior_call_but_other_scenarios_and_coherence_r
     assert "deferred_runtime_blocked" in coherence_prompt
 
 
+def test_behavior_deferred_by_a_runtime_blocker_that_adjudication_drops_is_reviewed() -> None:
+    # r7: SC-1's Token/Bearer runtime blocker was dropped by adjudication, but its deferred behavior review never ran
+    # and the Design reached the checkpoint with SC-1's behavior claims unreviewed.
+    client = StaticLlmClient(
+        [
+            _runtime_blocked("SC-1:MF-1", "SC-1:surface:ui"),
+            _task_success("SC-2:AF-1", "SC-2:surface:ui"),
+            _coherence(
+                conflicts=[
+                    {
+                        "finding_ids": ["runtime-sc-1:SEM-RUNTIME"],
+                        "claim_ids": ["SC-1:MF-1"],
+                        "design_refs": ["VDN-ui-1"],
+                        "reason": "sibling evidence contradicts the runtime blocker",
+                    }
+                ]
+            ),
+            _adjudication(drop_finding_ids=["runtime-sc-1:SEM-RUNTIME"]),
+            _task_success("SC-1:MF-1", "SC-1:surface:ui"),
+        ]
+    )
+
+    result = _review(client, inputs=_inputs(shared_screen=True, boundary=True))
+
+    assert not result.inconclusive
+    assert result.ok
+    assert result.blocking_findings == []
+    # runtime-sc-1, scenario-sc-2, coherence, adjudication, then the deferred scenario-sc-1
+    assert len(client.prompts) == 5
+    assert client.prompts[-1].startswith("Design Semantic Scenario Review v2")
+    assert '"primary_claim_ids":["SC-1:MF-1","SC-1:surface:ui"]' in client.prompts[-1]
+    assert result.llm_review["actual_calls"] == 5
+    tasks = {task["task_id"]: task for task in result.llm_review["tasks"]}
+    assert tasks["scenario-sc-1"]["status"] == "reviewed"
+    assert {item["status"] for item in tasks["scenario-sc-1"]["assessments"]} == {"satisfied"}
+
+
 def test_final_adjudication_remediation_mode_is_required_and_routes_fail_closed() -> None:
     blocker = _runtime_blocked("SC-1:MF-1")
     missing_mode = _adjudication("runtime-sc-1:SEM-RUNTIME")
@@ -1332,7 +1369,10 @@ def test_every_prompt_explains_packet_fields_severity_and_deterministic_scope() 
         assert "externally_blocked = runnable once its\n  declared external inputs exist" in prompt
         assert "ui_repo_context describes the current AS-IS repository" in prompt
         assert "composition forwarded-input propagation, branch parent wiring" in prompt
-        assert "ok=true\nis not evidence that this Design is semantically sound" in prompt
+        assert "not evidence that this Design is semantically sound" in " ".join(prompt.split())
+        # The facts proved for this packet are listed so the review does not re-derive them (r7 cost).
+        assert "packet.harness_established lists the facts it proved for this packet" in " ".join(prompt.split())
+        assert "spend the review on packet.harness_established.not_established" in " ".join(prompt.split())
         assert "explicitly modeled but non-required alternative or error outcome" in prompt
         assert "do not assume every\n  task contains a finding" in prompt
         assert "An invented blocker and a missed blocker" not in prompt

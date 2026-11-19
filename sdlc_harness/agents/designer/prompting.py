@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import collections
 import json
 
 from ...core.coerce import dict_copies as _dicts
@@ -62,8 +63,8 @@ def _active_requirement_slice(
 
     cross_cutting_conditions = _cross_cutting_conditions(requirement_model)
 
-    # A UI partition presents the scenario's final outcome even when the Requirement allocated that outcome only to
-    # backend surfaces (or to no surface): expose those ids as presentation-only context, never as behavior scope.
+    # A UI partition must stay consistent with acceptance criteria the Requirement allocated only to other surfaces
+    # (or to no surface): expose those ids as presentation-only context, never as behavior scope.
     outcome_context: list[dict[str, object]] = []
     if include_outcome_context and any(str(work.get("surface") or "") == "ui" for work in surface_work):
         allocated = {
@@ -274,6 +275,16 @@ def _designer_prompt(
         scenario_matches = [
             item for item in scenario_matches if str(item.get("scenario_id") or "") == repair_scenario_id
         ]
+    elif active_partition is not None:
+        # Construction builds only the active scenario's missing surfaces; other entries repeat the same anchors.
+        active_scenario_id = str(_dict(active_partition.get("partition")).get("scenario_id") or "")
+        missing_surfaces = set(_strings(active_partition.get("missing_surfaces")))
+        scenario_matches = [
+            item
+            for item in scenario_matches
+            if str(item.get("scenario_id") or "") == active_scenario_id
+            and str(item.get("surface") or "") in missing_surfaces
+        ]
     active_requirement_slice = _active_requirement_slice(
         requirement_model=requirement_model,
         active_partition=active_partition,
@@ -340,7 +351,11 @@ def _designer_prompt(
     )
     guidance_reused = _feature_guidance_satisfied(graph)
     uiux_status = (
-        _uiux_guidance_status(active_guidance or [], source_inspected=source_inspected)
+        _uiux_guidance_status(
+            active_guidance or [],
+            source_inspected=source_inspected,
+            delta_required=observations_since_delta >= observation_limit,
+        )
         if ui_guidance_required and not guidance_reused
         else {}
     )
@@ -359,30 +374,34 @@ def _designer_prompt(
         "node's runtime_binding.target, each item written as <repo path>#<symbol>; middle hops are AS-IS components "
         "from ui_runtime_context.composition_chain or runtime targets of other UI nodes, and runtime_binding.attachment "
         "owner_path#owner_symbol must equal the hop just before the target. Nodes on the same screen share one screen_id. "
-        "required_inputs lists every runtime input the screen needs to become usable (records to show or select, "
-        "session/auth, data loaded from another use case), including every required prop of an AS-IS component a "
-        "screen node modifies or reuses. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
+        "required_inputs lists every runtime input that must be handed to the screen before it is usable (records to "
+        "show or select, a session or auth value passed in, data loaded from another use case), including every required prop of an AS-IS "
+        "component a screen node modifies or reuses. Data the target component obtains by itself (a record it fetches "
+        "through one of ui_runtime_context.data_clients, or state it reads from a store) is not a required input: leave "
+        "it out of required_inputs and model its loading, ready and error states in runtime_states and transitions; "
+        "never route it through a hop that does not hold and pass it. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
         "new_boundary when this Design adds the provider (binding is that node's VDN-* id); external_use_case when the "
         "approved Requirement says the data comes from another use case, citing the precondition or flow-step id from "
         "ui_runtime_context.dependency_refs whose text states that dependency, and then runnable_status=externally_blocked; "
         "never declare such data as provided by this screen. An input guaranteed by a precondition (for example an "
-        "authenticated session) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
+        "authenticated session passed in) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
         "has its provider; demo_fixture only with an accepted D-* decision listed in dependency_refs and "
         "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
         "that supplies the input. When a new input must flow down to the screen, declare it only on the screen node "
         "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta every "
         "composition_wiring modify node and every nonterminal calls edge between consecutive AS-IS wiring hops "
         "from provided_by down to the screen "
-        "(active_partition.harness_wiring_operations shows them, with <input names> filled from your required_inputs); "
-        "do not write those wiring nodes or their internal edges yourself. Add only the semantic edge from the final "
-        "wiring hop to the screen, referencing that hop's temp_ref. An "
+        "(active_partition.harness_wiring_operations shows them, with <input names> filled from your required_inputs; "
+        "with no required_inputs it adds nothing); "
+        "do not write those wiring nodes or their internal edges yourself. When it adds wiring, add only the semantic "
+        "edge from the final wiring hop to the screen, referencing that hop's temp_ref. An "
         "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
         "Requirement does not state. "
         if ui_guidance_required
         else ""
     )
     uiux_status_instruction = (
-        "CURRENT UI/UX TOOL STATE (authoritative; apply before all general instructions):\n"
+        "CURRENT UI/UX TOOL STATE (authoritative; it overrides the general instructions above):\n"
         f"{json.dumps(uiux_status, ensure_ascii=True, separators=(',', ':'))}\n"
         "When required_next_action is present, match its action, mode, and fixed selector exactly; choose only the "
         "query text yourself. When it is null, choose only from allowed_next_actions. A domain query asks for the "
@@ -410,10 +429,11 @@ def _designer_prompt(
             "(screen, visual_contract, component layout) for the same screen_id and keep them consistent. "
             "feature_ux_decisions.scenario_focus_policies and runtime_states belong to the scenarios they name: use them "
             "only to keep element names consistent, never copy them into this scenario. Transitions, outcomes, feedback, "
-            "focus_policies and runtime_states must implement only active_requirement_slice. active_requirement_slice.outcome_context (if present) is this scenario's final "
-            "user-observable result: show it in the final transition outcome, outcomes, feedback and "
-            "runtime_states.success/error, but do not design how it is produced (that work belongs to other surfaces) and "
-            "never add outcome_context ids to requirement_refs. Mark a runtime state owned by another scenario as {not_applicable:true,reason:"
+            "focus_policies and runtime_states must implement only active_requirement_slice. active_requirement_slice.outcome_context (if present) lists "
+            "this scenario's acceptance criteria that the Requirement assigns to other surfaces. They are reference "
+            "only: never put their ids in requirement_refs and do not design their backend mechanism; keep what this "
+            "screen shows consistent with them (for example an action that stays unavailable while a request is "
+            "pending). This surface's own work is set by allowed_requirement_refs. Mark a runtime state owned by another scenario as {not_applicable:true,reason:"
             "'owned by <scenario id>'} and never add another scenario's behavior (for example its cancel or success "
             "outcome) to this node. Also fill screen{screen_id,purpose,entry_condition}; runtime_states for loading, "
             "ready, empty, error and success, each as {presentation,trigger} or {not_applicable:true,reason}; "
@@ -441,14 +461,39 @@ def _designer_prompt(
         "in allowed_requirement_refs. active_requirement_slice.cross_cutting_conditions are approved use-case facts, "
         "not behavior: account for each applicable condition in the Design and cite its id without inventing how the "
         "Requirement is implemented. "
+        "graph holds the active scenario in full and graph.index lists every other designed node as one row; before "
+        "reusing, attaching to or linking a node that appears only in graph.index, call "
+        "design.inspect_partition(scenario_id?,component_id?,node_ids?) to see it in full. "
         "requirement_context.scenario_index is navigation-only; never copy behavior from "
         "a sibling scenario into the active projection. A runtime target may be shared by later projections, but this "
         "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton, "
         "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
         "connect this projection to nodes of the same scenario already in the graph or in this delta, keeping exactly "
-        "one terminal edge last. Every edge endpoint must be an existing VDN-* id or a temp_ref added in this same delta; "
+        "one terminal edge last. Edge order follows add_edge operation order: to place new edges before an edge already "
+        "in the graph (for example the existing terminal edge, even one added by an earlier partition), remove that edge "
+        "with exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"} and add it again after the new edges. "
+        "Every edge endpoint must be an existing VDN-* id or a temp_ref added in this same delta; "
         "when the counterpart surface (for example the API a UI calls) is not designed yet, leave that edge to its later "
-        "partition instead of inventing an endpoint. "
+        "partition instead of inventing an endpoint. terminal=true belongs only on the edge that reaches the "
+        "scenario's final observable outcome; when that outcome is reached through a surface not designed yet "
+        "(active_partition.later_partitions lists this scenario's surfaces that later partitions design), keep "
+        "every edge of this delta terminal=false and let the later partition add the terminal edge. "
+        "A scenario's business_rule belongs to the component whose code makes that decision at run time; "
+        "surface_work[].placement or active_partition.placeable_surfaces shows the Harness routing guess, which comes "
+        "from the scenario's surface list and is not a decision. When this scenario sends a request the server must "
+        "accept or reject (for example an edit or delete request), its rule runs in the server component. When this "
+        "scenario only reads and another component decides what to show (for example the UI decides which actions to "
+        "show), add {\"op\":\"place_surface\",\"surface\":\"business_rule\",\"component_id\":\"<that "
+        "component>\",\"reason\":\"<where the decision runs>\",\"evidence_refs\":[\"<the ref of that code>\"]} instead of "
+        "inventing a call: placed in this delta's component, this delta also adds and covers the business_rule node; "
+        "placed elsewhere, drop business_rule from this delta's set_partition_coverage and completion_claims, add no "
+        "business_rule node, and that component's partition designs it. "
+        "When this scenario runs nothing at all on one of its missing surfaces in any component (for example a request "
+        "refused before any database access never touches data), add {\"op\":\"not_exercised\",\"surface\":\"<surface>\","
+        "\"reason\":\"<what ends the scenario before it>\",\"evidence_refs\":[\"<the ref of that code>\"]} and set that "
+        "surface's coverage to not_exercised instead of a node for code that never runs; its Requirement ids must still "
+        "be carried by the scenario's other Design nodes. A surface the scenario reads, writes or decides on is designed "
+        "as a node, never declared not exercised. "
         "For an alternative or exception scenario, inspect "
         "surface_work.shared_target_candidates before inventing a new runtime target. Graph projection identity and "
         "runtime target identity are separate: when the branch starts from or returns to the same interaction owner or "
@@ -516,13 +561,19 @@ def _designer_prompt(
         if active_partition is not None or repair_task is not None
         else ""
     )
+    # Fixed text first and volatile state last, so consecutive calls share a long prompt prefix (DeepSeek caches
+    # by prefix): the UI/UX state and rejection notices used to lead the prompt and changed on every call.
     return (
-        uiux_status_instruction
-        + correction
-        + review_correction
+        "The volatile state comes last in this prompt: CURRENT_STATE_JSON, then the CURRENT UI/UX TOOL STATE block "
+        "when present (authoritative: it overrides the general instructions) and any rejection of your previous "
+        "action (fix it before doing anything else).\n\n"
         + uiux_instruction
         + runtime_surface_instruction
         + "Investigate frozen AS-IS evidence, identify GAP, and propose TO-BE one tool action at a time. "
+        "A GAP is only behavior that active_requirement_slice.allowed_requirement_refs needs and the AS-IS target "
+        "lacks; when the AS-IS target already provides all of it, use reuse and describe its current runtime states as "
+        "they are. UI/UX guidance shapes how required behavior looks; it never adds behavior the Requirement does not "
+        "ask for. "
         "Use only the listed tools. Existing behavior must use reuse/modify/no_change with RLA evidence; "
         "new behavior uses add with an evidence_reason. Every node needs requirement_refs, a concise contract, and a "
         f"{SURFACE_CONTRACT_VERSION} surface_contract matching its surface. "
@@ -539,24 +590,27 @@ def _designer_prompt(
         + "For Graph V2, candidate anchors locate source but do not satisfy investigation. While observation_policy.source_inspected "
         "is false, the next action must be repo.read or an available codegraph.query for the active component; a delta "
         "proposed before that is rejected. observation_policy.actions_remaining_including_delta is the real budget of this "
-        f"target or partition and includes the delta: make at most {observation_limit} distinct observation actions, "
+        "target or partition and includes the delta: make at most observation_policy.limit_before_delta distinct "
+        "observation actions (design.inspect_partition is not one of them: it only shows designed graph nodes), "
         "then you must call design.propose_delta before investigating another partition. If must_propose_delta_now is true, "
-        "the only valid next action is design.propose_delta. Call complete only when active_partition and active_repair_task are null.\n\n"
+        "the only valid next actions are design.propose_delta, or design.inspect_partition of a node listed only in "
+        "graph.index. Call complete only when active_partition and active_repair_task are null.\n\n"
         "Tools: landscape.search(query?,scenario_id?,surface?,component_id?,kind?); "
         "landscape.get_anchor(anchor_id); repo.search(query,component_id?); "
         "repo.read(path,start_line?,end_line?); codegraph.query(operation=explore|symbols|callers|callees|impact|files,query?,symbol?,kind?,limit?,depth?,filter?,pattern?); "
         + uiux_tool_instruction
-        + "design.inspect_partition(scenario_id,component_id?); "
+        + "design.inspect_partition(scenario_id?,component_id?,node_ids?); "
         f"design.propose_delta(delta); complete(). The delta requires schema_version={delta_contract}, "
         "base_graph_digest, partition{use_case_id,scenario_id,component_id}, operations, "
         "completion_claims, and unresolved_items. completion_claims must be objects shaped exactly like "
         "{\"scenario_id\":\"SC-1\",\"surfaces\":[\"ui\",\"api\"]}; allowed surface values are ui, api, "
         "business_rule, data, and interaction. The completion_claims array must never contain bare strings. "
         "Supported operations are set_partition_coverage, "
-        "add_node, update_node, remove_node, add_edge, and remove_edge. An add_node contains "
+        "add_node, update_node, remove_node, add_edge, remove_edge, place_surface, and not_exercised. An add_node contains "
         "temp_ref, semantic_key, name, kind, surface, disposition, requirement_refs, evidence_refs, "
         "evidence_reason, contract, surface_contract, and for Graph V2 runtime_binding. node.evidence_refs accepts only "
-        "frozen repository evidence returned by Designer tools (RLA-* or repo:*); never put Requirement provenance E-*, "
+        "frozen repository evidence returned by Designer tools (RLA-* or repo:*), copied exactly: the #L line is part "
+        "of the ref, so never change it or write a new one; never put Requirement provenance E-*, "
         "Requirement IDs, or uiux:* refs there. Reuse/modify/no_change need an observed repository evidence ref. For "
         "disposition=add, leave node.evidence_refs empty, explain the GAP in evidence_reason, and keep inspected "
         "composition-owner or entrypoint anchors under runtime_binding.evidence_refs. For a mutation, the complete outer envelope must be "
@@ -604,6 +658,9 @@ def _designer_prompt(
         "For service and persistence_adapter providers, when boundary_contract.provider_operation is a concrete "
         "identifier, runtime_binding.target.symbol must expose that exact callable. A file may host multiple symbols; "
         "never bind a query operation to a create/update/delete callable. "
+        "A runtime_binding.attachment with relation called_by names the caller: its owner must be the runtime target "
+        "of a node with a calls edge into this node (the route handler or screen that runs the call), never an app "
+        "root that only wires modules together. "
         "A boundary_contract describes data mapping but does not make a direct cross-application call executable. "
         "Code in one apps/* application may call a non-API provider in another apps/* application only through an "
         "explicit approved transport surface. Business rules do not imply backend placement: when UI is required and "
@@ -617,8 +674,51 @@ def _designer_prompt(
         "the approved requirement explicitly requires it. "
         + delta_scaffold_instruction
         + "Action JSON: {\"action\":\"tool.id\",\"arguments\":{...}}\n\n"
-        + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        + _prompt_blocks(payload)
+        + "".join(f"\n\n{text.rstrip()}" for text in (uiux_status_instruction, correction, review_correction) if text)
     )
+
+
+# Ordered from run-stable to volatile; keys keep their names, so instructions such as
+# active_partition.surface_work or observation_policy.must_propose_delta_now stay valid.
+_PROMPT_BLOCKS = (
+    (
+        "RUN_CONTEXT_JSON",
+        ("graph_contract", "delta_contract", "landscape_summary", "components", "requirement_context", "requirement",
+         "uiux_mode", "repair_feedback_delivery"),
+    ),
+    (
+        "PARTITION_CONTEXT_JSON",
+        ("active_partition", "active_repair_task", "active_requirement_slice", "scenario_matches", "graph",
+         "ui_runtime_context", "feature_ux_decisions", "repair_feedback"),
+    ),
+    ("OBSERVATIONS_JSON", ("recent_observations",)),
+)
+
+
+def _prompt_blocks(payload: dict[str, object]) -> str:
+    placed = {key for _, keys in _PROMPT_BLOCKS for key in keys}
+    blocks = [(label, {key: payload[key] for key in keys if key in payload}) for label, keys in _PROMPT_BLOCKS]
+    # Everything else (counters, UI/UX status, last rejection) changes between calls: it goes last.
+    blocks.append(("CURRENT_STATE_JSON", {key: value for key, value in payload.items() if key not in placed}))
+    return "\n\n".join(
+        f"{label}:\n{json.dumps(block, ensure_ascii=False, sort_keys=True, separators=(',', ':'))}"
+        for label, block in blocks
+    )
+
+
+def designer_prompt_payload(prompt: str) -> dict[str, object]:
+    """Merge the labelled JSON blocks of a Designer prompt back into one payload (for tests and run viewers)."""
+
+    payload: dict[str, object] = {}
+    decoder = json.JSONDecoder()
+    for label, _ in (*_PROMPT_BLOCKS, ("CURRENT_STATE_JSON", ())):
+        marker = f"\n{label}:\n"
+        start = prompt.find(marker)
+        if start >= 0:
+            block, _ = decoder.raw_decode(prompt, start + len(marker))
+            payload.update(block)
+    return payload
 
 
 def _graph_without_ui_context(graph: dict[str, object]) -> dict[str, object]:
@@ -628,6 +728,66 @@ def _graph_without_ui_context(graph: dict[str, object]) -> dict[str, object]:
     return {**graph, "snapshot_binding": {key: value for key, value in binding.items() if key != "ui_repo_context"}}
 
 
+def _scenario_graph_slice(graph: dict[str, object], *, scenario_id: str) -> dict[str, object]:
+    """The active scenario in full, every other node as one index row (design.inspect_partition shows it in full).
+
+    Sending every node of every scenario made each prompt grow with the number of designed partitions.
+    """
+
+    if not scenario_id:
+        return graph
+    nodes = _dicts(graph.get("nodes"))
+    kept = {str(node.get("id") or "") for node in nodes if str(node.get("scenario_id") or "") == scenario_id}
+    # A runtime-bound node of another scenario that an active node is attached to is part of its runtime path.
+    kept |= {
+        str(_dict(_dict(node.get("runtime_binding")).get("attachment")).get("owner_ref") or "")
+        for node in nodes
+        if str(node.get("id") or "") in kept
+    }
+    edges = [
+        edge
+        for edge in _dicts(graph.get("edges"))
+        if str(edge.get("scenario_id") or "") == scenario_id
+        or str(edge.get("from") or "") in kept
+        or str(edge.get("to") or "") in kept
+    ]
+    index = [
+        {
+            "id": node.get("id"),
+            "scenario_id": node.get("scenario_id"),
+            "component_id": node.get("component_id"),
+            "surface": node.get("surface"),
+            "kind": node.get("kind"),
+            "disposition": node.get("disposition"),
+            "name": node.get("name"),
+            "target": "{path}#{symbol}".format(
+                path=_dict(_dict(node.get("runtime_binding")).get("target")).get("path") or "",
+                symbol=_dict(_dict(node.get("runtime_binding")).get("target")).get("symbol") or "",
+            ),
+        }
+        for node in nodes
+        if str(node.get("id") or "") not in kept
+    ]
+    return {
+        **graph,
+        "nodes": [node for node in nodes if str(node.get("id") or "") in kept],
+        "edges": edges,
+        "partitions": [
+            item for item in _dicts(graph.get("partitions")) if str(item.get("scenario_id") or "") == scenario_id
+        ],
+        "index": index,
+        "index_edge_counts": dict(
+            sorted(
+                collections.Counter(
+                    str(edge.get("scenario_id") or "")
+                    for edge in _dicts(graph.get("edges"))
+                    if str(edge.get("id") or "") not in {str(item.get("id") or "") for item in edges}
+                ).items()
+            )
+        ),
+    }
+
+
 def _construction_graph_view(
     graph: dict[str, object],
     *,
@@ -635,7 +795,10 @@ def _construction_graph_view(
 ) -> dict[str, object]:
     """Keep active topology visible without sending an unrelated full UX contract to backend partitions."""
 
-    view = _graph_without_ui_context(graph)
+    view = _scenario_graph_slice(
+        _graph_without_ui_context(graph),
+        scenario_id=str(_dict(_dict(active_partition).get("partition")).get("scenario_id") or ""),
+    )
     surfaces = {
         str(item.get("surface") or "")
         for item in _dicts(_dict(active_partition).get("surface_work"))
@@ -672,7 +835,8 @@ def _ui_runtime_prompt_context(
     }
     model = _dict(requirement_model)
     texts = {
-        str(item.get("id")): str(item.get("text") or item.get("action") or "")
+        # Decisions (D-*) carry their content in `answer`.
+        str(item.get("id")): str(item.get("text") or item.get("action") or item.get("answer") or "")
         for items in [
             *(_dicts(model.get(key)) for key in ("preconditions", "decisions")),
             *(_dicts(value) for value in _dict(model.get("flows")).values()),

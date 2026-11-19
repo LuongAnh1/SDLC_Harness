@@ -129,6 +129,10 @@ def build_vertical_trace_graph(
         str(item.get("id") or ""): _strings(item.get("acceptance_refs"))
         for item in scenarios
     }
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or "")): item
+        for item in _dicts(design_graph.get("surface_not_exercised"))
+    }
     for scenario in scenarios:
         scenario_id = str(scenario.get("id") or "")
         nodes.append(
@@ -166,6 +170,17 @@ def build_vertical_trace_graph(
                     "reason": str(contract.get("reason") or ""),
                     "requirement_refs": _strings(contract.get("requirement_refs")),
                     "evidence_refs": _strings(contract.get("evidence_refs")),
+                    # The Designer declared that this scenario runs nothing on the surface (semantic review judges it).
+                    **(
+                        {
+                            "design_not_exercised": {
+                                key: not_exercised[(scenario_id, surface)].get(key)
+                                for key in ("reason", "evidence_refs", "declared_in_partition")
+                            }
+                        }
+                        if (scenario_id, surface) in not_exercised
+                        else {}
+                    ),
                 }
             )
             edges.append(_edge(scenario_id, surface_id, "requires_surface", scenario_id=scenario_id))
@@ -366,7 +381,7 @@ def validate_vertical_trace_coverage(
         realized = [edge for edge in edges if edge.get("from") == surface_id and edge.get("kind") == "realizes"]
         if status == "required":
             required_surface_count += 1
-            if realized:
+            if realized or surface_node.get("design_not_exercised"):
                 covered_surface_count += 1
             else:
                 blockers.append(_finding("required_surface_missing", surface_id, "Required scenario surface has no Design element.", requirement_ids=_strings(surface_node.get("requirement_refs"))))
