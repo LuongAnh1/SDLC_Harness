@@ -1073,6 +1073,9 @@ class DeveloperToolLoopTest(unittest.TestCase):
         self.assertIn("leave its inspection and repair to the later unit", prompt)
         self.assertIn("Do not plan or draft a later file or action", context["next_action"]["response_scope"])
         self.assertIn("timing, fallback, and error handling", context["next_action"]["design_rule"])
+        self.assertIn("redesign that presentation choice", context["next_action"]["design_rule"])
+        self.assertIn("not its full extent", context["next_action"]["obligation_check"])
+        self.assertIn("correct it in this unit", context["next_action"]["obligation_check"])
         self.assertIn("Do not speculate about outcomes assigned to pending Verification stages", prompt)
         available = prompt.split("Available actions:\n", 1)[1].split("\n\nA mutation", 1)[0]
         self.assertNotIn("package.ensure_workspace_dependency", available)

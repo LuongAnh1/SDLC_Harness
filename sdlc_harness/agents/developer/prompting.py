@@ -655,8 +655,13 @@ def _action_prompt(
             "Implement the explicit mandatory obligations without inventing sibling controls, alternate flows, or a "
             "new interaction model. Preserve unrelated observable behavior, including timing, fallback, and error "
             "handling, unless an obligation explicitly changes it. When the contract permits multiple presentations, "
-            "choose the smallest compatible extension once and proceed; do not redesign it again without new tool or "
-            "verification evidence."
+            "choose the smallest compatible extension once and proceed; do not redesign that presentation choice "
+            "again without new tool or verification evidence."
+        ),
+        "obligation_check": (
+            "A test intent is the minimum evidence for an obligation, not its full extent. When current evidence "
+            "shows that code this unit wrote or changed breaks a mandatory obligation, correct it in this unit "
+            "before verification or completion; that correction is not a redesign."
         ),
     }
     signature_contract_ref = (
