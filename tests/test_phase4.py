@@ -65,6 +65,7 @@ from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase4 import (
     PhaseFourWorkflow,
     _code_review_pr_body,
+    _require_exact_v2_coverage,
     _verification_repair_feedback,
     _verification_attempt_count,
 )
@@ -81,6 +82,59 @@ from tests._support import (
 
 
 pytestmark = pytest.mark.integration
+
+
+def test_phase4_input_accepts_reused_code_and_precondition_coverage_rows() -> None:
+    canonical = [
+        {"id": "REQ-1", "content": "Only the author edits an article."},
+        {"id": "REQ-2", "content": "The author opens an own article."},
+        {"id": "PRE-1", "content": "The user is signed in."},
+    ]
+    trace = {
+        key: [{"requirement": item["id"], "links": [{"target": "sequence_sc_1"}]} for item in canonical]
+        for key in ("class_trace", "sequence_trace")
+    }
+
+    def row(requirement: dict[str, str], **fields: object) -> dict[str, object]:
+        return {
+            "requirement_id": requirement["id"],
+            "content": requirement["content"],
+            "design_targets": ["sequence_sc_1"],
+            "design_element_ids": [],
+            "planned_code_targets": [],
+            "test_intents": [],
+            **fields,
+        }
+
+    implemented = row(
+        canonical[0],
+        design_element_ids=["VDN-guard"],
+        planned_code_targets=["apps/api/src/guard.ts#guard"],
+        test_intents=["a non-author edit is refused"],
+    )
+    reused = row(
+        canonical[1],
+        coverage_kind="existing_code",
+        existing_design_node_ids=["VDN-page"],
+        existing_code_targets=["apps/web/src/ArticlePage.tsx#ArticlePage"],
+    )
+    precondition = row(canonical[2], coverage_kind="precondition")
+    rows = [implemented, reused, precondition]
+
+    _require_exact_v2_coverage(canonical_requirements=canonical, coverage=rows, trace=trace, run_id="run_test")
+
+    for broken, message in (
+        ({**reused, "existing_code_targets": []}, "names no existing code target"),
+        ({**reused, "coverage_kind": "reused"}, "unknown coverage kind"),
+        ({**implemented, "test_intents": []}, "has no test intent"),
+    ):
+        coverage = [broken if item["requirement_id"] == broken["requirement_id"] else item for item in rows]
+        with pytest.raises(HarnessError) as caught:
+            _require_exact_v2_coverage(
+                canonical_requirements=canonical, coverage=coverage, trace=trace, run_id="run_test"
+            )
+        assert caught.value.error_code == "requirement_v2_phase4_input_invalid"
+        assert message in caught.value.message
 
 
 def test_code_validation_verification_evidence_unwraps_browser_artifact() -> None:

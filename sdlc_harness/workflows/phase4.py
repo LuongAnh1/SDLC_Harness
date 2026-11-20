@@ -1242,6 +1242,25 @@ def _require_exact_v2_coverage(
                 f"Requirement coverage design targets do not match approved trace for {requirement_id}.",
                 run_id=run_id,
             )
+        # Same row kinds as Code Trace: `existing_code` rows point at reused code (Code Trace checks it still
+        # exists), `precondition` rows carry no code; only rows a work unit implements need design, code and tests.
+        coverage_kind = str(item.get("coverage_kind") or "")
+        if coverage_kind == "precondition":
+            continue
+        if coverage_kind == "existing_code":
+            if not _string_items(item.get("existing_code_targets")):
+                raise HarnessError(
+                    "requirement_v2_phase4_input_invalid",
+                    f"Requirement {requirement_id} reuses existing code but names no existing code target.",
+                    run_id=run_id,
+                )
+            continue
+        if coverage_kind:
+            raise HarnessError(
+                "requirement_v2_phase4_input_invalid",
+                f"Requirement {requirement_id} has an unknown coverage kind `{coverage_kind}`.",
+                run_id=run_id,
+            )
         if not _string_items(item.get("design_element_ids")):
             raise HarnessError(
                 "requirement_v2_phase4_input_invalid",
