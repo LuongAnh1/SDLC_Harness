@@ -259,6 +259,8 @@ def _build_execution_units(
         qa_test_intents = _dict_items(item.get("qa_test_intents"))
         for intent in test_intents:
             raw_paths.extend(_string_items(intent.get("target_paths")))
+        # Harness-listed existing tests of the unit's files: a change that breaks one may update it.
+        raw_paths.extend(_string_items(item.get("existing_test_paths")))
         unit_package_dependencies = [
             dependency
             for dependency in dependency_rows

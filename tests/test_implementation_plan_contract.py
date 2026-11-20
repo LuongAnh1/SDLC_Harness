@@ -193,6 +193,38 @@ def test_execution_unit_projects_runtime_config_only_to_its_owner() -> None:
     assert units[1]["runtime_config_changes"] == []
 
 
+def test_execution_unit_may_write_the_existing_tests_of_its_files() -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    source = "apps/web/src/components/Pages/EditArticle/EditArticle.tsx"
+    existing_test = "apps/web/src/components/Pages/EditArticle/EditArticle.test.tsx"
+
+    units = _build_execution_units(
+        structured_plan={
+            "implementation_signature_contract": {"entries": []},
+            "work_units": [
+                {
+                    "unit_id": "WU-WEB",
+                    "order": 1,
+                    "depends_on": [],
+                    "planned_code_targets": [{"path": source, "symbol": "EditArticle"}],
+                    "test_intents": [],
+                    "existing_test_paths": [existing_test],
+                }
+            ],
+        },
+        allowed_paths=[source, existing_test],
+        planning_policy=planning_policy,
+        verification_policy=build_verification_stage_policy(project=project),
+        run_id="run_existing_tests",
+    )
+
+    assert units[0]["write_paths"] == [source, existing_test]
+
+
 def test_execution_unit_rejects_runtime_config_outside_owner_write_scope() -> None:
     project = get_project_profile("typescript_fullstack_v1")
     planning_policy = build_planning_path_policy(

@@ -59,7 +59,9 @@ from ..storage.runtime import RuntimeStore, utc_now_iso
 from ..sync import sync_implementation_plan_checkpoint
 from ..llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
 from ..workspaces import RunWorkspaceManager
+from ..core.coerce import dict_items as _dict_items
 from ..core.coerce import dict_value as _dict_value
+from ..agents.designer.ui_context import build_ui_repo_context
 
 ALLOWED_IMPLEMENTATION_PLAN_ACTIONS = [
     "approve_checkpoint",
@@ -235,6 +237,18 @@ class PhaseThreeWorkflow:
         )
         issue_key = _issue_key_from_state(state)
         self.repo_context_provider.prepare_index(target_path)
+        component_plan_inputs = _with_repo_target_facts(
+            component_plan_inputs,
+            provider=self.repo_context_provider,
+            target_path=target_path,
+            vertical_design_graph=vertical_design_graph,
+        )
+        component_plan_inputs = _with_unit_test_environment(
+            component_plan_inputs,
+            state=state,
+            target_path=target_path,
+            repo_landscape=repo_landscape,
+        )
         repo_context = self.repo_context_provider.collect(
             target_path=target_path,
             target_files=target_files,
@@ -552,6 +566,18 @@ class PhaseThreeWorkflow:
                 planning_policy=planning_policy,
                 target_path=target_path,
                 target_files=target_files,
+            )
+            component_plan_inputs = _with_repo_target_facts(
+                component_plan_inputs,
+                provider=self.repo_context_provider,
+                target_path=target_path,
+                vertical_design_graph=vertical_design_graph,
+            )
+            component_plan_inputs = _with_unit_test_environment(
+                component_plan_inputs,
+                state=state,
+                target_path=target_path,
+                repo_landscape=repo_landscape,
             )
             repo_context = self.repo_context_provider.collect(
                 target_path=target_path,
@@ -1146,6 +1172,76 @@ def _with_runtime_config(
         **inputs,
         "repo_runtime_config": collect_repo_runtime_config(target_path=target_path, source_files=target_files),
     }
+
+
+def _with_repo_target_facts(
+    inputs: dict[str, object],
+    *,
+    provider,
+    target_path: Path,
+    vertical_design_graph: dict[str, object],
+) -> dict[str, object]:
+    """Record repository facts about runtime targets that the Planner cannot see in the Design.
+
+    `repo_symbol_kinds`: whether a target named like its file is a class or a function.
+    `repo_target_callers`: the other files that call or register an existing target.
+    `repo_target_tests`: the existing tests that import a target or attachment-owner file.
+    """
+
+    targets: list[tuple[str, str]] = []
+    files: set[str] = set()
+    for node in _dict_items(vertical_design_graph.get("nodes")):
+        binding = node.get("runtime_binding")
+        if not isinstance(binding, dict):
+            continue
+        target = binding.get("target") if isinstance(binding.get("target"), dict) else {}
+        path = str(target.get("path") or "").strip().replace("\\", "/")
+        symbol = str(target.get("symbol") or "").strip()
+        if path and symbol and (target_path / path).is_file():
+            targets.append((path, symbol))
+        attachment = binding.get("attachment") if isinstance(binding.get("attachment"), dict) else {}
+        for candidate in (path, str(attachment.get("owner_path") or "").strip().replace("\\", "/")):
+            if candidate and (target_path / candidate).is_file():
+                files.add(candidate)
+    # Only these targets are ambiguous: the Planner binds legacy methods to them by kind.
+    same_name = [
+        (path, symbol)
+        for path, symbol in targets
+        if path.endswith(".ts") and Path(path).stem.lower() == symbol.lower()
+    ]
+    facts: dict[str, object] = {}
+    if same_name:
+        facts["repo_symbol_kinds"] = provider.symbol_kinds(target_path, same_name)
+    if targets:
+        facts["repo_target_callers"] = provider.target_callers(target_path, targets)
+    if files:
+        facts["repo_target_tests"] = provider.target_tests(target_path, sorted(files))
+    return {**inputs, **facts} if facts else inputs
+
+
+def _with_unit_test_environment(
+    inputs: dict[str, object],
+    *,
+    state: dict[str, object],
+    target_path: Path,
+    repo_landscape: dict[str, object],
+) -> dict[str, object]:
+    """Record how the repository's unit tests run, from the same scan the Designer's UI context uses."""
+
+    profile = _dict_value(state.get("profile_snapshot"))
+    context = build_ui_repo_context(
+        target_path=target_path,
+        landscape=repo_landscape,
+        project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
+        verification_policy_version=str(profile.get("verification_policy_version") or ""),
+    )
+    verification = _dict_value(_dict_value(context).get("verification"))
+    environment = {
+        key: verification[key]
+        for key in ("unit_environment", "dom_capable", "dom_test_directive")
+        if key in verification
+    }
+    return {**inputs, "repo_unit_test_environment": environment} if environment else inputs
 
 
 def _target_source_files(

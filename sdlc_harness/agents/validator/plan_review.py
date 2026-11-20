@@ -27,6 +27,7 @@ from ...profiles import (
     resolve_language_prompt_directive,
 )
 from ...core.coerce import dict_items as _dict_items, string_items as _string_items
+from ...core.coerce import dict_value as _dict_value
 
 
 _PLAN_FINDING_CATEGORIES = {
@@ -52,8 +53,12 @@ def _component_requirement_coverage_issues(
     *,
     structured_plan: dict[str, object],
     requirement_graph: dict[str, object],
+    design_graph: dict[str, object] | None = None,
+    trace_graph: dict[str, object] | None = None,
 ) -> list[str]:
     """Validate exact canonical IDs while Vertical Trace owns V5 design identity."""
+
+    from ..developer.component_plan import requirement_existing_coverage
 
     issues: list[str] = []
     contract = structured_plan.get("requirement_contract")
@@ -87,6 +92,16 @@ def _component_requirement_coverage_issues(
             continue
         if str(item.get("content") or "").strip() != expected[requirement_id]:
             issues.append(f"Requirement {requirement_id} coverage content is stale.")
+        if str(item.get("coverage_kind") or ""):
+            # Existing-code and precondition rows carry no new code; the graphs must agree on that.
+            facts = requirement_existing_coverage(
+                requirement_id, design_graph=design_graph or {}, trace_graph=trace_graph or {}
+            )
+            if not facts or any(item.get(key) != value for key, value in facts.items()):
+                issues.append(
+                    f"Requirement {requirement_id} existing-code coverage does not match the approved Design."
+                )
+            continue
         design_ids = set(_string_items(item.get("design_element_ids")))
         if not design_ids or not design_ids.issubset(allowed_design_ids):
             issues.append(f"Requirement {requirement_id} has missing or unapproved design element IDs.")
@@ -294,6 +309,8 @@ class ImplementationPlanValidator:
             _component_requirement_coverage_issues(
                 structured_plan=structured_plan,
                 requirement_graph=requirement_graph or {},
+                design_graph=vertical_design_graph or {},
+                trace_graph=vertical_trace_graph or {},
             )
         )
         if planning_policy is None or verification_policy is None:
@@ -594,9 +611,19 @@ def _llm_review_prompt(
         planning_policy=planning_policy,
         verification_policy=verification_policy,
     )
+    # Provenance and source evidence trace the Requirement back to its source; the review judges
+    # the Requirement itself, so they are left out (and the JSON is compact) to bound the prompt.
     canonical_section = (
         "Canonical Requirement V2 (source of truth; stable IDs are authoritative):\n"
-        + json.dumps(canonical_requirement, ensure_ascii=False, indent=2)
+        + json.dumps(
+            {
+                key: value
+                for key, value in canonical_requirement.items()
+                if key not in {"provenance_ledger", "source", "evidence", "run_id", "validation"}
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
         if canonical_requirement
         else "Canonical Requirement V2: not enabled for this V1 run."
     )
@@ -612,6 +639,13 @@ def _llm_review_prompt(
         }
     )
     compact_plan = {key: value for key, value in structured_plan.items() if key not in omitted}
+    # The review judges runtime configuration from `inputs`; the other repository facts feed only the
+    # Planner prompt and the Harness rules.
+    compact_plan["inputs"] = {
+        key: value
+        for key, value in _dict_value(structured_plan.get("inputs")).items()
+        if key not in {"repo_symbol_kinds", "repo_target_callers", "repo_target_tests", "repo_unit_test_environment"}
+    }
     from ..developer.component_plan import unit_write_scope
 
     design_nodes = {
@@ -680,6 +714,62 @@ def _llm_review_prompt(
         for unit in structured_plan.get("work_units", [])
         if isinstance(unit, dict)
     ]
+    # Complete one-line facts for every approved node replace a cut excerpt of the Design document,
+    # so the review never mistakes a reused node for a missing one.
+    unit_by_node = {
+        node_id: str(unit.get("unit_id") or "")
+        for unit in _dict_items(structured_plan.get("work_units"))
+        for node_id in _string_items(unit.get("design_node_ids"))
+    }
+    index_rows = [
+        " | ".join(
+            [
+                node_id,
+                str(node.get("scenario_id") or ""),
+                f"{node.get('component_id') or ''}/{node.get('surface') or ''}",
+                str(node.get("disposition") or ""),
+                unit_by_node.get(node_id) or "no work unit",
+                str(node.get("name") or ""),
+            ]
+        )
+        for node_id, node in design_nodes.items()
+    ]
+    index_rows.extend(
+        f"Not exercised: {item.get('scenario_id')} {item.get('surface')}"
+        for item in _dict_items((vertical_design_graph or {}).get("surface_not_exercised"))
+    )
+    index_rows.extend(
+        f"Placed: {item.get('scenario_id')} {item.get('surface')} runs in {item.get('component_id')}"
+        for item in _dict_items((vertical_design_graph or {}).get("surface_placements"))
+    )
+    covered_without_unit = [
+        f"{row.get('requirement_id')}: "
+        + (
+            "precondition"
+            if str(row.get("coverage_kind") or "") == "precondition"
+            else "existing code " + ", ".join(_string_items(row.get("existing_code_targets")))
+        )
+        for row in _dict_items(structured_plan.get("requirement_coverage"))
+        if str(row.get("coverage_kind") or "")
+    ]
+    design_section = (
+        "Vertical Design node index (every approved node: id | scenario | component/surface | "
+        "disposition | work unit | name):\n"
+        + "\n".join(index_rows)
+        + (
+            "\nRequirements covered without a work unit (Harness-derived from the approved graphs):\n"
+            + "\n".join(covered_without_unit)
+            if covered_without_unit
+            else ""
+        )
+        if design_nodes
+        else "Approved design artifact:\n" + _excerpt(design_artifact, limit=6000)
+    )
+    requirement_section = (
+        ""
+        if canonical_requirement
+        else "Approved requirement packet:\n" + _excerpt(requirement_packet, limit=6000) + "\n\n"
+    )
     previous_round_section = (
         """Previous review round (check it first):
 - For each blocking issue below, decide whether this plan now resolves it and keep every
@@ -718,7 +808,10 @@ def _llm_review_prompt(
     else:
         language_context = {"prompt_directive_id": "legacy_compatibility"}
     verification_context = (
-        verification_policy.prompt_context()
+        # Same repository test-environment facts the Planner saw, so both judge one capability.
+        verification_policy.prompt_context(
+            _dict_value(structured_plan.get("inputs")).get("repo_unit_test_environment")
+        )
         if verification_policy
         else {"policy_version": "legacy_command_compatibility_v1"}
     )
@@ -729,6 +822,12 @@ Component-aware V5 boundaries:
   reinterpret or request changes to them. Create a Plan finding only when Planner-owned
   objectives, targets, migration decisions, tests, evidence, signatures or runtime
   configuration can make the final implementation satisfy those approved inputs.
+- Read every Requirement item in full: a response, message or outcome it names applies to every
+  case it lists (for example both edit and delete). When an approved Design contract states
+  less than a Requirement item its behavior realizes (for example a refusal without the error
+  message the Requirement demands, or a case the Design traces to another scenario only), the
+  plan must still satisfy the Requirement through Planner-owned fields; a plan that follows only
+  the narrower contract is a blocker citing the Requirement and the Design ids.
 - Vertical Design nodes define the complete approved work-unit/component scope.
   Do not invent a new business component or work unit. Each unit's `write_scope` lists the
   files it may target; supporting code belongs inside those files, plus shared contracts,
@@ -745,23 +844,36 @@ Component-aware V5 boundaries:
   unit's Planner-owned objective/tests to reconcile every affected earlier test; do not reopen
   Design or debate alternative architectures. A runtime binding with `attachment_wired_by` is
   already attached by that earlier unit, so the later unit needs its owner file only when its
-  own change requires it there.
-- The rule review checked that every UI contract item (state, validation, transition,
-  feedback, accessibility, focus, responsive rule and external runtime input) is in a test intent's `obligation_refs`
-  or in `unverified_obligations` with a reason. Do not re-audit that mapping item by item.
-  Block an `unverified_obligations` entry only when its reason is false because an active
-  stage could observe it.
+  own change requires it there. A seeded attachment owner whose existing code already reaches
+  the target (for example it mounts the router that registers the handler) may need no change;
+  accept an objective that says so.
+- When the verification policy has an active `browser_e2e` stage, Phase 4 Browser QA plans and
+  runs browser journeys for every UI contract item from the approved Design and demo seed, so the
+  Plan has no browser tests or test data: never ask for them. `unit` intents cite in
+  `obligation_refs` the items their `unit` stage capability observes. Without that stage, the rule review
+  checked that every UI contract item is in a test intent's `obligation_refs` or in
+  `unverified_obligations` with a reason; do not re-audit that mapping item by item, and block an
+  `unverified_obligations` entry only when its reason is false because an active stage could
+  observe it.
 - For each approved Design `runtime_surface.required_inputs` item whose source is
-  `external_use_case`, verify that the owning QA intent preserves the production dependency
-  as external and declares a sufficient `data_setup`. `repository` must cite actual repository
-  evidence; when none exists, `synthetic` is the correct test-only fallback and its requirements
-  must name the deterministic values/states QA needs. Synthetic data is created by QA inside the
-  browser spec after Developer execution. It must not introduce or alter a production provider,
-  endpoint, entrypoint, global, history-state contract, runtime config, or Design seam. Missing,
-  empty/default, or semantically insufficient values/states are a blocker. When the QA intent
-  names an approved public boundary plus exact deterministic values/states,
-  do not require Planner to invent the fixture-binding mechanism or a production seam; QA owns that binding
-  after Developer execution.
+  `external_use_case`, verify that the plan keeps the production dependency external: no planned
+  target introduces or alters a production provider, endpoint, entrypoint, global, history-state
+  contract, runtime config, or Design seam to supply its data.
+- An objective may state `Reading of <Design ID>: ...` for an approved contract behavior that
+  lists no outcome or response. Judge whether that reading satisfies the Requirement within the
+  approved outcomes; block it only when it adds a status, field, endpoint or response the
+  contract does not list, or when it contradicts the Requirement.
+- A listed response that existing code outside the unit already produces (for example a
+  validation middleware on the route) stays there; do not require the planned target to
+  re-implement or unit-test it. A planned target keeps the responses its own existing code
+  already produces unless its approved contract changes them.
+- `existing_test_paths` are the Harness-listed existing tests of a unit's write_scope files; the
+  unit's Developer may update them and a `unit` test intent may target them. An existing test
+  that still asserts behavior the unit replaces must be updated by a test intent of that unit.
+- The Vertical Design node index lists every approved node. A node marked `no work unit` keeps
+  existing code, and a requirement listed as covered without a work unit is satisfied by that
+  existing code or is a precondition: no work unit plans it by design, so never report it as
+  unplanned or missing.
 - Compatibility projections (steps, proposed files, design mappings, top-level test
   intents) are rendered from work_units and checked by the rule review, so they are omitted
   below. Each unit's `approved_design_contracts` contains only the exact Vertical Design
@@ -774,8 +886,8 @@ Component-aware V5 boundaries:
 - A `unit` intent targets a test file. A `typecheck` intent targets a non-test source
   file already owned by the same work unit.
 - Enforce `stage_ownership` from the verification policy: Developer `test_intents` use only
-  `developer_intent`, `qa_test_intents` use only `qa_intent`, and `harness_global` stages are
-  whole-run Harness checks rather than work-unit intents.
+  `developer_intent`; `qa_intent` and `harness_global` stages are run by the Harness and never
+  appear in the Plan.
 - Harness binds every signature target. Require parameters and returns that make the
   approved Vertical Design behavior callable and testable; reject placeholder-only
   `(): void` contracts when the flow accepts input, returns data/status, persists
@@ -784,18 +896,21 @@ Component-aware V5 boundaries:
   convention, require the plan to use it if otherwise Web/API/data boundaries would
   have to invent incompatible shapes. Attach supporting code to an approved unit's files;
   never request an upstream Design change from this review.
-- For every UI surface, verify that the objective, exact code targets, and test intents
-  cover every non-empty experience-contract category: component structure, feedback,
-  accessibility, responsive behavior, and focus flow. CSS class names without owned or
-  verified style rules do not implement responsive behavior; static markup alone does not
-  verify interaction or focus navigation. A UI unit may own a stylesheet under the policy's
-  `ui_stylesheets` root.
+- For every UI surface, verify that the objective and exact code targets implement every
+  non-empty experience-contract category: component structure, feedback, accessibility,
+  responsive behavior, and focus flow, and that `unit` intents test what the `unit` stage
+  capability observes. CSS class names without owned or verified style rules do not
+  implement responsive behavior; static markup alone does not verify interaction or focus
+  navigation, which Phase 4 Browser QA verifies when the `browser_e2e` stage is active. A UI unit
+  may own a stylesheet under the policy's `ui_stylesheets` root.
 - Judge each test intent against the verification policy's `stage_capabilities`. Block a
   test intent that claims a stage verifies behavior outside its capability, and block
   contract decisions the planned code could expose to a capable stage but leaves untested.
-  Do not block because behavior needs a stage the profile does not activate when the unit
-  objective states that it stays unverified; at most report one concise warning finding and
-  do not repeat obligations already recorded in `unverified_obligations` with a true reason.
+  Do not block behavior that only the browser can observe when Phase 4 Browser QA covers it.
+  Without a browser stage, do not block because behavior needs a stage the profile does not
+  activate when the unit objective states that it stays unverified; at most report one concise
+  warning finding and do not repeat obligations already recorded in `unverified_obligations`
+  with a true reason.
 - Verify that required boundary auth/input mappings and runtime attachments have an explicit
   owner/caller target. A dependency ID without its component, surfaces, and produced artifacts
   is not sufficient evidence that downstream wiring is executable.
@@ -872,13 +987,9 @@ Language prompt directive:
 Verification stage policy:
 {json.dumps(verification_context, ensure_ascii=False, indent=2)}
 
-Approved requirement packet:
-{_excerpt(requirement_packet, limit=6000)}
+{requirement_section}{canonical_section}
 
-{canonical_section}
-
-Approved design artifact:
-{_excerpt(design_artifact, limit=6000)}
+{design_section}
 
 {legacy_trace_section}{vertical_section}{legacy_graph_section}Structured implementation plan JSON:
 {json.dumps(compact_plan, ensure_ascii=False, separators=(",", ":"))}

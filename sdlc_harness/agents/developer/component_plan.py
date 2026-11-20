@@ -241,6 +241,28 @@ def build_component_work_units(
                             **boundary,
                         }
                     )
+        branch_scenario = str(_dict(nodes.get(source_node)).get("scenario_id") or "")
+        main_scenario = str(_dict(nodes.get(target_node)).get("scenario_id") or "")
+        if (
+            str(edge.get("kind") or "") == "depends_on"
+            and source_unit
+            and not target_unit
+            and branch_scenario != main_scenario
+            and scenario_kinds.get(branch_scenario) in {"alternative", "exception"}
+            and scenario_kinds.get(main_scenario) == "main"
+        ):
+            # The branch builds on main-scenario code it only reuses: no shared file links the two, so
+            # the Harness still orders the branch after every work unit of its main scenario.
+            refs = units_by_id[source_unit]["depends_on"]
+            for candidate in units:
+                candidate_id = str(candidate.get("unit_id") or "")
+                if (
+                    isinstance(refs, list)
+                    and str(candidate.get("scenario_id") or "") == main_scenario
+                    and candidate_id != source_unit
+                    and candidate_id not in refs
+                ):
+                    refs.append(candidate_id)
         if not source_unit or not target_unit or source_unit == target_unit:
             continue
         kind = str(edge.get("kind") or "")
@@ -473,6 +495,120 @@ def unit_write_scope(unit: dict[str, object], planning_policy: PlanningPathPolic
     return {"files": files, "also_allowed": also}
 
 
+def unit_existing_test_paths(
+    unit: dict[str, object],
+    repo_target_tests: object,
+    planning_policy: PlanningPathPolicy,
+) -> list[str]:
+    """Existing repository tests that import a file of the unit's write scope (Harness-owned)."""
+
+    files = set(_strings(unit_write_scope(unit, planning_policy).get("files")))
+    return sorted(
+        {
+            normalized
+            for row in _dicts(repo_target_tests)
+            if str(row.get("path") or "") in files
+            for raw in _strings(row.get("tests"))
+            for normalized in [planning_policy.normalize_editable_path(raw)]
+            if normalized and planning_policy.is_test_path(normalized)
+        }
+    )
+
+
+def requirement_existing_coverage(
+    requirement_id: str,
+    *,
+    design_graph: dict[str, object],
+    trace_graph: dict[str, object],
+) -> dict[str, object]:
+    """Coverage of a requirement that no work unit changes, read mechanically from the graphs.
+
+    Every realizing Design node reuses code -> `existing_code` with that code's runtime targets;
+    a precondition no Design node realizes -> `precondition`; anything else -> {} (it needs work).
+    """
+
+    nodes = {str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))}
+    realizing = sorted(
+        {
+            str(edge.get("to") or "")
+            for edge in _dicts(trace_graph.get("edges"))
+            if str(edge.get("kind") or "") == "realizes"
+            and str(edge.get("from") or "") == requirement_id
+            and str(edge.get("to") or "") in nodes
+        }
+    )
+    if realizing:
+        if any(str(nodes[node_id].get("disposition") or "") in _ACTIONABLE_DISPOSITIONS for node_id in realizing):
+            return {}
+        targets = sorted(
+            {
+                path + (f"#{symbol}" if symbol else "")
+                for node_id in realizing
+                for target in [_dict(_dict(nodes[node_id].get("runtime_binding")).get("target"))]
+                for path, symbol in [
+                    (str(target.get("path") or "").strip(), str(target.get("symbol") or "").strip())
+                ]
+                if path
+            }
+        )
+        if not targets:
+            return {}
+        return {
+            "coverage_kind": "existing_code",
+            "existing_design_node_ids": realizing,
+            "existing_code_targets": targets,
+        }
+    claim = next(
+        (item for item in _dicts(trace_graph.get("nodes")) if str(item.get("id") or "") == requirement_id),
+        {},
+    )
+    if str(claim.get("claim_type") or "") == "precondition":
+        return {"coverage_kind": "precondition"}
+    return {}
+
+
+def mark_existing_code_coverage(
+    coverage: list[dict[str, object]],
+    *,
+    design_graph: dict[str, object],
+    trace_graph: dict[str, object],
+) -> list[dict[str, object]]:
+    """Label requirement rows without planned code as existing-code or precondition coverage."""
+
+    result = []
+    for row in coverage:
+        item = dict(row)
+        if not _strings(item.get("planned_code_targets")):
+            item.update(
+                requirement_existing_coverage(
+                    str(item.get("requirement_id") or ""),
+                    design_graph=design_graph,
+                    trace_graph=trace_graph,
+                )
+            )
+        result.append(item)
+    return result
+
+
+def attach_existing_test_paths(
+    units: list[dict[str, object]],
+    repo_target_tests: object,
+    planning_policy: PlanningPathPolicy,
+) -> list[dict[str, object]]:
+    """Give each unit the existing tests of its files; its Developer may update them (Phase 4)."""
+
+    result = []
+    for unit in units:
+        item = dict(unit)
+        tests = unit_existing_test_paths(item, repo_target_tests, planning_policy)
+        if tests:
+            item["existing_test_paths"] = tests
+        else:
+            item.pop("existing_test_paths", None)
+        result.append(item)
+    return result
+
+
 def merge_work_unit_updates(
     *,
     units: list[dict[str, object]],
@@ -524,17 +660,6 @@ def merge_work_unit_updates(
             [
                 *(item for item in _dicts(unit.get("test_intents")) if test_intent_id(item) not in dropped),
                 *_dicts(patch.get("test_intents")),
-            ]
-        )
-        dropped_qa = set(_strings(patch.get("remove_qa_test_intents")))
-        unit["qa_test_intents"] = _canonical_test_intents(
-            [
-                *(
-                    item
-                    for item in _dicts(unit.get("qa_test_intents"))
-                    if test_intent_id(item) not in dropped_qa
-                ),
-                *_dicts(patch.get("qa_test_intents")),
             ]
         )
         if "unverified_obligations" in patch:
@@ -670,6 +795,8 @@ def canonicalize_work_unit_dependencies(
             for item in _dicts(unit.get("qa_test_intents"))
             for path in _strings(item.get("target_paths"))
         )
+        # The unit's Developer may update these tests, so units sharing one must run in order.
+        paths.update(_strings(unit.get("existing_test_paths")))
         for path in paths:
             owners.setdefault(path, []).append(unit_id)
 
@@ -695,8 +822,12 @@ def rebind_legacy_mappings_to_work_units(
     legacy_mappings: list[dict[str, object]],
     planning_policy: PlanningPathPolicy,
     signature_entries: object = None,
+    symbol_kinds: dict[tuple[str, str], str] | None = None,
 ) -> list[dict[str, object]]:
-    """Bind legacy Class/Sequence projections to canonical V5 code targets."""
+    """Bind legacy Class/Sequence projections to canonical V5 code targets.
+
+    `symbol_kinds` maps (path, symbol) to the kind the repository declares for it.
+    """
 
     design_nodes = {
         str(item.get("id") or ""): item for item in _dicts(design_graph.get("nodes"))
@@ -733,6 +864,19 @@ def rebind_legacy_mappings_to_work_units(
         if str(item.get("design_element_id") or "")
         and str(item.get("qualified_name") or "").strip()
     }
+    unit_node_ids = {node_id for unit in units for node_id in _strings(unit.get("design_node_ids"))}
+    unitless_names = {
+        str(node.get("name") or "").strip()
+        for node_id, node in design_nodes.items()
+        if node_id not in unit_node_ids
+    } - {""}
+    # Legacy projections name their file after a Design node (`<root>/<node name>.<ext>`), and node
+    # names may hold `/`, so the owner is the longest node name the extension-less path ends with.
+    node_names = sorted(
+        {str(node.get("name") or "").strip() for node in design_nodes.values()} - {""},
+        key=len,
+        reverse=True,
+    )
 
     rebound: list[dict[str, object]] = []
     for mapping in legacy_mappings:
@@ -749,9 +893,18 @@ def rebind_legacy_mappings_to_work_units(
             if element_type == "class"
             else ""
         )
+        path_stem = current_path.rsplit(".", 1)[0] if current_path else ""
+        path_owner = next((name for name in node_names if path_stem.endswith(f"/{name}")), "")
+        node_owner = design_owner or path_owner
+        if node_owner in unitless_names and node_owner not in targets_by_name:
+            # No work unit implements that Design node (it reuses existing code), so there is no new code
+            # to trace; requirement coverage records the existing code instead.
+            continue
         owner = (
             design_owner
             if design_owner in targets_by_name
+            else path_owner
+            if path_owner in targets_by_name
             else planning_policy.symbol_owner(current_path)
         )
         component_id, targets = targets_by_name.get(owner, ("", []))
@@ -802,11 +955,14 @@ def rebind_legacy_mappings_to_work_units(
         path = str(target.get("path") or "")
         symbol = str(target.get("symbol") or "").strip()
         path_stem = path.rsplit("/", 1)[-1].removesuffix(".ts")
+        # A legacy operation becomes a method only of a class the repository declares; a function
+        # named like its file (or a new file) is the callable itself, not an owner of fake methods.
         if (
             direct_symbol
             and current_symbol
             and path.endswith(".ts")
             and symbol.lower() == path_stem.lower()
+            and (symbol_kinds or {}).get((path, symbol)) == "class"
         ):
             symbol = f"{symbol}.{current_symbol}"
         item["planned_code_target"] = path + (f"#{symbol}" if direct_symbol and symbol else "")
@@ -886,6 +1042,7 @@ def component_plan_projections(
         paths.extend(path for path in test_paths if path not in paths)
         migration = _dict(unit.get("migration_impact"))
         paths.extend(path for path in _strings(migration.get("targets")) if path not in paths)
+        paths.extend(path for path in _strings(unit.get("existing_test_paths")) if path not in paths)
         steps.append(
             {
                 "order": int(unit.get("order") or 0),
@@ -1030,6 +1187,9 @@ def component_plan_issues(
         item["planned_code_targets"] = _dicts(actual.get("planned_code_targets"))
         item["test_intents"] = _dicts(actual.get("test_intents"))
         item["qa_test_intents"] = _dicts(actual.get("qa_test_intents"))
+        existing_tests = unit_existing_test_paths(item, expected_inputs.get("repo_target_tests"), planning_policy)
+        if existing_tests:
+            item["existing_test_paths"] = existing_tests
         if "migration_impact" in item:
             item["migration_impact"] = _dict(actual.get("migration_impact"))
         expected_with_targets.append(item)
@@ -1050,6 +1210,10 @@ def component_plan_issues(
             for field in _IMMUTABLE_UNIT_FIELDS:
                 if unit.get(field) != expected.get(field):
                     issues.append(f"Work unit {unit_id} changed immutable field `{field}`.")
+            if _strings(unit.get("existing_test_paths")) != _strings(expected.get("existing_test_paths")):
+                issues.append(
+                    f"Work unit {unit_id} existing_test_paths do not match the repository tests of its files."
+                )
         targets = _dicts(unit.get("planned_code_targets"))
         if not targets:
             issues.append(f"Work unit {unit_id} has no planned code target.")
@@ -1133,47 +1297,41 @@ def component_plan_issues(
             if str(boundary.get("design_edge_id") or "") not in known_edge_ids:
                 issues.append(f"Work unit {unit_id} has an unbound runtime boundary contract.")
         tests = _dicts(unit.get("test_intents"))
-        qa_tests = _dicts(unit.get("qa_test_intents"))
         if not tests:
             issues.append(f"Work unit {unit_id} has no test intent.")
+        if _dicts(unit.get("qa_test_intents")):
+            issues.append(
+                f"Work unit {unit_id} plans QA intents; Phase 4 Browser QA plans and runs the browser tests."
+            )
+        # Phase 4 Browser QA plans journeys for every UI obligation from the approved Design, so with it
+        # active a unit's UI obligations and acceptance need no browser intents in the Plan.
+        browser_qa = "browser_e2e" in allowed_stages and (
+            not stage_owners or stage_owners.get("browser_e2e") == QA_INTENT_STAGE_OWNER
+        )
         obligation_ids = {str(item.get("id") or "") for item in _dicts(_dict(expected).get("ui_obligations"))}
-        tested = {
-            ref
-            for item in [*tests, *qa_tests]
-            for ref in _strings(item.get("obligation_refs"))
-        }
+        tested = {ref for item in tests for ref in _strings(item.get("obligation_refs"))}
         declared = _dicts(unit.get("unverified_obligations"))
         unverified = {str(item.get("id") or "") for item in declared if str(item.get("reason") or "").strip()}
         unknown = (tested | {str(item.get("id") or "") for item in declared}) - obligation_ids
         if unknown:
             issues.append(f"Work unit {unit_id} references unknown UI obligations: {sorted(unknown)}")
-        unaccounted = obligation_ids - tested - unverified
+        if browser_qa and unverified:
+            issues.append(
+                f"Work unit {unit_id} declares UI obligations unverified while browser QA is active: "
+                f"{sorted(unverified)}"
+            )
+        unaccounted = set() if browser_qa else obligation_ids - tested - unverified
         if unaccounted:
             issues.append(
                 f"Work unit {unit_id} leaves UI obligations neither tested nor declared unverified "
                 f"with a reason: {sorted(unaccounted)}"
             )
-        if obligation_ids and "browser_e2e" in allowed_stages:
-            browser_tested = {
-                ref for item in qa_tests for ref in _strings(item.get("obligation_refs"))
-            }
-            missing_browser = obligation_ids - browser_tested
-            if missing_browser:
-                issues.append(
-                    f"Work unit {unit_id} leaves UI obligations outside browser QA coverage: "
-                    f"{sorted(missing_browser)}"
-                )
-            if unverified:
-                issues.append(
-                    f"Work unit {unit_id} declares UI obligations unverified while browser QA is active: "
-                    f"{sorted(unverified)}"
-                )
-        covered_acceptance = {
-            ref
-            for item in [*tests, *qa_tests]
-            for ref in _strings(item.get("acceptance_refs"))
-        }
-        missing_acceptance = set(_strings(unit.get("acceptance_refs"))) - covered_acceptance
+        covered_acceptance = {ref for item in tests for ref in _strings(item.get("acceptance_refs"))}
+        missing_acceptance = (
+            set()
+            if browser_qa and obligation_ids
+            else set(_strings(unit.get("acceptance_refs"))) - covered_acceptance
+        )
         if missing_acceptance:
             issues.append(f"Work unit {unit_id} omits acceptance test coverage: {sorted(missing_acceptance)}")
         for item in tests:
@@ -1224,39 +1382,6 @@ def component_plan_issues(
                             f"Work unit {unit_id} plans unit test `{path}` without matching "
                             f"source target `{source_path}`."
                         )
-        for item in qa_tests:
-            stage_id = str(item.get("stage_id") or "")
-            if (
-                stage_id != "browser_e2e"
-                or stage_id not in allowed_stages
-                or (stage_owners and stage_owners.get(stage_id) != QA_INTENT_STAGE_OWNER)
-            ):
-                issues.append(
-                    f"Work unit {unit_id} QA intent references unsupported stage `{stage_id}`."
-                )
-            qa_paths = _strings(item.get("target_paths"))
-            if not qa_paths:
-                issues.append(f"Work unit {unit_id} QA intent has no exact browser test path.")
-            for path in qa_paths:
-                if (
-                    planning_policy.normalize_editable_path(path) != path
-                    or planning_policy.component_for_path(path) != "e2e"
-                ):
-                    issues.append(f"Work unit {unit_id} has invalid QA browser target path `{path}`.")
-            data_setup = _dict(item.get("data_setup"))
-            mode = str(data_setup.get("mode") or "")
-            reason = str(data_setup.get("reason") or "").strip()
-            requirements = _strings(data_setup.get("requirements"))
-            if mode not in {"repository", "synthetic", "not_required"}:
-                issues.append(
-                    f"Work unit {unit_id} QA intent has invalid data setup mode `{mode}`."
-                )
-            if not reason:
-                issues.append(f"Work unit {unit_id} QA intent has no data setup reason.")
-            if mode in {"repository", "synthetic"} and not requirements:
-                issues.append(
-                    f"Work unit {unit_id} QA intent data setup `{mode}` has no requirements."
-                )
         if "data" in _strings(unit.get("surfaces")):
             migration = _dict(unit.get("migration_impact"))
             status = str(migration.get("status") or "")
@@ -1299,7 +1424,22 @@ def component_plan_issues(
         for unit in units
         for target in _dicts(unit.get("planned_code_targets"))
     )
-    if has_web_surface and has_api_surface and profile_has_contracts and not has_contract_target:
+    # Mechanical part only: a new endpoint the web calls needs a shared contract. Whether a changed
+    # existing endpoint needs one depends on what changes, which the semantic review judges.
+    graph_nodes = {str(item.get("id") or ""): item for item in _dicts(_dict(design_graph).get("nodes"))}
+    adds_web_endpoint = any(
+        str(_dict(graph_nodes.get(str(edge.get("from") or ""))).get("component_id") or "") == "web"
+        and str(_dict(graph_nodes.get(str(edge.get("to") or ""))).get("surface") or "") == "api"
+        and str(_dict(graph_nodes.get(str(edge.get("to") or ""))).get("disposition") or "") == "add"
+        for edge in _dicts(_dict(design_graph).get("edges"))
+    )
+    if (
+        has_web_surface
+        and has_api_surface
+        and adds_web_endpoint
+        and profile_has_contracts
+        and not has_contract_target
+    ):
         issues.append(
             "Cross-boundary Web/API work requires an approved shared contract target from the repository profile."
         )
@@ -1372,8 +1512,8 @@ def component_plan_issues(
         for unit in units
         for item in _dicts(unit.get("test_intents"))
         for path in _strings(item.get("target_paths"))
-    }
-    proposed_paths = {str(item.get("path") or "") for item in _dicts(structured_plan.get("proposed_files"))}
+    } | {path for unit in units for path in _strings(unit.get("existing_test_paths"))}
+    proposed_paths ={str(item.get("path") or "") for item in _dicts(structured_plan.get("proposed_files"))}
     if expected_paths != proposed_paths:
         issues.append("Compatibility proposed files do not match work-unit targets.")
     mapped_vdns = {
@@ -1508,6 +1648,9 @@ def _structural_plan_issues(
             for candidate_id, candidate in units_by_id.items()
             if str(candidate.get("scenario_id") or "") in parents
         }
+        # A main scenario that only reuses code has no work unit to come after.
+        if parents and not parent_units:
+            continue
         if not parents or not dependency_closure(unit_id).intersection(parent_units):
             issues.append(
                 f"Branch work unit {unit_id} has no dependency path to its parent main scenario."
@@ -1527,13 +1670,19 @@ def _structural_plan_issues(
     if missing_surfaces:
         issues.append(f"Work units omit actionable scenario surfaces: {missing_surfaces}")
 
+    # Same rule as the Design gate: a surface declared not exercised has no node to reach.
+    not_exercised = {
+        (str(item.get("scenario_id") or ""), str(item.get("surface") or ""))
+        for item in _dicts(design_graph.get("surface_not_exercised"))
+    }
     required_surfaces: dict[str, set[str]] = {}
     for node in _dicts(trace_graph.get("nodes")):
         if str(node.get("kind") or "") != "surface_requirement" or str(node.get("status") or "") != "required":
             continue
-        required_surfaces.setdefault(str(node.get("scenario_id") or ""), set()).add(
-            str(node.get("surface") or "")
-        )
+        scenario_id = str(node.get("scenario_id") or "")
+        surface = str(node.get("surface") or "")
+        if (scenario_id, surface) not in not_exercised:
+            required_surfaces.setdefault(scenario_id, set()).add(surface)
     for scenario_id, surfaces in required_surfaces.items():
         scenario_nodes = [
             node for node in design_nodes.values() if str(node.get("scenario_id") or "") == scenario_id

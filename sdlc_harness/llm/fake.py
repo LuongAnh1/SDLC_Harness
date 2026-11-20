@@ -1064,7 +1064,6 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
         "",
     )
     updates: list[dict[str, object]] = []
-    browser_qa_active = '"browser_e2e"' in prompt
     for unit in unit_items:
         if not isinstance(unit, dict):
             continue
@@ -1107,23 +1106,6 @@ def fake_component_aware_implementation_plan(prompt: str) -> str:
             ],
             "repo_evidence_refs": list(unit.get("repo_evidence_refs", [])),
         }
-        if browser_qa_active and obligation_ids:
-            update["qa_test_intents"] = [
-                {
-                    "stage_id": "browser_e2e",
-                    "intent": f"Verify the approved UI behavior for {unit_id} in Chromium.",
-                    "acceptance_refs": acceptance_refs,
-                    "target_paths": [f"tests/e2e/{unit_id.lower()}.spec.ts"],
-                    "obligation_refs": obligation_ids,
-                    "data_setup": {
-                        "mode": "synthetic",
-                        "reason": "Fake mode has no repository-backed browser data source.",
-                        "requirements": [
-                            "Create deterministic values for the UI runtime inputs and states covered by this intent."
-                        ],
-                    },
-                }
-            ]
         if "data" in unit.get("surfaces", []):
             update["migration_impact"] = {
                 "status": "not_required",

@@ -221,9 +221,10 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         verification_stage_ids=list(verification.stage_ids),
     ) == []
 
-    missing_qa_setup = deepcopy(structured)
+    # Phase 4 Browser QA plans the browser tests, so a Plan that carries a QA intent is rejected.
+    with_qa_intent = deepcopy(structured)
     qa_unit = next(
-        unit for unit in missing_qa_setup["work_units"] if unit["component_id"] == "web"
+        unit for unit in with_qa_intent["work_units"] if unit["component_id"] == "web"
     )
     qa_unit["qa_test_intents"] = [
         {
@@ -233,9 +234,9 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
             "target_paths": ["tests/e2e/sc-1.spec.ts"],
         }
     ]
-    missing_qa_setup.update(
+    with_qa_intent.update(
         component_plan_projections(
-            units=missing_qa_setup["work_units"],
+            units=with_qa_intent["work_units"],
             design_graph=design,
             requirement_graph=requirement_graph,
             legacy_mappings=[],
@@ -243,14 +244,13 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         )
     )
     issues = component_plan_issues(
-        structured_plan=missing_qa_setup,
+        structured_plan=with_qa_intent,
         expected_units=first,
         expected_inputs=inputs,
         planning_policy=planning,
         verification_stage_ids=list(verification.stage_ids),
     )
-    assert any("QA intent has invalid data setup mode" in issue for issue in issues)
-    assert any("QA intent has no data setup reason" in issue for issue in issues)
+    assert any("plans QA intents; Phase 4 Browser QA plans" in issue for issue in issues)
 
     missing_test_source = deepcopy(structured)
     web_unit = next(
@@ -305,6 +305,17 @@ def test_work_units_are_stable_grouped_and_validator_owned_fields_are_immutable(
         expected_inputs=inputs,
         planning_policy=planning,
         verification_stage_ids=list(verification.stage_ids),
+        # The rule reads from the Design that the web calls a new endpoint.
+        design_graph={
+            **design,
+            "edges": [
+                {
+                    "from": next(n["id"] for n in design["nodes"] if n["surface"] == "ui"),
+                    "to": next(n["id"] for n in design["nodes"] if n["surface"] == "api"),
+                    "kind": "calls",
+                }
+            ],
+        },
     )
     assert any("shared contract target" in issue for issue in issues)
 
@@ -482,6 +493,104 @@ def test_branch_units_depend_on_and_follow_primary_main_units() -> None:
     branch_unit = next(item for item in units if item["scenario_id"] == "SC-2")
     assert branch_unit["depends_on"] == [main_unit["unit_id"]]
     assert main_unit["order"] < branch_unit["order"]
+
+
+def test_branch_built_on_reused_main_code_still_follows_the_main_units() -> None:
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "requirement_v2" / "uc2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    model = RequirementModelV2.from_dict(payload)
+    planning, _ = _policy()
+    graph = new_vertical_design_graph(
+        run_id=model.run_id,
+        snapshot_binding={
+            "requirement_digest": "sha256:req",
+            "repo_landscape_digest": "sha256:repo",
+            "workspace_ref": "run_workspace_v1",
+            "base_sha": "abc123",
+        },
+    )
+    main_scenario = next(item for item in model.scenario_contract["scenarios"] if item["id"] == "SC-1")
+    branch_scenario = next(item for item in model.scenario_contract["scenarios"] if item["id"] == "SC-2")
+    evidence = "repo:apps/web/src/MainScreen.tsx#L1@sha256:" + "0" * 64
+
+    def node(temp_ref: str, key: str, name: str, refs: list[str], disposition: str) -> dict[str, object]:
+        return {
+            "op": "add_node",
+            "node": {
+                "temp_ref": temp_ref,
+                "semantic_key": key,
+                "name": name,
+                "kind": "ui_interaction",
+                "surface": "ui",
+                "disposition": disposition,
+                "requirement_refs": refs,
+                "evidence_refs": [evidence] if disposition == "reuse" else [],
+                "evidence_reason": "" if disposition == "reuse" else f"{name} is new.",
+                "contract": f"Render {name}.",
+            },
+        }
+
+    def delta(scenario_id: str, operations: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "schema_version": DELTA_VERSION,
+            "base_graph_digest": graph["artifact_digest"],
+            "partition": {"use_case_id": model.use_case["id"], "scenario_id": scenario_id, "component_id": "web"},
+            "operations": [{"op": "set_partition_coverage", "coverage": {"ui": "covered"}}, *operations],
+            "completion_claims": [],
+            "unresolved_items": [],
+        }
+
+    main_refs_ui = main_scenario["surfaces"]["ui"]["requirement_refs"]
+    graph, main_refs = apply_designer_delta(
+        graph,
+        delta(
+            "SC-1",
+            [
+                node("tmp:main-ui", "SC-1:web:ui", "Main UI", main_refs_ui, "reuse"),
+                node("tmp:main-new", "SC-1:web:ui-new", "Main notice", main_refs_ui, "add"),
+            ],
+        ),
+        valid_evidence_refs={evidence},
+    )
+    graph, _ = apply_designer_delta(
+        graph,
+        delta(
+            "SC-2",
+            [
+                node("tmp:branch-ui", "SC-2:web:ui", "Cancel UI", branch_scenario["surfaces"]["ui"]["requirement_refs"], "add"),
+                {
+                    "op": "add_edge",
+                    "edge": {
+                        "from": "tmp:branch-ui",
+                        "to": main_refs["tmp:main-ui"],
+                        "kind": "depends_on",
+                        "label": "Cancellation builds on the reused main screen",
+                        "scenario_id": "SC-2",
+                        "branch_group": "",
+                        "guard": "",
+                        "terminal": False,
+                    },
+                },
+            ],
+        ),
+        valid_evidence_refs={evidence},
+    )
+    trace = build_vertical_trace_graph(requirement_model=model, design_graph=graph)
+    units = build_component_work_units(
+        design_graph=graph,
+        trace_graph=trace,
+        repo_landscape={"anchors": []},
+        planning_policy=planning,
+    )
+
+    # The reused main node has no unit; the branch still follows the main scenario's own work.
+    main_units = [item for item in units if item["scenario_id"] == "SC-1"]
+    branch_unit = next(item for item in units if item["scenario_id"] == "SC-2")
+    assert main_units and set(branch_unit["depends_on"]) == {item["unit_id"] for item in main_units}
+    assert all(item["order"] < branch_unit["order"] for item in main_units)
 
 
 def test_runtime_binding_seeds_target_and_composition_owner_into_phase3_unit() -> None:
@@ -703,6 +812,152 @@ def test_legacy_projection_rebinds_to_real_work_unit_targets() -> None:
     assert by_id["sequence:SC-1:2"]["planned_code_target"] == "apps/api/src/sc1-api.ts"
 
 
+def test_legacy_mappings_of_reused_design_nodes_are_dropped() -> None:
+    _, base_design, trace = _fixture()
+    planning, _ = _policy()
+    skeleton = build_component_work_units(
+        design_graph=base_design, trace_graph=trace, repo_landscape={"anchors": []}, planning_policy=planning
+    )
+    api_unit = next(item for item in skeleton if item["component_id"] == "api")
+    units = merge_work_unit_updates(
+        units=skeleton,
+        updates=[
+            {
+                "unit_id": api_unit["unit_id"],
+                "planned_code_targets": [{"path": "apps/api/src/sc1-api.ts", "symbol": "handleSc1Api"}],
+            }
+        ],
+        planning_policy=planning,
+    )
+    design = deepcopy(base_design)
+    api_node = next(node for node in design["nodes"] if node["surface"] == "api")
+    # Node names may hold `/`, as Conduit's endpoint names do.
+    api_node["name"] = "Update endpoint (PUT /api/articles/:slug)"
+    design["nodes"].append(
+        {
+            "id": "VDN-reused",
+            "name": "Reused screen",
+            "kind": "ui_interaction",
+            "scenario_id": "SC-1",
+            "component_id": "web",
+            "surface": "ui",
+            "disposition": "reuse",
+            "requirement_refs": [],
+            "contract": "Show the existing screen.",
+            "evidence_refs": ["repo:apps/web/src/Screen.tsx#L1@sha256:" + "0" * 64],
+            "runtime_binding": {"target": {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}},
+        }
+    )
+    reused_file = "apps/web/src/Reused screen.tsx"
+    mappings = rebind_legacy_mappings_to_work_units(
+        units=units,
+        design_graph=design,
+        legacy_mappings=[
+            {"design_element_id": "class:Reused screen", "design_element_type": "class", "planned_code_target": reused_file},
+            {
+                "design_element_id": "method:Reused screen.execute",
+                "design_element_type": "method",
+                "planned_code_target": f"{reused_file}#execute",
+            },
+            {
+                "design_element_id": "sequence:sc_1:1",
+                "design_element_type": "sequence_message",
+                "design_element_name": f"{api_node['id']}->VDN-reused: show()",
+                "planned_code_target": f"{reused_file}#show",
+                "trace_policy": "direct_symbol",
+            },
+            {
+                # A return message is projected onto the file of the node that returns it.
+                "design_element_id": "sequence:sc_1:2",
+                "design_element_type": "sequence_message",
+                "design_element_name": f"VDN-reused->{api_node['id']}: shown()",
+                "planned_code_target": f"{reused_file}#shown",
+                "trace_policy": "return_behavior",
+            },
+            {
+                "design_element_id": "sequence:sc_1:3",
+                "design_element_type": "sequence_message",
+                "design_element_name": f"VDN-reused->{api_node['id']}: save()",
+                "planned_code_target": f"apps/api/src/{api_node['name']}.ts#save",
+                "trace_policy": "direct_symbol",
+            },
+            {
+                "design_element_id": f"class:{api_node['name']}",
+                "design_element_type": "class",
+                "planned_code_target": f"apps/api/src/{api_node['name']}.ts",
+            },
+        ],
+        planning_policy=planning,
+    )
+
+    # The reused node has no work unit, so its legacy class, method and messages are not traced; the
+    # unit's node keeps both mappings, rebound to the unit's real target despite the `/` in its name.
+    by_id = {item["design_element_id"]: item for item in mappings}
+    assert set(by_id) == {"sequence:sc_1:3", f"class:{api_node['name']}"}
+    unit_paths = {target["path"] for unit in units for target in unit["planned_code_targets"]}
+    assert all(item["planned_code_target"].split("#")[0] in unit_paths for item in mappings)
+
+
+def test_requirement_coverage_of_reused_code_and_preconditions_is_read_from_the_graphs() -> None:
+    from sdlc_harness.agents.developer.component_plan import (
+        mark_existing_code_coverage,
+        requirement_existing_coverage,
+    )
+    from sdlc_harness.agents.validator.plan_review import _component_requirement_coverage_issues
+
+    design = {
+        "nodes": [
+            {
+                "id": "VDN-r",
+                "disposition": "reuse",
+                "runtime_binding": {"target": {"path": "apps/web/src/Screen.tsx", "symbol": "Screen"}},
+            },
+            {"id": "VDN-a", "disposition": "add"},
+        ]
+    }
+    trace = {
+        "nodes": [
+            {"id": "PRE-1", "claim_type": "precondition"},
+            {"id": "MF-9", "claim_type": "main_flow"},
+        ],
+        "edges": [
+            {"from": "AC-1", "to": "VDN-r", "kind": "realizes"},
+            {"from": "AC-2", "to": "VDN-r", "kind": "realizes"},
+            {"from": "AC-2", "to": "VDN-a", "kind": "realizes"},
+        ],
+    }
+    reused = {
+        "coverage_kind": "existing_code",
+        "existing_design_node_ids": ["VDN-r"],
+        "existing_code_targets": ["apps/web/src/Screen.tsx#Screen"],
+    }
+    assert requirement_existing_coverage("AC-1", design_graph=design, trace_graph=trace) == reused
+    assert requirement_existing_coverage("AC-2", design_graph=design, trace_graph=trace) == {}
+    assert requirement_existing_coverage("PRE-1", design_graph=design, trace_graph=trace) == {
+        "coverage_kind": "precondition"
+    }
+    assert requirement_existing_coverage("MF-9", design_graph=design, trace_graph=trace) == {}
+
+    rows = [
+        {"requirement_id": "AC-1", "content": "a", "planned_code_targets": []},
+        {"requirement_id": "AC-2", "content": "b", "planned_code_targets": ["apps/api/src/x.ts#x"]},
+    ]
+    marked = mark_existing_code_coverage(rows, design_graph=design, trace_graph=trace)
+    assert marked[0] == {**rows[0], **reused} and marked[1] == rows[1]
+
+    def issues(coverage: list[dict[str, object]]) -> list[str]:
+        return _component_requirement_coverage_issues(
+            structured_plan={"requirement_coverage": coverage, "design_mappings": []},
+            requirement_graph={"requirements": [{"id": "AC-1", "content": "a"}]},
+            design_graph=design,
+            trace_graph=trace,
+        )
+
+    assert not any("AC-1" in issue for issue in issues([marked[0]]))
+    tampered = {**marked[0], "existing_code_targets": ["apps/web/src/Other.tsx#Other"]}
+    assert "Requirement AC-1 existing-code coverage does not match the approved Design." in issues([tampered])
+
+
 def test_legacy_method_keeps_method_symbol_when_target_is_a_typescript_class() -> None:
     _, design, trace = _fixture()
     planning, _ = _policy()
@@ -740,12 +995,66 @@ def test_legacy_method_keeps_method_symbol_when_target_is_a_typescript_class() -
             }
         ],
         planning_policy=planning,
+        symbol_kinds={("apps/api/src/CulturalHeritage.ts", "CulturalHeritage"): "class"},
     )
 
     assert (
         mappings[0]["planned_code_target"]
         == "apps/api/src/CulturalHeritage.ts#CulturalHeritage.execute"
     )
+
+
+def test_legacy_method_binds_to_a_function_named_like_its_file() -> None:
+    _, design, trace = _fixture()
+    planning, _ = _policy()
+    skeleton = build_component_work_units(
+        design_graph=design,
+        trace_graph=trace,
+        repo_landscape={"anchors": []},
+        planning_policy=planning,
+    )
+    api_unit = next(item for item in skeleton if item["component_id"] == "api")
+    units = merge_work_unit_updates(
+        units=skeleton,
+        updates=[
+            {
+                "unit_id": api_unit["unit_id"],
+                "planned_code_targets": [
+                    {"path": "apps/api/src/articlesUpdate.ts", "symbol": "articlesUpdate"}
+                ],
+            }
+        ],
+        planning_policy=planning,
+    )
+    legacy = [
+        {
+            "design_element_id": "method:SC-1 api.execute",
+            "design_element_type": "method",
+            "planned_code_target": "apps/api/src/SC-1 api.ts#execute",
+            "component_id": "api",
+        },
+        {
+            "design_element_id": "method:SC-1 api.authorPublishesTheEditedArticle",
+            "design_element_type": "method",
+            "planned_code_target": "apps/api/src/SC-1 api.ts#authorPublishesTheEditedArticle",
+            "component_id": "api",
+        },
+    ]
+
+    for symbol_kinds in (
+        {("apps/api/src/articlesUpdate.ts", "articlesUpdate"): "function"},
+        None,  # a new file has no repository declaration yet
+    ):
+        mappings = rebind_legacy_mappings_to_work_units(
+            units=units,
+            design_graph=design,
+            legacy_mappings=legacy,
+            planning_policy=planning,
+            symbol_kinds=symbol_kinds,
+        )
+        assert {item["planned_code_target"] for item in mappings} == {
+            "apps/api/src/articlesUpdate.ts#articlesUpdate"
+        }
 
 
 def test_legacy_methods_bind_to_their_matching_concrete_targets() -> None:
@@ -1421,8 +1730,10 @@ def test_r9_planner_calls_one_construction_prompt_per_scenario() -> None:
         )
         for prompt in client.prompts
     ] == ["SC-1", "SC-2", "SC-3"]
-    assert '"mode": "repository|synthetic|not_required"' in client.prompts[0]
-    assert "Synthetic data is created in the QA spec after code exists" in client.prompts[0]
+    # Phase 4 Browser QA owns browser tests and their data, so the Plan prompt offers neither.
+    assert "qa_test_intents" not in client.prompts[0]
+    assert "data_setup" not in client.prompts[0]
+    assert "Do not plan browser tests or their test data here" in client.prompts[0]
     assert draft.structured["planning_mode"] == "llm_component_aware_scenario_sliced_v1"
     assert len(draft.structured["work_units"]) == 7
 
@@ -1460,48 +1771,37 @@ def test_planner_payload_rejects_scalar_test_target_paths_before_canonicalizatio
     assert "$.work_unit_updates[0].test_intents[0].target_paths" in error.value.message
 
 
-def test_planner_payload_requires_structured_qa_data_setup() -> None:
-    payload = {
-        "scenario_id": "SC-1",
-        "summary": "Plan SC-1.",
-        "work_unit_updates": [
-            {
-                "unit_id": "WU-1",
-                "qa_test_intents": [
-                    {
-                        "stage_id": "browser_e2e",
-                        "intent": "Verify the approved browser flow.",
-                        "acceptance_refs": ["AC-1"],
-                        "target_paths": ["tests/e2e/sc-1.spec.ts"],
-                    }
-                ],
-            }
-        ],
-    }
+def test_planner_payload_rejects_qa_intents_that_phase4_browser_qa_owns() -> None:
+    for field, value in (
+        (
+            "qa_test_intents",
+            [
+                {
+                    "stage_id": "browser_e2e",
+                    "intent": "Verify the approved browser flow.",
+                    "acceptance_refs": ["AC-1"],
+                    "target_paths": ["tests/e2e/sc-1.spec.ts"],
+                }
+            ],
+        ),
+        ("remove_qa_test_intents", ["QA-1"]),
+    ):
+        payload = {
+            "scenario_id": "SC-1",
+            "summary": "Plan SC-1.",
+            "work_unit_updates": [{"unit_id": "WU-1", field: value}],
+        }
 
-    with pytest.raises(HarnessError) as error:
-        _parse_component_plan_payload(
-            json.dumps(payload),
-            scenario_id="SC-1",
-            allowed_unit_ids={"WU-1"},
-            required_unit_ids={"WU-1"},
-        )
+        with pytest.raises(HarnessError) as error:
+            _parse_component_plan_payload(
+                json.dumps(payload),
+                scenario_id="SC-1",
+                allowed_unit_ids={"WU-1"},
+                required_unit_ids={"WU-1"},
+            )
 
-    assert error.value.error_code == "implementation_plan_developer_contract_invalid"
-    assert "qa_test_intents[0].data_setup must be an object" in error.value.message
-
-    payload["work_unit_updates"][0]["qa_test_intents"][0]["data_setup"] = {
-        "mode": "synthetic",
-        "reason": "The repository has no browser data seed.",
-        "requirements": ["An authenticated session and one deletable record."],
-    }
-    parsed = _parse_component_plan_payload(
-        json.dumps(payload),
-        scenario_id="SC-1",
-        allowed_unit_ids={"WU-1"},
-        required_unit_ids={"WU-1"},
-    )
-    assert parsed["work_unit_updates"][0]["qa_test_intents"][0]["data_setup"]["mode"] == "synthetic"
+        assert error.value.error_code == "implementation_plan_developer_contract_invalid"
+        assert f"$.work_unit_updates[0].{field} is not part of the Plan" in error.value.message
 
 
 def test_planner_retries_one_contract_invalid_scenario_output_with_exact_error() -> None:
@@ -1833,9 +2133,16 @@ def test_r9_write_scope_lists_runtime_wired_files_for_the_prompt() -> None:
     assert all("write_scope" in item and "surface_contracts" not in item for item in prompt_units)
 
 
-def _r9_rule_issues(units: list[dict[str, object]], expected: list[dict[str, object]]) -> list[str]:
+def _r9_rule_issues(
+    units: list[dict[str, object]],
+    expected: list[dict[str, object]],
+    *,
+    without_browser: bool = False,
+    inputs: dict[str, object] | None = None,
+    design: dict[str, object] | None = None,
+) -> list[str]:
     root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
-    design = json.loads((root / "vertical_design_graph.json").read_text(encoding="utf-8"))
+    design = design or json.loads((root / "vertical_design_graph.json").read_text(encoding="utf-8"))
     trace = json.loads((root / "vertical_trace_graph.json").read_text(encoding="utf-8"))
     planning, verification = _policy()
     projections = component_plan_projections(
@@ -1844,16 +2151,104 @@ def _r9_rule_issues(units: list[dict[str, object]], expected: list[dict[str, obj
     return component_plan_issues(
         structured_plan={
             "version": COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
-            "inputs": {},
+            "inputs": inputs or {},
             "work_units": units,
             **projections,
         },
         expected_units=expected,
-        expected_inputs={},
+        expected_inputs=inputs or {},
         planning_policy=planning,
-        verification_stage_ids=list(verification.stage_ids),
+        verification_stage_ids=[
+            stage for stage in verification.stage_ids if not (without_browser and stage == "browser_e2e")
+        ],
         design_graph=design,
         trace_graph=trace,
+    )
+
+
+def test_r9_shared_contract_is_required_only_for_a_new_endpoint_the_web_calls() -> None:
+    units, _ = _r9_units()
+    message = "Cross-boundary Web/API work requires an approved shared contract target from the repository profile."
+    # eTour adds the endpoint its screen calls, so the Plan must add a shared contract.
+    assert message in _r9_rule_issues(units, units)
+    root = Path(__file__).parent / "fixtures" / "plan_v4_design_v2_r9"
+    design = json.loads((root / "vertical_design_graph.json").read_text(encoding="utf-8"))
+    for node in design["nodes"]:
+        if node.get("surface") == "api":
+            node["disposition"] = "modify"
+    # Changing an existing endpoint may reuse its contract; the semantic review judges that case.
+    assert message not in _r9_rule_issues(units, units, design=design)
+
+
+def test_scenario_path_check_skips_a_surface_the_design_declares_not_exercised() -> None:
+    from sdlc_harness.agents.developer.component_plan import _structural_plan_issues
+
+    design = {
+        "nodes": [
+            {
+                "id": "VDN-api",
+                "scenario_id": "SC-6",
+                "surface": "api",
+                "disposition": "reuse",
+                "runtime_binding": {"runtime_kind": "api_route"},
+            }
+        ],
+        "edges": [],
+    }
+    trace = {
+        "nodes": [
+            {"kind": "surface_requirement", "status": "required", "scenario_id": "SC-6", "surface": surface}
+            for surface in ("api", "data")
+        ]
+    }
+    message = "Scenario SC-6 has no connected runtime work-unit path; uncovered surfaces: ['data']."
+    assert message in _structural_plan_issues(units=[], design_graph=design, trace_graph=trace)
+    design["surface_not_exercised"] = [{"scenario_id": "SC-6", "surface": "data"}]
+    assert _structural_plan_issues(units=[], design_graph=design, trace_graph=trace) == []
+
+
+def test_r9_existing_tests_of_unit_files_are_harness_owned_writable_and_ordered() -> None:
+    from sdlc_harness.agents.developer.component_plan import (
+        attach_existing_test_paths,
+        canonicalize_work_unit_dependencies,
+        unit_write_scope,
+    )
+
+    units, name = _r9_units()
+    planning, _ = _policy()
+    by_name = {name[u["unit_id"]]: u for u in units}
+    web_file = unit_write_scope(by_name["SC-1/web"], planning)["files"][0]
+    test_path = web_file.rsplit(".", 1)[0] + ".test.tsx"
+    facts = [{"path": web_file, "tests": [test_path, "apps/api/src/not-a-test.ts"]}]
+    inputs = {"repo_target_tests": facts}
+
+    attached = attach_existing_test_paths(units, facts, planning)
+    owners = [u for u in attached if web_file in unit_write_scope(u, planning).get("files", [])]
+    assert owners and all(u["existing_test_paths"] == [test_path] for u in owners)
+    assert all("existing_test_paths" not in u for u in attached if u not in owners)
+    projections = component_plan_projections(
+        units=attached, design_graph={"nodes": []}, requirement_graph={}, legacy_mappings=[], planning_policy=planning
+    )
+    assert test_path in {item["path"] for item in projections["proposed_files"]}
+    # Units sharing an existing test run in order, so their Developers never write it concurrently.
+    ordered = canonicalize_work_unit_dependencies(attached)
+    owner_ids = [u["unit_id"] for u in sorted(owners, key=lambda u: u["order"])]
+    by_id = {u["unit_id"]: u for u in ordered}
+    for earlier, later in zip(owner_ids, owner_ids[1:]):
+        assert earlier in by_id[later]["depends_on"]
+
+    # The rule review recomputes the Harness-owned list from the plan inputs.
+    issues = _r9_rule_issues(ordered, units, inputs=inputs)
+    assert not any("existing_test_paths" in issue for issue in issues)
+    assert "Compatibility proposed files do not match work-unit targets." not in issues
+    owner_set = {u["unit_id"] for u in owners}
+    tampered = [
+        {key: value for key, value in u.items() if key != "existing_test_paths"} if u["unit_id"] in owner_set else u
+        for u in ordered
+    ]
+    assert any(
+        "existing_test_paths do not match the repository tests of its files" in issue
+        for issue in _r9_rule_issues(tampered, units, inputs=inputs)
     )
 
 
@@ -1892,7 +2287,7 @@ def test_r9_later_units_reuse_the_attachment_an_earlier_unit_wired() -> None:
     assert not any("omits runtime wiring target" in issue for issue in _r9_rule_issues(removed, units))
 
 
-def test_r9_ui_obligations_must_each_be_tested_or_declared_unverified() -> None:
+def test_r9_ui_obligations_belong_to_browser_qa_or_must_be_tested_or_declared_unverified() -> None:
     units, name = _r9_units()
     planning, _ = _policy()
     by_name = {name[u["unit_id"]]: u for u in units}
@@ -1920,7 +2315,12 @@ def test_r9_ui_obligations_must_each_be_tested_or_declared_unverified() -> None:
     partial = merge_work_unit_updates(
         units=units, updates=[{"unit_id": unit_id, "test_intents": [test]}], planning_policy=planning
     )
+    # Phase 4 Browser QA covers every UI obligation, so a unit test may observe only part of them.
     issues = _r9_rule_issues(partial, units)
+    assert not any(f"{unit_id} leaves UI obligations" in issue for issue in issues)
+    assert not any(f"{unit_id} omits acceptance test coverage" in issue for issue in issues)
+    # Without a browser stage every obligation must be tested or declared unverified.
+    issues = _r9_rule_issues(partial, units, without_browser=True)
     assert any(f"{unit_id} leaves UI obligations" in issue and sc1[-1] in issue for issue in issues)
 
     complete = merge_work_unit_updates(
@@ -1936,8 +2336,10 @@ def test_r9_ui_obligations_must_each_be_tested_or_declared_unverified() -> None:
         ],
         planning_policy=planning,
     )
-    issues = _r9_rule_issues(complete, units)
+    issues = _r9_rule_issues(complete, units, without_browser=True)
     assert not any(f"{unit_id} leaves UI obligations neither tested" in issue for issue in issues)
+    assert any(f"{unit_id} references unknown UI obligations" in issue for issue in issues)
+    issues = _r9_rule_issues(complete, units)
     assert any(f"{unit_id} references unknown UI obligations" in issue for issue in issues)
     # The active suite has browser_e2e: an obligation may not be declared unverified.
     assert any(f"{unit_id} declares UI obligations unverified while browser QA is active" in issue for issue in issues)

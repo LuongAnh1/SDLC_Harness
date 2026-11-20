@@ -437,6 +437,64 @@ def test_profiled_code_trace_uses_exact_ast_symbol_evidence(
     assert prompt["symbol_evidence"]["extractor_id"] == "typescript_compiler_ast_v1"
 
 
+def test_profiled_code_trace_checks_reused_code_and_skips_preconditions(
+    code_trace_policy: CodeTracePolicy,
+) -> None:
+    source_path = "apps/api/src/DeleteService.ts"
+    test_path = "apps/api/src/DeleteService.test.ts"
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir)
+        (target / source_path).parent.mkdir(parents=True)
+        (target / source_path).write_text("export class DeleteService {}\nexport class ExistingGuard {}\n", encoding="utf-8")
+        (target / test_path).write_text("export {};\n", encoding="utf-8")
+        packet = _work_packet(source_path=source_path, test_path=test_path, symbol="DeleteService")
+        packet["canonical_requirements"] += [
+            {"id": "REQ-2", "content": "Existing guard keeps refusing visitors."},
+            {"id": "PRE-1", "content": "The user is signed in."},
+        ]
+        packet["requirement_coverage"] += [
+            {
+                "requirement_id": "REQ-2",
+                "content": "Existing guard keeps refusing visitors.",
+                "design_targets": [],
+                "design_element_ids": [],
+                "planned_code_targets": [],
+                "test_intents": [],
+                "coverage_kind": "existing_code",
+                "existing_design_node_ids": ["VDN-reused"],
+                "existing_code_targets": [f"{source_path}#ExistingGuard"],
+            },
+            {
+                "requirement_id": "PRE-1",
+                "content": "The user is signed in.",
+                "design_targets": [],
+                "design_element_ids": [],
+                "planned_code_targets": [],
+                "test_intents": [],
+                "coverage_kind": "precondition",
+            },
+        ]
+
+        present = CodeTraceValidator(
+            AcceptingCodeTraceLlm(),
+            symbol_extractor=StaticAstExtractor([_symbol("DeleteService"), _symbol("ExistingGuard")]),
+        ).validate(target_path=target, work_packet=packet, code_trace_policy=code_trace_policy)
+        vanished = CodeTraceValidator(
+            AcceptingCodeTraceLlm(),
+            symbol_extractor=StaticAstExtractor([_symbol("DeleteService")]),
+        ).validate(target_path=target, work_packet=packet, code_trace_policy=code_trace_policy)
+
+    status = {row["requirement_ref"]: row["evidence_status"] for row in present.mappings}
+    assert present.ok is True
+    assert status == {"REQ-1": "covered", "REQ-2": "existing_code", "PRE-1": "precondition"}
+    # Reused code that no longer exists is a missing link like any other.
+    assert vanished.ok is False
+    assert any(
+        item.get("type") == "missing_code_symbol" and item.get("requirement_ref") == "REQ-2"
+        for item in vanished.missing_links
+    )
+
+
 def test_profiled_code_trace_rejects_browser_e2e_as_unit_test_evidence(
     code_trace_policy: CodeTracePolicy,
 ) -> None:

@@ -860,10 +860,20 @@ def _v2_trace_mappings(
     for item in coverage:
         requirement_id = str(item.get("requirement_id") or "").strip()
         content = str(item.get("content") or "").strip()
-        targets = _string_items(item.get("planned_code_targets"))
+        # Plan rows a work unit implements carry planned code, design ids and tests; `existing_code` rows
+        # point at reused code that must still exist; `precondition` rows carry no code.
+        coverage_kind = str(item.get("coverage_kind") or "")
+        targets = _string_items(
+            item.get("existing_code_targets") if coverage_kind == "existing_code" else item.get("planned_code_targets")
+        )
         design_ids = _string_items(item.get("design_element_ids"))
         test_intents = _string_items(item.get("test_intents"))
-        if content != expected[requirement_id] or not targets or not design_ids or not test_intents:
+        incomplete = (
+            coverage_kind not in {"", "existing_code", "precondition"}
+            or (coverage_kind == "existing_code" and not targets)
+            or (not coverage_kind and (not targets or not design_ids or not test_intents))
+        )
+        if content != expected[requirement_id] or incomplete:
             raise HarnessError(
                 "code_trace_requirement_coverage_invalid",
                 f"Requirement coverage is incomplete or stale for {requirement_id}.",
@@ -939,9 +949,14 @@ def _v2_trace_mappings(
                 "test_intents": test_intents,
                 "test_files": existing_test_paths,
                 "test_covered": bool(existing_test_paths),
-                "evidence_status": "covered"
+                "evidence_status": "precondition"
+                if coverage_kind == "precondition"
+                else "existing_code"
+                if coverage_kind == "existing_code" and all(bool(value.get("symbol_found")) for value in evidence)
+                else "covered"
                 if evidence and all(bool(value.get("symbol_found")) for value in evidence) and existing_test_paths
                 else "missing",
+                **({"coverage_kind": coverage_kind} if coverage_kind else {}),
             }
         )
     return trace_mappings, missing_links
@@ -1007,6 +1022,7 @@ def _profiled_source_paths(
     candidates: list[object] = list(_dict_of_lists(work_packet.get("design_mappings_by_file")))
     for item in _dict_items(work_packet.get("requirement_coverage")):
         candidates.extend(target.split("#", 1)[0] for target in _string_items(item.get("planned_code_targets")))
+        candidates.extend(target.split("#", 1)[0] for target in _string_items(item.get("existing_code_targets")))
     paths: list[str] = []
     for item in candidates:
         path = policy.normalize_source_path(item)

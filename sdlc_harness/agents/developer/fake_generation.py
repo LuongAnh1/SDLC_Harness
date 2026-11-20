@@ -109,7 +109,7 @@ def _typescript_declarations(signatures: list[dict[str, object]]) -> str:
         lines.append("")
     for entry in functions:
         name = str(entry.get("qualified_name") or "generated").split(".")[-1]
-        lines.extend(_render_callable(entry, name=name, indent="", prefix="export "))
+        lines.extend(_render_callable(entry, name=name, indent="", prefix="export ", keyword="function "))
         lines.append("")
     for (owner, owner_kind), entries in owners.items():
         if owner_kind == "interface":
@@ -174,9 +174,10 @@ def _render_callable(
     name: str,
     indent: str,
     prefix: str = "",
+    keyword: str = "",
 ) -> list[str]:
     async_prefix = "async " if entry.get("async") is True else ""
-    result = [f"{indent}{prefix}{async_prefix}{_signature(entry, name=name)} {{"]
+    result = [f"{indent}{prefix}{async_prefix}{keyword}{_signature(entry, name=name)} {{"]
     for parameter in _dict_items(entry.get("parameters")):
         parameter_name = str(parameter.get("name") or "value").strip()
         if parameter_name:

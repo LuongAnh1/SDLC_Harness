@@ -1673,7 +1673,10 @@ class PhaseFourTest(unittest.TestCase):
             / "src"
             / "CulturalHeritage.ts"
         )
-        self.assertIn("execute", service_path.read_text(encoding="utf-8"))
+        # CulturalHeritage.ts is a new file, so its legacy `execute` operation binds to the function itself.
+        self.assertIn(
+            "export async function CulturalHeritage(", service_path.read_text(encoding="utf-8")
+        )
         report_path = self.repo_root / str(response["latest_artifacts"]["code_change_report"])
         report = report_path.read_text(encoding="utf-8")
         self.assertIn("Code Change Report V1", report)

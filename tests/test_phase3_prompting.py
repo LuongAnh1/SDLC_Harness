@@ -12,8 +12,11 @@ from sdlc_harness.agents.developer.planner import (
     _component_repair_slice,
     _component_plan_prompt,
     _compact_review,
+    _owned_source_files,
     _prior_scenario_plan_context,
 )
+from sdlc_harness.repo_context import codegraph as codegraph_module
+from sdlc_harness.workflows.phase3 import _with_repo_target_facts
 from sdlc_harness.agents.validator.plan_review import (
     ImplementationPlanReview,
     _llm_review_prompt,
@@ -94,11 +97,70 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     assert "Work-unit identity, membership, dependency, order, runtime_bindings, requirement_refs" in prompt
     assert "Do not invent a new business component or work unit" in prompt
     assert "A `typecheck` intent targets a non-test source" in prompt
-    assert "Do not re-audit that mapping item by item" in prompt
+    assert "do not re-audit that mapping item by item" in prompt
+    assert "the\n  Plan has no browser tests or test data: never ask for them" in prompt
     assert "do not require a compose service or stub for it" in prompt
+    # A Design contract narrower than its Requirement never lowers what the plan must satisfy.
+    assert "a plan that follows only\n  the narrower contract is a blocker" in prompt
+    assert "applies to every\n  case it lists (for example both edit and delete)" in prompt
     for legacy in ("UNIQUE-LEGACY-TRACE", "UNIQUE-CLASS", "UNIQUE-SEQUENCE", "Class graph JSON"):
         assert legacy not in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
+
+
+def test_validator_prompt_lists_every_design_node_instead_of_a_cut_design_document() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    design = {
+        "nodes": [
+            {"id": "VDN-edit", "scenario_id": "SC-1", "component_id": "api", "surface": "api",
+             "disposition": "modify", "name": "Update endpoint (PUT /api/x/:id)"},
+            {"id": "VDN-page", "scenario_id": "SC-3", "component_id": "web", "surface": "ui",
+             "disposition": "reuse", "name": "Article page"},
+        ],
+        "edges": [],
+        "surface_not_exercised": [{"scenario_id": "SC-6", "surface": "data"}],
+    }
+    prompt = _llm_review_prompt(
+        structured_plan={
+            "version": COMPONENT_AWARE_PROFILED_IMPLEMENTATION_PLAN_VERSION,
+            "inputs": {"repo_runtime_config": {"schema_version": "x"}, "repo_target_callers": [{"path": "UNIQUE-CALLER"}]},
+            "work_units": [{"unit_id": "WU-1", "design_node_ids": ["VDN-edit"]}],
+            "requirement_coverage": [
+                {"requirement_id": "AC-3", "coverage_kind": "existing_code",
+                 "existing_code_targets": ["apps/web/src/Page.tsx#ArticleMeta"]},
+                {"requirement_id": "PRE-1", "coverage_kind": "precondition"},
+            ],
+        },
+        requirement_packet="UNIQUE-REQUIREMENT-PACKET",
+        design_artifact="UNIQUE-DESIGN-DOCUMENT",
+        requirement_design_trace={},
+        class_graph={},
+        sequence_graph={},
+        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v4"),
+        canonical_requirement={
+            "schema_version": "requirement_model_v2",
+            "acceptance_criteria": [{"id": "AC-3", "statement": "UNIQUE-AC"}],
+            "provenance_ledger": {"note": "UNIQUE-PROVENANCE"},
+            "evidence": [{"note": "UNIQUE-EVIDENCE"}],
+        },
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        vertical_design_graph=design,
+        vertical_trace_graph={"nodes": [], "edges": []},
+    )
+
+    assert "VDN-edit | SC-1 | api/api | modify | WU-1 | Update endpoint (PUT /api/x/:id)" in prompt
+    assert "VDN-page | SC-3 | web/ui | reuse | no work unit | Article page" in prompt
+    assert "Not exercised: SC-6 data" in prompt
+    assert "AC-3: existing code apps/web/src/Page.tsx#ArticleMeta" in prompt
+    assert "PRE-1: precondition" in prompt
+    assert "never report it as\n  unplanned or missing" in prompt
+    # The cut documents, provenance and Harness-only facts stay out; the Requirement itself stays.
+    for absent in ("UNIQUE-REQUIREMENT-PACKET", "UNIQUE-DESIGN-DOCUMENT", "UNIQUE-PROVENANCE",
+                   "UNIQUE-EVIDENCE", "UNIQUE-CALLER", "truncated for implementation plan review"):
+        assert absent not in prompt
+    assert "UNIQUE-AC" in prompt and '"repo_runtime_config"' in prompt
 
 
 def test_component_plan_prompt_keeps_signature_identity_harness_owned() -> None:
@@ -370,18 +432,13 @@ def test_component_plan_contract_retry_includes_previous_candidate() -> None:
             "work_unit_updates": [
                 {
                     "unit_id": "WU-1",
-                    "qa_test_intents": [
+                    "test_intents": [
                         {
-                            "stage_id": "browser_e2e",
-                            "intent": "Verify the browser flow.",
+                            "stage_id": "unit",
+                            "intent": "Verify the flow.",
                             "acceptance_refs": ["AC-1"],
-                            "target_paths": "tests/e2e/sc-1.spec.ts",
+                            "target_paths": "apps/api/src/sc1.test.ts",
                             "obligation_refs": [],
-                            "data_setup": {
-                                "mode": "not_required",
-                                "reason": "No setup is needed.",
-                                "requirements": [],
-                            },
                         }
                     ],
                 }
@@ -390,8 +447,8 @@ def test_component_plan_contract_retry_includes_previous_candidate() -> None:
         }
     )
     corrected_candidate = invalid_candidate.replace(
-        '"target_paths": "tests/e2e/sc-1.spec.ts"',
-        '"target_paths": ["tests/e2e/sc-1.spec.ts"]',
+        '"target_paths": "apps/api/src/sc1.test.ts"',
+        '"target_paths": ["apps/api/src/sc1.test.ts"]',
     )
 
     class RetryLlm:
@@ -507,10 +564,75 @@ def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice()
     assert prompt.count("UNIQUE-BOUNDARY") == 1
     assert "ui_stylesheets" in prompt
     assert "stage_capabilities" in prompt
-    assert "stays unverified until such a stage" in prompt
+    # Browser QA is active under this policy: Phase 4 owns browser tests, so no rule offers QA
+    # intents, test data or unverified UI obligations.
+    assert "Phase 4 Browser QA observes it; never claim a `unit` test proves it" in prompt
+    assert "Do not plan browser tests or their test data here" in prompt
+    assert "stays unverified until such a stage" not in prompt
+    for absent in ("unverified_obligations", "qa_test_intents", "data_setup", "synthetic"):
+        assert absent not in prompt
     assert "`runtime_input` obligation" in prompt
-    assert "mode `synthetic` when no such source exists" in prompt
-    assert "do not add or alter a production provider" in prompt
+    assert "do not add or alter a" in prompt
+    # Points 2-4: a contract gap is read explicitly, callers keep their responses, tests are not scope.
+    assert "`Reading of <Design node or edge ID>: ...`" in prompt
+    assert "do not re-implement it in a planned target" in prompt
+    assert "test files are not `write_scope` targets" in prompt
+    # A target keeps its own existing responses; a seeded owner that already wires it needs no change.
+    assert "target keeps the responses its own existing code already produces unless" in prompt
+    assert "state in the objective\n  that the owner needs no change and do not invent one" in prompt
+    assert "never leave an existing test asserting replaced behavior" in prompt
+    # Without repository facts the `unit` capability keeps the profile text.
+    assert "Vitest in a Node environment with no DOM and no browser" in prompt
+
+
+def test_unit_stage_capability_follows_the_repository_test_environment() -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    verification_policy = build_verification_stage_policy_version(
+        project=get_project_profile("typescript_fullstack_v1"),
+        policy_version=VERIFICATION_STAGE_POLICY_VERSION,
+    )
+    per_file = {"unit_environment": "node", "dom_capable": True, "dom_test_directive": "// @vitest-environment jsdom"}
+    unit = verification_policy.prompt_context(per_file)["stage_capabilities"]["unit"]
+    assert "A test file whose first line is `// @vitest-environment jsdom`" in unit
+    assert "fires events and queries the DOM, including which element has focus" in unit
+    assert "cannot observe CSS or viewport-dependent layout" in unit
+    configured = verification_policy.prompt_context({"unit_environment": "jsdom", "dom_capable": True})
+    assert configured["stage_capabilities"]["unit"].startswith("Vitest in a jsdom DOM environment")
+    no_dom = verification_policy.prompt_context({"unit_environment": "node", "dom_capable": False})
+    assert no_dom == verification_policy.prompt_context()
+
+    prompt = _component_plan_prompt(
+        run_id="run_dom",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=[],
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+        unit_test_environment=per_file,
+    )
+    assert "(the repository's own convention) runs in a DOM" in prompt
+    assert "Vitest in a Node environment with no DOM and no browser" not in prompt
+    # The Plan review reads the same fact from the plan inputs, so both judge one capability.
+    review = _llm_review_prompt(
+        structured_plan={"inputs": {"repo_unit_test_environment": per_file}},
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        requirement_design_trace={},
+        class_graph={},
+        sequence_graph={},
+        rule_review=ImplementationPlanReview(ok=True, mode="implementation_plan_rule_review_v4"),
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+    )
+    assert "(the repository's own convention) runs in a DOM" in review
 
 
 def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> None:
@@ -546,13 +668,243 @@ def test_validator_prompt_omits_v4_projections_and_unit_contract_copies() -> Non
     assert "UNIQUE-SIGNATURE" in prompt
     assert "apps/web/src/Screen.tsx" in prompt
     assert "stage_capabilities" in prompt
-    assert "preserves the production dependency" in prompt
-    assert "`synthetic` is the correct test-only fallback" in prompt
+    assert "verify that the plan keeps the production dependency external" in prompt
+    assert "data_setup" not in prompt and "qa_test_intents" not in prompt
+    assert "`Reading of <Design ID>: ...`" in prompt
+    assert "validation middleware on the route) stays there" in prompt
+    assert "keeps the responses its own existing code\n  already produces" in prompt
+    assert "may need no change;\n  accept an objective that says so" in prompt
     assert "Approved Requirement and Design are immutable inputs" in prompt
     assert "Review the final merged repository state" in prompt
     assert "Earlier test intents remain part of that final state" in prompt
-    assert "do not require Planner to invent the fixture-binding mechanism" in prompt
     assert "Review each listed contract once" in prompt
     assert "do not keep exploring alternatives" in prompt
     assert "require upstream Design change" not in prompt
     assert "Do not cap the number of findings" not in prompt
+
+
+def test_component_plan_prompt_shows_the_owned_source_files_of_the_slice(tmp_path) -> None:
+    policy, directive, verification_policy = _typescript_prompt_context()
+    (tmp_path / "apps/api/src").mkdir(parents=True)
+    (tmp_path / "apps/api/src/app.ts").write_text("export function createApp() {\n  return 1;\n}\n", encoding="utf-8")
+    (tmp_path / "apps/api/src/big.ts").write_text(
+        "".join(f"export const value{index} = {index};\n" for index in range(2000)), encoding="utf-8"
+    )
+    units = [
+        {
+            "unit_id": "WU-1",
+            "runtime_bindings": [
+                {
+                    "target": {"path": "apps/api/src/guard.ts", "symbol": "ensureGuard"},
+                    "attachment": {"owner_path": "apps/api/src/app.ts", "owner_symbol": "createApp"},
+                }
+            ],
+        },
+        {
+            "unit_id": "WU-2",
+            "runtime_bindings": [{"target": {"path": "apps/api/src/big.ts", "symbol": "value0"}}],
+        },
+    ]
+
+    (tmp_path / "apps/api/src/routes").mkdir()
+    (tmp_path / "apps/api/src/routes/values.ts").write_text(
+        'router.get("/", validate, value0);\n', encoding="utf-8"
+    )
+    callers = {
+        ("apps/api/src/big.ts", "value0"): [
+            {"path": "apps/api/src/routes/values.ts", "line": 1},
+            {"path": "apps/api/src/app.ts", "line": 2},  # already in write_scope
+            {"path": "apps/api/src/big.test.ts", "line": 4},  # tests are not wiring evidence
+        ]
+    }
+
+    (tmp_path / "apps/api/src/app.test.ts").write_text("expect(createApp()).toBe(1);\n", encoding="utf-8")
+    units[0]["existing_test_paths"] = ["apps/api/src/app.test.ts"]
+
+    owned = _owned_source_files(
+        units=units, target_repo_path=str(tmp_path), planning_policy=policy, target_callers=callers
+    )
+
+    assert (
+        "--- apps/api/src/app.test.ts (existing test of a write_scope file; 1 lines)\n"
+        "   1\texpect(createApp()).toBe(1);"
+    ) in owned
+    # Write-scope files first, then their existing tests, then read-only callers.
+    assert owned.index("big.ts (2000") < owned.index("app.test.ts (") < owned.index("routes/values.ts")
+    assert "--- apps/api/src/app.ts (3 lines)\n   1\texport function createApp() {\n   2\t  return 1;" in owned
+    assert "--- apps/api/src/guard.ts: does not exist yet; the work unit creates it." in owned
+    # A later unit of the same code entity extends a file the first unit creates.
+    later = [
+        {
+            **units[0],
+            "unit_id": "WU-LATER",
+            "existing_test_paths": [],
+            "code_entities": [
+                {"entity": "apps/api/src/guard.ts#ensureGuard", "unit_ids": ["WU-1", "WU-LATER"]}
+            ],
+        }
+    ]
+    assert (
+        "--- apps/api/src/guard.ts: does not exist in the worktree yet; earlier unit WU-1 creates it."
+        in _owned_source_files(units=later, target_repo_path=str(tmp_path), planning_policy=policy)
+    )
+    assert "--- apps/api/src/big.ts (2000 lines)" in owned
+    assert "-2000 not shown]" in owned
+    assert (
+        "--- apps/api/src/routes/values.ts (read-only caller of value0 at line 1; 1 lines)\n"
+        '   1\trouter.get("/", validate, value0);'
+    ) in owned
+    assert owned.count("apps/api/src/app.ts") == 1 and "big.test.ts" not in owned
+    assert owned.index("big.ts (2000") < owned.index("routes/values.ts")
+    assert len(owned) < 9400
+    prompt = _component_plan_prompt(
+        run_id="run_owned",
+        requirement_packet="Approved requirement.",
+        design_artifact="Approved design.",
+        units=units,
+        vertical_design_graph={"nodes": [], "edges": []},
+        vertical_trace_graph={"nodes": [], "edges": []},
+        repo_context={},
+        planning_policy=policy,
+        prompt_directive=directive,
+        verification_policy=verification_policy,
+        signature_targets=[],
+        repair_feedback="",
+        previous_review={},
+        owned_sources=owned,
+    )
+    assert prompt.index("Vertical Trace slice:") < prompt.index(
+        "Owned source files (current worktree text"
+    ) < prompt.index("Repository context:")
+    assert "   1\texport function createApp() {" in prompt
+
+
+def test_codegraph_symbol_kinds_read_only_exact_path_and_name(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".codegraph").mkdir()
+    calls: list[list[str]] = []
+
+    def fake_command(*, target_path, arguments, timeout_seconds):
+        calls.append(arguments)
+        return json.dumps(
+            [
+                {"node": {"kind": "function", "name": "articlesUpdateValidator", "filePath": "apps/api/src/a.ts"}},
+                {"node": {"kind": "class", "name": "articlesUpdate", "filePath": "apps/api/src/other.ts"}},
+                {"node": {"kind": "function", "name": "articlesUpdate", "filePath": "apps/api/src/articlesUpdate.ts"}},
+            ]
+        )
+
+    monkeypatch.setattr(codegraph_module, "_run_codegraph_command", fake_command)
+    provider = codegraph_module.CodeGraphContextProvider()
+
+    facts = provider.symbol_kinds(
+        tmp_path,
+        [("apps/api/src/articlesUpdate.ts", "articlesUpdate"), ("apps/api/src/New.ts", "New")],
+    )
+
+    assert facts == [{"path": "apps/api/src/articlesUpdate.ts", "symbol": "articlesUpdate", "kind": "function"}]
+    assert calls[0][:2] == ["query", "New"] and calls[1][:2] == ["query", "articlesUpdate"]
+
+
+def test_codegraph_target_callers_list_other_files_with_their_lines(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".codegraph").mkdir()
+
+    def fake_command(*, target_path, arguments, timeout_seconds):
+        assert arguments[:2] == ["callers", "articlesUpdate"]
+        return json.dumps(
+            {
+                "symbol": "articlesUpdate",
+                "callers": [
+                    {"name": "PUT /:slug", "kind": "route", "filePath": "apps/api/src/routes/api/articles.ts", "startLine": 41},
+                    {"name": "self", "kind": "function", "filePath": "apps/api/src/articlesUpdate.ts", "startLine": 3},
+                ],
+            }
+        )
+
+    monkeypatch.setattr(codegraph_module, "_run_codegraph_command", fake_command)
+
+    facts = codegraph_module.CodeGraphContextProvider().target_callers(
+        tmp_path, [("apps/api/src/articlesUpdate.ts", "articlesUpdate")]
+    )
+
+    assert facts == [
+        {
+            "path": "apps/api/src/articlesUpdate.ts",
+            "symbol": "articlesUpdate",
+            "callers": [{"path": "apps/api/src/routes/api/articles.ts", "line": 41}],
+        }
+    ]
+
+
+def test_phase3_records_repo_facts_only_for_existing_targets(tmp_path) -> None:
+    asked: dict[str, list[tuple[str, str]]] = {}
+
+    class Provider:
+        def symbol_kinds(self, target_path, targets):
+            asked["kinds"] = list(targets)
+            return [{"path": "apps/api/src/articlesUpdate.ts", "symbol": "articlesUpdate", "kind": "function"}]
+
+        def target_callers(self, target_path, targets):
+            asked["callers"] = list(targets)
+            return []
+
+        def target_tests(self, target_path, paths):
+            asked["tests"] = list(paths)
+            return [{"path": "apps/web/src/EditArticle.tsx", "tests": ["apps/web/src/EditArticle.test.tsx"]}]
+
+    def node(path: str, symbol: str, owner: str = "") -> dict[str, object]:
+        attachment = {"owner_path": owner} if owner else {}
+        return {"runtime_binding": {"target": {"path": path, "symbol": symbol}, "attachment": attachment}}
+
+    for path in ("apps/api/src/articlesUpdate.ts", "apps/web/src/EditArticle.tsx", "apps/web/src/App.tsx"):
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text("export {};\n", encoding="utf-8")
+    graph = {
+        "nodes": [
+            node("apps/api/src/articlesUpdate.ts", "articlesUpdate"),
+            node("apps/api/src/articleAuthorGuard.ts", "ensureArticleAuthor"),  # new file
+            node("apps/web/src/EditArticle.tsx", "EditArticle", owner="apps/web/src/App.tsx"),
+        ]
+    }
+
+    inputs = _with_repo_target_facts({"a": 1}, provider=Provider(), target_path=tmp_path, vertical_design_graph=graph)
+
+    # Only a .ts target named like its file can be a class owning legacy methods.
+    assert asked["kinds"] == [("apps/api/src/articlesUpdate.ts", "articlesUpdate")]
+    assert asked["callers"] == [
+        ("apps/api/src/articlesUpdate.ts", "articlesUpdate"),
+        ("apps/web/src/EditArticle.tsx", "EditArticle"),
+    ]
+    # Existing tests are looked up for every existing target and attachment-owner file.
+    assert asked["tests"] == [
+        "apps/api/src/articlesUpdate.ts",
+        "apps/web/src/App.tsx",
+        "apps/web/src/EditArticle.tsx",
+    ]
+    assert inputs == {
+        "a": 1,
+        "repo_symbol_kinds": [
+            {"path": "apps/api/src/articlesUpdate.ts", "symbol": "articlesUpdate", "kind": "function"}
+        ],
+        "repo_target_callers": [],
+        "repo_target_tests": [{"path": "apps/web/src/EditArticle.tsx", "tests": ["apps/web/src/EditArticle.test.tsx"]}],
+    }
+    assert _with_repo_target_facts(
+        {"a": 1}, provider=Provider(), target_path=tmp_path, vertical_design_graph={"nodes": [graph["nodes"][1]]}
+    ) == {"a": 1}
+
+
+def test_codegraph_target_tests_map_each_file_to_the_tests_importing_it(tmp_path, monkeypatch) -> None:
+    (tmp_path / ".codegraph").mkdir()
+
+    def fake_command(*, target_path, arguments, timeout_seconds):
+        assert arguments[0] == "affected" and arguments[-3:] == ["--depth", "1", "--json"]
+        tests = ["apps/web/src/EditArticle.test.tsx"] if "EditArticle.tsx" in arguments[1] else []
+        return json.dumps({"changedFiles": [arguments[1]], "affectedTests": tests})
+
+    monkeypatch.setattr(codegraph_module, "_run_codegraph_command", fake_command)
+
+    facts = codegraph_module.CodeGraphContextProvider().target_tests(
+        tmp_path, ["apps/web/src/EditArticle.tsx", "apps/api/src/articlesUpdate.ts"]
+    )
+
+    assert facts == [{"path": "apps/web/src/EditArticle.tsx", "tests": ["apps/web/src/EditArticle.test.tsx"]}]

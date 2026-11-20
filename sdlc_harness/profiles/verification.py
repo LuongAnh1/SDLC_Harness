@@ -217,14 +217,40 @@ class VerificationStagePolicy:
             }
         return metadata
 
-    def prompt_context(self) -> dict[str, object]:
-        capabilities = _STAGE_CAPABILITIES_BY_PROJECT.get(self.project_profile_id, {})
+    def prompt_context(self, unit_test_environment: object = None) -> dict[str, object]:
+        """`unit_test_environment` is the repository's scanned test environment (Phase 3 facts)."""
+
+        capabilities = dict(_STAGE_CAPABILITIES_BY_PROJECT.get(self.project_profile_id, {}))
+        unit = _repository_unit_capability(unit_test_environment)
+        if unit and "unit" in capabilities:
+            capabilities["unit"] = unit
         return {
             **self.metadata(),
             "stage_capabilities": {
                 stage_id: capabilities[stage_id] for stage_id in self.stage_ids if stage_id in capabilities
             },
         }
+
+
+def _repository_unit_capability(environment: object) -> str:
+    """Describe the `unit` stage as the repository's own tests run; empty keeps the profile text."""
+
+    facts = environment if isinstance(environment, dict) else {}
+    if facts.get("dom_capable") is not True:
+        return ""
+    dom = (
+        "it renders React, fires events and queries the DOM, including which element has focus; it "
+        "cannot observe CSS or viewport-dependent layout"
+    )
+    configured = str(facts.get("unit_environment") or "")
+    directive = str(facts.get("dom_test_directive") or "")
+    if not directive:
+        return f"Vitest in a {configured} DOM environment with no browser: {dom}."
+    return (
+        f"Vitest in a {configured or 'node'} environment by default: runs exported TypeScript functions "
+        f"and React rendered to static markup. A test file whose first line is `{directive}` (the "
+        f"repository's own convention) runs in a DOM: {dom}."
+    )
 
 
 def profiled_plan_contract_issues(

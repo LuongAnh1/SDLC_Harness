@@ -32,9 +32,11 @@ from ...profiles import (
 )
 from .component_plan import (
     COMPONENT_AWARE_IMPLEMENTATION_PLAN_VERSION,
+    attach_existing_test_paths,
     build_component_work_units,
     canonicalize_work_unit_dependencies,
     component_plan_projections,
+    mark_existing_code_coverage,
     merge_work_unit_updates,
     test_intent_id,
     rebind_legacy_mappings_to_work_units,
@@ -235,11 +237,15 @@ class DeveloperPlanAgent:
         repo_landscape: dict[str, object],
         component_plan_inputs: dict[str, object],
     ) -> ImplementationPlanDraft:
-        skeleton = build_component_work_units(
-            design_graph=vertical_design_graph,
-            trace_graph=vertical_trace_graph,
-            repo_landscape=repo_landscape,
-            planning_policy=planning_policy,
+        skeleton = attach_existing_test_paths(
+            build_component_work_units(
+                design_graph=vertical_design_graph,
+                trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                planning_policy=planning_policy,
+            ),
+            component_plan_inputs.get("repo_target_tests"),
+            planning_policy,
         )
         legacy_mappings = _design_mappings(
             class_graph=class_graph,
@@ -254,6 +260,7 @@ class DeveloperPlanAgent:
             design_graph=vertical_design_graph,
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
+            symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
         )
         signature_targets = _implementation_signature_targets(
             mappings=legacy_mappings,
@@ -305,6 +312,12 @@ class DeveloperPlanAgent:
                 ),
                 allowed_unit_ids=slice_ids,
                 required_unit_ids=slice_ids,
+                owned_sources=_owned_source_files(
+                    units=current_slice,
+                    target_repo_path=target_repo_path,
+                    planning_policy=planning_policy,
+                    target_callers=_repo_target_callers(component_plan_inputs),
+                ),
             )
             units = merge_work_unit_updates(
                 units=units,
@@ -347,13 +360,17 @@ class DeveloperPlanAgent:
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
         )
-        projections["requirement_coverage"] = _merge_requirement_coverage(
-            projections["requirement_coverage"],
-            _requirement_coverage(
-                requirement_graph=requirement_graph,
-                requirement_design_trace=requirement_design_trace,
-                mappings=projections["design_mappings"],
+        projections["requirement_coverage"] = mark_existing_code_coverage(
+            _merge_requirement_coverage(
+                projections["requirement_coverage"],
+                _requirement_coverage(
+                    requirement_graph=requirement_graph,
+                    requirement_design_trace=requirement_design_trace,
+                    mappings=projections["design_mappings"],
+                ),
             ),
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
         )
         signature_contract = build_implementation_signature_contract(
             planning_policy=planning_policy,
@@ -466,11 +483,15 @@ class DeveloperPlanAgent:
         repo_landscape: dict[str, object],
         component_plan_inputs: dict[str, object],
     ) -> ImplementationPlanDraft:
-        skeleton = build_component_work_units(
-            design_graph=vertical_design_graph,
-            trace_graph=vertical_trace_graph,
-            repo_landscape=repo_landscape,
-            planning_policy=planning_policy,
+        skeleton = attach_existing_test_paths(
+            build_component_work_units(
+                design_graph=vertical_design_graph,
+                trace_graph=vertical_trace_graph,
+                repo_landscape=repo_landscape,
+                planning_policy=planning_policy,
+            ),
+            component_plan_inputs.get("repo_target_tests"),
+            planning_policy,
         )
         preserved = merge_work_unit_updates(
             units=skeleton,
@@ -502,6 +523,7 @@ class DeveloperPlanAgent:
             design_graph=vertical_design_graph,
             legacy_mappings=base_mappings,
             planning_policy=planning_policy,
+            symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
         )
         signature_targets = _implementation_signature_targets(
             mappings=legacy_mappings,
@@ -535,6 +557,12 @@ class DeveloperPlanAgent:
             allowed_unit_ids=affected_unit_ids or None,
             required_unit_ids=affected_unit_ids or None,
             signature_contract_required=False,
+            owned_sources=_owned_source_files(
+                units=repair_units,
+                target_repo_path=target_repo_path,
+                planning_policy=planning_policy,
+                target_callers=_repo_target_callers(component_plan_inputs),
+            ),
         )
         proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
         if affected_unit_ids:
@@ -562,6 +590,7 @@ class DeveloperPlanAgent:
                 design_graph=vertical_design_graph,
                 legacy_mappings=base_mappings,
                 planning_policy=planning_policy,
+                symbol_kinds=_repo_symbol_kinds(component_plan_inputs),
             )
             signature_targets = _implementation_signature_targets(
                 mappings=legacy_mappings,
@@ -574,13 +603,17 @@ class DeveloperPlanAgent:
             legacy_mappings=legacy_mappings,
             planning_policy=planning_policy,
         )
-        projections["requirement_coverage"] = _merge_requirement_coverage(
-            projections["requirement_coverage"],
-            _requirement_coverage(
-                requirement_graph=requirement_graph,
-                requirement_design_trace=requirement_design_trace,
-                mappings=projections["design_mappings"],
+        projections["requirement_coverage"] = mark_existing_code_coverage(
+            _merge_requirement_coverage(
+                projections["requirement_coverage"],
+                _requirement_coverage(
+                    requirement_graph=requirement_graph,
+                    requirement_design_trace=requirement_design_trace,
+                    mappings=projections["design_mappings"],
+                ),
             ),
+            design_graph=vertical_design_graph,
+            trace_graph=vertical_trace_graph,
         )
         signature_contract = _merge_implementation_signature_contract(
             planning_policy=planning_policy,
@@ -697,6 +730,7 @@ class DeveloperPlanAgent:
         allowed_unit_ids: set[str] | None = None,
         required_unit_ids: set[str] | None = None,
         signature_contract_required: bool | None = None,
+        owned_sources: str = "",
     ) -> dict[str, object]:
         if not self.llm_client:
             return {}
@@ -721,6 +755,8 @@ class DeveloperPlanAgent:
             ),
             scenario_id=scenario_id,
             prior_plan_context=prior_plan_context or {},
+            owned_sources=owned_sources,
+            unit_test_environment=(component_plan_inputs or {}).get("repo_unit_test_environment"),
         )
         system = (
             "You are SDLC Harness Developer.plan for a component-aware full-stack plan. "
@@ -1026,18 +1062,18 @@ def _units_for_prompt(
 
     result = []
     for unit in units:
-        item = {key: value for key, value in unit.items() if key not in {"surface_contracts", "boundary_contracts"}}
+        # Phase 4 Browser QA owns browser tests, so the Plan never shows a QA intent slot.
+        item = {
+            key: value
+            for key, value in unit.items()
+            if key not in {"surface_contracts", "boundary_contracts", "qa_test_intents"}
+        }
         if _dict_items(unit.get("test_intents")):
             # Ids let a repair drop one test without resending the others.
             item["test_intents"] = [
                 {"id": test_intent_id(test), **test} for test in _dict_items(unit.get("test_intents"))
             ]
-        if _dict_items(unit.get("qa_test_intents")):
-            item["qa_test_intents"] = [
-                {"id": test_intent_id(test), **test}
-                for test in _dict_items(unit.get("qa_test_intents"))
-            ]
-        scope = unit_write_scope(unit, planning_policy) if planning_policy else {}
+        scope =unit_write_scope(unit, planning_policy) if planning_policy else {}
         if scope:
             item["write_scope"] = scope
         result.append(item)
@@ -1087,6 +1123,8 @@ def _component_plan_prompt(
     runtime_config: dict[str, object] | None = None,
     scenario_id: str = "",
     prior_plan_context: dict[str, object] | None = None,
+    owned_sources: str = "",
+    unit_test_environment: object = None,
 ) -> str:
     node_ids = {
         node_id for unit in units for node_id in _string_items(unit.get("design_node_ids"))
@@ -1171,40 +1209,97 @@ def _component_plan_prompt(
         )
     else:
         repair = ""
+    browser_qa_active = (
+        "browser_e2e" in verification_policy.stage_ids
+        and verification_policy.owner_for_stage("browser_e2e") == QA_INTENT_STAGE_OWNER
+    )
+    # With Browser QA active, Phase 4 plans and runs browser journeys for every UI obligation from the
+    # approved Design and demo seed, so the Plan carries neither browser tests nor unverified obligations.
+    repair_unverified_rule = (
+        ""
+        if browser_qa_active
+        else "\n  - `unverified_obligations` entries add to or replace the unit's entries with the same id."
+    )
     repair_rules = (
         """
 - This is a repair patch. Return only the units named by the review, and in them only what changes:
-  - `planned_code_targets`, `test_intents`, and `qa_test_intents` add to what the unit already
-    has; never resend an existing target or test. Drop an existing test by listing its `id` in
-    `remove_test_intents` or `remove_qa_test_intents`, and drop a target the review calls unapproved
-    or unnecessary by listing its exact path and symbol in `remove_planned_code_targets`. Targets
-    seeded from runtime_bindings cannot be removed.
-  - `unverified_obligations` entries add to or replace the unit's entries with the same id.
+  - `planned_code_targets` and `test_intents` add to what the unit already has; never resend an
+    existing target or test. Drop an existing test by listing its `id` in `remove_test_intents`,
+    and drop a target the review calls unapproved or unnecessary by listing its exact path and
+    symbol in `remove_planned_code_targets`. Targets seeded from runtime_bindings cannot be removed."""
+        + repair_unverified_rule
+        + """
   - Send `objective` only when the review requires it to change; keep its unchanged sentences
     word for word and add the new ones.
 """.rstrip()
         if repair_feedback.strip()
         else ""
     )
-    browser_qa_active = (
-        "browser_e2e" in verification_policy.stage_ids
-        and verification_policy.owner_for_stage("browser_e2e") == QA_INTENT_STAGE_OWNER
+    unverified_field = (
+        ""
+        if browser_qa_active
+        else """
+      "unverified_obligations": [
+        {"id": "ui_obligations id no active stage fully observes", "reason": "what stays unobserved and why"}
+      ],"""
+    )
+    static_markup_rule = (
+        "CSS class names without owned style rules do not cover responsive behavior, and static\n"
+        "  markup does not cover interaction or focus; Phase 4 Browser QA observes such items in the\n"
+        "  real browser."
+        if browser_qa_active
+        else "CSS class names without owned style rules do not cover responsive behavior, and static\n"
+        "  markup does not cover interaction or focus; record such items in `unverified_obligations`."
+    )
+    browser_behavior_rule = (
+        "When behavior needs more than the `unit`\n"
+        "  stage capability, Phase 4 Browser QA observes it; never claim a `unit` test proves it."
+        if browser_qa_active
+        else "When behavior needs a DOM or browser that\n"
+        "  no active stage provides, say in the objective that it stays unverified until such a stage\n"
+        "  exists; never claim a test proves it."
+    )
+    obligation_accounting_rule = (
+        "Phase 4 Browser QA\n"
+        "  observes every id in the real browser. List an id in `obligation_refs` of a `unit` test intent\n"
+        "  when that test observes it within the `unit` stage capability: static markup shows roles, aria\n"
+        "  attributes, accessible names and state-dependent markup; only a DOM test shows focus and\n"
+        "  events; no `unit` test shows viewport layout."
+        if browser_qa_active
+        else "Account for every id:\n"
+        "  list it in `obligation_refs` of a test intent whose stage can observe it, or in\n"
+        "  `unverified_obligations` with the reason, or in both when a test observes part of it and the\n"
+        "  rest needs a stage the profile does not activate. Roles, aria attributes, accessible names and\n"
+        "  state-dependent markup are observable by static rendering; focus movement, keyboard\n"
+        "  interaction and viewport layout need a stage the profile may not activate. The rule review\n"
+        "  rejects a unit that leaves an id unaccounted for."
+    )
+    owned_sources_section = (
+        "\nOwned source files (current worktree text, with line numbers, of every file in the work "
+        "units' write_scope, then of read-only caller files outside it; evidence for targets and "
+        "signatures):\n"
+        + owned_sources
+        + "\n"
+        if owned_sources.strip()
+        else ""
     )
     browser_qa_rule = (
-        "Browser QA is active. Put every UI obligation in at least one `qa_test_intents` "
-        "entry and do not mark UI obligations unverified. For each `runtime_input` obligation "
-        "whose approved Design source is `external_use_case`, keep the production dependency "
-        "external. Every QA intent must declare `data_setup`: use mode `repository` only when "
-        "repository evidence names an existing seed or fixture setup, mode `synthetic` when no "
-        "such source exists, and `not_required` only when the flow needs no data setup. For a "
-        "synthetic setup, list the exact input values and states QA must create deterministically "
-        "inside the browser spec. This authorizes test data only: do not add or alter a production "
-        "provider, endpoint, entrypoint, global, history state, runtime config, or Design seam to "
-        "deliver it. The QA agent will bind the fixture to the public boundary in the implemented "
-        "code after Developer execution."
+        "Browser QA is active: in Phase 4 the Harness plans and runs browser journeys for every UI "
+        "obligation from the approved Design and the approved demo seed. Do not plan browser tests "
+        "or their test data here. For each `runtime_input` obligation whose approved Design source "
+        "is `external_use_case`, keep the production dependency external: do not add or alter a "
+        "production provider, endpoint, entrypoint, global, history state, runtime config, or Design "
+        "seam to supply test data."
         if browser_qa_active
         else "Browser QA is inactive. Record UI behavior that active stages cannot observe in "
         "`unverified_obligations`."
+    )
+    acceptance_rule = (
+        "A unit without `ui_obligations` covers every acceptance ref with at least one `test_intents`\n"
+        "  entry. Phase 4 Browser QA covers the acceptance refs of a unit with `ui_obligations`; plan its\n"
+        "  `unit` tests for what the `unit` stage capability observes."
+        if browser_qa_active
+        else "Keep every acceptance ref covered by at least one `test_intents` entry in its owning unit."
     )
     scenario_contract = (
         f"This call plans exactly scenario `{scenario_id}`. Return top-level "
@@ -1246,26 +1341,8 @@ Return JSON only:
           "target_paths": ["exact profile-approved test path"],
           "obligation_refs": ["ui_obligations ids this test observes"]
         }}
-      ],
-      "qa_test_intents": [
-        {{
-          "stage_id": "browser_e2e",
-          "intent": "browser-observable acceptance intent for the independent QA agent",
-          "acceptance_refs": ["AC-..."],
-          "target_paths": ["tests/e2e/<scenario>.spec.ts"],
-          "obligation_refs": ["ui_obligations ids observed in the real browser"],
-          "data_setup": {{
-            "mode": "repository|synthetic|not_required",
-            "reason": "why this source mode applies",
-            "requirements": ["exact deterministic input or initial state QA needs"]
-          }}
-        }}
-      ],
-      "unverified_obligations": [
-        {{"id": "ui_obligations id no active stage fully observes", "reason": "what stays unobserved and why"}}
-      ],
+      ],{unverified_field}
       "remove_test_intents": ["id of an existing test intent to drop"],
-      "remove_qa_test_intents": ["id of an existing QA intent to drop"],
       "repo_evidence_refs": ["evidence refs used for this unit"]
     }}
   ],
@@ -1297,16 +1374,9 @@ Rules:
 - Update every work unit that lacks an exact target or test intent.
 - Never return command, argv, cwd, env or timeout fields.
 - Use only paths allowed by the immutable planning policy.
-- Keep every acceptance ref covered by at least one `test_intents` or `qa_test_intents`
-  entry in its owning unit.
-- `qa_test_intents` belong to the independent QA agent and never expand Developer write scope.
-  Use only the `browser_e2e` stage and exact `tests/e2e/*.spec.ts` paths.
-- `data_setup` belongs only to QA. It describes required test data, not how production obtains
-  runtime inputs. Synthetic data is created in the QA spec after code exists and must never add
-  a production code target, provider, API, global, history-state contract, or runtime setting.
-- Stage ownership is authoritative: `test_intents` may use only `developer_intent` stages,
-  `qa_test_intents` may use only `qa_intent` stages, and `harness_global` stages must never
-  appear in either list because the Harness runs them for the whole implementation.
+- {acceptance_rule}
+- Stage ownership is authoritative: `test_intents` may use only `developer_intent` stages;
+  `qa_intent` and `harness_global` stages never appear in the Plan because the Harness runs them.
 - {browser_qa_rule}
 - A `unit` test intent must target an exact test file. A `typecheck` intent must
   target an exact non-test source file already listed in that work unit's
@@ -1326,18 +1396,33 @@ Rules:
   `boundary_contract` of every edge in its design_edge_ids (both in the Vertical Design slice;
   the work units below omit these copies) as immutable approved behavior. For UI work,
   `ui_obligations` lists the contract items each unit must account for.
+- When an approved contract states a behavior but lists no outcome or response for it, never add
+  a status, field, endpoint or response the contract does not list. Choose the reading that
+  satisfies the Requirement within the listed outcomes and state it in the objective as
+  `Reading of <Design node or edge ID>: ...`, so the plan review can judge it.
 - Map data source, authentication and runtime attachment to exact code targets. The objective
   says what the unit builds and through which seams; it does not restate the contract, which
   the Vertical Design slice already carries.
-- CSS class names without owned style rules do not cover responsive behavior, and static
-  markup does not cover interaction or focus; record such items in `unverified_obligations`.
+- {static_markup_rule}
 - For every boundary, identify the owner of required auth and input mappings plus the caller
   that supplies them. A completed dependency ID without its component/surface/artifacts is
   not sufficient execution evidence.
 - Do not propose a new work unit. Planned targets must stay inside Harness-owned runtime
   wiring, except approved shared-contract files, data schema/migration artifacts and UI
-  stylesheets. A unit's `write_scope` lists exactly the files it may target: put new
+  stylesheets. A unit's `write_scope` lists exactly the source files it may target: put new
   helpers, clients and adapters as exported symbols inside those files, never in a new file.
+  A `unit` test intent names its own test file (the profile test suffix, normally next to the
+  source it tests); test files are not `write_scope` targets.
+- `existing_test_paths` lists the repository's existing tests of the unit's write_scope files
+  (Owned source files show them); the unit's Developer may update them. When the unit changes
+  behavior such a test asserts, plan a `unit` test intent that targets that exact file and
+  says which assertions change; never leave an existing test asserting replaced behavior.
+- Read-only caller files in Owned source files show existing code that reaches a target, such
+  as a route and its middleware. A response that such code already produces (for example a
+  validation middleware on the route) stays there: do not re-implement it in a planned target,
+  and do not plan a `unit` test that expects the planned target to produce it. A planned
+  target keeps the responses its own existing code already produces unless its approved
+  contract changes them.
 - A UI unit may own stylesheet targets under the planning policy's `ui_stylesheets` root.
   Choose the style mechanism from repository evidence; when the contract needs responsive,
   focus-appearance or visual-token rules and no stylesheet exists, plan one stylesheet next to
@@ -1346,9 +1431,7 @@ Rules:
 - Bind every test intent to a verification stage whose stated capability can observe the
   behavior it claims. Put decisions the contract fixes (state transitions, focus targets,
   announcement text, which controls are blocked) in exported pure functions inside the
-  planned targets so the `unit` stage can test them. When behavior needs a DOM or browser that
-  no active stage provides, say in the objective that it stays unverified until such a stage
-  exists; never claim a test proves it.
+  planned targets so the `unit` stage can test them. {browser_behavior_rule}
 - When Web and API cross a boundary and the profile has a contracts component, add an
   exact `packages/contracts/src/...` target to the nearest API work unit. Include the
   shared-contract barrel only when repository evidence requires its export.
@@ -1368,14 +1451,12 @@ Rules:
   unit. Target the owner file when this unit adds something the owner must create, inject or
   pass on (for example a client with a network default that tests replace); otherwise leave
   the owner file untouched.
+- Targets seeded from `runtime_bindings` (a binding target and its attachment owner) stay
+  planned. When the owner's existing code already reaches the target, as Owned source files
+  show (for example it mounts the router that registers the handler), state in the objective
+  that the owner needs no change and do not invent one.
 - `ui_obligations` lists, with stable ids, the states, validations, transitions, feedback,
-  accessibility, focus and responsive items of the unit's UI contracts. Account for every id:
-  list it in `obligation_refs` of a test intent whose stage can observe it, or in
-  `unverified_obligations` with the reason, or in both when a test observes part of it and the
-  rest needs a stage the profile does not activate. Roles, aria attributes, accessible names and
-  state-dependent markup are observable by static rendering; focus movement, keyboard
-  interaction and viewport layout need a stage the profile may not activate. The rule review
-  rejects a unit that leaves an id unaccounted for.
+  accessibility, focus and responsive items of the unit's UI contracts. {obligation_accounting_rule}
 {repair_rules}
 - Emit one signature entry for every Harness-owned signature target below; in a repair, only
   for targets of the units you update.
@@ -1393,7 +1474,7 @@ Run id: {run_id}
 Planning policy:
 {json.dumps(planning_policy.prompt_context(), ensure_ascii=False, indent=2)}
 Verification policy:
-{json.dumps(verification_policy.prompt_context(), ensure_ascii=False, indent=2)}
+{json.dumps(verification_policy.prompt_context(unit_test_environment), ensure_ascii=False, indent=2)}
 {runtime_config_section}Language directive:
 {json.dumps(language, ensure_ascii=False, indent=2)}
 Harness-owned signature targets:
@@ -1418,7 +1499,7 @@ Vertical Design slice:
 {json.dumps(design_slice, ensure_ascii=False, separators=(",", ":"))}
 Vertical Trace slice:
 {json.dumps(trace_slice, ensure_ascii=False, separators=(",", ":"))}
-
+{owned_sources_section}
 Repository context:
 {json.dumps(_repo_context_summary(repo_context), ensure_ascii=False, indent=2)}
 Repository evidence:
@@ -1518,15 +1599,15 @@ def _component_plan_payload_issues(
                 issues.append(f"{path}.{field} must be a string")
         for field in ("planned_code_targets", "remove_planned_code_targets"):
             _require_target_list(raw_update.get(field), f"{path}.{field}", issues, optional=True)
-        for field in ("test_intents", "qa_test_intents"):
-            _require_test_intent_list(
-                raw_update.get(field),
-                f"{path}.{field}",
-                issues,
-                optional=True,
-                require_data_setup=field == "qa_test_intents",
-            )
-        for field in ("remove_test_intents", "remove_qa_test_intents", "repo_evidence_refs"):
+        _require_test_intent_list(
+            raw_update.get("test_intents"), f"{path}.test_intents", issues, optional=True
+        )
+        for field in ("qa_test_intents", "remove_qa_test_intents"):
+            if field in raw_update:
+                issues.append(
+                    f"{path}.{field} is not part of the Plan; Phase 4 Browser QA plans the browser tests"
+                )
+        for field in ("remove_test_intents", "repo_evidence_refs"):
             if field in raw_update:
                 _require_string_list(raw_update.get(field), f"{path}.{field}", issues)
         if "unverified_obligations" in raw_update:
@@ -1617,7 +1698,6 @@ def _require_test_intent_list(
     issues: list[str],
     *,
     optional: bool,
-    require_data_setup: bool = False,
 ) -> None:
     if value is None and optional:
         return
@@ -1637,27 +1717,6 @@ def _require_test_intent_list(
                 _require_string_list(intent.get(field), f"{item_path}.{field}", issues)
         if "target_paths" not in intent:
             issues.append(f"{item_path}.target_paths must be an array of strings")
-        if require_data_setup:
-            setup = intent.get("data_setup")
-            if not isinstance(setup, dict):
-                issues.append(f"{item_path}.data_setup must be an object")
-                continue
-            mode = setup.get("mode")
-            if mode not in {"repository", "synthetic", "not_required"}:
-                issues.append(
-                    f"{item_path}.data_setup.mode must be repository, synthetic, or not_required"
-                )
-            if not isinstance(setup.get("reason"), str) or not str(setup.get("reason")).strip():
-                issues.append(f"{item_path}.data_setup.reason must be a non-empty string")
-            requirements = setup.get("requirements")
-            _require_string_list(requirements, f"{item_path}.data_setup.requirements", issues)
-            if mode in {"repository", "synthetic"} and (
-                not isinstance(requirements, list)
-                or not any(isinstance(item, str) and item.strip() for item in requirements)
-            ):
-                issues.append(
-                    f"{item_path}.data_setup.requirements must be non-empty for mode `{mode}`"
-                )
 
 
 def _require_signature_contract(
@@ -2002,6 +2061,107 @@ def _parse_first_json_object(raw: str, *, expected_keys: set[str]) -> dict[str, 
 
 def _has_expected_keys(candidate: dict[str, object], expected_keys: set[str]) -> bool:
     return expected_keys.issubset(candidate.keys())
+
+
+_OWNED_SOURCE_FILE_CHARS = 8000
+_OWNED_SOURCE_TOTAL_CHARS = 24000
+
+
+def _repo_symbol_kinds(component_plan_inputs: dict[str, object]) -> dict[tuple[str, str], str]:
+    return {
+        (str(item.get("path") or ""), str(item.get("symbol") or "")): str(item.get("kind") or "")
+        for item in _dict_items(component_plan_inputs.get("repo_symbol_kinds"))
+    }
+
+
+def _repo_target_callers(component_plan_inputs: dict[str, object]) -> dict[tuple[str, str], list[dict[str, object]]]:
+    return {
+        (str(item.get("path") or ""), str(item.get("symbol") or "")): _dict_items(item.get("callers"))
+        for item in _dict_items(component_plan_inputs.get("repo_target_callers"))
+    }
+
+
+def _owned_source_files(
+    *,
+    units: list[dict[str, object]],
+    target_repo_path: str,
+    planning_policy: PlanningPathPolicy,
+    target_callers: dict[tuple[str, str], list[dict[str, object]]] | None = None,
+) -> str:
+    """Line-numbered worktree text of the files the units may write, then of the existing code
+    that calls or registers their targets (read-only); the shared evidence is run-wide."""
+
+    paths: list[str] = []
+    for unit in units:
+        for path in _string_items(unit_write_scope(unit, planning_policy).get("files")):
+            if path not in paths:
+                paths.append(path)
+    callers: dict[str, list[str]] = {}
+    for unit in units:
+        for binding in _dict_items(unit.get("runtime_bindings")):
+            target = _object_dict(binding.get("target"))
+            key = (str(target.get("path") or ""), str(target.get("symbol") or ""))
+            for caller in (target_callers or {}).get(key, []):
+                caller_path = str(caller.get("path") or "")
+                if caller_path in paths or planning_policy.is_test_path(caller_path):
+                    continue
+                note = f"{key[1]} at line {int(caller.get('line') or 0)}"
+                if note not in callers.setdefault(caller_path, []):
+                    callers[caller_path].append(note)
+    existing_tests = [
+        path
+        for path in dict.fromkeys(
+            path for unit in units for path in _string_items(unit.get("existing_test_paths"))
+        )
+        if path not in paths and path not in callers
+    ]
+    # code_entities lists units in implementation order: a new file a later unit extends is
+    # created by the first unit of that entity, not by this slice.
+    slice_ids = {str(unit.get("unit_id") or "") for unit in units}
+    creators: dict[str, str] = {}
+    for unit in units:
+        for entity in _dict_items(unit.get("code_entities")):
+            entity_path = str(entity.get("entity") or "").partition("#")[0]
+            first = next(iter(_string_items(entity.get("unit_ids"))), "")
+            if entity_path and first and first not in slice_ids:
+                creators.setdefault(entity_path, first)
+    if not target_repo_path or not paths:
+        return ""
+    root = Path(target_repo_path).resolve()
+    blocks: list[str] = []
+    remaining = _OWNED_SOURCE_TOTAL_CHARS
+    for path in [*paths, *existing_tests, *callers]:
+        source = (root / path).resolve()
+        if not source.is_relative_to(root):
+            continue
+        role = (
+            f"read-only caller of {', '.join(callers[path])}; "
+            if path in callers
+            else "existing test of a write_scope file; " if path in existing_tests else ""
+        )
+        if not source.is_file():
+            if not role:
+                creator = creators.get(path, "")
+                blocks.append(
+                    f"--- {path}: does not exist in the worktree yet; earlier unit {creator} creates it."
+                    if creator
+                    else f"--- {path}: does not exist yet; the work unit creates it."
+                )
+            continue
+        if remaining <= 0:
+            blocks.append(f"--- {path} ({role}exists; not shown because the owned-source budget is used up)")
+            continue
+        lines = source.read_text(encoding="utf-8", errors="replace").splitlines()
+        numbered = "\n".join(f"{index:>4}\t{line}" for index, line in enumerate(lines, start=1))
+        limit = min(_OWNED_SOURCE_FILE_CHARS, remaining)
+        if len(numbered) > limit:
+            cut = numbered.rfind("\n", 0, limit)
+            numbered = numbered[: cut if cut > 0 else limit]
+            shown = numbered.count("\n") + 1
+            numbered += f"\n[cut: lines {shown + 1}-{len(lines)} not shown]"
+        remaining -= len(numbered)
+        blocks.append(f"--- {path} ({role}{len(lines)} lines)\n{numbered}")
+    return "\n".join(blocks)
 
 
 def _repo_context_summary(repo_context: dict[str, object]) -> dict[str, object]:

@@ -103,6 +103,86 @@ class CodeGraphContextProvider:
             evidence=_truncate(evidence, limit=MAX_EVIDENCE_CHARS),
         )
 
+    def symbol_kinds(
+        self,
+        target_path: Path,
+        targets: list[tuple[str, str]],
+    ) -> list[dict[str, str]]:
+        """Return the declaration kind the index holds for each existing (path, symbol)."""
+
+        self.require_index(target_path)
+        if self.fake_mode:
+            return []
+        facts: list[dict[str, str]] = []
+        for path, symbol in sorted(set(targets)):
+            raw = _run_codegraph_command(
+                target_path=target_path,
+                arguments=["query", symbol, "--limit", "20", "--json"],
+                timeout_seconds=self.timeout_seconds,
+            )
+            try:
+                payload = json.loads(raw or "[]")
+            except json.JSONDecodeError as exc:
+                raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned invalid JSON.") from exc
+            if not isinstance(payload, list):
+                raise HarnessError("target_repo_codegraph_failed", "CodeGraph symbol query did not return a list.")
+            kind = next(
+                (
+                    str(node.get("kind") or "")
+                    for item in _dict_items(payload)
+                    for node in [item.get("node")]
+                    if isinstance(node, dict)
+                    and node.get("filePath") == path
+                    and node.get("name") == symbol
+                ),
+                "",
+            )
+            if kind:
+                facts.append({"path": path, "symbol": symbol, "kind": kind})
+        return facts
+
+    def target_callers(
+        self,
+        target_path: Path,
+        targets: list[tuple[str, str]],
+    ) -> list[dict[str, object]]:
+        """Return, per (path, symbol), the other files whose code calls or registers that symbol."""
+
+        facts: list[dict[str, object]] = []
+        for path, symbol in sorted(set(targets)):
+            payload = self.query_structured(target_path, operation="callers", symbol=symbol, limit=10)
+            callers = sorted(
+                {
+                    (str(item.get("filePath") or ""), int(item.get("startLine") or 0))
+                    for item in _dict_items(payload.get("callers"))
+                    if str(item.get("filePath") or "") and str(item.get("filePath") or "") != path
+                }
+            )
+            if callers:
+                facts.append(
+                    {
+                        "path": path,
+                        "symbol": symbol,
+                        "callers": [{"path": caller, "line": line} for caller, line in callers],
+                    }
+                )
+        return facts
+
+    def target_tests(
+        self,
+        target_path: Path,
+        paths: list[str],
+    ) -> list[dict[str, object]]:
+        """Return, per source path, the existing test files that import it directly."""
+
+        facts: list[dict[str, object]] = []
+        for path in sorted(set(paths)):
+            payload = self.query_structured(target_path, operation="affected_tests", files=[path], depth=1)
+            tests = sorted({str(item) for item in payload.get("affectedTests") or [] if str(item)} - {path})
+            if tests:
+                facts.append({"path": path, "tests": tests})
+        return facts
+
     def query_readonly(self, target_path: Path, query: str) -> str:
         """Query một index đã tồn tại; không tự tạo generated state cho L2."""
 
