@@ -317,6 +317,8 @@ class DeveloperPlanAgent:
                     target_repo_path=target_repo_path,
                     planning_policy=planning_policy,
                     target_callers=_repo_target_callers(component_plan_inputs),
+                    workspaces=_repo_workspaces(component_plan_inputs),
+                    after_mount=_repo_after_mount_middleware(component_plan_inputs),
                 ),
             )
             units = merge_work_unit_updates(
@@ -562,6 +564,8 @@ class DeveloperPlanAgent:
                 target_repo_path=target_repo_path,
                 planning_policy=planning_policy,
                 target_callers=_repo_target_callers(component_plan_inputs),
+                workspaces=_repo_workspaces(component_plan_inputs),
+                after_mount=_repo_after_mount_middleware(component_plan_inputs),
             ),
         )
         proposed_updates = _dict_items(llm_payload.get("work_unit_updates"))
@@ -858,7 +862,13 @@ def _runtime_config_prompt(
         return {}
     context: dict[str, object] = {"repository": facts, "policy": runtime_config_prompt_context(policy)}
     if isinstance(current_decision, dict):
-        context["current_decision"] = canonical_runtime_config_impact(current_decision)
+        # Later scenarios preserve the status and changes; the earlier reason is prose, and showing it
+        # would make every rerun of an earlier scenario change (and rerun) every later prompt.
+        context["current_decision"] = {
+            key: value
+            for key, value in canonical_runtime_config_impact(current_decision).items()
+            if key != "reason"
+        }
     return context
 
 
@@ -1423,6 +1433,11 @@ Rules:
   and do not plan a `unit` test that expects the planned target to produce it. A planned
   target keeps the responses its own existing code already produces unless its approved
   contract changes them.
+- Read-only middleware registered after the router (Owned source files) answers what a target
+  passes on (`next(error)` or a thrown error): its responses and body shapes are the
+  repository's error convention. When an approved outcome needs a response the middleware
+  does not give for that error, the planned target answers it itself; never assume a status
+  the middleware does not produce.
 - A UI unit may own stylesheet targets under the planning policy's `ui_stylesheets` root.
   Choose the style mechanism from repository evidence; when the contract needs responsive,
   focus-appearance or visual-token rules and no stylesheet exists, plan one stylesheet next to
@@ -1432,9 +1447,13 @@ Rules:
   behavior it claims. Put decisions the contract fixes (state transitions, focus targets,
   announcement text, which controls are blocked) in exported pure functions inside the
   planned targets so the `unit` stage can test them. {browser_behavior_rule}
-- When Web and API cross a boundary and the profile has a contracts component, add an
-  exact `packages/contracts/src/...` target to the nearest API work unit. Include the
-  shared-contract barrel only when repository evidence requires its export.
+- When the Design adds an API endpoint that the web calls and the profile has a contracts
+  component, add an exact `packages/contracts/src/...` target to the nearest API work unit; do the
+  same when a changed endpoint needs a request or response shape no shared contract describes yet.
+  An endpoint whose existing contract types still fit needs no contract target: use those types
+  (Owned source files show the shared contracts a target imports) instead of restating their
+  shapes inline. Include the shared-contract barrel only when repository evidence requires its
+  export.
 - Do not add database, API, or Web barrel/index targets. Harness assigns repo-profile
   package entrypoints to one provider work unit after this enrichment step; leave an
   entrypoint Harness already placed in a unit as it is.
@@ -1447,6 +1466,10 @@ Rules:
   extension changes how earlier code is called (a new parameter, dependency or response),
   keep the earlier call working (optional parameter, injected dependency with a default) or
   add a test intent here that updates the earlier unit's test file, named by exact path.
+  Every unit, the first one included, implements and tests only the behavior of its own
+  design_node_ids: behavior that only Shared code-entity contracts state belongs to the unit that
+  owns those nodes, so an earlier unit keeps its code open to it (for example a result union with
+  room for that outcome) but neither implements nor tests it.
 - A runtime binding with `attachment_wired_by` is already attached to its owner by that earlier
   unit. Target the owner file when this unit adds something the owner must create, inject or
   pass on (for example a client with a network default that tests replace); otherwise leave
@@ -2074,6 +2097,18 @@ def _repo_symbol_kinds(component_plan_inputs: dict[str, object]) -> dict[tuple[s
     }
 
 
+def _repo_workspaces(component_plan_inputs: dict[str, object]) -> list[dict[str, object]]:
+    runtime_config = component_plan_inputs.get("repo_runtime_config")
+    return _dict_items(runtime_config.get("workspaces")) if isinstance(runtime_config, dict) else []
+
+
+def _repo_after_mount_middleware(component_plan_inputs: dict[str, object]) -> dict[str, list[dict[str, object]]]:
+    return {
+        str(item.get("path") or ""): _dict_items(item.get("middleware"))
+        for item in _dict_items(component_plan_inputs.get("repo_after_mount_middleware"))
+    }
+
+
 def _repo_target_callers(component_plan_inputs: dict[str, object]) -> dict[tuple[str, str], list[dict[str, object]]]:
     return {
         (str(item.get("path") or ""), str(item.get("symbol") or "")): _dict_items(item.get("callers"))
@@ -2087,9 +2122,12 @@ def _owned_source_files(
     target_repo_path: str,
     planning_policy: PlanningPathPolicy,
     target_callers: dict[tuple[str, str], list[dict[str, object]]] | None = None,
+    workspaces: list[dict[str, object]] | None = None,
+    after_mount: dict[str, list[dict[str, object]]] | None = None,
 ) -> str:
-    """Line-numbered worktree text of the files the units may write, then of the existing code
-    that calls or registers their targets (read-only); the shared evidence is run-wide."""
+    """Line-numbered worktree text of the files the units may write, their existing tests, the
+    shared contracts they import, the code that calls or registers their targets and the
+    middleware registered after that code is mounted (read-only); the shared evidence is run-wide."""
 
     paths: list[str] = []
     for unit in units:
@@ -2130,13 +2168,33 @@ def _owned_source_files(
     root = Path(target_repo_path).resolve()
     blocks: list[str] = []
     remaining = _OWNED_SOURCE_TOTAL_CHARS
-    for path in [*paths, *existing_tests, *callers]:
+    contracts = {
+        path: names
+        for path, names in _shared_contract_declarations(
+            root=root, paths=paths, planning_policy=planning_policy, workspaces=workspaces or []
+        ).items()
+        if path not in paths and path not in existing_tests and path not in callers
+    }
+    middleware: dict[str, list[str]] = {}
+    for start in [*paths, *callers]:
+        for item in (after_mount or {}).get(start, []):
+            path = str(item.get("path") or "")
+            if not path or path in paths or path in existing_tests or path in contracts or path in callers:
+                continue
+            note = f"{item.get('name')} that {item.get('registered_by')} registers at line {int(item.get('line') or 0)}"
+            if note not in middleware.setdefault(path, []):
+                middleware[path].append(note)
+    for path in [*paths, *existing_tests, *contracts, *callers, *middleware]:
         source = (root / path).resolve()
         if not source.is_relative_to(root):
             continue
         role = (
             f"read-only caller of {', '.join(callers[path])}; "
             if path in callers
+            else f"read-only shared contract declaring {', '.join(contracts[path])}; "
+            if path in contracts
+            else f"read-only middleware registered after the router: {', '.join(middleware[path])}; "
+            if path in middleware
             else "existing test of a write_scope file; " if path in existing_tests else ""
         )
         if not source.is_file():
@@ -2162,6 +2220,61 @@ def _owned_source_files(
         remaining -= len(numbered)
         blocks.append(f"--- {path} ({role}{len(lines)} lines)\n{numbered}")
     return "\n".join(blocks)
+
+
+_NAMED_IMPORT = re.compile(r"import\s+(?:type\s+)?\{([^}]*)\}\s+from\s+[\"']([^\"']+)[\"']")
+
+
+def _shared_contract_declarations(
+    *,
+    root: Path,
+    paths: list[str],
+    planning_policy: PlanningPathPolicy,
+    workspaces: list[dict[str, object]],
+) -> dict[str, list[str]]:
+    """Files of the contracts component that declare the names the given sources import from it."""
+
+    rule = next((item for item in planning_policy.component_rules if item.component_id == "contracts"), None)
+    if rule is None:
+        return {}
+    manifest = rule.source_root.rsplit("/", 1)[0] + "/package.json"
+    package = next(
+        (str(item.get("name") or "") for item in workspaces if str(item.get("manifest") or "") == manifest), ""
+    )
+    if not package:
+        return {}
+    names: set[str] = set()
+    for path in paths:
+        source = root / path
+        if not source.is_file():
+            continue
+        # shortcut: a regex over named imports; namespace or default imports of contracts are not followed.
+        for match in _NAMED_IMPORT.finditer(source.read_text(encoding="utf-8", errors="replace")):
+            if match.group(2) == package or match.group(2).startswith(f"{package}/"):
+                names.update(
+                    name.strip().removeprefix("type ").split(" as ")[0].strip()
+                    for name in match.group(1).split(",")
+                    if name.strip()
+                )
+    contract_root = root / rule.source_root
+    if not names or not contract_root.is_dir():
+        return {}
+    declarations: dict[str, list[str]] = {}
+    for source in sorted(contract_root.rglob("*.ts")):
+        relative = source.relative_to(root).as_posix()
+        if planning_policy.is_test_path(relative):
+            continue
+        text = source.read_text(encoding="utf-8", errors="replace")
+        declared = sorted(
+            name
+            for name in names
+            if re.search(
+                rf"export\s+(?:declare\s+)?(?:type|interface|const|function|class|enum)\s+{re.escape(name)}\b", text
+            )
+        )
+        if declared:
+            declarations[relative] = declared
+    return declarations
 
 
 def _repo_context_summary(repo_context: dict[str, object]) -> dict[str, object]:

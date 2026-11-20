@@ -644,7 +644,14 @@ def _llm_review_prompt(
     compact_plan["inputs"] = {
         key: value
         for key, value in _dict_value(structured_plan.get("inputs")).items()
-        if key not in {"repo_symbol_kinds", "repo_target_callers", "repo_target_tests", "repo_unit_test_environment"}
+        if key
+        not in {
+            "repo_symbol_kinds",
+            "repo_target_callers",
+            "repo_target_tests",
+            "repo_unit_test_environment",
+            "repo_after_mount_middleware",
+        }
     }
     from ..developer.component_plan import unit_write_scope
 
@@ -842,7 +849,9 @@ Component-aware V5 boundaries:
   Earlier test intents remain part of that final state unless a later unit explicitly updates, replaces or
   removes them. When a later unit changes a shared signature or behavior, require that later
   unit's Planner-owned objective/tests to reconcile every affected earlier test; do not reopen
-  Design or debate alternative architectures. A runtime binding with `attachment_wired_by` is
+  Design or debate alternative architectures. Each unit implements and tests only the behavior of
+  its own design_node_ids: never block an earlier unit for behavior that only a later unit's
+  contract in the same code entity states. A runtime binding with `attachment_wired_by` is
   already attached by that earlier unit, so the later unit needs its owner file only when its
   own change requires it there. A seeded attachment owner whose existing code already reaches
   the target (for example it mounts the router that registers the handler) may need no change;

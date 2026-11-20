@@ -48,6 +48,7 @@ from ..profiles import (
     verification_stage_policy_from_snapshot,
 )
 from ..profiles.runtime_config import runtime_config_policy
+from ..repo_context.landscape import after_mount_middleware
 from ..repo_context.runtime_config import collect_repo_runtime_config
 from ..repo_context import (
     CodeGraphContextProvider,
@@ -242,6 +243,7 @@ class PhaseThreeWorkflow:
             provider=self.repo_context_provider,
             target_path=target_path,
             vertical_design_graph=vertical_design_graph,
+            target_files=target_files,
         )
         component_plan_inputs = _with_unit_test_environment(
             component_plan_inputs,
@@ -572,6 +574,7 @@ class PhaseThreeWorkflow:
                 provider=self.repo_context_provider,
                 target_path=target_path,
                 vertical_design_graph=vertical_design_graph,
+                target_files=target_files,
             )
             component_plan_inputs = _with_unit_test_environment(
                 component_plan_inputs,
@@ -1180,12 +1183,15 @@ def _with_repo_target_facts(
     provider,
     target_path: Path,
     vertical_design_graph: dict[str, object],
+    target_files: list[str] | None = None,
 ) -> dict[str, object]:
     """Record repository facts about runtime targets that the Planner cannot see in the Design.
 
     `repo_symbol_kinds`: whether a target named like its file is a class or a function.
     `repo_target_callers`: the other files that call or register an existing target.
     `repo_target_tests`: the existing tests that import a target or attachment-owner file.
+    `repo_after_mount_middleware`: middleware (error handlers) registered after a target's file or
+    its registering file is mounted.
     """
 
     targets: list[tuple[str, str]] = []
@@ -1214,6 +1220,20 @@ def _with_repo_target_facts(
         facts["repo_symbol_kinds"] = provider.symbol_kinds(target_path, same_name)
     if targets:
         facts["repo_target_callers"] = provider.target_callers(target_path, targets)
+        mounted = sorted(
+            {path for path, _ in targets}
+            | {
+                str(caller.get("path") or "")
+                for item in _dict_items(facts["repo_target_callers"])
+                for caller in _dict_items(item.get("callers"))
+            }
+            - {""}
+        )
+        middleware = after_mount_middleware(target_path, files=mounted, source_files=list(target_files or []))
+        if middleware:
+            facts["repo_after_mount_middleware"] = [
+                {"path": path, "middleware": items} for path, items in middleware.items()
+            ]
     if files:
         facts["repo_target_tests"] = provider.target_tests(target_path, sorted(files))
     return {**inputs, **facts} if facts else inputs

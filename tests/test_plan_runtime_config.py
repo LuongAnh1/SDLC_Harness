@@ -209,4 +209,6 @@ def test_repair_prompt_context_carries_the_current_decision() -> None:
     decision = {"status": "required", "reason": "x", "changes": [_env_change()]}
     context = _runtime_config_prompt({"repo_runtime_config": {"env_reads": []}}, _policy(), current_decision=decision)
     assert context["current_decision"]["changes"][0]["name"] == "EXTERNAL_BASE_URL"
+    # The earlier reason is prose: a rerun of an earlier scenario must not change every later prompt.
+    assert context["current_decision"]["status"] == "required" and "reason" not in context["current_decision"]
     assert "current_decision" not in _runtime_config_prompt({"repo_runtime_config": {}}, _policy())

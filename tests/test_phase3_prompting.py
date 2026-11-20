@@ -17,6 +17,7 @@ from sdlc_harness.agents.developer.planner import (
 )
 from sdlc_harness.repo_context import codegraph as codegraph_module
 from sdlc_harness.workflows.phase3 import _with_repo_target_facts
+from sdlc_harness.repo_context.landscape import after_mount_middleware
 from sdlc_harness.agents.validator.plan_review import (
     ImplementationPlanReview,
     _llm_review_prompt,
@@ -103,6 +104,8 @@ def test_active_typescript_validator_prompt_uses_same_directive() -> None:
     # A Design contract narrower than its Requirement never lowers what the plan must satisfy.
     assert "a plan that follows only\n  the narrower contract is a blocker" in prompt
     assert "applies to every\n  case it lists (for example both edit and delete)" in prompt
+    # An earlier unit of a shared code entity is never blocked for a later unit's behavior.
+    assert "never block an earlier unit for behavior that only a later unit's\n  contract" in prompt
     for legacy in ("UNIQUE-LEGACY-TRACE", "UNIQUE-CLASS", "UNIQUE-SEQUENCE", "Class graph JSON"):
         assert legacy not in prompt
     assert all(token not in lowered for token in _JAVA_ASSUMPTIONS)
@@ -581,6 +584,12 @@ def test_component_plan_prompt_carries_unit_contracts_only_in_the_design_slice()
     assert "target keeps the responses its own existing code already produces unless" in prompt
     assert "state in the objective\n  that the owner needs no change and do not invent one" in prompt
     assert "never leave an existing test asserting replaced behavior" in prompt
+    # Shared contracts only for a new endpoint or a shape no contract describes; error middleware is the convention.
+    assert "When the Design adds an API endpoint that the web calls" in prompt
+    assert "An endpoint whose existing contract types still fit needs no contract target" in prompt
+    assert "repository's error convention" in prompt
+    # Each unit implements only its own nodes' behavior, the first one included.
+    assert "Every unit, the first one included, implements and tests only the behavior of its own" in prompt
     # Without repository facts the `unit` capability keeps the profile text.
     assert "Vitest in a Node environment with no DOM and no browser" in prompt
 
@@ -891,6 +900,104 @@ def test_phase3_records_repo_facts_only_for_existing_targets(tmp_path) -> None:
     assert _with_repo_target_facts(
         {"a": 1}, provider=Provider(), target_path=tmp_path, vertical_design_graph={"nodes": [graph["nodes"][1]]}
     ) == {"a": 1}
+
+
+def test_planner_sees_shared_contracts_and_error_middleware_read_only(tmp_path) -> None:
+    from sdlc_harness.agents.developer.planner import _repo_after_mount_middleware, _repo_workspaces
+
+    policy, _, _ = _typescript_prompt_context()
+    files = {
+        "apps/api/src/app.ts": (
+            'import articlesRouter from "./routes/articles";\n'
+            'import { requestLog, errorHandler } from "./middleware";\n'
+            "app.use(requestLog);\n"
+            'app.use("/api/articles", articlesRouter);\n'
+            "app.use(express.json());\n"
+            "app.use(errorHandler);\n"
+        ),
+        "apps/api/src/middleware/index.ts": (
+            'export { default as requestLog } from "./requestLog";\n'
+            'export { default as errorHandler } from "./errorHandler";\n'
+        ),
+        "apps/api/src/middleware/requestLog.ts": "export default function requestLog() {}\n",
+        "apps/api/src/middleware/errorHandler.ts": (
+            "export default function errorHandler(err, _req, res) {\n"
+            '  return res.status(422).json({ errors: [String(err)] });\n'
+            "}\n"
+        ),
+        "apps/api/src/routes/articles.ts": (
+            'import { update } from "../controllers/update";\n'
+            'router.put("/:slug", update);\n'
+            "export default router;\n"
+        ),
+        "apps/api/src/controllers/update.ts": (
+            'import type { GenericErrorBody, Other as Alias } from "@sdlc-target/contracts";\n'
+            "export async function update() {}\n"
+        ),
+        "packages/contracts/src/errors.ts": "export interface GenericErrorBody { errors: Record<string, string[]> }\n",
+        "packages/contracts/src/unused.ts": "export type Unused = string;\n",
+    }
+    for path, text in files.items():
+        (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / path).write_text(text, encoding="utf-8")
+
+    # Only path-less middleware registered after the mount, resolved through the barrel.
+    expected = [
+        {
+            "registered_by": "apps/api/src/app.ts",
+            "line": 6,
+            "name": "errorHandler",
+            "path": "apps/api/src/middleware/errorHandler.ts",
+        }
+    ]
+    assert after_mount_middleware(
+        tmp_path, files=["apps/api/src/routes/articles.ts"], source_files=sorted(files)
+    ) == {"apps/api/src/routes/articles.ts": expected}
+
+    class Provider:
+        def symbol_kinds(self, target_path, targets):
+            return []
+
+        def target_callers(self, target_path, targets):
+            return [
+                {
+                    "path": "apps/api/src/controllers/update.ts",
+                    "symbol": "update",
+                    "callers": [{"path": "apps/api/src/routes/articles.ts", "line": 2}],
+                }
+            ]
+
+        def target_tests(self, target_path, paths):
+            return []
+
+    graph = {"nodes": [{"runtime_binding": {"target": {"path": "apps/api/src/controllers/update.ts", "symbol": "update"}}}]}
+    inputs = _with_repo_target_facts(
+        {"repo_runtime_config": {"workspaces": [{"manifest": "packages/contracts/package.json", "name": "@sdlc-target/contracts"}]}},
+        provider=Provider(),
+        target_path=tmp_path,
+        vertical_design_graph=graph,
+        target_files=sorted(files),
+    )
+    assert inputs["repo_after_mount_middleware"] == [{"path": "apps/api/src/routes/articles.ts", "middleware": expected}]
+
+    owned = _owned_source_files(
+        units=[{"unit_id": "WU-1", "runtime_bindings": [graph["nodes"][0]["runtime_binding"]]}],
+        target_repo_path=str(tmp_path),
+        planning_policy=policy,
+        target_callers={("apps/api/src/controllers/update.ts", "update"): [{"path": "apps/api/src/routes/articles.ts", "line": 2}]},
+        workspaces=_repo_workspaces(inputs),
+        after_mount=_repo_after_mount_middleware(inputs),
+    )
+    assert "--- packages/contracts/src/errors.ts (read-only shared contract declaring GenericErrorBody; 1 lines)" in owned
+    assert "unused.ts" not in owned
+    assert (
+        "--- apps/api/src/middleware/errorHandler.ts (read-only middleware registered after the router: "
+        "errorHandler that apps/api/src/app.ts registers at line 6; 3 lines)"
+    ) in owned
+    assert "requestLog.ts" not in owned
+    assert owned.index("controllers/update.ts") < owned.index("contracts/src/errors.ts") < owned.index(
+        "routes/articles.ts"
+    ) < owned.index("middleware/errorHandler.ts")
 
 
 def test_codegraph_target_tests_map_each_file_to_the_tests_importing_it(tmp_path, monkeypatch) -> None:

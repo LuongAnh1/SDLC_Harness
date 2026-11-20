@@ -274,6 +274,20 @@ def materialize_task_context(
         ],
         # Runtime feasibility is judged from the executable graph; Requirement-to-Design mappings serve claim reviews.
         **({} if task_type == "scenario_runtime" else {"trace_mappings": mappings}),
+        **(
+            {
+                "realized_in_other_scenarios": _realized_in_other_scenarios(
+                    task=task,
+                    claims=selected_claims,
+                    mappings=all_mappings,
+                    nodes_by_id=nodes_by_id,
+                    edges_by_id=edges_by_id,
+                    scenario_ids=scenario_ids,
+                )
+            }
+            if task_type == "scenario_behavior" and scenario_ids
+            else {}
+        ),
         "unresolved_items": graph.get("unresolved_items") or [],
         **({"branch_entries": branch_entries} if branch_entries else {}),
         **({"approved_context": approved_context} if approved_context else {}),
@@ -361,6 +375,9 @@ def review_node_view(
         view["surface_contract"] = contract
     if task_type == "scenario_behavior":
         view.pop("runtime_binding", None)
+        owned = _owned_code(binding)
+        if owned:
+            view["owned_code"] = owned
         node_scenario = str(view.get("scenario_id") or "")
         if scenario_ids and node_scenario not in {"", "global", *scenario_ids}:
             compact_contract = {
@@ -376,6 +393,63 @@ def review_node_view(
             if compact_contract:
                 view["surface_contract"] = compact_contract
     return view
+
+
+def _owned_code(binding: dict[str, Any]) -> list[str]:
+    """The code a node's work may change: its runtime binding target and attachment owner."""
+
+    target = _dict_value(binding.get("target"))
+    attachment = _dict_value(binding.get("attachment"))
+    owned = []
+    for path, symbol in (
+        (target.get("path"), target.get("symbol")),
+        (attachment.get("owner_path"), attachment.get("owner_symbol")),
+    ):
+        if path:
+            owned.append(f"{path}#{symbol}" if symbol else str(path))
+    return owned
+
+
+def _realized_in_other_scenarios(
+    *,
+    task: dict[str, object],
+    claims: list[dict[str, object]],
+    mappings: list[dict[str, object]],
+    nodes_by_id: dict[str, dict[str, Any]],
+    edges_by_id: dict[str, dict[str, Any]],
+    scenario_ids: set[str],
+) -> list[dict[str, object]]:
+    """For each Requirement item of a primary claim, every subject of another scenario realizing it.
+
+    An empty list is a fact too: no other scenario realizes that item.
+    """
+
+    primary = set(_string_items(task.get("primary_claim_ids")))
+    requirement_ids = sorted(
+        {
+            requirement_id
+            for claim in claims
+            if str(claim.get("claim_id") or "") in primary
+            for requirement_id in _string_items(claim.get("requirement_ids"))
+        }
+    )
+    result = []
+    for requirement_id in requirement_ids:
+        subjects = []
+        for mapping in mappings:
+            if str(mapping.get("from") or "") != requirement_id or str(mapping.get("kind") or "realizes") != "realizes":
+                continue
+            subject_id = str(mapping.get("to") or "")
+            subject = nodes_by_id.get(subject_id) or edges_by_id.get(subject_id)
+            if not subject or str(subject.get("scenario_id") or "") in {"", "global", *scenario_ids}:
+                continue
+            item = {"id": subject_id, "scenario_id": str(subject.get("scenario_id") or "")}
+            if subject.get("name"):
+                item["name"] = str(subject["name"])
+            if item not in subjects:
+                subjects.append(item)
+        result.append({"requirement_id": requirement_id, "subjects": subjects})
+    return result
 
 
 def review_edge_view(edge: dict[str, Any], *, task_type: str) -> dict[str, Any]:

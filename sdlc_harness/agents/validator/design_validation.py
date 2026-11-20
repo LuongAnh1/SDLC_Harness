@@ -787,6 +787,10 @@ class DesignValidator:
         review_context["task"] = {key: value for key, value in task.items() if key != "focus"}
         return f"""{header}
 
+This reviews a real Design before it is implemented in a real repository. It is not a test: no defect was planted,
+and there is no grader or expected answer to guess. Decide every status and severity from the packet evidence and the
+severity guide alone.
+
 Review only the assigned task. Primary claims require exactly one assessment each. Context claims are evidence only
 and may be cited only where the task-specific scope below permits it. Review obligations are validation coverage, not
 new Requirements.
@@ -1744,6 +1748,11 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
   parent_entry_state. parent_transitions_leading_to_entry are reachability conditions, not a history of transitions
   that all ran on this pass. parent_transitions_after_entry have not run when the branch starts.
 - trace_mappings connect supplied Requirement ids and surface claims to exact Design ids.
+- realized_in_other_scenarios lists, for each Requirement item of a primary claim, every node or edge of another
+  scenario that the approved trace says realizes it. It is Harness-derived and complete: an empty list means no other
+  scenario realizes that item.
+- owned_code lists the code an active-scenario node's work may change: its runtime binding target and attachment
+  owner. The implementation changes no other code for that node.
 - approved_context contains approved Requirement preconditions and external facts; treat them as given.
 - harness_established: facts the Harness proved mechanically for this packet; not_established lists the questions
   those checks leave to this review.
@@ -1840,6 +1849,15 @@ _BEHAVIOR_RULES = """
 - The UI experience contract (states, feedback, focus, accessibility, responsive layout) must agree with the approved
   interaction and make every required state and outcome observable. Visual taste alone is a warning.
 - Authentication and authorization are separate decisions; an uncertainty without evidence is a warning.
+- A primary claim may name several cases (for example edit and delete, or two actors). Each case needs a Design
+  realization in this packet or among the realized_in_other_scenarios subjects of a Requirement item that states that
+  case; a subject listed only under another item does not realize what this item adds (such as its error message). A
+  case that neither realizes has no Design: report a blocking finding citing the claim; never downgrade it on the guess
+  that another scenario realizes it. Its diagram_ids may include those other-scenario subjects as well as active nodes.
+- Contract prose (component_structure, decisions, outcomes) may name other code modules. Reading one unchanged is
+  fine. When a contract needs a new or changed module (for example a store slice that must hold a new state) that no
+  packet node's owned_code includes, no implementation unit can change it: report unsupported_assumption, blocking
+  when a primary claim depends on that change, otherwise a warning.
 """.strip()
 
 _GLOBAL_RULES = """
@@ -1888,7 +1906,8 @@ Runtime-task scope:
         """
 Scenario-task scope:
 - Evaluate the active scenario in this packet. Paths assigned to other scenario ids are intentionally reviewed in
-  separate specialist calls, so their absence here is not a Design defect.
+  separate specialist calls: their absence here is not a Design defect when realized_in_other_scenarios shows they
+  realize the Requirement item at stake; a case of a primary claim that no scenario realizes is one.
 - Do not discard a shared acceptance criterion or rule. Assess every obligation it places on the active scenario;
   defer only evidence that requires executing another scenario to that scenario's separate review.
 - This scenario's runtime path already passed a separate runtime review without blockers. Treat runtime feasibility as

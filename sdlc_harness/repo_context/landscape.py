@@ -63,6 +63,9 @@ _MOUNT_PREFIX_OPTION = re.compile(
 # The clause excludes quotes so a side-effect import (`import "./x"`) never swallows the next statement.
 _RELATIVE_IMPORT = re.compile(r"import\s+(?:type\s+)?([^;\"'`]*?)\s*from\s*[\"'](\.{1,2}/[^\"']+)[\"']")
 _MAX_MOUNT_DEPTH = 8
+# Middleware registered without a path (`app.use(handler)`), e.g. Express error handlers.
+_PATHLESS_USE = re.compile(r"\.use\s*\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*\)")
+_RELATIVE_REEXPORT = re.compile(r"export\s*\{([^}]*)\}\s*from\s*[\"'](\.{1,2}/[^\"']+)[\"']")
 _PRISMA_MODEL = re.compile(r"(?m)^\s*model\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{")
 _PRISMA_OPERATION = re.compile(
     r"\b(?:prisma|client)\.([A-Za-z_$][A-Za-z0-9_$]*)\."
@@ -399,18 +402,8 @@ def _relative_import_targets(path: str, text: str, sources: dict[str, str]) -> d
     """Local binding name -> repo path of the relative module it comes from (only modules in ``sources``)."""
 
     targets: dict[str, str] = {}
-    base = posixpath.dirname(path)
     for clause, spec in _RELATIVE_IMPORT.findall(text):
-        stem = posixpath.normpath(posixpath.join(base, spec))
-        stem = re.sub(r"\.(?:m?js|cjs)$", "", stem)  # ESM TypeScript imports "./x.js" for "./x.ts"
-        target = next(
-            (
-                candidate
-                for candidate in (stem, f"{stem}.ts", f"{stem}.tsx", f"{stem}.mts", f"{stem}/index.ts")
-                if candidate in sources
-            ),
-            "",
-        )
+        target = _resolve_relative(path, spec, sources)
         if not target:
             continue
         default, _, named = clause.partition("{")
@@ -421,6 +414,78 @@ def _relative_import_targets(path: str, text: str, sources: dict[str, str]) -> d
             if re.fullmatch(r"[A-Za-z_$][A-Za-z0-9_$]*", name):
                 targets[name] = target
     return targets
+
+
+def _resolve_relative(path: str, spec: str, sources: dict[str, str]) -> str:
+    stem = posixpath.normpath(posixpath.join(posixpath.dirname(path), spec))
+    stem = re.sub(r"\.(?:m?js|cjs)$", "", stem)  # ESM TypeScript imports "./x.js" for "./x.ts"
+    return next(
+        (
+            candidate
+            for candidate in (stem, f"{stem}.ts", f"{stem}.tsx", f"{stem}.mts", f"{stem}/index.ts")
+            if candidate in sources
+        ),
+        "",
+    )
+
+
+def after_mount_middleware(
+    target_path: Path, *, files: list[str], source_files: list[str]
+) -> dict[str, list[dict[str, object]]]:
+    """Middleware that the modules mounting each file (up the mount chain) register without a path
+    after that mount, such as Express error handlers: they answer what the mounted code passes on."""
+
+    root = target_path.resolve()
+    sources = {
+        path: (root / path).read_text(encoding="utf-8", errors="replace")
+        for path in source_files
+        if path.endswith((".ts", ".tsx", ".mts")) and (root / path).is_file()
+    }
+    imports = {path: _relative_import_targets(path, text, sources) for path, text in sources.items()}
+    mounted_by: dict[str, list[tuple[str, int]]] = {}
+    for path, text in sources.items():
+        for match in _MOUNT_PATH_FIRST.finditer(text):
+            child = imports[path].get(match.group(3), "")
+            if child and child != path:
+                mounted_by.setdefault(child, []).append((path, match.end()))
+    result: dict[str, list[dict[str, object]]] = {}
+    for start in files:
+        found: list[dict[str, object]] = []
+        frontier, seen = [start], {start}
+        for _ in range(_MAX_MOUNT_DEPTH):
+            parents = [item for child in frontier for item in mounted_by.get(child, [])]
+            for parent, offset in parents:
+                text = sources[parent]
+                for use in _PATHLESS_USE.finditer(text, offset):
+                    module = imports[parent].get(use.group(1), "")
+                    if not module:
+                        continue
+                    entry = {
+                        "registered_by": parent,
+                        "line": text.count("\n", 0, use.start()) + 1,
+                        "name": use.group(1),
+                        "path": _declaring_module(module, use.group(1), sources),
+                    }
+                    if entry not in found:
+                        found.append(entry)
+            frontier = [parent for parent, _ in parents if parent not in seen]
+            seen.update(frontier)
+            if not frontier:
+                break
+        if found:
+            result[start] = found
+    return result
+
+
+def _declaring_module(module: str, name: str, sources: dict[str, str]) -> str:
+    """The module behind a barrel's `export { x as name } from "./y"` (one level), else `module`."""
+
+    for clause, spec in _RELATIVE_REEXPORT.findall(sources.get(module, "")):
+        for item in clause.split(","):
+            local, _, alias = item.strip().partition(" as ")
+            if (alias.strip() or local.strip()) == name:
+                return _resolve_relative(module, spec, sources) or module
+    return module
 
 
 def _mount_prefixes(files: dict[str, str], edges: list[tuple[str, str, str]]) -> dict[str, tuple[str, ...]]:

@@ -1272,6 +1272,8 @@ def test_behavior_packet_keeps_behavior_evidence_but_drops_runtime_and_foreign_s
     call_view = next(edge for edge in context["edges"] if edge["id"] == "VDE-call")
     assert child_view["surface_contract"]["experience_contract"] == {"focus_flow": ["active behavior"]}
     assert "runtime_binding" not in child_view
+    # Only which code the node owns stays, so prose naming other modules can be checked against it.
+    assert child_view["owned_code"] == ["child.tsx#Child"]
     assert "runtime_surface" not in child_view["surface_contract"]
     assert parent_view == {
         "id": "VDN-parent",
@@ -1346,7 +1348,7 @@ def test_every_prompt_explains_packet_fields_severity_and_deterministic_scope() 
         # C: one explicit blocking/warning criterion, no use-case-specific examples.
         assert "Severity:" in prompt
         assert "cancel API" not in prompt
-        assert "not a test" not in prompt
+        assert "not a test" not in prompt.replace("It is not a test: no defect was planted", "")
         # F: the deterministic scope is listed, not implied by ok=true.
         assert "branch parent wiring" in prompt
         # Findings describe the required outcome on existing ids; they never design or invent a system.
@@ -1394,6 +1396,63 @@ def test_each_task_type_gets_only_its_own_rules() -> None:
     assert "Do not audit UI completeness, feedback" in runtime
     assert behavior_rule in behavior and behavior_rule not in runtime and behavior_rule not in global_review
     assert global_rule in global_review and global_rule not in runtime and global_rule not in behavior
+    # A case of a multi-case claim that no scenario realizes is a blocker, never a hedged warning (r7 SC-5 delete).
+    case_rule = "A\n  case that neither realizes has no Design: report a blocking finding"
+    assert case_rule in behavior and case_rule not in runtime and case_rule not in global_review
+    assert "realized_in_other_scenarios lists, for each Requirement item of a primary claim" in behavior
+    # A contract needing a change in code no node owns has no implementation owner (r7 SC-4 editor slice).
+    assert "that no\n  packet node's owned_code includes, no implementation unit can change it" in behavior
+    for prompt in (behavior, global_review, runtime):
+        assert "It is not a test: no defect was planted" in prompt
+
+
+def test_behavior_packet_lists_other_scenarios_realizing_each_primary_requirement_item() -> None:
+    claims = [
+        {
+            "claim_id": "SC-1:AC-5",
+            "claim_type": "requirement",
+            "scenario_id": "SC-1",
+            "requirement_ids": ["AC-5", "BR-1"],
+            "statement": "An edit or delete request by another user is refused with 403 and a message.",
+        }
+    ]
+    graph = {
+        "nodes": [
+            {"id": "VDN-edit", "scenario_id": "SC-1", "surface": "api", "name": "Edit refusal"},
+            {"id": "VDN-rule", "scenario_id": "SC-1", "surface": "business_rule", "name": "Edit guard"},
+            {"id": "VDN-delete", "scenario_id": "SC-2", "surface": "api", "name": "Delete guard"},
+            {"id": "VDN-dep", "scenario_id": "SC-2", "surface": "data", "name": "Delete write"},
+        ],
+        "edges": [{"id": "VDE-1", "scenario_id": "SC-1", "from": "VDN-edit", "to": "VDN-rule", "kind": "calls"}],
+    }
+    trace = {
+        "mappings": [
+            {"kind": "realizes", "from": "AC-5", "to": "VDN-edit"},
+            {"kind": "realizes", "from": "BR-1", "to": "VDN-rule"},
+            {"kind": "realizes", "from": "BR-1", "to": "VDN-delete"},
+            {"kind": "depends_on", "from": "BR-1", "to": "VDN-dep"},
+        ]
+    }
+    task = next(
+        task
+        for task in build_semantic_review_plan(claims=claims, vertical_design_graph=graph)["tasks"]
+        if task["task_type"] == "scenario_behavior" and task.get("scenario_ids") == ["SC-1"]
+    )
+
+    context = materialize_task_context(task, claims=claims, vertical_design_graph=graph, vertical_trace=trace)
+
+    # The empty list is the fact the r7 SC-5 review lacked: no other scenario realizes AC-5.
+    assert context["realized_in_other_scenarios"] == [
+        {"requirement_id": "AC-5", "subjects": []},
+        {"requirement_id": "BR-1", "subjects": [{"id": "VDN-delete", "scenario_id": "SC-2", "name": "Delete guard"}]},
+    ]
+    runtime_task = next(
+        task
+        for task in build_semantic_review_plan(claims=claims, vertical_design_graph=graph)["tasks"]
+        if task["task_type"] == "scenario_runtime"
+    )
+    runtime = materialize_task_context(runtime_task, claims=claims, vertical_design_graph=graph, vertical_trace=trace)
+    assert "realized_in_other_scenarios" not in runtime
 
 
 def test_runtime_packet_drops_ui_experience_traces_and_audit_fields_but_keeps_behavior_inputs() -> None:
