@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 
@@ -350,6 +352,60 @@ def test_real_typescript_ast_helper_fails_closed_without_target_package(
             )
 
     assert caught.value.error_code == "typescript_ast_extractor_unavailable"
+
+
+def _installed_typescript_node_modules() -> Path | None:
+    harness_root = Path(__file__).resolve().parents[1]
+    candidates = [os.environ.get("SDLC_TEST_TYPESCRIPT_NODE_MODULES", "")] + [
+        str(harness_root.parent / name / "node_modules") for name in ("SDLC_Target_Conduit", "SDLC_Target_TypeScript")
+    ]
+    for candidate in candidates:
+        if candidate and (Path(candidate) / "typescript" / "package.json").is_file():
+            return Path(candidate)
+    return None
+
+
+def test_real_typescript_ast_helper_extracts_top_level_variables(code_trace_policy: CodeTracePolicy) -> None:
+    node_modules = _installed_typescript_node_modules()
+    if node_modules is None or shutil.which("node") is None:
+        pytest.skip("needs node and an installed typescript package (SDLC_TEST_TYPESCRIPT_NODE_MODULES)")
+    source_path = "apps/api/src/middleware/auth/authenticator.ts"
+
+    def run_with_typescript(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        env = {**dict(kwargs.pop("env") or {}), "NODE_PATH": str(node_modules)}
+        return subprocess.run(argv, env=env, **kwargs)  # type: ignore[call-overload]
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        target = Path(temp_dir)
+        (target / "package.json").write_text("{}", encoding="utf-8")
+        source = target / source_path
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            "export const authenticate = jwt({ algorithms: ['HS256'] });\n"
+            "export const loadUser = async (name: string): Promise<string> => name;\n"
+            "const limit: number = 3, { a } = { a: 1 };\n",
+            encoding="utf-8",
+        )
+        evidence = TypeScriptAstExtractor(run_process=run_with_typescript).extract(
+            target_path=target,
+            source_paths=[source_path],
+            policy=code_trace_policy,
+            run_id="run-profiled-code-trace",
+        )
+
+    symbols = {item["name"]: item for item in evidence.files[0]["symbols"]}
+    # A destructuring declaration names no single symbol.
+    assert set(symbols) == {"authenticate", "loadUser", "limit"}
+    assert symbols["authenticate"]["kind"] == "variable"
+    assert symbols["authenticate"]["exported"] is True
+    assert symbols["loadUser"]["kind"] == "function"
+    assert symbols["loadUser"]["async"] is True
+    assert symbols["loadUser"]["parameters"] == [{"name": "name", "type": "string", "optional": False, "rest": False}]
+    assert symbols["loadUser"]["return_type"] == "Promise<string>"
+    assert symbols["limit"]["kind"] == "variable"
+    assert symbols["limit"]["return_type"] == "number"
+    assert symbols["limit"]["exported"] is False
+    assert "authenticate" in evidence.symbols_for(source_path)
 
 
 def test_typescript_ast_bridge_rejects_parse_diagnostics_and_mismatched_paths(

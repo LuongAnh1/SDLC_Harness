@@ -22,7 +22,7 @@ DEFAULT_TYPESCRIPT_AST_TIMEOUT_SECONDS = 30
 MODULE_FACTS_EXTRACTOR_ID = "typescript_compiler_ast_v1"
 MODULE_REFERENCE_KINDS = {"static", "type_only", "dynamic"}
 MAX_EXTRACTOR_ERROR_CHARS = 4000
-_ALLOWED_SYMBOL_KINDS = {"interface", "class", "function", "method"}
+_ALLOWED_SYMBOL_KINDS = {"interface", "class", "function", "method", "variable"}
 _ENV_ALLOWLIST = {
     "path",
     "pathext",

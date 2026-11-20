@@ -71,11 +71,45 @@ function declarationSymbol(ts, node, sourceFile, owner) {
   };
 }
 
+// `export const handler = async (req) => ...` is a function; any other value (`jwt({...})`) is a variable.
+function variableSymbols(ts, statement, sourceFile) {
+  if (!ts.isVariableStatement(statement)) {
+    return [];
+  }
+  const exported = hasModifier(ts, statement, ts.SyntaxKind.ExportKeyword);
+  const symbols = [];
+  for (const declaration of statement.declarationList.declarations) {
+    if (!ts.isIdentifier(declaration.name)) {
+      continue;
+    }
+    const initializer = declaration.initializer;
+    const callable =
+      initializer && (ts.isArrowFunction(initializer) || ts.isFunctionExpression(initializer)) ? initializer : null;
+    const name = declaration.name.getText(sourceFile);
+    const start = sourceFile.getLineAndCharacterOfPosition(declaration.getStart(sourceFile));
+    const end = sourceFile.getLineAndCharacterOfPosition(declaration.getEnd());
+    symbols.push({
+      kind: callable ? "function" : "variable",
+      name,
+      qualified_name: name,
+      parameters: callable ? parameters(callable, sourceFile) : [],
+      return_type: typeText(callable || declaration, sourceFile),
+      type_parameters: callable ? typeParameters(callable, sourceFile) : [],
+      async: callable ? hasModifier(ts, callable, ts.SyntaxKind.AsyncKeyword) : false,
+      exported,
+      start_line: start.line + 1,
+      end_line: end.line + 1,
+    });
+  }
+  return symbols;
+}
+
 function collectSymbols(ts, sourceFile) {
   const symbols = [];
   for (const statement of sourceFile.statements) {
     const top = declarationSymbol(ts, statement, sourceFile, "");
     if (top) symbols.push(top);
+    symbols.push(...variableSymbols(ts, statement, sourceFile));
     if (ts.isClassDeclaration(statement) || ts.isInterfaceDeclaration(statement)) {
       const owner = statement.name ? statement.name.getText(sourceFile) : "";
       for (const member of statement.members || []) {
