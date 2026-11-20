@@ -173,6 +173,7 @@ class CodeTraceValidator:
         previous_ledger: dict[str, object] | None = None,
         code_trace_policy: CodeTracePolicy | None = None,
         task_cache_path: Path | None = None,
+        symbol_locator: Callable[[str], list[str]] | None = None,
     ) -> CodeTraceResult:
         if code_trace_policy is None:
             raise HarnessError(
@@ -349,8 +350,39 @@ class CodeTraceValidator:
         inconclusive = False
         inconclusive_task_id = ""
         invalid_tasks: list[dict[str, object]] = []
+        claim_owner = {
+            claim_id: str(task.get("task_id") or "")
+            for task in tasks
+            for claim_id in _string_items(task.get("authority_claim_ids"))
+        }
+        tasks_by_id = {str(task.get("task_id") or ""): task for task in tasks}
+        repo_target_callers = _dict_items(
+            _dict_value(_dict_value((approved_context or {}).get("implementation_plan_structured_data")).get("inputs")).get(
+                "repo_target_callers"
+            )
+        )
+        registration_by_task = {
+            task_id: _registration_context(
+                target_path=target_path,
+                task=task,
+                repo_target_callers=repo_target_callers,
+                symbol_locator=symbol_locator,
+            )
+            for task_id, task in tasks_by_id.items()
+        }
+        received_leads: dict[str, list[dict[str, object]]] = {}
+        lead_log: list[dict[str, object]] = []
+        rerun_task_ids: list[str] = []
+        rerun_done: set[str] = set()
         if not static_missing_links:
-            for task in tasks:
+            # A task that sees a likely defect in a claim another task owns sends that owner a lead; an owner that
+            # already ran reruns once with it. The owner alone decides whether the lead is a finding.
+            queue = list(tasks)
+            position = 0
+            while position < len(queue):
+                task = queue[position]
+                is_rerun = position >= len(tasks)
+                position += 1
                 task_id = str(task.get("task_id") or "").strip()
                 task_snippets = _task_code_snippets(
                     target_path=target_path,
@@ -365,6 +397,9 @@ class CodeTraceValidator:
                     verification_evidence=verification_evidence,
                     symbol_evidence=symbol_evidence,
                     scenario_results=task_results,
+                    other_task_claims=_other_task_claims(task=task, tasks=tasks),
+                    received_leads=received_leads.get(task_id, []),
+                    registration_context=registration_by_task.get(task_id, []),
                     approved_closure_changes=_dict_value(approved_context.get("approved_closure_changes")) or None,
                 )
                 cached = task_cache.get(prompt)
@@ -413,9 +448,27 @@ class CodeTraceValidator:
                     task_cache.put(prompt, review)
 
                 findings, task_observations = _task_findings(review=review, task=task)
-                semantic_blockers.extend(findings)
-                observations.extend(task_observations)
-                task_results.append(
+                if is_rerun:
+                    rerun_done.add(task_id)
+                finished_task_ids = {str(item.get("task_id") or "") for item in task_results}
+                for lead in _task_leads(review=review, task=task, claim_owner=claim_owner):
+                    owner_task_id = str(lead.get("owner_task_id") or "")
+                    if lead["status"] == "routed" and owner_task_id in rerun_done:
+                        # Bounded: an owner reruns at most once per validation.
+                        lead["status"] = "owner_already_rerun"
+                    elif (
+                        lead["status"] == "routed"
+                        and owner_task_id in finished_task_ids
+                        and owner_task_id not in rerun_task_ids
+                    ):
+                        rerun_task_ids.append(owner_task_id)
+                        queue.append(tasks_by_id[owner_task_id])
+                    if lead["status"] == "routed":
+                        received_leads.setdefault(owner_task_id, []).append(
+                            {key: lead[key] for key in ("from_task_id", "claim_id", "code_ref", "concern")}
+                        )
+                    lead_log.append(lead)
+                task_result = (
                     {
                         "task_id": task_id,
                         "task_kind": task.get("task_kind"),
@@ -429,8 +482,19 @@ class CodeTraceValidator:
                         "blocking_findings": findings,
                         "observations": task_observations,
                         "llm_metadata": metadata,
+                        **({"rerun_for_leads": True} if is_rerun else {}),
                     }
                 )
+                # A rerun replaces the owner's first verdict.
+                previous = next(
+                    (index for index, item in enumerate(task_results) if item.get("task_id") == task_id), None
+                )
+                if previous is None:
+                    task_results.append(task_result)
+                else:
+                    task_results[previous] = task_result
+            semantic_blockers = [item for result in task_results for item in result["blocking_findings"]]
+            observations = [item for result in task_results for item in result["observations"]]
 
         missing_links = [*static_missing_links, *semantic_blockers]
         static_ok = bool(trace_mappings) and not static_missing_links
@@ -450,6 +514,7 @@ class CodeTraceValidator:
             "inconclusive_task_id": inconclusive_task_id,
             "invalid_tasks": invalid_tasks,
             "deterministic_preflight_blocked": bool(static_missing_links),
+            "lead_routing": {"leads": lead_log, "rerun_task_ids": rerun_task_ids},
         }
         llm_review = {
             "ok": not semantic_blockers and not inconclusive and all_tasks_completed,
@@ -1481,6 +1546,9 @@ def _code_validation_task_prompt(
     symbol_evidence: dict[str, object],
     scenario_results: list[dict[str, object]],
     approved_closure_changes: dict[str, object] | None = None,
+    other_task_claims: list[dict[str, object]] | None = None,
+    received_leads: list[dict[str, object]] | None = None,
+    registration_context: list[dict[str, object]] | None = None,
 ) -> str:
     is_boundary = task.get("task_kind") == "boundary"
     authority_claim_ids = _string_items(task.get("authority_claim_ids"))
@@ -1618,7 +1686,7 @@ def _code_validation_task_prompt(
     }
     payload = {
         "prompt_schema_version": (
-            "code_validation_task_prompt_v6" if is_boundary else "code_validation_task_prompt_v4"
+            "code_validation_task_prompt_v7" if is_boundary else "code_validation_task_prompt_v5"
         ),
         "task": "Scenario + Boundary Code Validation v1",
         "task_contract": {
@@ -1680,7 +1748,13 @@ def _code_validation_task_prompt(
             "evidence, and executed verification evidence. Decide semantic correctness, not JSON shape. A file or "
             "symbol existing is not enough when its behavior or test assertions do not satisfy the claim. Use "
             "related_design_context only to interpret behavior in shared code entities; do not review or create "
-            "findings for its scenarios. Do not speculate about deferred dimensions."
+            "findings for its scenarios. Do not speculate about deferred dimensions. When the supplied evidence "
+            "shows a likely defect in a claim listed in other_task_claims, do not judge it here: record it once in "
+            "out_of_scope_leads for its owner task. Check every received_leads entry against the supplied evidence: "
+            "a lead is only a pointer to check, never evidence; report a finding only when the supplied evidence "
+            "proves it and the cited claim's requirement_refs require that behavior, otherwise say in observations "
+            "why it does not hold; a lead never adds claims to this task. Before concluding that behavior is missing, "
+            "check registration_context for code that runs before a target (route registration, middleware)."
         ),
         **(
             {
@@ -1688,6 +1762,7 @@ def _code_validation_task_prompt(
                     "Read ownership_exclusions first and exclude every listed local evidence fingerprint from boundary findings.",
                     "Assess each claim_review_matrix row exactly once and record one claim_assessment.",
                     "A pass is a valid result; there is no blocker quota and no hidden-defect search after every row is assessed.",
+                    "Check every received_leads entry against the supplied evidence before returning.",
                     "When claim_assessments covers the exact authority claim set, return the JSON immediately.",
                 ],
                 "ownership_exclusions": ownership_exclusions,
@@ -1737,9 +1812,27 @@ def _code_validation_task_prompt(
                 }
             ],
             "observations": ["short deferred-stage or other non-blocking strings; never repair instructions"],
+            "out_of_scope_leads": [
+                {
+                    "claim_id": "one claim_id from other_task_claims; never one of this task's authority_claim_ids",
+                    "code_ref": "file or file#symbol ref in the supplied code_snippets",
+                    "concern": "short factual description of the suspected defect for the owner task to check",
+                }
+            ],
         },
         "authority_claims": task.get("claims"),
         "claim_review_matrix": claim_review_matrix,
+        "other_task_claims": other_task_claims or [],
+        "received_leads": received_leads or [],
+        "registration_context": {
+            "role": "read_only_runtime_context",
+            "policy": (
+                "How the running application reaches this task's code targets: the statement that registers a "
+                "target and the definitions that statement passes with it (for example middleware that runs first). "
+                "Read-only evidence of behavior around a target; it adds no claims to this task."
+            ),
+            "entries": registration_context or [],
+        },
         "approved_design_contracts": task.get("approved_design_contracts"),
         "deferred_review_context": {
             "stage": "browser_ui_qa",
@@ -1880,6 +1973,9 @@ def _validate_code_validation_task_output(
         isinstance(item, str) for item in observations
     ):
         raise ValueError("findings must be an array and observations must be an array of strings.")
+    leads = output.get("out_of_scope_leads", [])
+    if not isinstance(leads, list) or not all(isinstance(item, dict) for item in leads):
+        raise ValueError("out_of_scope_leads must be an array of objects.")
     if requires_claim_assessments and not isinstance(claim_assessments, list):
         raise ValueError("Boundary claim_assessments must be an array.")
 
@@ -2026,6 +2122,145 @@ def _validate_code_validation_task_output(
             raise ValueError(
                 f"Claim assessment {claim_id} verdict and finding_ids must match findings that cite it."
             )
+
+
+MAX_REGISTRATION_EXCERPT_LINES = 24
+MAX_REGISTRATION_DEFINITION_CHARS = 6000
+MAX_REGISTRATION_DEFINITIONS = 6
+
+
+def _registration_context(
+    *,
+    target_path: Path,
+    task: dict[str, object],
+    repo_target_callers: list[dict[str, object]],
+    symbol_locator: Callable[[str], list[str]] | None,
+) -> list[dict[str, object]]:
+    """Read-only context for a task's targets: where each is registered and what that statement passes with it.
+
+    The callers come from the frozen Plan's repo facts; a passed name is resolved only when the locator finds
+    exactly one defining file, so nothing is guessed.
+    """
+
+    targets = {
+        (str(item.get("path") or "").strip().replace("\\", "/"), str(item.get("symbol") or "").strip())
+        for item in _dict_items(task.get("code_targets"))
+    }
+    included = {path for path, _ in targets}
+    entries: list[dict[str, object]] = []
+    for fact in repo_target_callers:
+        target = (str(fact.get("path") or ""), str(fact.get("symbol") or ""))
+        if target not in targets:
+            continue
+        for caller in _dict_items(fact.get("callers")):
+            caller_path = str(caller.get("path") or "").strip().replace("\\", "/")
+            excerpt, names = _registration_excerpt(target_path / caller_path, int(caller.get("line") or 0))
+            if not excerpt:
+                continue
+            definitions: list[dict[str, object]] = []
+            for name in names:
+                if name == target[1] or symbol_locator is None or len(included) >= MAX_REGISTRATION_DEFINITIONS + 1:
+                    continue
+                paths = sorted(set(symbol_locator(name)))
+                if len(paths) != 1 or paths[0] in included or not (target_path / paths[0]).is_file():
+                    continue
+                content = (target_path / paths[0]).read_text(encoding="utf-8", errors="replace")
+                definitions.append(
+                    {
+                        "name": name,
+                        "path": paths[0],
+                        "content": content[:MAX_REGISTRATION_DEFINITION_CHARS],
+                        "content_truncated": len(content) > MAX_REGISTRATION_DEFINITION_CHARS,
+                    }
+                )
+                included.add(paths[0])
+            entries.append(
+                {
+                    "target": f"{target[0]}#{target[1]}",
+                    "registered_in": f"{caller_path}:{caller.get('line')}",
+                    "excerpt": excerpt,
+                    "passed_definitions": definitions,
+                }
+            )
+    return entries
+
+
+def _registration_excerpt(path: Path, line: int) -> tuple[str, list[str]]:
+    """The statement starting at `line` (1-based, up to its `;`) and the member names it passes, callee excluded."""
+
+    if line < 1 or not path.is_file():
+        return "", []
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = line - 1
+    if start >= len(lines):
+        return "", []
+    end = start
+    while end < len(lines) - 1 and end - start < MAX_REGISTRATION_EXCERPT_LINES - 1:
+        if lines[end].rstrip().endswith(";"):
+            break
+        end += 1
+    statement = "\n".join(lines[start : end + 1])
+    callee = re.match(r"\s*(?:[\w$]+\.)*([\w$]+)\s*\(", lines[start])
+    names: list[str] = []
+    for match in re.finditer(r"\b[A-Za-z_$][\w$]*\.([A-Za-z_$][\w$]*)\b", statement):
+        name = match.group(1)
+        if name not in names and not (callee and name == callee.group(1)):
+            names.append(name)
+    excerpt = "\n".join(f"{index + 1}\t{lines[index]}" for index in range(max(0, start - 2), end + 1))
+    return excerpt, names
+
+
+def _other_task_claims(*, task: dict[str, object], tasks: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Claims owned by the other review tasks, so a task can address a lead to the right owner."""
+
+    task_id = str(task.get("task_id") or "")
+    return [
+        {
+            "claim_id": claim.get("claim_id"),
+            "owner_task_id": other.get("task_id"),
+            "requirement_ref": claim.get("requirement_ref"),
+            "requirement_content": claim.get("requirement_content"),
+        }
+        for other in tasks
+        if str(other.get("task_id") or "") != task_id
+        for claim in _dict_items(other.get("claims"))
+    ]
+
+
+def _task_leads(
+    *,
+    review: dict[str, object],
+    task: dict[str, object],
+    claim_owner: dict[str, str],
+) -> list[dict[str, object]]:
+    """Route each out-of-scope lead to the task owning its claim; an unknown or own claim is not routed."""
+
+    task_id = str(task.get("task_id") or "")
+    leads: list[dict[str, object]] = []
+    for raw in _dict_items(review.get("out_of_scope_leads")):
+        claim_id = str(raw.get("claim_id") or "").strip()
+        concern = str(raw.get("concern") or "").strip()
+        owner_task_id = claim_owner.get(claim_id, "")
+        status = (
+            "rejected_empty_concern"
+            if not concern
+            else "rejected_unknown_claim"
+            if not owner_task_id
+            else "rejected_own_claim"
+            if owner_task_id == task_id
+            else "routed"
+        )
+        leads.append(
+            {
+                "from_task_id": task_id,
+                "owner_task_id": owner_task_id,
+                "claim_id": claim_id,
+                "code_ref": str(raw.get("code_ref") or "").strip(),
+                "concern": concern,
+                "status": status,
+            }
+        )
+    return leads
 
 
 def _task_findings(

@@ -836,10 +836,29 @@ class PhaseFourPublicationCycle:
                 symbol_extractor=self.code_trace_validator.symbol_extractor,
                 reviewable_client_factory=reviewable_client,
             )
+        def locate_symbol(name: str) -> list[str]:
+            """Files whose CodeGraph symbol is exactly `name` (registration context for the Code Validator)."""
+
+            try:
+                payload = self.repo_context_provider.query_structured(
+                    target_path, operation="symbols", query=name, limit=10
+                )
+            except HarnessError:
+                return []
+            return sorted(
+                {
+                    str(_dict_value(item.get("node")).get("filePath") or "")
+                    for item in _dict_items(payload.get("results"))
+                    if _dict_value(item.get("node")).get("name") == name
+                }
+                - {""}
+            )
+
         return validator.validate(
             target_path=target_path,
             work_packet=work_packet,
             approved_context=approved_context,
+            symbol_locator=locate_symbol,
             verification_evidence=verification,
             previous_ledger=_dict_value(approved_context.get("prior_implementation_validation_ledger")),
             code_trace_policy=_code_trace_policy_for_state(state, run_id=run_id),

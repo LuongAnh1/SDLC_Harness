@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from sdlc_harness.agents.validator.code_contract import build_finding_ledger
 from sdlc_harness.agents.validator.code_review_tasks import build_code_validation_review_plan
@@ -464,6 +465,190 @@ class CodeValidationTaskTest(unittest.TestCase):
                 prompt=prompt,
             )
 
+    def _two_scenario_review_plan(self) -> dict[str, object]:
+        units = [
+            {
+                "unit_id": "WU-1",
+                "scenario_id": "SC-1",
+                "depends_on": [],
+                "requirement_refs": ["REQ-1"],
+                "design_node_ids": ["VDN-1"],
+                "design_edge_ids": ["VDE-CROSS"],
+            },
+            {
+                "unit_id": "WU-2",
+                "scenario_id": "SC-2",
+                "depends_on": ["WU-1"],
+                "requirement_refs": ["REQ-2"],
+                "design_node_ids": ["VDN-2"],
+                "design_edge_ids": ["VDE-CROSS"],
+            },
+        ]
+        return build_code_validation_review_plan(
+            work_packet={"execution_units": units},
+            approved_context={
+                "implementation_plan_structured_data": {"work_units": units},
+                "vertical_design_graph_data": {
+                    "nodes": [
+                        {"id": "VDN-1", "scenario_id": "SC-1", "kind": "business_rule"},
+                        {"id": "VDN-2", "scenario_id": "SC-2", "kind": "business_rule"},
+                    ],
+                    "edges": [
+                        {"id": "VDE-CROSS", "scenario_id": "SC-2", "kind": "depends_on", "from": "VDN-2", "to": "VDN-1"}
+                    ],
+                },
+            },
+            validation_claims=[
+                {"claim_id": "CODE-1", "requirement_ref": "REQ-1", "requirement_content": "Run the behavior.",
+                 "design_element_ids": ["VDN-1"]},
+                {"claim_id": "CODE-2", "requirement_ref": "REQ-2", "requirement_content": "Run the second behavior.",
+                 "design_element_ids": ["VDN-2"]},
+            ],
+        )
+
+    def test_out_of_scope_lead_reaches_its_owner_and_a_finished_owner_reruns_once(self) -> None:
+        plan = self._two_scenario_review_plan()
+        order = [task["task_id"] for task in plan["tasks"]]
+        self.assertEqual(order[:2], ["scenario:SC-1", "scenario:SC-2"])
+
+        def lead(claim_id: str, concern: str) -> dict[str, object]:
+            return {"claim_id": claim_id, "code_ref": self.source_path, "concern": concern}
+
+        def responder(payload: dict[str, object], _call: int) -> dict[str, object]:
+            task_id = payload["task_contract"]["task_id"]
+            if task_id == "scenario:SC-1" and payload["received_leads"]:
+                return blocking_review(payload)
+            review = clean_review(payload)
+            if task_id == "scenario:SC-1":
+                review["out_of_scope_leads"] = [lead("CODE-2", "SC-2 path skips the check."), lead("CODE-1", "own")]
+            elif task_id == "scenario:SC-2":
+                review["out_of_scope_leads"] = [lead("CODE-1", "A repeat call releases the first call's marker.")]
+            return review
+
+        llm = TaskCodeTraceLlm(responder)
+        with patch("sdlc_harness.agents.validator.code_trace.build_code_validation_review_plan", return_value=plan):
+            result = self.validate(llm)
+
+        payloads = [json.loads(prompt) for prompt in llm.prompts]
+        by_task = [payload["task_contract"]["task_id"] for payload in payloads]
+        # SC-1, SC-2, the boundary task, then SC-1 again for the lead SC-2 sent after SC-1 had finished.
+        self.assertEqual(by_task, [*order, "scenario:SC-1"])
+        self.assertIn("CODE-2", {item["claim_id"] for item in payloads[0]["other_task_claims"]})
+        self.assertEqual(payloads[0]["received_leads"], [])
+        self.assertEqual(
+            payloads[1]["received_leads"],
+            [{"from_task_id": "scenario:SC-1", "claim_id": "CODE-2", "code_ref": self.source_path,
+              "concern": "SC-2 path skips the check."}],
+        )
+        self.assertEqual(payloads[-1]["received_leads"][0]["from_task_id"], "scenario:SC-2")
+        routing = result.aggregation["lead_routing"]
+        self.assertEqual(routing["rerun_task_ids"], ["scenario:SC-1"])
+        self.assertEqual(
+            [(item["from_task_id"], item["claim_id"], item["status"]) for item in routing["leads"]],
+            [
+                ("scenario:SC-1", "CODE-2", "routed"),
+                ("scenario:SC-1", "CODE-1", "rejected_own_claim"),
+                ("scenario:SC-2", "CODE-1", "routed"),
+            ],
+        )
+        # The owner's rerun verdict replaces its first one and is the only blocker.
+        self.assertFalse(result.ok)
+        self.assertEqual([item["task_id"] for item in result.missing_links], ["scenario:SC-1"])
+        self.assertEqual(len(result.task_results), len(order))
+        rerun = next(item for item in result.task_results if item["task_id"] == "scenario:SC-1")
+        self.assertTrue(rerun["rerun_for_leads"])
+
+    def test_owner_reruns_at_most_once_and_malformed_leads_fail_the_contract(self) -> None:
+        plan = self._two_scenario_review_plan()
+        task_by_id = {task["task_id"]: task for task in plan["tasks"]}
+
+        def responder(payload: dict[str, object], _call: int) -> dict[str, object]:
+            review = clean_review(payload)
+            if payload["task_contract"]["task_id"] != "scenario:SC-1":
+                review["out_of_scope_leads"] = [{"claim_id": "CODE-1", "code_ref": "", "concern": "Check SC-1."}]
+            return review
+
+        llm = TaskCodeTraceLlm(responder)
+        with patch("sdlc_harness.agents.validator.code_trace.build_code_validation_review_plan", return_value=plan):
+            result = self.validate(llm)
+
+        statuses = [item["status"] for item in result.aggregation["lead_routing"]["leads"]]
+        self.assertEqual(result.aggregation["lead_routing"]["rerun_task_ids"], ["scenario:SC-1"])
+        self.assertEqual(statuses.count("routed"), len(plan["tasks"]) - 1)
+        self.assertEqual(llm.calls, len(plan["tasks"]) + 1)
+        self.assertTrue(result.ok)
+
+        prompt = _code_validation_task_prompt(
+            task=task_by_id["scenario:SC-2"],
+            code_snippets=[],
+            trace_mappings=[],
+            verification_evidence={},
+            symbol_evidence={},
+            scenario_results=[],
+        )
+        output = clean_review(json.loads(prompt))
+        output["out_of_scope_leads"] = "CODE-1 looks wrong"
+        with self.assertRaisesRegex(ValueError, "out_of_scope_leads must be an array of objects"):
+            _validate_code_validation_task_output(output=output, task=task_by_id["scenario:SC-2"], prompt=prompt)
+
+    def test_task_prompt_carries_registration_statement_and_passed_definitions(self) -> None:
+        routes = self.target / "apps/api/src/routes.ts"
+        routes.write_text(
+            'import { guard } from "./guard";\n'
+            'import { Sample } from "./Sample";\n'
+            "router.post(\n"
+            '  "/run",\n'
+            "  guard.check,\n"
+            "  guard.shared,\n"
+            "  sample.run,\n"
+            ");\n"
+            "export default router;\n",
+            encoding="utf-8",
+        )
+        (self.target / "apps/api/src/guard.ts").write_text("export function check() { return 400; }\n", encoding="utf-8")
+        located: list[str] = []
+
+        def locator(name: str) -> list[str]:
+            located.append(name)
+            # `shared` is defined twice, so it is not resolved; `run` is the target itself.
+            return {"check": ["apps/api/src/guard.ts"], "shared": ["a.ts", "b.ts"]}.get(name, [])
+
+        llm = TaskCodeTraceLlm()
+        result = self.validate(
+            llm,
+            approved_context={
+                "implementation_plan_structured_data": {
+                    "inputs": {
+                        "repo_target_callers": [
+                            {
+                                "path": self.source_path,
+                                "symbol": "run",
+                                "callers": [{"path": "apps/api/src/routes.ts", "line": 3}],
+                            }
+                        ]
+                    }
+                }
+            },
+            symbol_locator=locator,
+        )
+
+        self.assertTrue(result.ok)
+        context = json.loads(llm.prompts[0])["registration_context"]
+        self.assertEqual(context["role"], "read_only_runtime_context")
+        [entry] = context["entries"]
+        self.assertEqual(entry["target"], f"{self.source_path}#run")
+        self.assertEqual(entry["registered_in"], "apps/api/src/routes.ts:3")
+        self.assertIn("3\trouter.post(", entry["excerpt"])
+        self.assertIn("8\t);", entry["excerpt"])
+        self.assertNotIn("export default router", entry["excerpt"])
+        self.assertEqual(
+            [(item["name"], item["path"]) for item in entry["passed_definitions"]],
+            [("check", "apps/api/src/guard.ts")],
+        )
+        self.assertIn("return 400", entry["passed_definitions"][0]["content"])
+        # The callee (`post`) and the target (`run`) are never looked up.
+        self.assertEqual(located, ["check", "shared"])
+
     def test_all_task_blockers_are_returned_without_voting(self) -> None:
         llm = TaskCodeTraceLlm(blocking_review)
 
@@ -868,7 +1053,7 @@ class CodeValidationTaskTest(unittest.TestCase):
             ],
         )
         self.assertEqual(payload["static_trace_evidence"]["test_files"], [self.test_path])
-        self.assertEqual(payload["prompt_schema_version"], "code_validation_task_prompt_v4")
+        self.assertEqual(payload["prompt_schema_version"], "code_validation_task_prompt_v5")
         self.assertTrue(prompt.startswith('{\n"prompt_schema_version"'))
         self.assertNotIn("\n ", prompt)
         contract = payload["task_contract"]
@@ -949,7 +1134,7 @@ class CodeValidationTaskTest(unittest.TestCase):
         )
 
         payload = json.loads(prompt)
-        self.assertEqual(payload["prompt_schema_version"], "code_validation_task_prompt_v6")
+        self.assertEqual(payload["prompt_schema_version"], "code_validation_task_prompt_v7")
         self.assertNotIn("scenario_task_outcomes", payload)
         ownership = payload["ownership_exclusions"]
         self.assertEqual(
