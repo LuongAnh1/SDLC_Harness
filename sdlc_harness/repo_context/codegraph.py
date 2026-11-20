@@ -247,6 +247,7 @@ class CodeGraphContextProvider:
             target_path=target_path,
             command=command,
             timeout_seconds=self.timeout_seconds,
+            list_key="results",
         )
 
     def query_capability(
@@ -463,6 +464,7 @@ def _run_codegraph_json(
     target_path: Path,
     command: list[str],
     timeout_seconds: int,
+    list_key: str = "",
 ) -> dict[str, object]:
     raw = _run_codegraph_command(
         target_path=target_path,
@@ -473,6 +475,9 @@ def _run_codegraph_json(
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned invalid JSON.") from exc
+    # `query --json` and `files --json` print a JSON array of entries.
+    if isinstance(payload, list) and list_key:
+        return {list_key: payload}
     if not isinstance(payload, dict):
         raise HarnessError("target_repo_codegraph_failed", "CodeGraph returned an invalid JSON object.")
     return payload

@@ -206,6 +206,32 @@ def test_codegraph_affected_tests_uses_bounded_structured_query() -> None:
     ]
 
 
+def test_codegraph_list_output_is_wrapped_in_results() -> None:
+    from sdlc_harness.repo_context import codegraph as codegraph_module
+
+    entries = [{"node": {"name": "articleGetPrisma", "kind": "function"}, "score": 1.0}]
+    with tempfile.TemporaryDirectory() as directory:
+        target = Path(directory)
+        (target / ".codegraph").mkdir()
+        provider = CodeGraphContextProvider()
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_command",
+            return_value=json.dumps(entries),
+        ) as run:
+            symbols = provider.query_capability(target, operation="symbols", query="Prisma", limit=60)
+            files = provider.query_capability(target, operation="files")
+        with patch(
+            "sdlc_harness.repo_context.codegraph._run_codegraph_command",
+            return_value="[1, 2]",
+        ), pytest.raises(HarnessError, match="invalid JSON object"):
+            # Commands documented as objects (status, impact...) still reject an array.
+            codegraph_module._run_codegraph_status(target_path=target, timeout_seconds=5)
+
+    assert symbols == {"results": entries}
+    assert files == {"results": entries}
+    assert run.call_args_list[0].kwargs["arguments"] == ["query", "Prisma", "--limit", "20", "--json"]
+
+
 def test_codegraph_symbols_file_uses_bounded_node_capability() -> None:
     with tempfile.TemporaryDirectory() as directory:
         target = Path(directory)
