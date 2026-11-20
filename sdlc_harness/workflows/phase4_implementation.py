@@ -1782,6 +1782,16 @@ class PhaseFourImplementationCycle:
             self.store.write_state(state)
             return self._status_response(state, created_new_run=False)
 
+        # A Code Validator step-review pause resumes through the normal code-trace step, never back
+        # into the pre-revalidation status (`implementation_repair_needed` would rerun its stale repair).
+        state.update(
+            {
+                "status": "implementation_tested",
+                "current_phase": "implementation_testing",
+                "latest_artifacts": latest_artifacts,
+                "quality_reports": quality_reports,
+            }
+        )
         try:
             trace_result = self._validate_code_trace_snapshot(
                 state=state,

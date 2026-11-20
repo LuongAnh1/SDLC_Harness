@@ -260,12 +260,29 @@ class ApplicationService:
                 PHASE_THREE: PhaseThreeWorkflow,
                 PHASE_FOUR: PhaseFourWorkflow,
             }
+            developer_review: dict[str, object] = {}
+            review_all = bool(command.arguments.get("step_review"))
+            if review_all or bool(command.arguments.get("step_review_input")):
+                developer_review["review_input"] = True
+            if review_all or bool(command.arguments.get("step_review_output")):
+                developer_review["review_output"] = True
+            developer_review.update(review)
+            if developer_review:
+                developer_review["enabled"] = True
             if node is not None and node.step_review is not None:
                 pause = node.step_review
                 enabled = {"enabled": True, **review} if pause.always_enabled or review else None
-                return getattr(workflows[pause.workflow](settings, **{pause.argument: enabled}), pause.method)(
-                    run_id=run_id
-                )
+                step_reviews: dict[str, object] = {pause.argument: enabled}
+                if pause.workflow == PHASE_FOUR:
+                    # Resuming one Phase 4 review can run other Phase 4 agents (a Validator approval can start a
+                    # Developer repair); they keep the per-call review the operator asked for.
+                    step_reviews = {
+                        "developer_step_review": developer_review or None,
+                        "code_validation_step_review": developer_review or None,
+                        "runtime_closure_step_review": developer_review or None,
+                        **step_reviews,
+                    }
+                return getattr(workflows[pause.workflow](settings, **step_reviews), pause.method)(run_id=run_id)
             if node is not None and node.workflow != PHASE_FOUR and node.continue_routes:
                 if node.kind == "running":
                     # We hold the run lock, so the command that set this in-progress status is gone.
@@ -280,22 +297,6 @@ class ApplicationService:
                     phase_one.store.write_state(state)
                 workflow = phase_one if node.workflow == PHASE_ONE else workflows[node.workflow](settings)
                 return getattr(workflow, node.continue_routes[0].handler)(run_id=run_id)
-            developer_review: dict[str, object] = {}
-            review_all = bool(command.arguments.get("step_review"))
-            if review_all or bool(command.arguments.get("step_review_input")):
-                developer_review["review_input"] = True
-            if review_all or bool(command.arguments.get("step_review_output")):
-                developer_review["review_output"] = True
-            for argument_name, review_key in (
-                ("step_review_call_id", "call_id"),
-                ("step_review_decision", "decision"),
-                ("step_review_note", "note"),
-            ):
-                value = self._optional_text(command, argument_name)
-                if value is not None:
-                    developer_review[review_key] = value
-            if developer_review:
-                developer_review["enabled"] = True
             return PhaseFourWorkflow(
                 settings,
                 developer_step_review=developer_review or None,

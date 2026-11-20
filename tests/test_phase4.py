@@ -2301,6 +2301,48 @@ class PhaseFourTest(unittest.TestCase):
         ).continue_code_validation_step_review(run_id=str(tested["run_id"]))
         self.assertEqual(traced["status"], "implementation_traced")
 
+    def test_revalidate_validation_step_review_resumes_validation_not_stale_repair(self) -> None:
+        tested = self._create_phase4_tested_run()
+        run_id = str(tested["run_id"])
+        # Pending repair feedback whose finding no longer holds (r7: a false Code Trace symbol finding).
+        store = PhaseOneWorkflow(self.settings).store
+        repair_needed = store.read_state(run_id)
+        repair_needed.update({"status": "implementation_repair_needed", "current_phase": "implementation_repair"})
+        store.write_state(repair_needed)
+
+        self.settings = self._settings(SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED="1")
+        input_pending = PhaseFourWorkflow(self.settings).revalidate_implementation(run_id=run_id)
+        self.assertEqual(input_pending["status"], "implementation_validation_step_review_required")
+        state = PhaseOneWorkflow(self.settings).store.read_state(run_id)
+        self.assertEqual(
+            state["implementation_validation_resume"],
+            {"status": "implementation_tested", "current_phase": "implementation_testing"},
+        )
+        # The revalidated packet and test report are what the resumed code-trace step reads.
+        self.assertNotEqual(state["latest_artifacts"]["test_report"], repair_needed["latest_artifacts"]["test_report"])
+
+        output_pending = PhaseFourWorkflow(
+            self.settings,
+            code_validation_step_review={
+                "enabled": True,
+                "call_id": input_pending["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_code_validation_step_review(run_id=run_id)
+        self.assertEqual(output_pending["status"], "implementation_validation_step_review_required")
+        self.assertEqual(output_pending["pending_step_review"]["review_stage"], "output")
+        traced = PhaseFourWorkflow(
+            self.settings,
+            code_validation_step_review={
+                "enabled": True,
+                "call_id": output_pending["pending_step_review"]["call_id"],
+                "decision": "approve",
+            },
+        ).continue_code_validation_step_review(run_id=run_id)
+
+        self.assertEqual(traced["status"], "implementation_traced")
+        self.assertFalse((self.store_run_dir(run_id) / "developer_execution" / "implementation_repair_v1").exists())
+
     def test_code_validation_step_review_after_developer_resumes_validation_not_developer(self) -> None:
         workflow = PhaseFourWorkflow(self.settings)
         state = {
