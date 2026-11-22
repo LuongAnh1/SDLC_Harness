@@ -52,6 +52,7 @@ from .phase4 import (
     _int_value,
     _is_repairable_code_trace_failure,
     _is_repairable_verification_failure,
+    _code_trace_artifact_version,
     _next_phase4_artifact_version,
     _nonrepairable_code_trace_error_code,
     _planning_policy_for_state,
@@ -1491,7 +1492,7 @@ class PhaseFourImplementationCycle:
         try:
             packet_path = _required_phase4_artifact(artifact_paths, "developer_work_packet", run_id=run_id)
             _required_phase4_artifact(artifact_paths, "code_change_report", run_id=run_id)
-            _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
+            test_report_path = _required_phase4_artifact(artifact_paths, "test_report", run_id=run_id)
             for key in (
                 "design_artifact",
                 "requirement_design_trace",
@@ -1499,6 +1500,8 @@ class PhaseFourImplementationCycle:
                 "sequence_diagram_graph",
             ):
                 _required_phase4_artifact(artifact_paths, key, run_id=run_id)
+            # A resumed or repeated trace must not overwrite the evidence of an earlier one.
+            artifact_version = _code_trace_artifact_version(self.store, run_id, test_report_path)
             work_packet = _read_json_artifact(self._existing_artifact_path(packet_path, run_id=run_id), run_id=run_id)
             target_info = self._workspace_target_info(run_id=run_id, work_packet=work_packet)
             trace_result = self._validate_code_trace_snapshot(
@@ -1520,12 +1523,12 @@ class PhaseFourImplementationCycle:
                 store=self.store,
                 run_id=run_id,
                 report=trace_payload,
-                version=1,
+                version=artifact_version,
             )
             ledger_path = self._write_implementation_validation_ledger(
                 run_id=run_id,
                 trace_result=trace_result,
-                version=1,
+                version=artifact_version,
             )
         except LlmStepReviewRequired as exc:
             return self._pause_for_code_validation_step_review(
@@ -1583,14 +1586,14 @@ class PhaseFourImplementationCycle:
                 trace_path=trace_path,
                 target_repo=str(target_info.path),
                 branch=target_info.current_branch,
-                feedback_version=1,
+                feedback_version=artifact_version,
                 repair_iteration=0,
             )
             feedback_path = write_phase4_repair_feedback(
                 store=self.store,
                 run_id=run_id,
                 feedback=feedback,
-                version=1,
+                version=artifact_version,
             )
             latest_artifacts = {
                 **latest_artifacts,
@@ -1625,7 +1628,7 @@ class PhaseFourImplementationCycle:
                     "implementation_repair_iterations": 0,
                     "summary_for_user": (
                         f"Validator code trace còn thiếu link có thể sửa ở code/test cho run {run_id}: "
-                        f"{trace_result.summary} Đã ghi implementation_repair_feedback_v1.json. "
+                        f"{trace_result.summary} Đã ghi {Path(feedback_path).name}. "
                         "Lần continue-run tiếp theo sẽ giao Developer.repair xử lý feedback này."
                     ),
                 }

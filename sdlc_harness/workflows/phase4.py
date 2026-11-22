@@ -1423,6 +1423,23 @@ def _next_phase4_artifact_version(store: RuntimeStore, run_id: str) -> int:
     return max_version + 1
 
 
+def _code_trace_artifact_version(store: RuntimeStore, run_id: str, test_report_path: str) -> int:
+    """The version of the test report a code trace checks, or the next free version once that one is taken."""
+
+    match = re.search(r"test_report_v(\d+)\.md$", test_report_path.replace("\\", "/"))
+    version = int(match.group(1)) if match else 0
+    artifact_dir = store.run_dir(run_id) / "artifacts"
+    taken = version < 1 or any(
+        (artifact_dir / f"{prefix}_v{version}.json").exists()
+        for prefix in (
+            "requirement_design_code_trace",
+            "implementation_validation_ledger",
+            "implementation_repair_feedback",
+        )
+    )
+    return _next_phase4_artifact_version(store, run_id) if taken else version
+
+
 def _verification_attempt_count(store: RuntimeStore, run_id: str) -> int:
     """Count persisted official Verification Runner reports, independent of artifact gaps."""
 

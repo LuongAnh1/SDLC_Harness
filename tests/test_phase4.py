@@ -58,6 +58,7 @@ from sdlc_harness.profiles import (
     get_project_profile,
 )
 from sdlc_harness.storage.artifact_index import read_artifact_index, sha256_file
+from sdlc_harness.storage.runtime import RuntimeStore
 from sdlc_harness.verification import VerificationResult, VerificationRunner, VerificationStageResult
 from sdlc_harness.verification.registry import BROWSER_CAPTURE_SPEC_PATH, RUNTIME_PROBE_SPEC_PATH
 from sdlc_harness.workflows.approval import CheckpointApprovalWorkflow
@@ -65,6 +66,7 @@ from sdlc_harness.workflows.phase1 import PhaseOneWorkflow
 from sdlc_harness.workflows.phase4 import (
     PhaseFourWorkflow,
     _code_review_pr_body,
+    _code_trace_artifact_version,
     _require_exact_v2_coverage,
     _verification_repair_feedback,
     _verification_attempt_count,
@@ -787,6 +789,21 @@ class DeveloperExecutionStateTest(unittest.TestCase):
 
         self.assertNotIn("pending_step_review", execution)
 
+
+class CodeTraceArtifactVersionTest(unittest.TestCase):
+    def test_trace_takes_the_test_report_version_and_never_overwrites_an_earlier_trace(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            store = RuntimeStore(repo_root=Path(temp), runtime_root=Path(temp) / "runtime")
+            artifacts = store.run_dir("run_1") / "artifacts"
+            artifacts.mkdir(parents=True)
+            for name in ("developer_work_packet_v3.json", "test_report_v1.md", "test_report_v3.md"):
+                (artifacts / name).write_text("{}", encoding="utf-8")
+
+            self.assertEqual(_code_trace_artifact_version(store, "run_1", "artifacts/test_report_v1.md"), 1)
+            (artifacts / "requirement_design_code_trace_v1.json").write_text("{}", encoding="utf-8")
+            self.assertEqual(_code_trace_artifact_version(store, "run_1", "artifacts/test_report_v3.md"), 3)
+            # The same test report traced again gets the next free version.
+            self.assertEqual(_code_trace_artifact_version(store, "run_1", "artifacts/test_report_v1.md"), 4)
 
 class PhaseFourTest(unittest.TestCase):
     ISOLATED_REPOSITORY_TESTS = {
