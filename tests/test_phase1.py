@@ -76,7 +76,7 @@ class PhaseOneTest(unittest.TestCase):
 
     def test_fixture_loader_reads_every_conduit_use_case(self) -> None:
         names = sorted(path.stem for path in (self.repo_root / "fixtures" / "conduit").glob("UC*.txt"))
-        self.assertEqual(names, ["UC1", "UC2", "UC3", "UC4", "UC5"])
+        self.assertEqual(names, ["UC1", "UC3", "UC4", "UC5", "UC6"])
         for name in names:
             source = load_use_case(dataset="conduit", use_case=name, repo_root=self.repo_root)
             self.assertEqual(source.source_ref, f"dataset_use_case:conduit:{name}")
