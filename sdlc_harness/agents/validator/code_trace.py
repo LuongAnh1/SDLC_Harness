@@ -154,12 +154,13 @@ class CodeTraceValidator:
         self,
         llm_client: LlmClient,
         *,
-        llm_call_budget: int = 6,
+        llm_call_budget: int = 0,
         symbol_extractor: TypeScriptAstExtractor | None = None,
         reviewable_client_factory: Callable[[dict[str, object], str], object] | None = None,
     ):
         self.llm_client = llm_client
-        self.llm_call_budget = max(1, int(llm_call_budget))
+        # 0 = automatic: one extra call per review task for a contract retry or a lead rerun.
+        self.llm_call_budget = max(0, int(llm_call_budget))
         self.symbol_extractor = symbol_extractor or TypeScriptAstExtractor()
         self.reviewable_client_factory = reviewable_client_factory
 
@@ -329,12 +330,13 @@ class CodeTraceValidator:
                 run_id=run_id,
             ) from exc
         tasks = _dict_items(review_plan.get("tasks"))
-        if not static_missing_links and self.llm_call_budget < len(tasks):
+        call_budget = self.llm_call_budget or 2 * len(tasks)
+        if not static_missing_links and call_budget < len(tasks):
             raise HarnessError(
                 "implementation_validation_call_budget_insufficient",
                 (
                     f"Code validation requires {len(tasks)} task call(s), but the configured "
-                    f"budget is {self.llm_call_budget}."
+                    f"budget is {call_budget}."
                 ),
                 run_id=run_id,
             )
@@ -422,7 +424,7 @@ class CodeTraceValidator:
                     cache_hits += 1
                 else:
                     cache_misses += 1
-                    max_attempts = min(2, self.llm_call_budget - calls_used)
+                    max_attempts = min(2, call_budget - calls_used)
                     if max_attempts < 1:
                         inconclusive = True
                         inconclusive_task_id = task_id
@@ -508,7 +510,7 @@ class CodeTraceValidator:
             "completed_task_count": len(task_results),
             "blocking_findings": semantic_blockers,
             "observation_count": len(observations),
-            "llm_call_budget": self.llm_call_budget,
+            "llm_call_budget": call_budget,
             "llm_calls_used": calls_used,
             "inconclusive": inconclusive,
             "inconclusive_task_id": inconclusive_task_id,

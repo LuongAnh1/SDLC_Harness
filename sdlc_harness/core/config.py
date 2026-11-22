@@ -561,7 +561,7 @@ def load_settings(
             default=True,
         ),
         implementation_repair_limit=_int_value(merged.get("SDLC_IMPLEMENTATION_REPAIR_LIMIT"), default=2, minimum=0),
-        implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=6, minimum=2),
+        implementation_validation_call_budget=_int_value(merged.get("SDLC_IMPLEMENTATION_VALIDATION_CALL_BUDGET"), default=0, minimum=0),
         implementation_validation_step_review_enabled=_bool_value(
             merged.get("SDLC_IMPLEMENTATION_VALIDATION_STEP_REVIEW_ENABLED")
         ),

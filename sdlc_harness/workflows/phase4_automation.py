@@ -174,7 +174,8 @@ class PhaseFourAutomation:
         scenarios = max(1, len({str(unit.get("scenario_id") or "") for unit in implementation_units} - {""}))
         implementation_repairs = max(0, int(settings.implementation_repair_limit))
         plan_rounds = 1 + max(0, int(settings.implementation_plan_repair_limit))
-        validation = max(1, int(settings.implementation_validation_call_budget))
+        # 0 = the Code Validator's automatic budget: 2 calls per review task (one per scenario plus the boundary).
+        validation = int(settings.implementation_validation_call_budget) or 2 * (scenarios + 1)
         closure_repairs = self._repair_limit(state, "runtime_closure_repair")
         browser_repairs = self._repair_limit(state, "browser_qa_repair")
         patches = self._repair_limit(state, "browser_journey_patch")

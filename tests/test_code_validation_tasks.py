@@ -669,6 +669,21 @@ class CodeValidationTaskTest(unittest.TestCase):
         self.assertEqual(llm.calls, 2)
         self.assertEqual(result.missing_links, [])
 
+    def test_automatic_call_budget_is_two_calls_per_review_task(self) -> None:
+        result = CodeTraceValidator(
+            TaskCodeTraceLlm(),
+            symbol_extractor=StaticTypeScriptExtractor(),
+        ).validate(
+            target_path=self.target,
+            work_packet=self.packet,
+            code_trace_policy=self.code_trace_policy,
+        )
+
+        self.assertTrue(result.ok)
+        self.assertEqual(result.aggregation["task_count"], 1)
+        self.assertEqual(result.aggregation["llm_call_budget"], 2)
+
+
     def test_contract_retry_uses_previous_output_and_only_cited_evidence(self) -> None:
         llm = ContractRecoveryCodeTraceLlm()
 
