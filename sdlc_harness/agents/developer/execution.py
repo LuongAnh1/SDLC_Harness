@@ -2815,11 +2815,13 @@ def _build_manifest(
             if not unit_paths:
                 continue
             unit_context_candidates = _string_items(unit.get("context_paths")) or unit_paths
+            unit_contract_anchors = set(_string_items(unit.get("contract_anchor_paths")))
+            # Provider anchors lie outside the packet's write scope; they stay readable, never writable.
             unit_context = [
                 path for path in unit_context_candidates
-                if path in context_selected and path in allowed
+                if (path in context_selected and path in allowed)
+                or (path in unit_contract_anchors and path not in allowed)
             ]
-            unit_contract_anchors = set(_string_items(unit.get("contract_anchor_paths")))
             unit_signature_ids = _string_items(unit.get("signature_entry_ids"))
             unit_signature_id_set = set(unit_signature_ids)
             items.append(

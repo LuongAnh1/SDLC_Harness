@@ -21,6 +21,7 @@ from ...profiles import (
     profiled_plan_contract_issues,
 )
 from ...storage.runtime import utc_now_iso
+from ...repo_context.providers import provider_files
 from ...profiles.runtime_config import canonical_runtime_config_impact
 from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
 
@@ -154,6 +155,7 @@ def build_developer_work_packet(
                     verification_policy=verification_policy,
                     run_id=run_id,
                     package_dependencies=package_dependencies,
+                    target_repo_path=target_repo_path,
                 )
             }
         ),
@@ -210,6 +212,7 @@ def _build_execution_units(
     verification_policy: VerificationStagePolicy,
     run_id: str,
     package_dependencies: list[dict[str, object]] | None = None,
+    target_repo_path: Path | None = None,
 ) -> list[dict[str, object]]:
     """Project approved component-aware work units without inventing new execution scope."""
 
@@ -373,7 +376,7 @@ def _build_execution_units(
         paths_by_unit[unit_id] = set(write_paths)
         dependencies[unit_id] = set(depends_on)
 
-    _attach_execution_unit_context(projected, allowed=allowed)
+    _attach_execution_unit_context(projected, allowed=allowed, target_path=target_repo_path)
 
     def reaches(source: str, target: str) -> bool:
         pending = list(dependencies.get(source, set()))
@@ -525,23 +528,37 @@ def upgrade_developer_dependency_scope(
     }, True
 
 
+MAX_PROVIDER_ANCHORS_PER_UNIT = 10
+
+
 def _attach_execution_unit_context(
     units: list[dict[str, object]],
     *,
     allowed: set[str],
+    target_path: Path | None = None,
 ) -> None:
+    """Give each unit read-only anchors: its dependencies' files and the files defining what its files import."""
+
     projected_by_id = {str(unit.get("unit_id") or ""): unit for unit in units}
     for unit in units:
         write_paths = _string_items(unit.get("write_paths"))
-        design_edge_ids = set(_string_items(unit.get("design_edge_ids")))
         contract_anchor_paths: list[str] = []
         for dependency_id in _string_items(unit.get("depends_on")):
             dependency = projected_by_id[dependency_id]
-            if not design_edge_ids.intersection(_string_items(dependency.get("design_edge_ids"))):
-                continue
-            for path in _execution_context_target_paths(dependency):
+            # Implementation targets first, then the dependency's tests (a pattern to copy).
+            for path in [*_execution_context_target_paths(dependency), *_string_items(dependency.get("write_paths"))]:
                 if path in allowed and path not in write_paths and path not in contract_anchor_paths:
                     contract_anchor_paths.append(path)
+        if target_path is not None:
+            contract_anchor_paths.extend(
+                str(row["path"])
+                for row in provider_files(
+                    target_path=target_path,
+                    source_paths=write_paths,
+                    exclude=contract_anchor_paths,
+                    limit=MAX_PROVIDER_ANCHORS_PER_UNIT,
+                )
+            )
         unit["context_paths"] = [*write_paths, *contract_anchor_paths]
         unit["contract_anchor_paths"] = contract_anchor_paths
         digest_payload = json.dumps(unit, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

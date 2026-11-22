@@ -649,6 +649,29 @@ class CodeValidationTaskTest(unittest.TestCase):
         # The callee (`post`) and the target (`run`) are never looked up.
         self.assertEqual(located, ["check", "shared"])
 
+    def test_task_prompt_carries_the_provider_files_its_code_targets_import(self) -> None:
+        source = self.target / self.source_path
+        source.write_text(
+            'import { loadSample } from "./sampleStore";\n' + source.read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+        (source.parent / "sampleStore.ts").write_text(
+            "export function loadSample() { return { loading: true }; }\n", encoding="utf-8"
+        )
+        llm = TaskCodeTraceLlm()
+
+        result = self.validate(llm)
+
+        self.assertTrue(result.ok)
+        context = json.loads(llm.prompts[0])["provider_context"]
+        self.assertEqual(context["role"], "read_only_provider_context")
+        [entry] = context["entries"]
+        self.assertEqual(entry["path"], str(Path(self.source_path).parent.as_posix()) + "/sampleStore.ts")
+        self.assertEqual(entry["imported_by"], [self.source_path])
+        self.assertEqual(entry["names"], ["loadSample"])
+        self.assertIn("loading: true", entry["content"])
+        self.assertFalse(entry["content_truncated"])
+
     def test_all_task_blockers_are_returned_without_voting(self) -> None:
         llm = TaskCodeTraceLlm(blocking_review)
 
@@ -682,7 +705,6 @@ class CodeValidationTaskTest(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.aggregation["task_count"], 1)
         self.assertEqual(result.aggregation["llm_call_budget"], 2)
-
 
     def test_contract_retry_uses_previous_output_and_only_cited_evidence(self) -> None:
         llm = ContractRecoveryCodeTraceLlm()

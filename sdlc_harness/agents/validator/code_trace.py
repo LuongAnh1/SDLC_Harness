@@ -24,6 +24,7 @@ from ...llm.step_review import LlmStepReviewRequired
 from ...profiles import (
     CodeTracePolicy,
 )
+from ...repo_context.providers import provider_files
 from ...storage.runtime import utc_now_iso
 from .code_contract import (
     build_finding_ledger,
@@ -372,6 +373,18 @@ class CodeTraceValidator:
             )
             for task_id, task in tasks_by_id.items()
         }
+        provider_by_task = {
+            task_id: _provider_context(
+                target_path=target_path,
+                task=task,
+                already_shown={
+                    str(definition.get("path") or "")
+                    for entry in registration_by_task.get(task_id, [])
+                    for definition in _dict_items(entry.get("passed_definitions"))
+                },
+            )
+            for task_id, task in tasks_by_id.items()
+        }
         received_leads: dict[str, list[dict[str, object]]] = {}
         lead_log: list[dict[str, object]] = []
         rerun_task_ids: list[str] = []
@@ -402,6 +415,7 @@ class CodeTraceValidator:
                     other_task_claims=_other_task_claims(task=task, tasks=tasks),
                     received_leads=received_leads.get(task_id, []),
                     registration_context=registration_by_task.get(task_id, []),
+                    provider_context=provider_by_task.get(task_id, []),
                     approved_closure_changes=_dict_value(approved_context.get("approved_closure_changes")) or None,
                 )
                 cached = task_cache.get(prompt)
@@ -1551,6 +1565,7 @@ def _code_validation_task_prompt(
     other_task_claims: list[dict[str, object]] | None = None,
     received_leads: list[dict[str, object]] | None = None,
     registration_context: list[dict[str, object]] | None = None,
+    provider_context: list[dict[str, object]] | None = None,
 ) -> str:
     is_boundary = task.get("task_kind") == "boundary"
     authority_claim_ids = _string_items(task.get("authority_claim_ids"))
@@ -1756,7 +1771,8 @@ def _code_validation_task_prompt(
             "a lead is only a pointer to check, never evidence; report a finding only when the supplied evidence "
             "proves it and the cited claim's requirement_refs require that behavior, otherwise say in observations "
             "why it does not hold; a lead never adds claims to this task. Before concluding that behavior is missing, "
-            "check registration_context for code that runs before a target (route registration, middleware)."
+            "check registration_context for code that runs before a target (route registration, middleware). "
+            "Judge what the code a target calls accepts, returns or holds from provider_context, never from a guess."
         ),
         **(
             {
@@ -1834,6 +1850,16 @@ def _code_validation_task_prompt(
                 "Read-only evidence of behavior around a target; it adds no claims to this task."
             ),
             "entries": registration_context or [],
+        },
+        "provider_context": {
+            "role": "read_only_provider_context",
+            "policy": (
+                "Repository files that define what this task's code targets import (for example data access, "
+                "a shared contract or a state slice), with the importing files and imported names. Read-only "
+                "evidence of what that code accepts, returns or holds; it adds no claims to this task and a "
+                "finding still cites this task's own code."
+            ),
+            "entries": provider_context or [],
         },
         "approved_design_contracts": task.get("approved_design_contracts"),
         "deferred_review_context": {
@@ -2124,6 +2150,71 @@ def _validate_code_validation_task_output(
             raise ValueError(
                 f"Claim assessment {claim_id} verdict and finding_ids must match findings that cite it."
             )
+
+
+MAX_PROVIDER_FILES = 8
+MAX_PROVIDER_FILE_CHARS = 4000
+MAX_PROVIDER_TOTAL_CHARS = 16000
+MAX_PROVIDER_DEFINITION_LINES = 40
+
+
+def _provider_context(
+    *,
+    target_path: Path,
+    task: dict[str, object],
+    already_shown: set[str],
+) -> list[dict[str, object]]:
+    """Read-only text of the files that define what the task's code targets import, bounded per file and in total."""
+
+    sources = list(
+        dict.fromkeys(
+            str(item.get("path") or "").strip().replace("\\", "/")
+            for item in _dict_items(task.get("code_targets"))
+            if str(item.get("path") or "").strip()
+        )
+    )
+    entries: list[dict[str, object]] = []
+    remaining = MAX_PROVIDER_TOTAL_CHARS
+    for row in provider_files(
+        target_path=target_path,
+        source_paths=sources,
+        exclude=[*_string_items(task.get("test_paths")), *already_shown],
+        limit=MAX_PROVIDER_FILES,
+    ):
+        if remaining <= 0:
+            break
+        path = str(row["path"])
+        text = (target_path / path).read_text(encoding="utf-8", errors="replace")
+        limit = min(MAX_PROVIDER_FILE_CHARS, remaining)
+        content = text if len(text) <= limit else _provider_definitions_excerpt(text, _string_items(row["names"]))
+        entries.append(
+            {
+                "path": path,
+                "imported_by": row["imported_by"],
+                "names": row["names"],
+                "content": content[:limit],
+                "content_truncated": len(text) > limit,
+            }
+        )
+        remaining -= min(len(content), limit)
+    return entries
+
+
+def _provider_definitions_excerpt(text: str, names: list[str]) -> str:
+    """The line-numbered definitions of the imported names in a long provider file, each up to the next export."""
+
+    lines = text.splitlines()
+    blocks: list[str] = []
+    for name in names:
+        pattern = r"^\s*export\s+default\b" if name == "default" else rf"^\s*export\b.*\b{re.escape(name)}\b"
+        start = next((index for index, line in enumerate(lines) if re.search(pattern, line)), None)
+        if start is None:
+            continue
+        end = start + 1
+        while end < len(lines) and end - start < MAX_PROVIDER_DEFINITION_LINES and not lines[end].startswith("export "):
+            end += 1
+        blocks.append("\n".join(f"{index + 1:>4}\t{lines[index]}" for index in range(start, end)))
+    return "\n...\n".join(blocks) if blocks else text
 
 
 MAX_REGISTRATION_EXCERPT_LINES = 24

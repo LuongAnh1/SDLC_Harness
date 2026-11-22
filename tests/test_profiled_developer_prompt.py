@@ -186,7 +186,7 @@ def test_tool_loop_manifest_binds_profile_signatures_and_orders_tests_last(tmp_p
         "Preserve each boundary input/output/error mapping and runtime attachment in active_focus.mandatory_obligations; inspect related approved paths instead of inventing a different contract.",
         "For UI work, implement the approved experience contract including structure, feedback, accessibility, responsive behavior, and focus flow.",
         "For UI work, autoFocus alone does not prove focus containment or post-action focus restoration, and CSS class names alone do not prove responsive behavior without matching style evidence.",
-        "Before mutating a boundary consumer, inspect its unread contract_anchor_paths; they are read-only context and never expand write_paths.",
+        "contract_anchor_paths are read-only: the files of the units this unit depends on and the repository files that define what this unit's files import. Read the ones whose names, signatures or results your change uses instead of guessing them; they never expand write_paths.",
         "Repository reads, diffs, listings and searches are confined to read_context_paths. CodeGraph topology may name a connected out-of-unit path, but it does not grant source access to that path; leave its inspection and repair to the later unit that declares it as context.",
         "Package manifests and lockfiles in package_tool_owned_paths may be changed only by package.ensure_workspace_dependency.",
             "Use compatible control flow or domain errors only when the current unit's mandatory obligations explicitly require that behavior; do not infer behavior from signature shape alone and do not change an approved contract.",

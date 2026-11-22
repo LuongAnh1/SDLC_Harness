@@ -140,6 +140,60 @@ def test_execution_unit_adds_shared_boundary_dependency_targets_as_read_context(
     assert consumer["contract_anchor_paths"] == [provider_path, contract_path]
 
 
+def test_execution_unit_reads_every_dependency_and_the_files_its_sources_import(tmp_path: Path) -> None:
+    project = get_project_profile("typescript_fullstack_v1")
+    planning_policy = build_planning_path_policy(
+        project=project,
+        language=get_language_profile(project.language_profile_id),
+    )
+    verification_policy = build_verification_stage_policy(project=project)
+    guard_path = "apps/api/src/articleGuard.ts"
+    update_path = "apps/api/src/articlesUpdate.ts"
+    viewer_path = "apps/api/src/view/articleViewer.ts"
+    (tmp_path / "apps/api/src/view").mkdir(parents=True)
+    (tmp_path / update_path).write_text(
+        'import articleViewer from "./view/articleViewer";\nimport { guard } from "./articleGuard";\n',
+        encoding="utf-8",
+    )
+    (tmp_path / viewer_path).write_text("export default function articleViewer() {}\n", encoding="utf-8")
+
+    units = _build_execution_units(
+        structured_plan={
+            "implementation_signature_contract": {"entries": []},
+            "work_units": [
+                {
+                    "unit_id": "WU-GUARD",
+                    "order": 1,
+                    "depends_on": [],
+                    "design_edge_ids": ["EDGE-GUARD"],
+                    "planned_code_targets": [{"path": guard_path, "symbol": "guard"}],
+                    "test_intents": [],
+                },
+                {
+                    "unit_id": "WU-UPDATE",
+                    "order": 2,
+                    "depends_on": ["WU-GUARD"],
+                    "design_edge_ids": ["EDGE-UPDATE"],
+                    "planned_code_targets": [{"path": update_path, "symbol": "articlesUpdate"}],
+                    "test_intents": [],
+                },
+            ],
+        },
+        allowed_paths=[guard_path, update_path],
+        planning_policy=planning_policy,
+        verification_policy=verification_policy,
+        run_id="run_provider_context",
+        target_repo_path=tmp_path,
+    )
+
+    update = next(unit for unit in units if unit["unit_id"] == "WU-UPDATE")
+    assert update["write_paths"] == [update_path]
+    # The dependency shares no design edge; the guard it creates does not exist yet, so it comes from the
+    # dependency and the viewer from the import.
+    assert update["contract_anchor_paths"] == [guard_path, viewer_path]
+    assert update["context_paths"] == [update_path, guard_path, viewer_path]
+
+
 def test_execution_unit_projects_runtime_config_only_to_its_owner() -> None:
     project = get_project_profile("typescript_fullstack_v1")
     planning_policy = build_planning_path_policy(

@@ -2672,6 +2672,56 @@ class DeveloperToolLoopTest(unittest.TestCase):
         )
         self.assertEqual(result.progress["completed_unit_ids"], ["WU-002"])
 
+    def test_provider_anchor_outside_write_scope_is_readable_but_never_writable(self) -> None:
+        packet = self.unit_packet()
+        unit = dict(packet["execution_units"][1])
+        unit["depends_on"] = []
+        unit["context_paths"] = ["src/MainTest.java", "src/Provider.java"]
+        unit["contract_anchor_paths"] = ["src/Provider.java"]
+        packet["execution_units"] = [unit]
+        provider = self.repo / "src/Provider.java"
+        provider.parent.mkdir(parents=True)
+        provider.write_text("class Provider {}\n", encoding="utf-8")
+        # A provider is existing repository code, never a change of this run.
+        subprocess.run(["git", "add", "src/Provider.java"], cwd=self.repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "base"],
+            cwd=self.repo,
+            check=True,
+        )
+        llm = ScriptedLlm(
+            [
+                action("repo.read", {"path": "src/Provider.java"}),
+                action(
+                    "repo.write_file",
+                    {"path": "src/MainTest.java", "expected_sha256": "", "content": "class MainTest {}"},
+                ),
+                action(
+                    "execution.complete_unit",
+                    {
+                        "summary": "test complete",
+                        "path_dispositions": [
+                            {"path": "src/MainTest.java", "status": "mutated", "reason": "Added test."}
+                        ],
+                    },
+                ),
+            ]
+        )
+
+        result = self.executor(llm).execute(
+            run_id="run_provider_anchor",
+            work_packet=packet,
+            target_path=self.repo,
+        )
+
+        prompt_context = json.loads(llm.prompts[0].split("Execution context:\n", 1)[1])
+        contract = prompt_context["execution_unit_contract"]
+        self.assertEqual(contract["read_context_paths"], ["src/MainTest.java", "src/Provider.java"])
+        self.assertEqual(contract["contract_anchor_paths"], ["src/Provider.java"])
+        self.assertEqual(contract["write_paths"], ["src/MainTest.java"])
+        self.assertEqual(result.progress["completed_unit_ids"], ["WU-002"])
+        self.assertEqual(provider.read_text(encoding="utf-8"), "class Provider {}\n")
+
     def test_unit_aware_execution_allows_fully_verified_unchanged_unit(self) -> None:
         packet = self.unit_packet()
         packet["execution_units"] = [packet["execution_units"][0]]
