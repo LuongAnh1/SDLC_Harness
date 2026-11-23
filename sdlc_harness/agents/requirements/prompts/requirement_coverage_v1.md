@@ -46,6 +46,12 @@ not mention, do not create the candidate.
   A named failure does not put other possible failures in scope.
 - Do not ask for best-practice completeness. Ask only for a missing decision required
   to implement or test behavior already introduced by the source.
+- A refusal the source introduces is a source-scoped gap when it leaves the request
+  answer open while the source makes request answers part of the contract (it states
+  one, such as HTTP 404 for one actor, or requires the server rather than the page to
+  enforce its rules): "refused and nothing created" is not yet testable at the request
+  boundary. Unless an open question already covers it, return one candidate with
+  `decision_category="api_contract"` that lists every such refusal.
 
 Return at most five material question candidates. Ask only when the answer changes
 behavior, acceptance testing, data identity, operational handling, security/privacy,

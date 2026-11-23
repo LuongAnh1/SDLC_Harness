@@ -271,6 +271,9 @@ class RequirementModelV2RefinerTest(unittest.TestCase):
             # Same source boundary as the coverage reviewer: no questions about unmentioned validation or mechanisms.
             self.assertIn("Apply this test only to a decision that the source introduces", prompts[2])
             self.assertIn("how the system stores or compares identities belongs to Design", prompts[2])
+            # Conduit UC4 H-r1: a refusal whose request answer the source leaves open was dropped as "UI copy".
+            self.assertIn("A refusal is observable to the actor and also at the application's request boundary", prompts[2])
+            self.assertIn("The rule about exact UI copy does not cover it", prompts[2])
             self.assertIn("A question's `affects` lists every requirement whose text or pass/fail result", prompts[2])
             # No silent choices inside `explicit` items, and a checklist for overlaps and related records.
             self.assertIn("`explicit` text says no more than its quoted evidence", prompts[2])

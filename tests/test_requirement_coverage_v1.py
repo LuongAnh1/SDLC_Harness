@@ -158,6 +158,9 @@ def test_non_fake_reviewer_executes_semantic_contract_path() -> None:
     assert "`placeholders` means model content still waiting for a decision" in prompt
     assert "already captures a category's\n  source-scoped gap, mark that category `partial`" in prompt
     assert "other records that the source names in relation to that\n  item is source-scoped" in prompt
+    # Conduit UC4 H-r1: "refused and nothing created" was judged testable at the request boundary.
+    assert "A refusal the source introduces is a source-scoped gap" in prompt
+    assert '`decision_category="api_contract"` that lists every such refusal' in prompt
     # Silent interpretations are judged (accepted / needs_fix) and never become questions.
     assert "## Interpretation check" in prompt
     assert "An interpretation is never a question candidate" in prompt
