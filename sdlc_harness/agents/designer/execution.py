@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import re
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -5355,7 +5356,20 @@ def _write_json_atomic(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    _replace_retrying(temporary, path)
+
+
+def _replace_retrying(temporary: Path, path: Path) -> None:
+    """Replace like the Developer's writer: Windows briefly locks a file another process (a scanner) just opened."""
+
+    for attempt in range(5):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.05 * (2**attempt))
 
 
 def _append_journal(path: Path, entry: dict[str, object]) -> None:
@@ -5370,7 +5384,7 @@ def _append_journal(path: Path, entry: dict[str, object]) -> None:
         entries.append(entry)
     temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
     temporary.write_text("".join(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n" for item in entries), encoding="utf-8")
-    temporary.replace(path)
+    _replace_retrying(temporary, path)
 
 
 def _observation_allowance(limit: int, *, actions_remaining: int) -> int:

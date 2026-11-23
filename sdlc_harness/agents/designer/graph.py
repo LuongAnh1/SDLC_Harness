@@ -708,12 +708,9 @@ def _validate_surface_contract(
                     f"Node {node_id} requires authentication but declares no authentication source.",
                     run_id=run_id,
                 )
-            if value.get("authentication_required") is False and source != "none":
-                raise HarnessError(
-                    "vertical_design_graph_invalid",
-                    f"Node {node_id} does not require authentication but declares an authentication source.",
-                    run_id=run_id,
-                )
+            # authentication_required=False with a source is optional authentication: callers without a credential are
+            # served and a present credential identifies the caller (Conduit UC4: a public read that only the author may
+            # see as a draft). Rejecting it forced "none" and dropped the identity the endpoint needs.
             if source == "existing_runtime" and not value.get("authentication_evidence_refs"):
                 raise HarnessError(
                     "vertical_design_graph_invalid",
@@ -1118,6 +1115,7 @@ def _apply_designer_delta(
         run_id=run_id,
     )
     _materialize_composition_forwarding(candidate)
+    _copy_paired_input_mappings(candidate, before=graph)
     candidate["revision"] = int(graph.get("revision") or 0) + 1
     candidate["nodes"] = sorted(_dict_items(candidate.get("nodes"), code="designer_delta_invalid", run_id=run_id), key=lambda item: str(item.get("id") or ""))
     candidate["edges"] = sorted(
@@ -2164,6 +2162,24 @@ def established_facts(
         "scenario": scenario,
         "not_established": list(ESTABLISHED_NOT_PROVEN),
     }
+
+
+def _copy_paired_input_mappings(candidate: dict[str, object], *, before: dict[str, object]) -> None:
+    """Give each new returns edge the input_mapping of its paired request edge.
+
+    The boundary gate requires the two to be identical, so the copy is mechanical; Conduit UC4 H-r1 lost two
+    Designer deltas to "copy input_mapping from paired calls edge". Existing edges are never changed.
+    """
+
+    existing = {str(item.get("id") or "") for item in before.get("edges") or [] if isinstance(item, dict)}
+    edges = [item for item in candidate.get("edges") or [] if isinstance(item, dict)]
+    for edge in edges:
+        contract = edge.get("boundary_contract")
+        if str(edge.get("kind") or "") != "returns" or str(edge.get("id") or "") in existing or not isinstance(contract, dict):
+            continue
+        paired_inputs = _dict_value(_paired_request_edge(edge, edges).get("boundary_contract")).get("input_mapping")
+        if isinstance(paired_inputs, list):
+            contract["input_mapping"] = json.loads(json.dumps(paired_inputs))
 
 
 def _paired_request_edge(edge: dict[str, object], edges: list[dict[str, object]]) -> dict[str, object]:

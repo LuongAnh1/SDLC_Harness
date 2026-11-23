@@ -68,6 +68,7 @@ from sdlc_harness.agents.designer.prompting import (
 )
 from sdlc_harness.agents.designer.graph import (
     _boundary_contract_diagnostics,
+    _copy_paired_input_mappings,
     _delta_written_names,
     _sequence_behavior_findings,
     _validate_surface_contract,
@@ -129,6 +130,20 @@ class VerticalDesignGraphTest(unittest.TestCase):
             node_id="VDN-api",
             run_id="run-test",
         )
+        # Conduit UC4 H-r1: optional authentication (visitors served, a present token identifies the caller).
+        _validate_surface_contract(
+            {**contract, "authorization_required": False, "authentication_required": False},
+            surface="api",
+            node_id="VDN-api",
+            run_id="run-test",
+        )
+        with self.assertRaisesRegex(HarnessError, "requires authentication but declares no authentication source"):
+            _validate_surface_contract(
+                {**contract, "authorization_required": False, "authentication_source": "none"},
+                surface="api",
+                node_id="VDN-api",
+                run_id="run-test",
+            )
 
     def test_data_relations_must_be_strings_and_the_error_says_so(self) -> None:
         contract = {
@@ -1423,6 +1438,27 @@ class VerticalDesignGraphTest(unittest.TestCase):
             {str(item["category"]) for item in design_bundle_findings(graph, landscape=landscape)},
         )
 
+    def test_new_returns_edge_gets_the_paired_input_mapping(self) -> None:
+        forward = [{"from": "selectedId", "to": "id", "required": True}]
+
+        def edge(edge_id: str, kind: str, source: str, target: str, order: int, mapping: list[object]) -> dict[str, object]:
+            return {
+                "id": edge_id, "from": source, "to": target, "kind": kind, "scenario_id": "SC-1", "order": order,
+                "boundary_contract": {"provider_operation": "op", "input_mapping": mapping},
+            }
+
+        before = {"edges": [edge("VDE-old-calls", "calls", "VDN-a", "VDN-b", 1, forward),
+                            edge("VDE-old-returns", "returns", "VDN-b", "VDN-a", 2, [])]}
+        candidate = json.loads(json.dumps(before))
+        # Conduit UC4 H-r1: the Designer wrote the response fields into the new returns edge's input_mapping.
+        candidate["edges"].append(edge("VDE-new-returns", "returns", "VDN-b", "VDN-a", 3, [{"from": "x", "to": "y"}]))
+
+        _copy_paired_input_mappings(candidate, before=before)
+
+        self.assertEqual(candidate["edges"][2]["boundary_contract"]["input_mapping"], forward)
+        # An edge that was already in the graph is never rewritten.
+        self.assertEqual(candidate["edges"][1]["boundary_contract"]["input_mapping"], [])
+
     @staticmethod
     def _api_contract() -> dict[str, object]:
         return {
@@ -2029,6 +2065,13 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("Do not invent a preliminary backend verification round trip", prompt)
         self.assertNotIn("separate outgoing confirmation interaction", prompt)
         self.assertIn("never bind a query operation to a create/update/delete callable", prompt)
+        # Conduit UC4 H-r1: SC-3/SC-4 named several requests but the Designer kept one api node and dropped the rest.
+        self.assertIn("own api_contract node (one method and path each)", prompt)
+        self.assertIn("Never leave out an operation the scenario names.", prompt)
+        # Same run: the prompt said "component/runtime boundaries" while the gate checks only different components.
+        self.assertIn("an edge between two nodes of the same component needs none", prompt)
+        self.assertIn("The Harness copies input_mapping onto every new returns edge", prompt)
+        self.assertIn("a source other than none means optional authentication", prompt)
 
     def test_designer_prompt_has_unambiguous_flow_and_tool_contracts(self) -> None:
         prompt = _designer_prompt(
@@ -2153,6 +2196,8 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertNotIn("rollback", prompt.casefold())
         self.assertIn("navigation-only", prompt)
         self.assertIn("may only implement IDs listed in allowed_requirement_refs", prompt)
+        # Conduit UC4 H-r1: the one-node-per-surface scaffold made the Designer drop the scenario's other requests.
+        self.assertIn("add a node for every further operation the scenario names", prompt)
         self.assertIn("mixed sibling-scenario behavior into SC-1", payload["last_review_feedback"])
 
     def test_designer_prompt_shows_the_operator_rejected_delta(self) -> None:
@@ -5919,6 +5964,31 @@ class BusinessRuleBoundaryInputsTest(unittest.TestCase):
             ["remove undeclared input targets ['cancellationCompletedVisible']"],
         )
         self.assertEqual(_boundary_contract_diagnostics({}, provider)["mismatches"], ["add boundary_contract"])
+
+
+class DesignerAtomicWriteTest(unittest.TestCase):
+    def test_session_write_retries_a_briefly_locked_file(self) -> None:
+        from pathlib import Path
+
+        from sdlc_harness.agents.designer.execution import _write_json_atomic
+
+        original = Path.replace
+        calls: list[int] = []
+
+        def locked_once(self: Path, target: Path) -> Path:
+            calls.append(1)
+            if len(calls) == 1:
+                # Conduit UC4 H-r1: "[WinError 5] Access is denied" while a scanner held the session file.
+                raise PermissionError(5, "Access is denied")
+            return original(self, target)
+
+        with tempfile.TemporaryDirectory() as directory, patch.object(Path, "replace", locked_once), patch(
+            "sdlc_harness.agents.designer.execution.time.sleep"
+        ):
+            path = Path(directory) / "designer_loop_session_v1.json"
+            _write_json_atomic(path, {"ok": True})
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), {"ok": True})
+        self.assertEqual(len(calls), 2)
 
 
 if __name__ == "__main__":
