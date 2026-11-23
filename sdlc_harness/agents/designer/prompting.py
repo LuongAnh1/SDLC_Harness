@@ -373,7 +373,9 @@ def _designer_prompt(
         "prove how a user reaches the screen. composition_path starts at ui_runtime_context.entrypoint and ends at the "
         "node's runtime_binding.target, each item written as <repo path>#<symbol>; middle hops are AS-IS components "
         "from ui_runtime_context.composition_chain or runtime targets of other UI nodes, and runtime_binding.attachment "
-        "owner_path#owner_symbol must equal the hop just before the target. Nodes on the same screen share one screen_id. "
+        "owner_path#owner_symbol must equal the hop just before the target; when that hop is an AS-IS component of "
+        "ui_runtime_context.composition_chain, its ref (<repo path>#<symbol>) is a valid owner_ref, so no RLA lookup is "
+        "needed. Nodes on the same screen share one screen_id; different screens use different screen_ids. "
         "required_inputs lists every runtime input that must be handed to the screen before it is usable (records to "
         "show or select, a session or auth value passed in, data loaded from another use case), including every required prop of an AS-IS "
         "component a screen node modifies or reuses. Data the target component obtains by itself (a record it fetches "
@@ -467,7 +469,7 @@ def _designer_prompt(
         "requirement_context.scenario_index is navigation-only; never copy behavior from "
         "a sibling scenario into the active projection. A runtime target may be shared by later projections, but this "
         "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton "
-        "(one node per surface; add a node for every further operation the scenario names), "
+        "(one node per surface; add a node for every further operation or screen the scenario names), "
         "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
         "connect this projection to nodes of the same scenario already in the graph or in this delta, keeping exactly "
         "one terminal edge last. Edge order follows add_edge operation order: to place new edges before an edge already "
@@ -682,7 +684,9 @@ def _designer_prompt(
         "with the same outcome (for example the same refusal of several different requests), give each operation its "
         "own api_contract node (one method and path each) and its own message path: every operation path except the "
         "last carries a branch_group with a guard naming that operation, and only the last path ends with the terminal "
-        "edge. Never leave out an operation the scenario names. If the requirement requires human confirmation "
+        "edge. Never leave out an operation the scenario names. Likewise a scenario that the actor carries out on "
+        "several screens (for example an editor and a list on another page) has one ui node per screen, each "
+        "attached where the AS-IS code renders that screen. If the requirement requires human confirmation "
         "before persistence, represent that confirmation in the UI surface contract before the outbound mutation call or "
         "in the interaction path before any writes edge. Do not invent a preliminary backend verification round trip unless "
         "the approved requirement explicitly requires it. "
@@ -862,6 +866,9 @@ def _ui_runtime_prompt_context(
         "composition_chain": [
             {
                 "ref": hop.get("ref"),
+                # The graph gate accepts this ref as a web attachment owner_ref; say so where the Designer looks
+                # (Conduit UC4 H-r1: it hunted an RLA id for NewArticle and then mounted a new editor on App instead).
+                **({"owner_ref": hop.get("ref")} if hop.get("renders") else {}),
                 "renders": hop.get("renders"),
                 "passes_props": hop.get("passes_props"),
                 "required_props": required_props(context, str(hop.get("ref") or "")),

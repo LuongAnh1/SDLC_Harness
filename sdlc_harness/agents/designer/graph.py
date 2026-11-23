@@ -1435,8 +1435,9 @@ def _runtime_composition_findings(
             owner_valid = owner_valid and (not owner_symbol or owner_symbol == str(owner.get("symbol") or ""))
         elif owner_ref.startswith("RLA-") and not anchors:
             owner_valid = True
-        elif component_id == "web":
-            # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context.
+        elif ui_components:
+            # Non-exported components (e.g. an app Root) have no landscape anchor but are frozen in ui_repo_context;
+            # the Designer prompt offers their chain ref as owner_ref, whatever the UI component is called.
             owner_key = f"{attachment.get('owner_path') or ''}#{attachment.get('owner_symbol') or ''}"
             ui_component = _dict_value(ui_components.get(owner_key))
             owner_valid = bool(ui_component) and owner_ref in {owner_key, str(ui_component.get("evidence_ref") or "")}

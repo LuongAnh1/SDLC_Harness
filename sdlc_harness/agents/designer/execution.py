@@ -2917,7 +2917,9 @@ def _runtime_binding_scaffold(
         "attachment": {
             "relation": relation,
             "owner_ref": str(
-                owner.get("anchor_id") or "<RLA-*, runtime-bound VDN-*, or the temp_ref of a node this delta adds>"
+                owner.get("anchor_id")
+                or "<RLA-*, runtime-bound VDN-*, the owner_ref of a ui_runtime_context.composition_chain entry, "
+                "or the temp_ref of a node this delta adds>"
             ),
             "owner_path": str(
                 owner.get("path")

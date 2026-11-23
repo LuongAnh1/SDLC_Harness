@@ -2197,7 +2197,7 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("navigation-only", prompt)
         self.assertIn("may only implement IDs listed in allowed_requirement_refs", prompt)
         # Conduit UC4 H-r1: the one-node-per-surface scaffold made the Designer drop the scenario's other requests.
-        self.assertIn("add a node for every further operation the scenario names", prompt)
+        self.assertIn("add a node for every further operation or screen the scenario names", prompt)
         self.assertIn("mixed sibling-scenario behavior into SC-1", payload["last_review_feedback"])
 
     def test_designer_prompt_shows_the_operator_rejected_delta(self) -> None:
@@ -2256,6 +2256,8 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("uiux.search_guidance(query,mode=stack,stack=react)", ui_prompt)
         self.assertIn("one dominant intent in 2-5 meaningful generic ASCII terms", ui_prompt)
         self.assertIn("never targeting the removed element", ui_prompt)
+        # Conduit UC4 H-r1 Design v3: the owner candidates stop at 3 chain hops, so the Designer hunted an RLA for a page.
+        self.assertIn("its ref (<repo path>#<symbol>) is a valid owner_ref, so no RLA lookup is needed", ui_prompt)
         self.assertIn("layout as {region,layer,content} items", ui_prompt)
         self.assertIn("Never add cancel/close behavior from another scenario", ui_prompt)
         self.assertIn("For an alternative or exception scenario", ui_prompt)
@@ -2369,6 +2371,24 @@ class DesignerResumeTest(unittest.TestCase):
             surface="api", component={"component_id": "api"}, candidate_anchors=[], owner_anchors=owners
         )
         self.assertEqual(api_binding["attachment"]["owner_ref"], "RLA-3")
+
+    def test_ui_runtime_context_offers_rendering_hops_as_owner_refs(self) -> None:
+        graph = {
+            "snapshot_binding": {
+                "ui_repo_context": {
+                    "composition_chain": [
+                        {"ref": "src/App.tsx#App", "renders": ["src/pages/NewArticle.tsx#NewArticle"]},
+                        {"ref": "src/pages/NewArticle.tsx#NewArticle", "renders": ["src/Editor.tsx#Editor"]},
+                        {"ref": "src/Editor.tsx#Editor", "renders": []},
+                    ]
+                }
+            }
+        }
+
+        chain = _ui_runtime_prompt_context(graph)["composition_chain"]
+
+        # Conduit UC4 H-r1: the Designer hunted an RLA id for NewArticle; the gate accepts its chain ref.
+        self.assertEqual([item.get("owner_ref") for item in chain], ["src/App.tsx#App", "src/pages/NewArticle.tsx#NewArticle", None])
 
     def test_ui_runtime_context_gives_accepted_decisions_their_answer_text(self) -> None:
         graph = {
@@ -4096,7 +4116,8 @@ class DesignerResumeTest(unittest.TestCase):
             active["delta_scaffold"]["operations"][1]["node"]["runtime_binding"]["attachment"],
             {
                 "relation": "called_by",
-                "owner_ref": "<RLA-*, runtime-bound VDN-*, or the temp_ref of a node this delta adds>",
+                "owner_ref": "<RLA-*, runtime-bound VDN-*, the owner_ref of a ui_runtime_context.composition_chain "
+                "entry, or the temp_ref of a node this delta adds>",
                 "owner_path": "<path of the code that calls this target>",
                 "owner_symbol": "<symbol of that caller>",
             },
