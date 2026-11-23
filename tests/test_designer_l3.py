@@ -130,6 +130,31 @@ class VerticalDesignGraphTest(unittest.TestCase):
             run_id="run-test",
         )
 
+    def test_data_relations_must_be_strings_and_the_error_says_so(self) -> None:
+        contract = {
+            "schema_version": SURFACE_CONTRACT_VERSION,
+            "surface": "data",
+            "entity": "Article",
+            "operation": "write the article",
+            "fields": [{"name": "title", "type": "string"}],
+            "constraints": [],
+            # Conduit UC4 H-r1: DeepSeek wrote relations as objects, like `fields`.
+            "relations": [{"from": "Article.authorUsername", "to": "User.username", "type": "many-to-one"}],
+            "migration_intent": "alter: add a column",
+        }
+
+        with self.assertRaisesRegex(HarnessError, "invalid relations: it must be an array of non-empty strings"):
+            _validate_surface_contract(contract, surface="data", node_id="VDN-data", run_id="run-test")
+        with self.assertRaisesRegex(HarnessError, "invalid fields: it must be an array of objects, each with non-empty name, type"):
+            _validate_surface_contract({**contract, "fields": ["title"]}, surface="data", node_id="VDN-data", run_id="run-test")
+
+        _validate_surface_contract(
+            {**contract, "relations": ["Article.authorUsername -> User.username (many-to-one)"]},
+            surface="data",
+            node_id="VDN-data",
+            run_id="run-test",
+        )
+
     def test_ui_transitions_must_reference_declared_states(self) -> None:
         contract = {
             "schema_version": SURFACE_CONTRACT_VERSION,

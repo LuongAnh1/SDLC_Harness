@@ -574,7 +574,8 @@ def _validate_surface_contract(
         if not isinstance(raw, list) or any(not isinstance(item, str) or not item.strip() for item in raw):
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} surface contract has invalid {key}.",
+                f"Node {node_id} surface contract has invalid {key}: it must be an array of non-empty strings, "
+                "never objects.",
                 run_id=run_id,
             )
         if not allow_empty and not raw:
@@ -593,7 +594,8 @@ def _validate_surface_contract(
         ):
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} surface contract has invalid {key}.",
+                f"Node {node_id} surface contract has invalid {key}: it must be an array of objects, each with "
+                f"non-empty {', '.join(sorted(required_keys))}.",
                 run_id=run_id,
             )
         if not allow_empty and not raw:
