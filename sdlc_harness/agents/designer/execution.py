@@ -2216,6 +2216,55 @@ def _remove_redundant_closers(text: str, *, require_runtime_binding: bool, limit
     return None
 
 
+def _innermost_open_container(text: str, end: int) -> str | None:
+    """Return '{' or '[' for the innermost container still open before `end` (strings are skipped)."""
+
+    stack: list[str] = []
+    in_string = escaped = False
+    for char in text[:end]:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            stack.append(char)
+        elif char in "}]" and stack:
+            stack.pop()
+    return stack[-1] if stack else None
+
+
+def _swap_mismatched_closers(text: str, *, require_runtime_binding: bool, limit: int = 3) -> dict[str, object] | None:
+    """Swap a closer that does not match its open container ('}' closing an array, or the reverse).
+
+    Real DeepSeek slip (Conduit UC4 H-r1): `"operations":[...}` followed by `,"completion_claims":...`. Closing the
+    array before that brace would leave the later keys outside `delta`; only swapping keeps every key where the model
+    wrote it. The result must still be a complete Designer action, so an ambiguous repair is never accepted.
+    """
+
+    candidate = text
+    for _ in range(limit + 1):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            if error.pos >= len(candidate) or candidate[error.pos] not in "}]":
+                return None
+            opener = _innermost_open_container(candidate, error.pos)
+            closer = candidate[error.pos]
+            if opener is None or (opener == "{") == (closer == "}"):
+                return None
+            candidate = candidate[: error.pos] + ("]" if closer == "}" else "}") + candidate[error.pos + 1:]
+            continue
+        if candidate is text or not isinstance(payload, dict):
+            return None
+        return payload if _designer_action_shape(payload, require_runtime_binding=require_runtime_binding) else None
+    return None
+
+
 def _parse_designer_tool_action_text(
     raw: str,
     *,
@@ -2251,6 +2300,12 @@ def _parse_designer_tool_action_text(
                     return stripped, {
                         "schema_version": "designer_output_normalization_v1",
                         "kind": "removed_redundant_closers",
+                    }
+                swapped = _swap_mismatched_closers(text, require_runtime_binding=require_runtime_binding)
+                if swapped is not None:
+                    return swapped, {
+                        "schema_version": "designer_output_normalization_v1",
+                        "kind": "swapped_mismatched_closers",
                     }
             closed = _repair_unbalanced_closers(text) if repair_closers else None
             if closed is not None:

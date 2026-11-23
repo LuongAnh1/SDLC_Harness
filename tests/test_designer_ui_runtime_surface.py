@@ -1288,6 +1288,24 @@ class DesignerOutputNormalizationTest(unittest.TestCase):
         self.assertEqual(normalization["kind"], "closed_unbalanced_brackets")
         self.assertEqual(payload, json.loads(raw))
 
+    def test_operations_closed_with_brace_before_later_keys_is_swapped(self) -> None:
+        action = self._action(json.loads(json.dumps(self.NODE)))
+        delta = action["arguments"]["delta"]
+        # Conduit UC4 H-r1 (designer-0007): `operations` comes before the claims and is closed with '}'.
+        action["arguments"]["delta"] = {
+            key: delta[key]
+            for key in ("schema_version", "base_graph_digest", "partition", "operations", "completion_claims", "unresolved_items")
+        }
+        raw = json.dumps(action, separators=(",", ":"))
+        marker = raw.index(',"completion_claims"')
+        self.assertEqual(raw[marker - 1], "]")
+        broken = raw[: marker - 1] + "}" + raw[marker:]
+        with self.assertRaises(json.JSONDecodeError):
+            _parse_designer_tool_action(broken, require_runtime_binding=True)
+        payload, normalization = _parse_designer_tool_action(broken, require_runtime_binding=True, repair_closers=True)
+        self.assertEqual(normalization["kind"], "swapped_mismatched_closers")
+        self.assertEqual(payload, json.loads(raw))
+
     def test_stray_closers_are_removed_where_the_parser_stops(self) -> None:
         action = self._action(json.loads(json.dumps(self.NODE)))
         action["arguments"]["delta"]["operations"].insert(0, {"op": "set_partition_coverage", "coverage": {"ui": "covered"}})
