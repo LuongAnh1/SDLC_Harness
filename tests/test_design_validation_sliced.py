@@ -1995,3 +1995,51 @@ def test_sequence_operation_is_checked_against_the_receiver_node_even_when_class
     missing = _structural_findings(class_graph=class_graph, sequence_graph=sequence("unknownOperation"))
     assert [item.category for item in missing] == ["cross_diagram_contract"]
     assert name in missing[0].message
+
+
+def test_partition_rebuild_may_add_a_provider_in_another_component_of_the_finding_scenario() -> None:
+    from sdlc_harness.agents.validator.design_validation import _normalize_adjudication_repair_steps
+
+    graph = {
+        "nodes": [
+            {"id": "VDN-api", "scenario_id": "SC-9", "component_id": "api"},
+            {"id": "VDN-rule", "scenario_id": "SC-9", "component_id": "api"},
+            {"id": "VDN-insert", "scenario_id": "SC-9", "component_id": "database"},
+            {"id": "VDN-other", "scenario_id": "SC-1", "component_id": "database"},
+        ],
+        "edges": [{"id": "VDE-call", "scenario_id": "SC-9", "from": "VDN-api", "to": "VDN-rule"}],
+    }
+    finding = {"diagram_ids": ["VDN-api", "VDN-rule", "VDE-call"], "subject_ref": "VDN-rule"}
+
+    def route(*steps: dict[str, object]) -> dict[str, object]:
+        return {"finding_id": "runtime-sc-9:SEM-001", "repair_steps": list(steps)}
+
+    add_step = {"target_id": "SC-9@database", "diagram_ids": [], "expected_change": "add a title read", "depends_on": []}
+    api_step = {
+        "target_id": "SC-9@api",
+        "diagram_ids": ["VDN-api", "VDE-call"],
+        "expected_change": "call the read first",
+        "depends_on": ["SC-9@database"],
+    }
+    steps = _normalize_adjudication_repair_steps(
+        route=route(add_step, api_step),
+        finding=finding,
+        remediation_mode="partition_rebuild",
+        vertical_design_graph=graph,
+    )
+    assert [step["target_id"] for step in steps] == ["SC-9@database", "SC-9@api"]
+    assert steps[0]["diagram_ids"] == []
+
+    # Only a rebuild may add, only in the finding's own scenario, only in a known component.
+    for mode, target in (
+        ("local_patch", "SC-9@database"),
+        ("partition_rebuild", "SC-1@database"),
+        ("partition_rebuild", "SC-9@payments"),
+    ):
+        with pytest.raises(HarnessError):
+            _normalize_adjudication_repair_steps(
+                route=route({**add_step, "target_id": target}),
+                finding=finding,
+                remediation_mode=mode,
+                vertical_design_graph=graph,
+            )

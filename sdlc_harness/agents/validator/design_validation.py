@@ -1578,6 +1578,11 @@ def _normalize_adjudication_repair_steps(
                 targets.add(f"{scenario_id}@{component_id}")
         return targets
 
+    # A rebuild may need a provider that does not exist yet in another component of the finding's own scenario
+    # (UC4 runtime-sc-9: a title read in SC-9@database), so no existing id can name that partition. Such a step may
+    # leave diagram_ids empty: it then only authorizes adding nodes in that partition.
+    finding_scenarios = {target.split("@", 1)[0] for ref in allowed_refs for target in ref_targets(ref)}
+    graph_components = {str(node.get("component_id") or "") for node in nodes_by_id.values()} - {""}
     normalized: list[dict[str, object]] = []
     seen_targets: set[str] = set()
     for raw_step in raw_steps:
@@ -1590,10 +1595,17 @@ def _normalize_adjudication_repair_steps(
         diagram_ids = _string_items(raw_step.get("diagram_ids"))
         expected_change = str(raw_step.get("expected_change") or "").strip()
         depends_on = _string_items(raw_step.get("depends_on"))
+        target_scenario, _, target_component = target_id.partition("@")
+        adds_only = (
+            not diagram_ids
+            and remediation_mode == "partition_rebuild"
+            and target_scenario in finding_scenarios
+            and target_component in graph_components
+        )
         if (
             not target_id
             or target_id in seen_targets
-            or not diagram_ids
+            or (not diagram_ids and not adds_only)
             or not expected_change
             or len(depends_on) != len(set(depends_on))
             or target_id in depends_on
