@@ -2384,8 +2384,14 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("in one repo.read_batch instead of one repo.read per call", prompt)
         self.assertNotIn("ready_to_propose", prompt)
         self.assertIn("When two screens render the same AS-IS component", prompt)
+        # design_v20 designer-0019 kept only ProfilePage for SC-2: "one ui node per screen" read as acting, not observing.
+        self.assertIn("the same list rule seen on two pages", prompt)
+        self.assertIn("still gets its node, with disposition reuse", prompt)
+        self.assertIn("structural edges such as depends_on are not listed", prompt)
+        self.assertIn("feature_ux_decisions does not name gets a new screen_id", prompt)
         self.assertIn("a node cites only the ids its own behavior implements", prompt)
-        self.assertIn("read its runtime_binding.target.path yourself in this session", prompt)
+        self.assertIn("read its runtime_binding.target.path yourself in this scenario", prompt)
+        self.assertIn("Each scenario starts without the files earlier scenarios read", prompt)
         self.assertIn("listed in ui_runtime_context (its evidence_ref values are valid as they are)", prompt)
         # design_v17 designer-0001: singular "that read" / "another source" wording kept the one-file-per-call habit.
         self.assertIn("issue the reads/searches they need now (the files you can name together in one", prompt)
@@ -2510,7 +2516,7 @@ class DesignerResumeTest(unittest.TestCase):
         # Construction mode places new edges among existing ones with order_edges (design_v19 designer-0009 had to
         # remove and re-add an edge with its whole boundary contract only to move it).
         self.assertIn('{"op":"order_edges","scenario_id":"SC-1","edges":[...],"terminal":"..."}', backend_prompt)
-        self.assertIn("never remove and re-add an edge only to move it", backend_prompt)
+        self.assertIn("Never remove and re-add an edge only to move it", backend_prompt)
         # design_v20 designer-0008: "an inspected existing composition owner" pointed at the router the Designer read,
         # while the only offered owner was the app root.
         self.assertNotIn("inspected existing composition owner", backend_prompt)
@@ -3071,7 +3077,8 @@ class DesignerResumeTest(unittest.TestCase):
     def test_prompt_observations_only_grow_at_the_end_within_a_partition(self) -> None:
         old_ref = "repo:apps/web/src/Old.tsx#L1@sha256:old"
         new_ref = "repo:apps/web/src/New.tsx#L1@sha256:new"
-        earlier = {"tool_id": "repo.read", "status": "succeeded", "partition_key": "SC-1|web", "evidence_refs": [old_ref]}
+        # A read of another partition of the same scenario is carried (it touched a web file).
+        earlier = {"tool_id": "repo.read", "status": "succeeded", "partition_key": "SC-2|api", "evidence_refs": [old_ref]}
         session = {
             "active_partition_key": "SC-2|web",
             "observations": [
@@ -3093,6 +3100,58 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(after[-1]["evidence_refs"], [new_ref])
         self.assertEqual(before[0], earlier)
         self.assertEqual(len(before), 10)
+
+    def test_a_new_scenario_starts_without_earlier_scenario_reads(self) -> None:
+        # design_v20 SC-2: carried SC-1 reads let the Designer draft whole deltas before it noticed Home.tsx was
+        # never read (designer-0015, 0017). The owner chose: a scenario re-reads what it needs.
+        from sdlc_harness.agents.designer.execution import _inspected_source_refs, _scenario_read_paths
+
+        sc1_ref = "repo:apps/web/src/Profile.tsx#L1@sha256:p"
+        sc2_ref = "repo:apps/web/src/Home.tsx#L1@sha256:h"
+        sc1_read = {
+            "tool_id": "repo.read_batch",
+            "status": "succeeded",
+            "partition_key": "SC-1|web",
+            "evidence_refs": [sc1_ref],
+            "output": {"results": [{"path": "apps/web/src/Profile.tsx", "evidence_ref": sc1_ref, "content": "1: x"}]},
+        }
+        session = {
+            "active_partition_key": "SC-2|web",
+            "observations": [sc1_read],
+            "source_observations": {"web": [sc1_ref]},
+            "source_read_paths": ["apps/web/src/Profile.tsx"],
+            "repair_observations": {},
+        }
+        self.assertEqual(_prompt_observations(session, repair_task=None, active_component_id="web"), [])
+        self.assertEqual(_inspected_source_refs(session, "web", construction=True), [])
+        self.assertEqual(_scenario_read_paths(session, "SC-2"), set())
+        # A repair keeps every read of the session.
+        self.assertEqual(_inspected_source_refs(session, "web", construction=False), [sc1_ref])
+        self.assertEqual(
+            _prompt_observations(session, repair_task={"target_id": "SC-1@web"}, active_component_id="web"), [sc1_read]
+        )
+
+        sc2_read = {
+            "tool_id": "repo.read_batch",
+            "status": "succeeded",
+            "partition_key": "SC-2|web",
+            "evidence_refs": [sc2_ref],
+            "output": {
+                "results": [
+                    {"path": "apps/web/src/Home.tsx", "evidence_ref": sc2_ref, "content": "1: y"},
+                    {"path": "apps/web/src/Missing.tsx", "error": "not found"},
+                ]
+            },
+        }
+        session["observations"].append(sc2_read)
+        session["source_observations"]["web"].append(sc2_ref)
+        self.assertEqual(_prompt_observations(session, repair_task=None, active_component_id="web"), [sc2_read])
+        self.assertEqual(_inspected_source_refs(session, "web", construction=True), [sc2_ref])
+        self.assertEqual(_scenario_read_paths(session, "SC-2"), {"apps/web/src/Home.tsx"})
+        # The next partition of the same scenario still sees SC-2's web read, never SC-1's.
+        session["active_partition_key"] = "SC-2|api"
+        session["source_observations"]["api"] = [sc2_ref]
+        self.assertEqual(_prompt_observations(session, repair_task=None, active_component_id="api"), [sc2_read])
 
     def test_recorded_observations_never_trim_the_active_partition_or_pinned_reads(self) -> None:
         # r7: the 12-item window pushed the pinned SC-1|api read of app.ts out while SC-2|api was running.
@@ -4657,6 +4716,7 @@ class DesignerResumeTest(unittest.TestCase):
 
         parent = active["branch_parent_requirement"]
         self.assertEqual(parent["parent_scenario_id"], "SC-1")
+        self.assertIn("depends_on is structural", parent["instruction"])
         self.assertEqual(
             active["surface_work"][0]["shared_target_candidates"],
             [

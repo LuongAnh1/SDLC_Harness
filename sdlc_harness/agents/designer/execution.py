@@ -1160,7 +1160,9 @@ class DesignerToolLoopExecutor:
                     ),
                     last_rejected_delta=_dict(session.get("last_review_rejected_delta")),
                     active_guidance=_guidance_observations(session, guidance_key),
-                    source_inspected=bool(_source_observation_refs(session, active_component_id)),
+                    source_inspected=bool(
+                        _inspected_source_refs(session, active_component_id, construction=repair_task is None)
+                    ),
                     actions_remaining=scope_actions_remaining,
                     design_notes=_design_notes(session, work_key=_review_target_key(repair_task, active_partition)),
                 )
@@ -1324,6 +1326,7 @@ class DesignerToolLoopExecutor:
             arguments = action.get("arguments")
             _record_design_note(session, action, work_key=_review_target_key(repair_task, active_partition))
             source_refs = _source_observation_refs(session, active_component_id)
+            inspected_refs = _inspected_source_refs(session, active_component_id, construction=repair_task is None)
             exact_deterministic_repair = _is_exact_deterministic_repair_delta(
                 arguments=arguments,
                 repair_task=repair_task,
@@ -1346,7 +1349,7 @@ class DesignerToolLoopExecutor:
                     )
                     _write_json_atomic(session_file, session)
                     continue
-                if not source_refs:
+                if not inspected_refs:
                     self._invalid_action(
                         session,
                         session_file,
@@ -1366,7 +1369,7 @@ class DesignerToolLoopExecutor:
                 mode = str(args.get("mode") or "").strip().lower()
                 guidance_status = _uiux_guidance_status(
                     _guidance_observations(session, guidance_key),
-                    source_inspected=bool(source_refs),
+                    source_inspected=bool(inspected_refs),
                 )
                 if not _uiux_call_allowed(guidance_status, mode=mode, selector=selector):
                     required_next = guidance_status.get("required_next_action")
@@ -1410,7 +1413,7 @@ class DesignerToolLoopExecutor:
             if (
                 tool_id == "design.propose_delta"
                 and active_component_id
-                and not source_refs
+                and not inspected_refs
                 and not exact_deterministic_repair
             ):
                 if observations_since_delta >= observation_limit:
@@ -1487,7 +1490,11 @@ class DesignerToolLoopExecutor:
                 _unread_existing_targets(
                     arguments,
                     graph=registry.graph,
-                    read_paths=set(_strings(session.get("source_read_paths"))),
+                    read_paths=(
+                        _scenario_read_paths(session, _partition_scenario(str(session.get("active_partition_key") or "")))
+                        if repair_task is None
+                        else set(_strings(session.get("source_read_paths")))
+                    ),
                 )
                 if tool_id == "design.propose_delta" and not exact_deterministic_repair
                 else []
@@ -1500,8 +1507,9 @@ class DesignerToolLoopExecutor:
                     session,
                     session_file,
                     message=(
-                        "The delta designs from existing files that no repo.read or repo.read_batch of this session "
-                        "returned (runtime targets of reuse, modify or no_change nodes, or provided_by hops of required "
+                        "The delta designs from existing files that no repo.read or repo.read_batch of this "
+                        + ("scenario" if repair_task is None else "session")
+                        + " returned (runtime targets of reuse, modify or no_change nodes, or provided_by hops of required "
                         "inputs): " + ", ".join(unread_targets) + ". Read the listed files with one repo.read_batch "
                         "(allowed even after the observation limit), then propose the delta again."
                     ),
@@ -1645,7 +1653,7 @@ class DesignerToolLoopExecutor:
                 _write_json_atomic(session_file, session)
                 continue
             try:
-                if tool_id == "design.report_blocker" and not source_refs and not any(
+                if tool_id == "design.report_blocker" and not inspected_refs and not any(
                     item.get("tool_id") in {"repo.read", "repo.read_batch", "codegraph.query"}
                     for item in _prompt_observations(session, repair_task=repair_task, active_component_id=active_component_id)
                 ):
@@ -2625,7 +2633,12 @@ def _prompt_observations(
                 (not partition_key or str(item.get("partition_key") or "") == partition_key)
                 and str(item.get("tool_id") or "") != "uiux.search_guidance"
             )
-            if not in_partition and not source_refs.intersection(_strings(item.get("evidence_refs"))):
+            # A new scenario starts without the reads of earlier scenarios (owner, 2026-11-24): carried reads made
+            # design_v20 SC-2 draft whole deltas before noticing a file it still had to read (designer-0015, 0017).
+            same_scenario = _partition_scenario(str(item.get("partition_key") or "")) == _partition_scenario(partition_key)
+            if not in_partition and not (
+                same_scenario and source_refs.intersection(_strings(item.get("evidence_refs")))
+            ):
                 continue
             fingerprint = canonical_json_hash(item)
             if fingerprint not in seen:
@@ -3886,7 +3899,12 @@ def _branch_parent_scaffold(
     return {
         "branch_scenario_id": branch_id,
         "parent_scenario_id": parent_scenario_id,
-        "instruction": "Keep this exact add_edge operation so the branch has one canonical parent.",
+        # design_v20 designer-0017/0020 found the edge to the main editor "odd" and once read it as breaking the path.
+        "instruction": (
+            "Keep this exact add_edge operation so the branch has one canonical parent. depends_on is structural: it "
+            "records which main scenario this branch varies; it is not a user step and is not part of the ordered "
+            "behavior path."
+        ),
         "edge": {
             "from": branch_entry_ref,
             "to": str(parent.get("id") or ""),
@@ -5803,6 +5821,46 @@ def _requested_read_paths(tool_id: str, arguments: object) -> list[str]:
 
 def _source_observation_refs(session: dict[str, object], component_id: str) -> list[str]:
     return _strings(_dict(session.get("source_observations")).get(component_id)) if component_id else []
+
+
+def _partition_scenario(partition_key: str) -> str:
+    return partition_key.split("|", 1)[0] if "|" in partition_key else ""
+
+
+def _scenario_observations(session: dict[str, object], scenario_id: str) -> list[dict[str, object]]:
+    return [
+        item
+        for item in _dicts(session.get("observations"))
+        if scenario_id
+        and _partition_scenario(str(item.get("partition_key") or "")) == scenario_id
+        and str(item.get("status") or "") == "succeeded"
+    ]
+
+
+def _inspected_source_refs(session: dict[str, object], component_id: str, *, construction: bool) -> list[str]:
+    """The component's source refs that count as inspected now: for a construction partition only those read in
+    its own scenario (a new scenario starts without earlier scenarios' reads), for a repair every one."""
+
+    refs = _source_observation_refs(session, component_id)
+    if not construction:
+        return refs
+    scenario_id = _partition_scenario(str(session.get("active_partition_key") or ""))
+    if not scenario_id:
+        return refs
+    seen = {ref for item in _scenario_observations(session, scenario_id) for ref in _strings(item.get("evidence_refs"))}
+    return [ref for ref in refs if ref in seen]
+
+
+def _scenario_read_paths(session: dict[str, object], scenario_id: str) -> set[str]:
+    """Files a repo.read or repo.read_batch of the scenario returned (the read-before-design gate's input)."""
+
+    paths: set[str] = set()
+    for item in _scenario_observations(session, scenario_id):
+        tool_id = str(item.get("tool_id") or "")
+        output = _dict(item.get("output"))
+        rows = [output] if tool_id == "repo.read" else _dicts(output.get("results")) if tool_id == "repo.read_batch" else []
+        paths.update(_normalized_path(row.get("path")) for row in rows if row.get("evidence_ref"))
+    return paths - {""}
 
 
 def _record_source_observations(
