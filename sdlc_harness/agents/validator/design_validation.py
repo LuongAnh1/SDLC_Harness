@@ -25,6 +25,7 @@ from .semantic_review import (
     materialize_task_context,
     review_node_view,
     relation_index,
+    with_global_projections,
 )
 from .traceability import TraceabilityResult
 from ...core.coerce import dict_items as _dict_items, dict_value as _dict_value, string_items as _string_items
@@ -291,6 +292,7 @@ class DesignValidator:
         trace_view = _vertical_trace_review_view(vertical_trace)
         task_results: list[dict[str, object]] = []
         semantic_findings: list[DesignFinding] = []
+        global_claims: list[dict[str, object]] = []
         runtime_blockers: dict[str, list[str]] = {}
         skipped_calls = 0
         retry_calls = 0
@@ -421,6 +423,7 @@ class DesignValidator:
                     continue
                 run_task(task)
 
+            global_claims, global_findings = _aggregate_global_claims(claims=claims, task_results=task_results)
             shared_surfaces = _dict_items(review_plan.get("shared_surfaces"))
             shared_node_ids = {
                 node_id
@@ -443,6 +446,7 @@ class DesignValidator:
                     claims=claims,
                     shared_surfaces=shared_surfaces,
                     shared_surface_nodes=shared_surface_nodes,
+                    global_claims=global_claims,
                     correction=correction,
                 )
                 coherence_attempt_payload = coherence_payload
@@ -475,6 +479,7 @@ class DesignValidator:
                 for finding in coherence_findings
             ]
             semantic_findings.extend(coherence_findings)
+            semantic_findings.extend(global_findings)
             conflicts = _dict_items(coherence.get("conflicts"))
             adjudication: dict[str, object] = {}
             actual_calls = len(tasks) - skipped_calls + 1 + retry_calls
@@ -664,6 +669,7 @@ class DesignValidator:
             # retained blocking finding, so the result stays not ok.
             remaining_blocking = {finding.finding_id for finding in semantic_findings if finding.severity == "blocking"}
             tasks_by_id = {str(task.get("task_id") or ""): task for task in tasks}
+            reran_behavior = False
             for result in [item for item in task_results if item.get("status") == "deferred_runtime_blocked"]:
                 blocked_by = {
                     ref
@@ -676,6 +682,13 @@ class DesignValidator:
                 skipped_calls -= 1
                 cache_hit, retries = run_task(tasks_by_id[str(result.get("task_id") or "")])
                 actual_calls += (0 if cache_hit else 1) + retries
+                reran_behavior = True
+            if reran_behavior:
+                global_claims, updated_findings = _aggregate_global_claims(claims=claims, task_results=task_results)
+                existing_ids = {finding.finding_id for finding in global_findings}
+                semantic_findings.extend(
+                    finding for finding in updated_findings if finding.finding_id not in existing_ids
+                )
         except LlmStepReviewRequired:
             raise
         except HarnessError as exc:
@@ -687,6 +700,7 @@ class DesignValidator:
                 review_plan=review_plan,
                 error=exc.to_response(),
                 task_results=task_results,
+                global_claims=global_claims,
                 call_metrics=_llm_call_metrics(self.llm_client)[metric_start:],
             )
 
@@ -701,6 +715,7 @@ class DesignValidator:
                 "ok": not any(item.severity == "blocking" for item in semantic_findings),
                 "summary": "Sliced specialist reviews completed with a compact coherence pass.",
                 "tasks": task_results,
+                "global_claims": global_claims,
                 "coherence": coherence,
                 "adjudication": adjudication,
                 "planned_calls": planned_calls,
@@ -732,6 +747,7 @@ class DesignValidator:
         review_plan: dict[str, object],
         error: dict[str, object],
         task_results: list[dict[str, object]] | None = None,
+        global_claims: list[dict[str, object]] | None = None,
         call_metrics: list[dict[str, object]] | None = None,
     ) -> DesignValidationResult:
         return DesignValidationResult(
@@ -745,6 +761,7 @@ class DesignValidator:
                 "summary": "Sliced semantic review did not complete; Design cannot reach checkpoint.",
                 "error": error,
                 "tasks": task_results or [],
+                "global_claims": global_claims or [],
                 "call_metrics": call_metrics or [],
                 "usage": _summarize_call_metrics(call_metrics or []),
                 "coverage": review_plan.get("coverage") or {},
@@ -770,6 +787,29 @@ class DesignValidator:
         task = _dict_value(task_context.get("task"))
         task_type = str(task.get("task_type") or "")
         header, scope, task_rules = _SEMANTIC_TASK_PROMPTS.get(task_type, _SEMANTIC_TASK_PROMPTS["cross_cutting"])
+        if (
+            task_type == "cross_cutting"
+            and not _string_items(task.get("primary_claim_ids"))
+            and _string_items(task.get("coverage_keys"))
+        ):
+            scope = (
+                "Global boundary scope:\n"
+                "- Review only the global boundary contracts listed as boundary:<edge id> in coverage_keys. "
+                "Context claims are evidence and may be cited by boundary findings.\n"
+                "- This task has no primary claims: return an empty assessments array."
+            )
+            task_rules = _RUNTIME_RULES
+        statuses = "satisfied|missing|contradicted|uncertain"
+        assessment_rule = (
+            "A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence."
+        )
+        if task_type == "scenario_behavior":
+            statuses += "|not_applicable"
+            assessment_rule = (
+                "Only a global_projection claim can be not_applicable, with a non-empty reason. "
+                "All other non-satisfied primary claims require a finding. "
+                "A satisfied claim requires exact Design evidence."
+            )
         finding_categories = _SEMANTIC_FINDING_CATEGORIES.get(
             task_type,
             _SEMANTIC_FINDING_CATEGORIES["cross_cutting"],
@@ -798,7 +838,7 @@ new Requirements.
 {scope}
 
 Return one JSON object only:
-{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"satisfied|missing|contradicted|uncertain","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"{finding_categories}","severity":"blocking|warning","message":"specific issue","expected_change":"one invariant that must become true across the cited existing ids; no repair instructions or alternatives","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["every exact existing VDN-* or VDE-* id whose contract may coherently change to satisfy the invariant"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
+{{"ok":true,"summary":"short summary","assessments":[{{"claim_id":"exact supplied id","status":"{statuses}","design_refs":["exact VDN-* or VDE-* id"],"reason":"evidence-backed decision"}}],"findings":[{{"id":"SEM-001","category":"{finding_categories}","severity":"blocking|warning","message":"specific issue","expected_change":"one invariant that must become true across the cited existing ids; no repair instructions or alternatives","claim_ids":["exact supplied claim id"],"requirement_ids":["exact Requirement id"],"diagram_ids":["every exact existing VDN-* or VDE-* id whose contract may coherently change to satisfy the invariant"],"subject_ref":"exact VDN-* or VDE-* id where the defect is observed","evidence":[{{"source":"requirement|design","ref":"exact id","excerpt":"short evidence"}}]}}]}}
 
 {packet_field_guide}
 
@@ -807,7 +847,7 @@ Return one JSON object only:
 Rules:
 - Set ok=true exactly when findings contains no blocking item. Warnings keep ok=true.
 - Never invent a Requirement or Design reference. Every blocker cites a stable Requirement id and exact Design ref.
-- A non-satisfied primary claim requires a finding. A satisfied claim requires exact Design evidence.
+- {assessment_rule}
 - expected_change states one invariant that must become true across cited existing node and edge ids. Describe the
   defect-free contract, not how to repair it: do not select, add, remove or reorder an edge; require a particular new
   field, mapping, guard or trigger; or offer alternative repairs. Do not introduce a system, service or dependency
@@ -834,6 +874,7 @@ Assigned review packet:
         claims: list[dict[str, object]],
         shared_surfaces: list[dict[str, object]],
         shared_surface_nodes: list[dict[str, object]],
+        global_claims: list[dict[str, object]],
     ) -> dict[str, object]:
         prompt = f"""Design Semantic Coherence Review v2
 
@@ -862,12 +903,19 @@ ref needed to decide it; do not silently retain or dismiss it. Every conflict mu
 non-empty finding_ids, claim_ids, design_refs and reason. Never assess or raise a finding on a claim listed as
 deferred in a specialist result. Do not use a deferred claim's behavior or Requirement ids to support a new finding
 by attaching it to a non-deferred claim. Do not re-report a runtime blocker already present.
+Global projection assessments of the same projection_of claim must be compatible across scenarios: on a shared
+surface or shared runtime target, two scenarios must not give the claim's outcome incompatible meanings (for example
+different orderings of the same list); report a cross-task finding or a conflict with the exact projection claim ids
+and design refs.
 
 Claims:
 {json.dumps(claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Specialist results:
 {json.dumps(task_results, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
+
+global_claims:
+{json.dumps(global_claims, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
 
 Relationship index:
 {json.dumps(relationship_index, ensure_ascii=False, separators=(",", ":"), sort_keys=True)}
@@ -1150,7 +1198,7 @@ def _semantic_review_claims(canonical: dict[str, object]) -> list[dict[str, obje
                     "statement": _record_statement(record) or requirement_id,
                 }
             )
-    return claims
+    return with_global_projections(claims)
 
 
 def _record_statement(record: dict[str, object]) -> str:
@@ -1243,10 +1291,10 @@ def _validate_semantic_assessments(
     claims: list[dict[str, object]],
     valid_subject_refs: set[str],
 ) -> None:
-    expected = {str(item.get("claim_id") or "") for item in claims}
+    claim_types = {str(item.get("claim_id") or ""): item.get("claim_type") for item in claims}
     assessments = _dict_items(payload.get("assessments"))
     received = [str(item.get("claim_id") or "") for item in assessments]
-    if len(received) != len(set(received)) or set(received) != expected:
+    if len(received) != len(set(received)) or set(received) != set(claim_types):
         raise HarnessError(
             "design_semantic_review_failed",
             "Design semantic validator must assess every supplied claim exactly once.",
@@ -1259,7 +1307,14 @@ def _validate_semantic_assessments(
     for assessment in assessments:
         claim_id = str(assessment.get("claim_id") or "")
         status = str(assessment.get("status") or "").strip().lower()
-        if status not in {"satisfied", "missing", "contradicted", "uncertain"}:
+        if status == "not_applicable" and claim_types[claim_id] == "global_projection":
+            reason = assessment.get("reason")
+            if not isinstance(reason, str) or not reason.strip():
+                raise HarnessError(
+                    "design_semantic_review_failed",
+                    f"Not-applicable Design semantic assessment {claim_id} requires a non-empty reason.",
+                )
+        elif status not in {"satisfied", "missing", "contradicted", "uncertain"}:
             raise HarnessError(
                 "design_semantic_review_failed",
                 f"Design semantic assessment {claim_id} has an invalid status.",
@@ -1276,11 +1331,80 @@ def _validate_semantic_assessments(
                 "design_semantic_review_failed",
                 f"Satisfied Design semantic assessment {claim_id} requires Design evidence.",
             )
-        if status != "satisfied" and claim_id not in findings_by_claim:
+        if status not in {"satisfied", "not_applicable"} and claim_id not in findings_by_claim:
             raise HarnessError(
                 "design_semantic_review_failed",
                 f"Non-satisfied Design semantic assessment {claim_id} requires an actionable finding.",
             )
+
+
+def _aggregate_global_claims(
+    *,
+    claims: list[dict[str, object]],
+    task_results: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], list[DesignFinding]]:
+    assessments = {
+        str(assessment.get("claim_id") or ""): assessment
+        for task in task_results
+        for assessment in _dict_items(task.get("assessments"))
+    }
+    projections_by_global: dict[str, list[dict[str, object]]] = {}
+    for claim in claims:
+        if claim.get("claim_type") != "global_projection":
+            continue
+        claim_id = str(claim["claim_id"])
+        assessment = assessments.get(claim_id)
+        if assessment is None:
+            raise HarnessError("design_semantic_plan_invalid", f"Global projection {claim_id} was not assessed.")
+        projections_by_global.setdefault(str(claim["projection_of"]), []).append(
+            {
+                "claim_id": claim_id,
+                "scenario_id": claim["scenario_id"],
+                "status": str(assessment["status"]).strip().lower(),
+                "design_refs": _string_items(assessment.get("design_refs")),
+                "reason": assessment.get("reason") or "",
+            }
+        )
+
+    summary: list[dict[str, object]] = []
+    findings: list[DesignFinding] = []
+    for claim in claims:
+        if claim.get("scenario_id"):
+            continue
+        claim_id = str(claim["claim_id"])
+        projections = projections_by_global.get(claim_id, [])
+        if not projections:
+            assessment = assessments.get(claim_id)
+            if assessment is None:
+                raise HarnessError("design_semantic_plan_invalid", f"Global claim {claim_id} was not assessed.")
+            status = str(assessment["status"]).strip().lower()
+        else:
+            statuses = {projection["status"] for projection in projections}
+            status = next(
+                (status for status in ("contradicted", "missing", "uncertain", "deferred") if status in statuses),
+                "satisfied",
+            )
+            if statuses == {"not_applicable"} and claim.get("claim_type") != "precondition":
+                status = "missing"
+                findings.append(
+                    DesignFinding(
+                        finding_id=f"global-aggregation:{claim_id}",
+                        category="global_claim_coverage",
+                        severity="blocking",
+                        message=f"{claim_id} is realized by no scenario",
+                        expected_change=f"At least one scenario realizes {claim_id}.",
+                        claim_ids=[claim_id],
+                        requirement_ids=_string_items(claim.get("requirement_ids")),
+                        diagram_ids=sorted({
+                            ref
+                            for projection in projections
+                            for ref in _string_items(projection.get("design_refs"))
+                        }),
+                        origin="deterministic",
+                    )
+                )
+        summary.append({"claim_id": claim_id, "status": status, "projections": projections})
+    return summary, findings
 
 
 def _normalize_llm_findings(
@@ -1772,10 +1896,11 @@ Packet field guide (Harness-owned meanings; do not reinterpret them):
 - branch_entries are Harness-derived from exact state names. For a resolved entry the branch starts in
   parent_entry_state. parent_transitions_leading_to_entry are reachability conditions, not a history of transitions
   that all ran on this pass. parent_transitions_after_entry have not run when the branch starts.
-- trace_mappings connect supplied Requirement ids and surface claims to exact Design ids.
-- realized_in_other_scenarios lists, for each Requirement item of a primary claim, every node or edge of another
-  scenario that the approved trace says realizes it. It is Harness-derived and complete: an empty list means no other
-  scenario realizes that item.
+- A node realizes its requirement_refs and its scenario's surface claim (<scenario>:surface:<surface>); trace_mappings
+  list only the further links the nodes do not state.
+- realized_in_other_scenarios lists, for each Requirement item of a non-projection primary claim, every node or edge
+  of another scenario that the approved trace says realizes it. It is Harness-derived and complete: an empty list
+  means no other scenario realizes that item.
 - owned_code lists the code an active-scenario node's work may change: its runtime binding target and attachment
   owner. The implementation changes no other code for that node.
 - approved_context contains approved Requirement preconditions and external facts; treat them as given.
@@ -1935,6 +2060,11 @@ Scenario-task scope:
   realize the Requirement item at stake; a case of a primary claim that no scenario realizes is one.
 - Do not discard a shared acceptance criterion or rule. Assess every obligation it places on the active scenario;
   defer only evidence that requires executing another scenario to that scenario's separate review.
+- A claim with claim_type=global_projection projects an approved use-case-wide Requirement item (global_claim_type)
+  onto this scenario. Assess only this scenario's part: satisfied when this scenario's Design realizes it or relies on
+  it consistently, with exact refs; not_applicable when no step of this scenario realizes, relies on or could
+  contradict it, with the reason; missing or contradicted with a finding otherwise. Other scenarios' parts are
+  assessed in their own calls, and the Harness combines them.
 - This scenario's runtime path already passed a separate runtime review without blockers. Treat runtime feasibility as
   established: use runtime details only as evidence for primary claims, and do not re-review or re-report transport,
   input propagation or alternative runtime-outcome findings unless they make a primary claim missing or contradicted.

@@ -14,6 +14,27 @@ from ..designer.graph import established_facts
 
 
 
+def with_global_projections(claims: list[dict[str, object]]) -> list[dict[str, object]]:
+    scenario_ids = sorted({str(claim["scenario_id"]) for claim in claims if claim.get("scenario_id")})
+    return [
+        *claims,
+        *[
+            {
+                "claim_id": f"{scenario_id}:{claim['claim_id']}",
+                "claim_type": "global_projection",
+                "projection_of": claim["claim_id"],
+                "global_claim_type": claim["claim_type"],
+                "requirement_ids": _string_items(claim.get("requirement_ids")),
+                "scenario_id": scenario_id,
+                "statement": claim.get("statement", ""),
+            }
+            for scenario_id in scenario_ids
+            for claim in claims
+            if not claim.get("scenario_id")
+        ],
+    ]
+
+
 def build_semantic_review_plan(
     *,
     claims: list[dict[str, object]],
@@ -43,11 +64,10 @@ def build_semantic_review_plan(
 
     global_boundaries = boundary_by_scenario.pop("global", [])
     scenario_ids = sorted(set(by_scenario) | set(boundary_by_scenario))
-    if global_claims or global_boundaries:
-        primary = sorted(_claim_ids(global_claims))
-        # Global claims (pre/postconditions, quality rules) may apply positively or negatively to any scenario and
-        # often have no direct trace mapping, so their packet is the whole graph rather than a requirement_refs guess.
-        if global_claims:
+    primary = sorted(_claim_ids(global_claims)) if not by_scenario else []
+    if primary or global_boundaries:
+        # Without behavior tasks, the global review still needs the whole graph.
+        if primary:
             sliced_node_ids, sliced_edge_ids = sorted(_ids(nodes)), sorted(_ids(edges))
         else:
             sliced_node_ids, sliced_edge_ids = [], []
@@ -64,7 +84,11 @@ def build_semantic_review_plan(
                 task_type="cross_cutting",
                 primary_claim_ids=primary,
                 context_claim_ids=sorted(
-                    claim_id for claim_id in _claim_ids(claims) if claim_id not in set(primary)
+                    str(claim["claim_id"])
+                    for claim in claims
+                    if claim.get("claim_id")
+                    and claim["claim_id"] not in primary
+                    and claim.get("claim_type") != "global_projection"
                 ),
                 scenario_ids=scenario_ids,
                 node_ids=sorted(set(sliced_node_ids) | global_node_ids),
@@ -74,11 +98,16 @@ def build_semantic_review_plan(
                     *[f"boundary:{item}" for item in sorted(global_edge_ids)],
                 ],
                 focus=(
-                    "Review only the primary global preconditions, postconditions, authentication versus "
-                    "authorization, quality and negative constraints, and any promised consistency boundary across "
-                    "scenarios. Scenario-local claims are evidence only and remain owned by their scenario calls."
+                    (
+                        "Review only the primary global preconditions, postconditions, authentication versus "
+                        "authorization, quality and negative constraints, and any promised consistency boundary across "
+                        "scenarios. Scenario-local claims are evidence only and remain owned by their scenario calls."
+                        if primary
+                        else ""
+                    )
                     + (
-                        " Also review the global boundary contracts listed in coverage_keys for transport, response "
+                        (" Also review " if primary else "Review ")
+                        + "the global boundary contracts listed in coverage_keys for transport, response "
                         "and error feasibility, decision inputs, rollback, unchanged-state, atomicity and retry "
                         "mechanisms."
                         if global_edge_ids
@@ -89,7 +118,8 @@ def build_semantic_review_plan(
         )
 
     for scenario_id in scenario_ids:
-        scenario_claim_ids = sorted(_claim_ids(by_scenario.get(scenario_id, [])))
+        scenario_claims = by_scenario.get(scenario_id, [])
+        scenario_claim_ids = sorted(_claim_ids(scenario_claims))
         selected_boundaries = boundary_by_scenario.get(scenario_id, [])
         node_ids, edge_ids = _scenario_slice(scenario_id, nodes=nodes, edges=edges)
         if edge_ids:
@@ -98,7 +128,9 @@ def build_semantic_review_plan(
                     task_id=f"runtime-{_slug(scenario_id)}",
                     task_type="scenario_runtime",
                     primary_claim_ids=[],
-                    context_claim_ids=scenario_claim_ids,
+                    context_claim_ids=sorted(
+                        _claim_ids([claim for claim in scenario_claims if claim.get("claim_type") != "global_projection"])
+                    ),
                     scenario_ids=[scenario_id],
                     node_ids=node_ids,
                     edge_ids=edge_ids,
@@ -194,7 +226,9 @@ def materialize_task_context(
     ui_context = _dict_value(_dict_value(graph.get("snapshot_binding")).get("ui_repo_context"))
     all_mappings = _dict_items(trace.get("mappings"))
     scenario_ids = set(_string_items(task.get("scenario_ids")))
-    for mapping in all_mappings:
+    task_type = str(task.get("task_type") or "")
+    boundary_only = task_type == "cross_cutting" and not _string_items(task.get("primary_claim_ids"))
+    for mapping in [] if boundary_only else all_mappings:
         if str(mapping.get("from") or "") not in trace_source_ids:
             continue
         subject_id = str(mapping.get("to") or "")
@@ -214,13 +248,14 @@ def materialize_task_context(
                 or subject_scenario in {"", "global", *scenario_ids}
             ):
                 edge_ids.add(subject_id)
-    node_ids, edge_ids = _bounded_relation_closure(
-        task=task,
-        seed_node_ids=node_ids,
-        selected_edge_ids=edge_ids,
-        nodes_by_id=nodes_by_id,
-        edges=edges,
-    )
+    if not boundary_only:
+        node_ids, edge_ids = _bounded_relation_closure(
+            task=task,
+            seed_node_ids=node_ids,
+            selected_edge_ids=edge_ids,
+            nodes_by_id=nodes_by_id,
+            edges=edges,
+        )
     for edge_id in edge_ids:
         edge = edges_by_id.get(edge_id, {})
         node_ids.update(
@@ -246,8 +281,13 @@ def materialize_task_context(
         for edge in edges
         if str(edge.get("id") or "") in edge_ids and str(edge.get("kind") or "") == "depends_on"
     ]
-    task_type = str(task.get("task_type") or "")
     selected_nodes = [node for node in nodes if str(node.get("id") or "") in node_ids]
+    node_views = [review_node_view(node, task_type=task_type, scenario_ids=scenario_ids) for node in selected_nodes]
+    edge_views = [
+        review_edge_view(edge, task_type=task_type)
+        for edge in edges
+        if str(edge.get("id") or "") in edge_ids
+    ]
     approved_context = _approved_context(claims=claims, nodes=selected_nodes)
     placements = [
         item
@@ -263,17 +303,14 @@ def materialize_task_context(
         "graph_digest": graph.get("artifact_digest"),
         "task": task,
         "claims": selected_claims,
-        "nodes": [
-            review_node_view(node, task_type=task_type, scenario_ids=scenario_ids)
-            for node in selected_nodes
-        ],
-        "edges": [
-            review_edge_view(edge, task_type=task_type)
-            for edge in edges
-            if str(edge.get("id") or "") in edge_ids
-        ],
+        "nodes": node_views,
+        "edges": edge_views,
         # Runtime feasibility is judged from the executable graph; Requirement-to-Design mappings serve claim reviews.
-        **({} if task_type == "scenario_runtime" else {"trace_mappings": mappings}),
+        **(
+            {"trace_mappings": _additional_trace_mappings(mappings, nodes=node_views, edges=edge_views)}
+            if task_type != "scenario_runtime"
+            else {}
+        ),
         **(
             {
                 "realized_in_other_scenarios": _realized_in_other_scenarios(
@@ -410,6 +447,35 @@ def _owned_code(binding: dict[str, Any]) -> list[str]:
     return owned
 
 
+def _additional_trace_mappings(
+    mappings: list[dict[str, object]],
+    *,
+    nodes: list[dict[str, object]],
+    edges: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    realized = {
+        (ref, node.get("id"))
+        for node in nodes
+        for ref in _string_items(node.get("requirement_refs"))
+    }
+    realized.update(
+        (f"SURF:{node['scenario_id']}:{node['surface']}", node.get("id"))
+        for node in nodes
+        if node.get("scenario_id") and node.get("surface")
+    )
+    dependencies = {
+        (edge.get("from"), edge.get("to")) for edge in edges if edge.get("kind") == "depends_on"
+    }
+    redundant = {"realizes": realized, "depends_on": dependencies}
+    return [
+        mapping
+        for mapping in mappings
+        if (mapping.get("from"), mapping.get("to")) not in redundant.get(
+            str(mapping.get("kind") or "realizes"), ()
+        )
+    ]
+
+
 def _realized_in_other_scenarios(
     *,
     task: dict[str, object],
@@ -429,7 +495,7 @@ def _realized_in_other_scenarios(
         {
             requirement_id
             for claim in claims
-            if str(claim.get("claim_id") or "") in primary
+            if str(claim.get("claim_id") or "") in primary and claim.get("claim_type") != "global_projection"
             for requirement_id in _string_items(claim.get("requirement_ids"))
         }
     )
@@ -669,6 +735,25 @@ def _validate_plan_coverage(
     *, tasks: list[dict[str, object]], claims: list[dict[str, object]], edges: list[dict[str, object]]
 ) -> None:
     expected_claims = set(_claim_ids(claims))
+    behavior_tasks = [task for task in tasks if task.get("task_type") == "scenario_behavior"]
+    if behavior_tasks:
+        global_ids = set(_claim_ids([claim for claim in claims if not claim.get("scenario_id")]))
+        projections = {
+            (claim.get("scenario_id"), claim.get("projection_of"), claim.get("claim_id"))
+            for claim in claims
+            if claim.get("claim_type") == "global_projection"
+        }
+        for task in behavior_tasks:
+            primary = set(_string_items(task.get("primary_claim_ids")))
+            for scenario_id in _string_items(task.get("scenario_ids")):
+                for global_id in global_ids:
+                    projection_id = f"{scenario_id}:{global_id}"
+                    if projection_id not in primary or (scenario_id, global_id, projection_id) not in projections:
+                        raise HarnessError(
+                            "design_semantic_plan_invalid",
+                            f"Behavior task {task.get('task_id')} must own global projection {projection_id}.",
+                        )
+        expected_claims -= global_ids
     assignments = [claim_id for task in tasks for claim_id in _string_items(task.get("primary_claim_ids"))]
     if set(assignments) != expected_claims or len(assignments) != len(set(assignments)):
         raise HarnessError(

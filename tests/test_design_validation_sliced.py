@@ -4,12 +4,16 @@ import json
 from pathlib import Path
 import tempfile
 
+import pytest
+
 from sdlc_harness.agents.validator import DesignValidator, TraceabilityResult
 from sdlc_harness.agents.validator.semantic_review import (
     _branch_entry,
     build_semantic_review_plan,
     materialize_task_context,
+    with_global_projections,
 )
+from sdlc_harness.core.errors import HarnessError
 from sdlc_harness.llm.fake import fake_completion
 from sdlc_harness.llm.client import LlmCompletion
 from sdlc_harness.llm.step_review import LlmStepReviewRequired, ReviewableLlmClient
@@ -332,6 +336,10 @@ def test_planner_routes_global_boundaries_to_cross_cutting_and_covers_every_boun
         ],
     }
 
+    claims = with_global_projections([
+        *claims,
+        {"claim_id": "GLOBAL:PRE-1", "claim_type": "precondition", "requirement_ids": ["PRE-1"]},
+    ])
     plan = build_semantic_review_plan(claims=claims, vertical_design_graph=graph)
 
     assert [task["task_type"] for task in plan["tasks"]] == ["cross_cutting", "scenario_runtime", "scenario_behavior"]
@@ -340,17 +348,26 @@ def test_planner_routes_global_boundaries_to_cross_cutting_and_covers_every_boun
     assert global_task["primary_claim_ids"] == []
     assert global_task["node_ids"] == ["VDN-global-a", "VDN-global-b"]
     assert global_task["edge_ids"] == ["VDE-global"]
-    assert "boundary:VDE-global" in global_task["coverage_keys"]
+    assert global_task["coverage_keys"] == ["boundary:VDE-global"]
+    packet = materialize_task_context(
+        global_task,
+        claims=claims,
+        vertical_design_graph=graph,
+        vertical_trace={"mappings": [{"from": "MF-1", "to": "VDN-scenario", "kind": "realizes"}]},
+    )
+    assert [node["id"] for node in packet["nodes"]] == ["VDN-global-a", "VDN-global-b"]
+    assert [edge["id"] for edge in packet["edges"]] == ["VDE-global"]
+    assert all(claim["claim_type"] != "global_projection" for claim in packet["claims"])
+    prompt = DesignValidator._semantic_task_prompt(task_context=packet, rule_review={})
+    assert "Context claims are evidence and may be cited by boundary findings" in prompt
+    assert "Judge only primary global preconditions" not in prompt
     assert "boundary:VDE-scenario" in scenario_task["coverage_keys"]
     assert plan["coverage"]["boundary_count"] == 2
     assert "global boundary contracts" in global_task["focus"]
 
 
-def test_global_focus_omits_boundary_review_without_global_boundaries() -> None:
-    claims = [
-        {"claim_id": "GLOBAL:PRE-1", "claim_type": "precondition", "requirement_ids": ["PRE-1"]},
-        {"claim_id": "SC-1:MF-1", "claim_type": "requirement", "scenario_id": "SC-1", "requirement_ids": ["MF-1"]},
-    ]
+def test_global_claim_fallback_keeps_whole_graph_without_behavior_tasks() -> None:
+    claims = [{"claim_id": "GLOBAL:PRE-1", "claim_type": "precondition", "requirement_ids": ["PRE-1"]}]
     graph = {
         "nodes": [{"id": "VDN-a", "scenario_id": "SC-1"}, {"id": "VDN-b", "scenario_id": "SC-1"}],
         "edges": [
@@ -367,12 +384,224 @@ def test_global_focus_omits_boundary_review_without_global_boundaries() -> None:
     plan = build_semantic_review_plan(claims=claims, vertical_design_graph=graph)
 
     global_task = next(task for task in plan["tasks"] if task["task_type"] == "cross_cutting")
-    assert not any(key.startswith("boundary:") for key in global_task["coverage_keys"])
+    assert global_task["primary_claim_ids"] == ["GLOBAL:PRE-1"]
+    assert global_task["coverage_keys"] == ["claim:GLOBAL:PRE-1"]
     assert "boundary contracts" not in global_task["focus"]
     assert "Scenario-local claims are evidence only" in global_task["focus"]
     # Global claims may lack trace mappings, so the packet is the whole graph, not a requirement_refs guess.
     assert global_task["node_ids"] == ["VDN-a", "VDN-b"]
     assert global_task["edge_ids"] == ["VDE-scenario"]
+
+
+def _global_inputs(*, postcondition: bool = True, boundary: bool = False):
+    canonical, graph = _inputs(shared_screen=True, boundary=boundary)
+    section, requirement_id = ("postconditions", "POST-3") if postcondition else ("preconditions", "PRE-1")
+    canonical[section] = [{"id": requirement_id, "text": "Approved cross-scenario behavior."}]
+    return canonical, graph
+
+
+def _projection_task(
+    scenario: int,
+    requirement_id: str,
+    *,
+    status: str = "not_applicable",
+    refs: list[str] | None = None,
+) -> dict[str, object]:
+    claim_id = f"SC-{scenario}:GLOBAL:{requirement_id}"
+    local_id = "MF-1" if scenario == 1 else "AF-1"
+    payload = _task_success(f"SC-{scenario}:{local_id}", f"SC-{scenario}:surface:ui", claim_id)
+    payload["assessments"][-1].update(
+        status=status, design_refs=refs or [], reason="This is the scenario's part of the global item."
+    )
+    if status in {"contradicted", "missing", "uncertain"}:
+        finding = _warning_finding("SEM-PROJECTION", claim_id=claim_id)
+        finding["requirement_ids"] = [requirement_id]
+        if status != "uncertain":
+            finding["severity"] = "blocking"
+            payload["ok"] = False
+        payload["findings"] = [finding]
+    return payload
+
+
+def test_plan_and_review_use_the_same_global_projections_and_approved_context() -> None:
+    canonical, graph = _global_inputs(boundary=True)
+    canonical["preconditions"] = [{"id": "PRE-1", "text": "The actor is signed in."}]
+    validator = DesignValidator(RoutedFakeLlmClient())
+    plan = validator.build_review_plan(canonical_requirement=canonical, vertical_design_graph=graph)
+    client = StaticLlmClient([
+        _runtime_passed(),
+        _task_success("SC-1:MF-1", "SC-1:surface:ui", "SC-1:GLOBAL:PRE-1", "SC-1:GLOBAL:POST-3"),
+        _task_success("SC-2:AF-1", "SC-2:surface:ui", "SC-2:GLOBAL:PRE-1", "SC-2:GLOBAL:POST-3"),
+        _coherence(),
+    ])
+
+    result = _review(client, inputs=(canonical, graph), plan=plan)
+
+    assert result.ok
+    assert [task["task_id"] for task in plan["tasks"]] == ["runtime-sc-1", "scenario-sc-1", "scenario-sc-2"]
+    assert plan["coverage"]["claim_count"] == 10
+    decoder = json.JSONDecoder()
+    for task, prompt in zip(plan["tasks"], client.prompts):
+        packet, _ = decoder.raw_decode(prompt.split("Assigned review packet:\n", 1)[1])
+        assert packet["approved_context"]["preconditions"] == [
+            {"requirement_id": "PRE-1", "text": "The actor is signed in."}
+        ]
+        if task["task_type"] == "scenario_runtime":
+            assert all(claim["claim_type"] != "global_projection" for claim in packet["claims"])
+            continue
+        assert {claim["claim_id"] for claim in packet["claims"]} == set(task["primary_claim_ids"])
+        scenario_id = task["scenario_ids"][0]
+        projections = {claim["claim_id"]: claim for claim in packet["claims"] if claim["claim_type"] == "global_projection"}
+        assert set(projections) == {f"{scenario_id}:GLOBAL:PRE-1", f"{scenario_id}:GLOBAL:POST-3"}
+        assert projections[f"{scenario_id}:GLOBAL:POST-3"] == {
+            "claim_id": f"{scenario_id}:GLOBAL:POST-3",
+            "claim_type": "global_projection",
+            "projection_of": "GLOBAL:POST-3",
+            "global_claim_type": "postcondition",
+            "requirement_ids": ["POST-3"],
+            "scenario_id": scenario_id,
+            "statement": "Approved cross-scenario behavior.",
+        }
+        assert {item["requirement_id"] for item in packet["realized_in_other_scenarios"]}.isdisjoint({"PRE-1", "POST-3"})
+        assert "A claim with claim_type=global_projection projects" in prompt
+    coherence = client.prompts[-1]
+    assert "Global projection assessments of the same projection_of claim must be compatible across scenarios" in coherence
+    summary, _ = decoder.raw_decode(coherence.split("global_claims:\n", 1)[1])
+    assert summary == result.llm_review["global_claims"]
+
+
+def test_semantic_plan_rejects_missing_global_projections() -> None:
+    claims = [
+        {"claim_id": "GLOBAL:PRE-1", "claim_type": "precondition"},
+        {"claim_id": "SC-1:MF-1", "claim_type": "requirement", "scenario_id": "SC-1"},
+        {"claim_id": "SC-2:AF-1", "claim_type": "requirement", "scenario_id": "SC-2"},
+    ]
+    projected = with_global_projections(claims)
+    assert projected[-1]["claim_id"] == "SC-2:GLOBAL:PRE-1"
+    with pytest.raises(HarnessError, match="must own global projection SC-2:GLOBAL:PRE-1"):
+        build_semantic_review_plan(claims=projected[:-1], vertical_design_graph={})
+
+
+@pytest.mark.parametrize(
+    ("claim_index", "reason", "error"),
+    [
+        (0, "Not applicable here.", "has an invalid status"),
+        (-1, None, "requires a non-empty reason"),
+        (-1, "  ", "requires a non-empty reason"),
+    ],
+)
+def test_not_applicable_requires_a_projection_and_a_non_empty_reason(claim_index, reason, error) -> None:
+    invalid = _projection_task(1, "POST-3", status="satisfied", refs=["VDN-ui-1"])
+    invalid["assessments"][claim_index].update(status="not_applicable", reason=reason)
+    client = StaticLlmClient([invalid, invalid])
+
+    result = _review(client, inputs=_global_inputs())
+
+    assert not result.ok and result.inconclusive
+    assert len(client.prompts) == 2
+    assert error in client.prompts[1]
+    assert error in result.llm_review["error"]["message"]
+
+
+@pytest.mark.parametrize(
+    ("postcondition", "status", "expected", "blocking_id"),
+    [
+        (True, "not_applicable", "missing", "global-aggregation:GLOBAL:POST-3"),
+        (True, "satisfied", "satisfied", ""),
+        (True, "contradicted", "contradicted", "scenario-sc-1:SEM-PROJECTION"),
+        (True, "missing", "missing", "scenario-sc-1:SEM-PROJECTION"),
+        (True, "uncertain", "uncertain", ""),
+        (False, "not_applicable", "satisfied", ""),
+    ],
+)
+def test_global_claim_aggregation(postcondition, status, expected, blocking_id) -> None:
+    requirement_id = "POST-3" if postcondition else "PRE-1"
+    refs = ["VDN-ui-1"] if status != "not_applicable" else []
+    client = StaticLlmClient([
+        _projection_task(1, requirement_id, status=status, refs=refs),
+        _projection_task(2, requirement_id),
+        _coherence(),
+        *(
+            [_adjudication(blocking_id, remediation_mode="inconclusive" if not refs else "local_patch")]
+            if blocking_id
+            else []
+        ),
+    ])
+
+    result = _review(client, inputs=_global_inputs(postcondition=postcondition))
+
+    assert result.ok == (not blocking_id)
+    [summary] = result.llm_review["global_claims"]
+    assert summary["claim_id"] == f"GLOBAL:{requirement_id}"
+    assert summary["status"] == expected
+    assert [(item["scenario_id"], item["status"]) for item in summary["projections"]] == [
+        ("SC-1", status), ("SC-2", "not_applicable")
+    ]
+    assert summary["projections"][0]["design_refs"] == refs
+    assert summary["projections"][0]["reason"]
+    assert [finding.finding_id for finding in result.blocking_findings] == ([blocking_id] if blocking_id else [])
+    if blocking_id.startswith("global-aggregation"):
+        [finding] = result.blocking_findings
+        assert result.inconclusive
+        assert finding.origin == "deterministic"
+        assert finding.message == "GLOBAL:POST-3 is realized by no scenario"
+        assert finding.claim_ids == ["GLOBAL:POST-3"]
+        assert finding.requirement_ids == ["POST-3"]
+        assert finding.diagram_ids == []
+        assert finding.finding_id in client.prompts[-1]
+
+
+@pytest.mark.parametrize(("drop_runtime_blocker", "status"), [(False, ""), (True, "satisfied"), (True, "not_applicable")])
+def test_global_aggregation_recomputes_when_deferred_behavior_runs(drop_runtime_blocker, status) -> None:
+    blocker = "runtime-sc-1:SEM-RUNTIME"
+    conflicts = [{
+        "finding_ids": [blocker], "claim_ids": ["SC-1:MF-1"], "design_refs": ["VDN-ui-1"],
+        "reason": "Sibling evidence contradicts the runtime blocker.",
+    }] if drop_runtime_blocker else []
+    client = StaticLlmClient([
+        _runtime_blocked("SC-1:MF-1"),
+        _projection_task(2, "POST-3"),
+        _coherence(conflicts=conflicts),
+        _adjudication(drop_finding_ids=[blocker]) if drop_runtime_blocker else _adjudication(blocker),
+        *(
+            [_projection_task(1, "POST-3", status=status, refs=["VDN-ui-1"] if status == "satisfied" else [])]
+            if drop_runtime_blocker
+            else []
+        ),
+    ])
+
+    result = _review(client, inputs=_global_inputs(boundary=True))
+
+    assert '"status":"deferred"' in client.prompts[2].split("global_claims:\n", 1)[1].split("Relationship index:", 1)[0]
+    expected = {"": "deferred", "satisfied": "satisfied", "not_applicable": "missing"}[status]
+    assert result.llm_review["global_claims"][0]["status"] == expected
+    assert result.ok == (status == "satisfied")
+    assert not client.responses
+    if status == "not_applicable":
+        assert [finding.finding_id for finding in result.blocking_findings] == ["global-aggregation:GLOBAL:POST-3"]
+
+
+def test_uc4_like_plan_fits_24_call_budget() -> None:
+    canonical, graph = _global_inputs()
+    canonical["scenario_contract"]["scenarios"] = [
+        {"id": f"SC-{number}", "requirement_refs": ["MF-1"]} for number in range(1, 12)
+    ]
+    graph["nodes"] = [{"id": f"VDN-{number}", "scenario_id": f"SC-{number}"} for number in range(1, 12)]
+    graph["edges"] = [
+        {"id": f"VDE-{number}", "scenario_id": f"SC-{number}", "from": f"VDN-{number}", "to": f"VDN-{number}"}
+        for number in range(1, 12)
+    ]
+    client = RoutedFakeLlmClient()
+
+    result = _review(client, inputs=(canonical, graph), budget=24)
+
+    assert result.ok
+    tasks = result.semantic_review_plan["tasks"]
+    assert len(tasks) == 22
+    assert [task["task_type"] for task in tasks].count("scenario_runtime") == 11
+    assert [task["task_type"] for task in tasks].count("scenario_behavior") == 11
+    assert not any(task["task_id"] == "cross-cutting-global" for task in tasks)
+    assert result.llm_review["planned_calls"] == len(tasks) + 2 == 24
 
 
 def test_main_scenario_does_not_absorb_inbound_branch_but_branch_keeps_parent() -> None:
@@ -1399,7 +1628,7 @@ def test_each_task_type_gets_only_its_own_rules() -> None:
     # A case of a multi-case claim that no scenario realizes is a blocker, never a hedged warning (r7 SC-5 delete).
     case_rule = "A\n  case that neither realizes has no Design: report a blocking finding"
     assert case_rule in behavior and case_rule not in runtime and case_rule not in global_review
-    assert "realized_in_other_scenarios lists, for each Requirement item of a primary claim" in behavior
+    assert "realized_in_other_scenarios lists, for each Requirement item of a non-projection primary claim" in behavior
     # A contract needing a change in code no node owns has no implementation owner (r7 SC-4 editor slice).
     assert "that no\n  packet node's owned_code includes, no implementation unit can change it" in behavior
     for prompt in (behavior, global_review, runtime):
@@ -1457,7 +1686,8 @@ def test_behavior_packet_lists_other_scenarios_realizing_each_primary_requiremen
 
 def test_runtime_packet_drops_ui_experience_traces_and_audit_fields_but_keeps_behavior_inputs() -> None:
     claims = [
-        {"claim_id": "PRE", "claim_type": "precondition", "requirement_ids": ["PRE-1"], "statement": "Operator is logged in."},
+        {"claim_id": "GLOBAL:PRE-1", "claim_type": "precondition", "requirement_ids": ["PRE-1"],
+         "statement": "Operator is logged in."},
         {"claim_id": "SC-1:MF-1", "claim_type": "requirement", "scenario_id": "SC-1", "requirement_ids": ["MF-1"],
          "statement": "View the list produced by SearchThings."},
     ]
@@ -1486,6 +1716,7 @@ def test_runtime_packet_drops_ui_experience_traces_and_audit_fields_but_keeps_be
     graph = {"nodes": [screen, {"id": "VDN-api", "scenario_id": "SC-1", "surface": "api"}],
              "edges": [{"id": "VDE-1", "scenario_id": "SC-1", "from": "VDN-screen", "to": "VDN-api", "kind": "calls"}]}
     trace = {"mappings": [{"from": "MF-1", "to": "VDN-screen"}]}
+    claims = with_global_projections(claims)
     plan = build_semantic_review_plan(claims=claims, vertical_design_graph=graph)
     runtime_task = next(task for task in plan["tasks"] if task["task_type"] == "scenario_runtime")
     behavior_task = next(task for task in plan["tasks"] if task["task_type"] == "scenario_behavior")

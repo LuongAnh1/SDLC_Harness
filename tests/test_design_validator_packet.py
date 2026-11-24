@@ -228,5 +228,58 @@ class UiRepoContextTest(unittest.TestCase):
         self.assertIn("VDE-call", packet["harness_established"]["boundaries"])
 
 
+class TraceMappingTest(unittest.TestCase):
+    def test_behavior_packet_omits_only_trace_mappings_redundant_with_its_graph(self) -> None:
+        graph = _graph()
+        graph["nodes"][0]["requirement_refs"] = ["MF-1"]
+        graph["nodes"].append({
+            "id": "VDN-other", "scenario_id": "SC-2", "surface": "ui", "requirement_refs": ["MF-1"],
+        })
+        graph["edges"].append({
+            "id": "VDE-depends", "scenario_id": "SC-1", "kind": "depends_on", "from": "VDN-ui", "to": "VDN-api",
+        })
+        claims = [
+            {
+                "claim_id": "SC-1:MF-1", "claim_type": "requirement", "scenario_id": "SC-1",
+                "requirement_ids": ["MF-1", "AC-2"],
+            },
+            {
+                "claim_id": "SC-1:surface:ui", "claim_type": "required_surface", "scenario_id": "SC-1",
+                "surface": "ui", "requirement_ids": [],
+            },
+        ]
+        unique = [
+            {"kind": "realizes", "from": "AC-2", "to": "VDN-ui"},
+            {"kind": "realizes", "from": "SURF:SC-1:ui", "to": "VDN-api"},
+            {"kind": "depends_on", "from": "VDN-api", "to": "VDN-ui"},
+        ]
+        trace = {"mappings": [
+            {"kind": "realizes", "from": "MF-1", "to": "VDN-ui"},
+            {"kind": "realizes", "from": "SURF:SC-1:ui", "to": "VDN-ui"},
+            {"kind": "depends_on", "from": "VDN-ui", "to": "VDN-api"},
+            {"kind": "realizes", "from": "MF-1", "to": "VDN-other"},
+            *unique,
+        ]}
+
+        packet = materialize_task_context(
+            {
+                "task_type": "scenario_behavior",
+                "scenario_ids": ["SC-1"],
+                "node_ids": ["VDN-ui", "VDN-api"],
+                "edge_ids": ["VDE-call", "VDE-return", "VDE-depends"],
+                "primary_claim_ids": ["SC-1:MF-1", "SC-1:surface:ui"],
+            },
+            claims=claims,
+            vertical_design_graph=graph,
+            vertical_trace=trace,
+        )
+
+        self.assertEqual(packet["trace_mappings"], unique)
+        self.assertEqual(packet["realized_in_other_scenarios"], [
+            {"requirement_id": "AC-2", "subjects": []},
+            {"requirement_id": "MF-1", "subjects": [{"id": "VDN-other", "scenario_id": "SC-2"}]},
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()
