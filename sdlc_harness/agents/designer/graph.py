@@ -827,9 +827,19 @@ def _validate_ui_experience_contract(value: object, *, node_id: str, run_id: str
     for key in ("component_structure", "accessibility", "responsive", "focus_flow", "guidance_refs"):
         items = value.get(key)
         if not isinstance(items, list) or not items or any(not isinstance(item, str) or not item.strip() for item in items):
+            # design_v20 designer-0038/0039: "has invalid guidance_refs" alone made the Designer empty valid refs it
+            # had nested under visual_contract; say what is required and where the field was found.
+            misplaced = [
+                name for name, nested in value.items() if isinstance(nested, dict) and key in nested
+            ]
             raise HarnessError(
                 "vertical_design_graph_invalid",
-                f"Node {node_id} UI experience contract has invalid {key}.",
+                f"Node {node_id} UI experience contract has invalid {key}: experience_contract.{key} must be a "
+                "non-empty array of non-empty strings."
+                + "".join(
+                    f" It was found under experience_contract.{name}; move it up to experience_contract."
+                    for name in misplaced
+                ),
                 run_id=run_id,
             )
     feedback = value.get("feedback")

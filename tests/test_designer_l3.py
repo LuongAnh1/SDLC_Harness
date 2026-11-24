@@ -2388,6 +2388,10 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("the same list rule seen on two pages", prompt)
         self.assertIn("still gets its node, with disposition reuse", prompt)
         self.assertIn("structural edges such as depends_on are not listed", prompt)
+        # design_v20 designer-0034 believed five branch paths could never pass the continuity check.
+        self.assertIn("The continuity check skips a pair of consecutive edges when either carries a", prompt)
+        # design_v20 designer-0029 left five SC-3 operation paths without branch_group "to keep it simple".
+        self.assertIn("Give branch_group and guard when you add an edge: a later partition cannot change them", prompt)
         self.assertIn("feature_ux_decisions does not name gets a new screen_id", prompt)
         self.assertIn("a node cites only the ids its own behavior implements", prompt)
         self.assertIn("read its runtime_binding.target.path yourself in this scenario", prompt)
@@ -2483,6 +2487,10 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertIn("active_partition.branch_parent_requirement", ui_prompt)
         self.assertIn("Start from delta_scaffold", ui_prompt)
         self.assertIn("Graph projection identity and runtime target identity are separate", ui_prompt)
+        # design_v20 0028/0030: "only create a new target when the candidate cannot host it" pushed SC-2/SC-3 to argue
+        # for folding unrelated decisions into SC-1's planned save/publish rule.
+        self.assertIn("a different decision gets its own target", ui_prompt)
+        self.assertNotIn("cannot host it", ui_prompt)
         self.assertIn("confirm and cancel in one dialog", ui_prompt)
         self.assertIn("even when its contract only describes the main outcome", ui_prompt)
         self.assertIn("Sharing a runtime target does not choose node.disposition", ui_prompt)
@@ -3100,6 +3108,32 @@ class DesignerResumeTest(unittest.TestCase):
         self.assertEqual(after[-1]["evidence_refs"], [new_ref])
         self.assertEqual(before[0], earlier)
         self.assertEqual(len(before), 10)
+
+    def test_experience_list_error_says_what_is_required_and_where_it_was_found(self) -> None:
+        # design_v20 designer-0038/0039: refs nested under visual_contract got only "invalid guidance_refs", and the
+        # retry emptied them.
+        from sdlc_harness.agents.designer.graph import UI_EXPERIENCE_CONTRACT_V2, _validate_ui_experience_contract
+
+        contract = {
+            "schema_version": UI_EXPERIENCE_CONTRACT_V2,
+            "component_structure": ["List"],
+            "accessibility": ["Announce status"],
+            "responsive": ["No overflow"],
+            "focus_flow": ["Keep focus"],
+            "visual_contract": {"hierarchy": ["List"], "guidance_refs": ["uiux:sha256:a"]},
+        }
+        with self.assertRaisesRegex(
+            HarnessError,
+            r"experience_contract\.guidance_refs must be a non-empty array of non-empty strings\. "
+            r"It was found under experience_contract\.visual_contract; move it up",
+        ):
+            _validate_ui_experience_contract(contract, node_id="tmp:ui", run_id="run")
+        contract["guidance_refs"] = []
+        del contract["visual_contract"]["guidance_refs"]
+        with self.assertRaises(HarnessError) as raised:
+            _validate_ui_experience_contract(contract, node_id="tmp:ui", run_id="run")
+        self.assertIn("must be a non-empty array", raised.exception.message)
+        self.assertNotIn("was found under", raised.exception.message)
 
     def test_a_new_scenario_starts_without_earlier_scenario_reads(self) -> None:
         # design_v20 SC-2: carried SC-1 reads let the Designer draft whole deltas before it noticed Home.tsx was
