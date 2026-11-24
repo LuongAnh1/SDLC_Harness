@@ -241,6 +241,71 @@ class TypeScriptAstExtractor:
             }
         return facts
 
+    def extract_ui_facts(
+        self, *, target_path: Path, source_paths: list[str], run_id: str | None = None,
+        typescript_package_root: Path | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """React syntax facts; unresolved props stay unknown rather than becoming an empty contract."""
+
+        paths = list(dict.fromkeys(source_paths))
+        if not paths:
+            return {}
+        root = target_path.resolve()
+        for path in paths:
+            if not isinstance(path, str) or "\\" in path or Path(path).is_absolute() or ".." in Path(path).parts:
+                raise _invalid_evidence("UI source path is not repository-relative.", run_id=run_id)
+            try:
+                (root / path).resolve().relative_to(root)
+            except ValueError as exc:
+                raise _invalid_evidence("UI source path escapes the target.", run_id=run_id) from exc
+        payload = self._run_helper(
+            target_root=root,
+            request={"version": TYPESCRIPT_AST_REQUEST_VERSION, "extractor_id": MODULE_FACTS_EXTRACTOR_ID,
+                     "profile": {}, "files": paths, "include_ui_facts": True,
+                     **({"typescript_package_root": str(typescript_package_root.resolve())} if typescript_package_root else {})},
+            run_id=run_id,
+        )
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if (not isinstance(payload, dict) or payload.get("version") != TYPESCRIPT_AST_EVIDENCE_VERSION
+                or payload.get("extractor_id") != MODULE_FACTS_EXTRACTOR_ID or not isinstance(files, list)
+                or [item.get("path") if isinstance(item, dict) else None for item in files] != paths):
+            raise _invalid_evidence("UI facts do not match the request.", run_id=run_id)
+        result = {}
+        for item in files:
+            facts = item.get("ui_facts")
+            if not isinstance(facts, dict) or not isinstance(facts.get("components"), list):
+                raise _invalid_evidence("UI component facts are invalid.", run_id=run_id)
+            if (not isinstance(facts.get("content_sha256"), str)
+                    or not isinstance(facts.get("diagnostics"), list)
+                    or not all(isinstance(x, str) for x in facts["diagnostics"])
+                    or not isinstance(facts.get("entrypoint_candidates"), list)
+                    or not all(isinstance(x, str) for x in facts["entrypoint_candidates"])):
+                raise _invalid_evidence("UI source facts are invalid.", run_id=run_id)
+            for component in facts["components"]:
+                if (not isinstance(component, dict) or not isinstance(component.get("symbol"), str)
+                        or not isinstance(component.get("start_line"), int) or component["start_line"] < 1
+                        or component.get("props_status") not in {"known", "unknown"}
+                        or not isinstance(component.get("renders"), list)
+                        or not isinstance(component.get("unresolved_tags"), list)
+                        or not all(isinstance(x, str) for x in component["unresolved_tags"])):
+                    raise _invalid_evidence("UI component schema is invalid.", run_id=run_id)
+                props = component.get("props")
+                if component["props_status"] == "unknown":
+                    valid = props is None
+                else:
+                    valid = isinstance(props, list) and all(
+                        isinstance(prop, dict) and isinstance(prop.get("name"), str)
+                        and isinstance(prop.get("optional"), bool) and isinstance(prop.get("has_default"), bool)
+                        for prop in props)
+                if not valid or not all(
+                    isinstance(edge, dict) and isinstance(edge.get("ref"), str)
+                    and isinstance(edge.get("props"), list) and all(isinstance(x, str) for x in edge["props"])
+                    for edge in component["renders"]
+                ):
+                    raise _invalid_evidence("UI props or render edges are invalid.", run_id=run_id)
+            result[str(item["path"])] = facts
+        return result
+
     def _run_helper(
         self,
         *,

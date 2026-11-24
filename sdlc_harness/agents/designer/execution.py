@@ -24,9 +24,14 @@ from .graph import (
     PLACEABLE_SURFACES,
     GRAPH_VERSION,
     RUNTIME_BINDING_VERSION,
+    STRUCTURAL_EDGE_KINDS,
     SURFACE_CONTRACT_VERSION,
+    _delta_written_names,
+    _sequence_behavior_findings,
+    apply_designer_delta,
     completion_findings,
     graph_digest,
+    UI_EXPERIENCE_FIELDS,
     is_composition_wiring,
     new_vertical_design_graph,
     validate_vertical_design_graph,
@@ -72,6 +77,7 @@ OBSERVATION_TOOL_IDS = frozenset(
         "landscape.get_anchor",
         "repo.search",
         "repo.read",
+        "repo.read_batch",
         "codegraph.query",
         "uiux.search_guidance",
         "design.inspect_partition",
@@ -1156,14 +1162,12 @@ class DesignerToolLoopExecutor:
                     active_guidance=_guidance_observations(session, guidance_key),
                     source_inspected=bool(_source_observation_refs(session, active_component_id)),
                     actions_remaining=scope_actions_remaining,
+                    design_notes=_design_notes(session, work_key=_review_target_key(repair_task, active_partition)),
                 )
                 system_prompt = "You are SDLC Harness Designer L3. Return exactly one JSON tool action."
-                profile_name = _designer_llm_profile_name(
-                    repair_task=repair_task,
-                    source_observation_refs=_source_observation_refs(session, active_component_id),
-                    observations_since_delta=observations_since_delta,
-                    observation_limit=observation_limit,
-                )
+                # One reasoning level for every construction call: with repo.read_batch a partition needs few reads,
+                # and a low-effort read call followed by a high-effort delta call cost a call and the prompt cache.
+                profile_name = "designer_repair" if repair_task is not None else "designer_delta"
                 call_options = phase2_llm_call_options(
                     self.settings,
                     profile_name,
@@ -1318,6 +1322,7 @@ class DesignerToolLoopExecutor:
             cursor = _dict(session.get("cursor"))
             tool_id = str(action.get("action") or "")
             arguments = action.get("arguments")
+            _record_design_note(session, action, work_key=_review_target_key(repair_task, active_partition))
             source_refs = _source_observation_refs(session, active_component_id)
             exact_deterministic_repair = _is_exact_deterministic_repair_delta(
                 arguments=arguments,
@@ -1478,6 +1483,47 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
+            unread_targets = (
+                _unread_existing_targets(
+                    arguments,
+                    graph=registry.graph,
+                    read_paths=set(_strings(session.get("source_read_paths"))),
+                )
+                if tool_id == "design.propose_delta" and not exact_deterministic_repair
+                else []
+            )
+            if unread_targets:
+                # The delta designs from existing files (targets it keeps or changes, hops that pass its inputs);
+                # the Designer must have read each of them itself.
+                session["required_target_reads"] = unread_targets
+                self._invalid_action(
+                    session,
+                    session_file,
+                    message=(
+                        "The delta designs from existing files that no repo.read or repo.read_batch of this session "
+                        "returned (runtime targets of reuse, modify or no_change nodes, or provided_by hops of required "
+                        "inputs): " + ", ".join(unread_targets) + ". Read the listed files with one repo.read_batch "
+                        "(allowed even after the observation limit), then propose the delta again."
+                    ),
+                )
+                self._record_observation(
+                    session,
+                    {
+                        "tool_id": tool_id,
+                        "status": "rejected",
+                        "code": "design_target_not_read",
+                        "unread_target_paths": unread_targets,
+                    },
+                )
+                _update_designer_exchange(
+                    exchange_path,
+                    {
+                        "status": "rejected",
+                        "rejection": {"code": "design_target_not_read", "unread_target_paths": unread_targets},
+                    },
+                )
+                _write_json_atomic(session_file, session)
+                continue
             if tool_id == "design.propose_delta" and active_component_id and source_refs:
                 arguments = _attach_source_observations(arguments, component_id=active_component_id, refs=source_refs)
             if tool_id == "complete" and (active_partition is not None or repair_task is not None):
@@ -1513,8 +1559,13 @@ class DesignerToolLoopExecutor:
                 )
                 _write_json_atomic(session_file, session)
                 continue
-            # inspect_partition only shows designed graph nodes, so it stays allowed after the quota (S5-B).
-            if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id not in {"design.propose_delta", "design.inspect_partition"}:
+            # inspect_partition only shows designed graph nodes, so it stays allowed after the quota (S5-B). UI/UX guidance
+            # has its own two-attempt lanes and is not counted; a read of a target the delta gate asked for stays allowed.
+            requested_read_paths = _requested_read_paths(tool_id, arguments)
+            required_target_read = bool(requested_read_paths) and set(requested_read_paths) <= set(
+                _strings(session.get("required_target_reads"))
+            )
+            if (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit and tool_id not in {"design.propose_delta", "design.inspect_partition", "design.report_blocker", "uiux.search_guidance"} and not required_target_read:
                 self._invalid_action(
                     session,
                     session_file,
@@ -1594,6 +1645,11 @@ class DesignerToolLoopExecutor:
                 _write_json_atomic(session_file, session)
                 continue
             try:
+                if tool_id == "design.report_blocker" and not source_refs and not any(
+                    item.get("tool_id") in {"repo.read", "repo.read_batch", "codegraph.query"}
+                    for item in _prompt_observations(session, repair_task=repair_task, active_component_id=active_component_id)
+                ):
+                    raise HarnessError("designer_tool_input_invalid", "Investigate the active source or CodeGraph before reporting an evidence blocker.", run_id=run_id)
                 if tool_id == "design.propose_delta" and active_partition is not None:
                     arguments = _materialize_delta_wiring(
                         arguments=arguments,
@@ -1622,6 +1678,14 @@ class DesignerToolLoopExecutor:
                         landscape=landscape,
                         run_id=run_id,
                     )
+                if tool_id == "design.propose_delta" and active_partition is not None and repair_task is None:
+                    _reject_discontinuous_completed_scenario(
+                        arguments,
+                        registry=registry,
+                        requirement_model=requirement_model,
+                        landscape=landscape,
+                        run_id=run_id,
+                    )
                 self._execute_tool_action(
                     run_id=run_id,
                     tool_id=tool_id,
@@ -1636,6 +1700,14 @@ class DesignerToolLoopExecutor:
                     fingerprint_arguments=designer_arguments,
                 )
                 _update_designer_exchange(exchange_path, {"status": "succeeded"})
+                if tool_id == "design.report_blocker":
+                    session["evidence_blocker"] = {**_dict(arguments), "component_id": active_component_id}
+                    _write_json_atomic(session_file, session)
+                    raise HarnessError(
+                        "design_evidence_insufficient",
+                        f"Cannot verify {_dict(arguments).get('target_ref')}: {_dict(arguments).get('missing_facts')}. {_dict(arguments).get('reason')}",
+                        run_id=run_id,
+                    )
                 if tool_id == "design.propose_delta" and repair_task is not None:
                     source = str(repair_task.get("source") or "")
                     remaining_inline = _composition_repair_findings(
@@ -1796,10 +1868,21 @@ class DesignerToolLoopExecutor:
         _write_json_atomic(session_file, session)
         output, evidence_refs = registry.execute(tool_id, arguments)
         session["last_invalid_action"] = ""
-        if tool_id == "repo.read" and evidence_refs:
-            component_id = registry.component_for_path(str(_dict(output).get("path") or ""))
-            _record_source_observations(session, component_id=component_id, refs=evidence_refs)
-        elif tool_id == "codegraph.query" and str(_dict(output).get("status") or "") == "available":
+        if tool_id in {"repo.read", "repo.read_batch"} and evidence_refs:
+            file_reads = [_dict(output)] if tool_id == "repo.read" else _dicts(_dict(output).get("results"))
+            for file_read in file_reads:
+                ref = str(file_read.get("evidence_ref") or "")
+                if not ref:
+                    continue
+                component_id = registry.component_for_path(str(file_read.get("path") or ""))
+                _record_source_observations(session, component_id=component_id, refs=[ref])
+                read_path = _normalized_path(file_read.get("path"))
+                session["source_read_paths"] = list(dict.fromkeys([*_strings(session.get("source_read_paths")), read_path]))
+                session["required_target_reads"] = [
+                    path for path in _strings(session.get("required_target_reads")) if path != read_path
+                ]
+        elif (tool_id == "codegraph.query" and str(_dict(output).get("status") or "") == "available"
+              and str(_dict(arguments).get("operation") or "explore") in {"explore", "callers", "callees", "impact"}):
             _record_source_observations(
                 session,
                 component_id=str(session.get("active_component_id") or ""),
@@ -1869,7 +1952,7 @@ class DesignerToolLoopExecutor:
         )
         if tool_id == "design.propose_delta":
             session["observation_actions_since_delta"] = 0
-        elif tool_id in OBSERVATION_TOOL_IDS and tool_id != "design.inspect_partition":
+        elif tool_id in OBSERVATION_TOOL_IDS and tool_id not in {"design.inspect_partition", "uiux.search_guidance"}:
             session["observation_actions_since_delta"] = int(session.get("observation_actions_since_delta") or 0) + 1
         cursor["pending_call"] = None
         cursor["next_action_index"] = int(cursor.get("next_action_index") or 1) + 1
@@ -1970,9 +2053,11 @@ class DesignerToolLoopExecutor:
                 "landscape.get_anchor",
                 "repo.search",
                 "repo.read",
+                "repo.read_batch",
                 "codegraph.query",
                 "uiux.search_guidance",
                 "design.inspect_partition",
+                "design.report_blocker",
                 "design.propose_delta",
                 "complete",
             ],
@@ -2068,6 +2153,14 @@ def _parse_designer_tool_action(
             **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
             "relocated_runtime_surface": relocated,
         }
+    relocated_experience = _relocate_misplaced_experience_fields(payload)
+    if relocated_experience:
+        normalization = {
+            "schema_version": "designer_output_normalization_v1",
+            "kind": normalization.get("kind") or "relocated_experience_fields",
+            **{key: value for key, value in normalization.items() if key not in {"schema_version", "kind"}},
+            "relocated_experience_fields": relocated_experience,
+        }
     arguments, external_inputs = _normalize_external_inputs(payload.get("arguments"))
     if external_inputs:
         payload["arguments"] = arguments
@@ -2078,6 +2171,32 @@ def _parse_designer_tool_action(
             "canonicalized_external_inputs": external_inputs,
         }
     return payload, normalization
+
+
+def _relocate_misplaced_experience_fields(payload: dict[str, object]) -> list[str]:
+    """Move experience-only fields written directly under surface_contract into its experience_contract.
+
+    The field names are disjoint from the surface_contract keys, so the move never changes what was written
+    (design_v12 designer-0008 closed experience_contract before visual_contract on all three UI nodes)."""
+
+    moved: list[str] = []
+    arguments = payload.get("arguments")
+    delta = arguments.get("delta") if isinstance(arguments, dict) else None
+    operations = delta.get("operations") if isinstance(delta, dict) else None
+    for operation in operations if isinstance(operations, list) else []:
+        if not isinstance(operation, dict):
+            continue
+        holder = operation.get("node") if operation.get("op") == "add_node" else operation.get("changes")
+        contract = holder.get("surface_contract") if isinstance(holder, dict) else None
+        experience = contract.get("experience_contract") if isinstance(contract, dict) else None
+        if not isinstance(experience, dict):
+            continue
+        name = str(holder.get("temp_ref") or operation.get("node_id") or "node")
+        for key in UI_EXPERIENCE_FIELDS:
+            if key in contract and key not in experience:
+                experience[key] = contract.pop(key)
+                moved.append(f"{name}.{key}")
+    return moved
 
 
 def _relocate_misplaced_runtime_surface(payload: dict[str, object]) -> list[str]:
@@ -2266,6 +2385,80 @@ def _swap_mismatched_closers(text: str, *, require_runtime_binding: bool, limit:
     return None
 
 
+def _close_open_array_items(
+    text: str, *, require_runtime_binding: bool, limit: int = 32
+) -> tuple[dict[str, object], list[int]] | None:
+    """Close an array item object left open where the next item or the array's end begins.
+
+    Real DeepSeek slip (Conduit UC4 design_v13 designer-0008): every add_node operation ended one '}' short, so
+    `,{"op":...` and the final `]` of operations arrived while the operation object was still open. The '}' goes
+    exactly where parsing stops (before that ',' or ']'), and only when closing that object leaves its array as the
+    open container; nothing is moved or rewritten, and only a complete Designer action is accepted.
+    """
+
+    candidate = text
+    inserted: list[int] = []
+    for _ in range(limit + 1):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            if _innermost_open_container(candidate, error.pos) != "{" or error.pos >= len(candidate):
+                return None
+            if candidate[error.pos] == "]":
+                at = error.pos
+            elif candidate[error.pos] == "{":
+                comma = candidate.rfind(",", 0, error.pos)
+                if comma < 0 or candidate[comma + 1:error.pos].strip():
+                    return None
+                at = comma
+            else:
+                return None
+            candidate = candidate[:at] + "}" + candidate[at:]
+            if _innermost_open_container(candidate, at + 1) != "[":
+                return None
+            inserted.append(at)
+            continue
+        if not inserted or not isinstance(payload, dict):
+            return None
+        if not _designer_action_shape(payload, require_runtime_binding=require_runtime_binding):
+            return None
+        return payload, inserted
+    return None
+
+
+def _drop_trailing_commas(
+    text: str, *, require_runtime_binding: bool, limit: int = 32
+) -> tuple[dict[str, object], list[int]] | None:
+    """Remove a ',' that directly precedes the '}' or ']' where parsing stops.
+
+    Real DeepSeek slip (Conduit UC4 design_v14 designer-0008): the last add_node operation ended with `},` before the
+    `]` of operations. Only whitespace may separate that comma from the closer; nothing else changes, and only a
+    complete Designer action is accepted.
+    """
+
+    candidate = text
+    removed: list[int] = []
+    for _ in range(limit + 1):
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError as error:
+            if error.pos >= len(candidate) or candidate[error.pos] not in "]}":
+                return None
+            before = candidate[: error.pos].rstrip()
+            if not before.endswith(","):
+                return None
+            comma = len(before) - 1
+            candidate = candidate[:comma] + candidate[comma + 1:]
+            removed.append(comma)
+            continue
+        if not removed or not isinstance(payload, dict):
+            return None
+        if not _designer_action_shape(payload, require_runtime_binding=require_runtime_binding):
+            return None
+        return payload, removed
+    return None
+
+
 def _parse_designer_tool_action_text(
     raw: str,
     *,
@@ -2322,6 +2515,22 @@ def _parse_designer_tool_action_text(
                         "schema_version": "designer_output_normalization_v1",
                         "kind": "closed_unbalanced_brackets",
                     }
+            closed_items = (
+                _close_open_array_items(text, require_runtime_binding=require_runtime_binding) if repair_closers else None
+            )
+            if closed_items is not None:
+                return closed_items[0], {
+                    "schema_version": "designer_output_normalization_v1",
+                    "kind": "closed_open_array_items",
+                    "inserted_closer_positions": closed_items[1],
+                }
+            dropped = _drop_trailing_commas(text, require_runtime_binding=require_runtime_binding) if repair_closers else None
+            if dropped is not None:
+                return dropped[0], {
+                    "schema_version": "designer_output_normalization_v1",
+                    "kind": "dropped_trailing_commas",
+                    "removed_comma_positions": dropped[1],
+                }
             raise original_error
         canonical, payload = next(iter(candidates.items()))
         return payload, {
@@ -2885,11 +3094,24 @@ def _runtime_binding_scaffold(
     component: dict[str, object],
     candidate_anchors: list[dict[str, object]],
     owner_anchors: list[dict[str, object]],
+    route_modules: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
     # A UI owner is the composition_path hop just before the target, and a business rule's owner is the code that
     # calls it; only the Designer knows either once it picks the target: a pre-filled guess (e.g. the app root)
     # contradicts that rule, so both keep placeholders.
     owner = owner_anchors[0] if owner_anchors and surface not in {"ui", "business_rule"} else {}
+    if surface == "api" and route_modules:
+        # An api route is owned by the file registering its sibling routes (whole-file anchor, empty symbol), not by
+        # the app root that mounts the router (design_v20 0011/0012 reasoned at length past a createApp prefill).
+        owner = (
+            {"anchor_id": route_modules[0].get("anchor_id"), "path": route_modules[0].get("path"), "symbol": ""}
+            if len(route_modules) == 1
+            else {
+                "anchor_id": "<anchor_id of the route_registration_modules entry whose routes this route joins>",
+                "path": "<path of that entry>",
+                "symbol": "",
+            }
+        )
     if surface == "ui":
         candidate_anchors = []
     component_id = str(component.get("component_id") or "<component_id>")
@@ -2929,7 +3151,9 @@ def _runtime_binding_scaffold(
                 }.get(surface, "<composition owner path>")
             ),
             "owner_symbol": str(
-                owner.get("symbol")
+                owner["symbol"]
+                if surface == "api" and "symbol" in owner  # whole-file route owner: empty symbol is the value
+                else owner.get("symbol")
                 or {"ui": "<symbol of that hop>", "business_rule": "<symbol of that caller>"}.get(
                     surface, "<composition owner symbol>"
                 )
@@ -2938,7 +3162,7 @@ def _runtime_binding_scaffold(
         "evidence_refs": list(
             dict.fromkeys(
                 [
-                    *([str(owner.get("anchor_id"))] if owner else []),
+                    *([str(owner.get("anchor_id"))] if owner and not str(owner.get("anchor_id")).startswith("<") else []),
                     *([str(candidate_anchors[0].get("anchor_id"))] if candidate_anchors else []),
                 ]
             )
@@ -3373,6 +3597,12 @@ def _active_partition(
                     "contract": surface_contract,
                     "candidate_anchors": candidate_anchors[:3],
                     "composition_owner_candidates": owner_anchors[:3],
+                    **(
+                        {"route_registration_modules": modules}
+                        if surface == "api"
+                        and (modules := _route_registration_modules(component_id=component_id, landscape=landscape))
+                        else {}
+                    ),
                     "shared_target_candidates": _shared_target_candidates(
                         scenario=scenario,
                         requirement_model=requirement_model,
@@ -3411,6 +3641,7 @@ def _active_partition(
                         component=component,
                         candidate_anchors=_dicts(item.get("candidate_anchors")),
                         owner_anchors=_dicts(item.get("composition_owner_candidates")),
+                        route_modules=_dicts(item.get("route_registration_modules")),
                     ),
                 },
             }
@@ -4803,6 +5034,20 @@ def _validate_repair_delta_scope(
                     run_id=run_id,
                 )
             continue
+        if op == "order_edges":
+            # Reordering moves edges as remove + re-add would, so a repair may only order edges it could remove.
+            outside = sorted(
+                ref
+                for ref in _strings(operation.get("edges"))
+                if ref.startswith("VDE-") and ref not in removable_edges
+            )
+            if outside:
+                raise HarnessError(
+                    "designer_delta_invalid",
+                    f"Repair cannot reorder edges outside write_scope: {outside}.",
+                    run_id=run_id,
+                )
+            continue
         if op == "add_edge":
             edge = _dict(operation.get("edge"))
             scenario_id = str(edge.get("scenario_id") or partition.get("scenario_id") or "")
@@ -5043,6 +5288,30 @@ def _composition_owner_candidates(
         return on_chain, incidental, composition_hint, kind_rank, str(item.get("anchor_id") or "")
 
     return sorted(anchors, key=rank)
+
+
+def _route_registration_modules(*, component_id: str, landscape: dict[str, object]) -> list[dict[str, object]]:
+    """The files that register the component's api routes, each with its file anchor and the routes it registers.
+
+    A new route is registered next to its sibling routes, not by the app root that mounts their router; without these
+    the only offered api owner was the app root (design_v20 designer-0008 mixed that root's anchor with the router
+    path it had read), and Phase 3 plans the owner as code to change."""
+
+    anchors = [item for item in _dicts(landscape.get("anchors")) if str(item.get("component_id") or "") == component_id]
+    file_anchors = {
+        str(item.get("path") or ""): str(item.get("anchor_id") or "")
+        for item in anchors
+        if str(item.get("kind") or "") == "source_file" and str(item.get("anchor_id") or "")
+    }
+    routes: dict[str, list[str]] = {}
+    for item in anchors:
+        path = str(item.get("path") or "")
+        if str(item.get("kind") or "") == "api_route" and path in file_anchors:
+            routes.setdefault(path, []).append(str(item.get("symbol") or ""))
+    return [
+        {"anchor_id": file_anchors[path], "path": path, "routes": sorted(route for route in routes[path] if route)}
+        for path in sorted(routes)
+    ]
 
 
 def _anchor_ref(anchor: dict[str, object]) -> str:
@@ -5389,24 +5658,147 @@ def _append_journal(path: Path, entry: dict[str, object]) -> None:
     _replace_retrying(temporary, path)
 
 
+DESIGN_NOTE_LIMIT = 12  # the partition action budget; a partition never trims, so its notes stay a prompt prefix
+DESIGN_NOTE_CHARS = 600
+
+
+def _record_design_note(session: dict[str, object], action: dict[str, object], *, work_key: str) -> None:
+    """Keep the Designer's own action summary for the work item, like the Developer's action ledger summaries."""
+
+    summary = " ".join(str(action.get("summary") or "").split())[:DESIGN_NOTE_CHARS]
+    if not summary or not work_key:
+        return
+    notes = _dict(session.get("design_notes"))
+    entries = [*_dicts(notes.get(work_key)), {"action": str(action.get("action") or ""), "summary": summary}]
+    notes[work_key] = entries[-DESIGN_NOTE_LIMIT:]
+    session["design_notes"] = notes
+
+
+def _design_notes(session: dict[str, object], *, work_key: str) -> list[dict[str, object]]:
+    return _dicts(_dict(session.get("design_notes")).get(work_key))
+
+
+def _normalized_path(value: object) -> str:
+    return str(value or "").strip().replace("\\", "/")
+
+
+def _unread_existing_targets(
+    arguments: object,
+    *,
+    graph: dict[str, object],
+    read_paths: set[str],
+) -> list[str]:
+    """Files a delta designs from that no repo.read of the session returned: the runtime target of a
+    reuse/modify/no_change node and the AS-IS hop that provides each declared required input."""
+
+    nodes = {str(node.get("id") or ""): node for node in _dicts(graph.get("nodes"))}
+    context = _dict(_dict(graph.get("snapshot_binding")).get("ui_repo_context"))
+    as_is_refs = {str(hop.get("ref") or "") for hop in _dicts(context.get("composition_chain"))} | set(
+        _dict(context.get("components"))
+    )
+    paths: list[str] = []
+    for operation in _dicts(_dict(_dict(arguments).get("delta")).get("operations")):
+        if operation.get("op") == "add_node":
+            node = _dict(operation.get("node"))
+            touched = set(node)
+        elif operation.get("op") == "update_node":
+            changes = _dict(operation.get("changes"))
+            node = {**nodes.get(str(operation.get("node_id") or ""), {}), **changes}
+            touched = set(changes)
+        else:
+            continue
+        if touched & {"disposition", "runtime_binding"} and str(node.get("disposition") or "") in {
+            "reuse", "modify", "no_change"
+        }:
+            paths.append(str(_dict(_dict(node.get("runtime_binding")).get("target")).get("path") or ""))
+        if "surface_contract" in touched:
+            runtime_surface = _dict(_dict(node.get("surface_contract")).get("runtime_surface"))
+            for item in _dicts(runtime_surface.get("required_inputs")):
+                provided_by = str(item.get("provided_by") or "")
+                if provided_by in as_is_refs:
+                    paths.append(provided_by.split("#", 1)[0])
+    return [
+        path
+        for path in dict.fromkeys(_normalized_path(item) for item in paths)
+        if path and path not in read_paths
+    ]
+
+
 def _observation_allowance(limit: int, *, actions_remaining: int) -> int:
     """Observations allowed before the delta, always keeping one action of the real scope budget for the delta."""
 
     return max(0, min(limit, actions_remaining - 1))
 
 
-def _designer_llm_profile_name(
+def _reject_discontinuous_completed_scenario(
+    arguments: object,
     *,
-    repair_task: dict[str, object] | None,
-    source_observation_refs: list[str],
-    observations_since_delta: int,
-    observation_limit: int,
-) -> str:
-    if repair_task is not None:
-        return "designer_repair"
-    if source_observation_refs or observations_since_delta >= observation_limit:
-        return "designer_delta"
-    return "designer_investigation"
+    registry: DesignerToolRegistry,
+    requirement_model: dict[str, object],
+    landscape: dict[str, object],
+    run_id: str,
+) -> None:
+    """The delta that completes a scenario must leave its ordered behavior as one continuous path.
+
+    Sequence continuity was checked only for the whole bundle, so design_v19 designer-0009 completed SC-1 with
+    layer-by-layer orders and the defect would have surfaced as a repair after every other scenario."""
+
+    delta = _dict(_dict(arguments).get("delta"))
+    scenario_id = str(_dict(delta.get("partition")).get("scenario_id") or "")
+    if not scenario_id:
+        return
+    candidate, temp_refs = apply_designer_delta(
+        registry.graph,
+        delta,
+        valid_evidence_refs=registry.valid_evidence_refs,
+        valid_guidance_refs=registry.valid_guidance_refs,
+    )
+    following = _active_partition(requirement_model=requirement_model, landscape=landscape, graph=candidate)
+    if following is not None and str(_dict(following.get("partition")).get("scenario_id") or "") == scenario_id:
+        return
+    nodes = _dicts(candidate.get("nodes"))
+    findings = [
+        item
+        for item in _sequence_behavior_findings(nodes=nodes, edges=_dicts(candidate.get("edges")))
+        if str(item.get("subject_ref") or "") == scenario_id
+    ]
+    if not findings:
+        return
+    written = _delta_written_names(registry.graph, candidate, temp_refs)
+    existing_edges = {str(item.get("id") or "") for item in _dicts(registry.graph.get("edges"))}
+    node_names = {str(item.get("id") or ""): str(item.get("name") or "")[:48] for item in nodes}
+
+    def participant(node_id: str) -> str:
+        return written.get(node_id) or f"{node_id} ({node_names.get(node_id, '')})"
+
+    lines = [
+        f"{item.get('order')}. {item.get('id') if str(item.get('id') or '') in existing_edges else 'new edge'} "
+        f"{item.get('kind')}: {participant(str(item.get('from') or ''))} -> {participant(str(item.get('to') or ''))}"
+        + (" [terminal]" if item.get("terminal") else "")
+        for item in sorted(_dicts(candidate.get("edges")), key=lambda edge: int(edge.get("order") or 0))
+        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
+    ]
+    raise HarnessError(
+        "designer_delta_invalid",
+        f"This delta completes scenario {scenario_id}, but its ordered behavior edges do not form one continuous path: "
+        + " ".join(str(item.get("message") or "") for item in findings)
+        + " Ordered by order, each calls/returns/reads/writes edge must start at the participant the previous edge "
+        "reached, and the single terminal=true edge must be last. Current order: "
+        + "; ".join(lines)
+        + f". Resubmit the delta with a temp_ref on each new edge and one order_edges operation listing every behavior "
+        f"edge of {scenario_id} (VDE-* ids of existing edges, temp_refs of new ones) in behavioral order, with terminal "
+        "naming the last one. Where the user moves from one screen to the next, the path needs a calls edge from the "
+        "ui node the user leaves to the ui node the user opens.",
+        run_id=run_id,
+    )
+
+
+def _requested_read_paths(tool_id: str, arguments: object) -> list[str]:
+    if tool_id == "repo.read":
+        return [_normalized_path(_dict(arguments).get("path"))]
+    if tool_id == "repo.read_batch":
+        return [_normalized_path(_dict(request).get("path")) for request in _dicts(_dict(arguments).get("requests"))]
+    return []
 
 
 def _source_observation_refs(session: dict[str, object], component_id: str) -> list[str]:

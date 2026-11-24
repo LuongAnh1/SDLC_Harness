@@ -185,9 +185,20 @@ try {
   const targetRequire = createRequire(path.join(process.cwd(), "package.json"));
   ts = targetRequire("typescript");
 } catch (error) {
-  fail(`Target TypeScript package is unavailable: ${error.code || error.message}`);
+  // Design runs before dependency installation in a worktree. Only the Harness-bound canonical repo
+  // may supply its compiler; source paths and cwd remain the run's worktree.
+  if (request.include_ui_facts === true && request.typescript_package_root) {
+    try {
+      ts = createRequire(path.join(request.typescript_package_root, "package.json"))("typescript");
+    } catch (fallbackError) {
+      fail(`Target TypeScript package is unavailable: ${fallbackError.code || fallbackError.message}`);
+    }
+  } else fail(`Target TypeScript package is unavailable: ${error.code || error.message}`);
 }
 
+const uiFacts = request.include_ui_facts === true
+  ? require("./typescript_ui_facts.cjs")(ts, (request.files || []).map(canonicalRelativePath))
+  : {};
 const files = [];
 for (const rawPath of request.files || []) {
   const relativePath = canonicalRelativePath(rawPath);
@@ -214,6 +225,7 @@ for (const rawPath of request.files || []) {
       length: diagnostic.length ?? null,
     })),
     symbols: collectSymbols(ts, sourceFile),
+    ...(request.include_ui_facts === true ? { ui_facts: uiFacts[relativePath] } : {}),
     ...(request.include_module_facts === true ? collectModuleFacts(ts, sourceFile) : {}),
   });
 }

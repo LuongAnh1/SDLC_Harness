@@ -5,7 +5,9 @@ from __future__ import annotations
 from ...core.coerce import dict_copies as _dicts
 
 
-OBSERVATION_ACTION_LIMIT = 3
+# 3 made the SC-1|api Designer drop the drafts-list endpoint for lack of reads, since every reuse/modify target and
+# input provider must now be read (design_v14 designer-0009); reads run at low effort, so six cost little (owner 2026-11-24).
+OBSERVATION_ACTION_LIMIT = 6
 
 
 def _feature_guidance_satisfied(graph: dict[str, object]) -> bool:
@@ -49,7 +51,8 @@ def _uiux_guidance_status(
     source_inspected: bool,
     delta_required: bool = False,
 ) -> dict[str, object]:
-    read_actions = [{"action": "repo.read"}, {"action": "codegraph.query"}]
+    read_actions = [{"action": "repo.read_batch"}, {"action": "repo.read"}, {"action": "codegraph.query"}]
+    propose = {"action": "design.propose_delta"}
 
     def lane(mode: str, selector: str) -> dict[str, object]:
         attempts = [
@@ -102,10 +105,10 @@ def _uiux_guidance_status(
         allowed_next = [
             {"action": "uiux.search_guidance", "arguments": {"mode": "stack", "stack": "react"}},
             *read_actions,
-            {"action": "design.propose_delta"},
+            propose,
         ]
     else:
-        allowed_next = [*read_actions, {"action": "design.propose_delta"}]
+        allowed_next = [*read_actions, propose]
     return {
         "source_inspected": source_inspected,
         "domain": domain,

@@ -1472,6 +1472,7 @@ def _vertical_snapshot_binding(
         "designer_ui_contract_version": UI_EXPERIENCE_CONTRACT_V2,
         "ui_repo_context": build_ui_repo_context(
             target_path=Path(str(getattr(workspace, "worktree_path", ""))),
+            typescript_package_root=Path(str(workspace.canonical_repo)) if getattr(workspace, "canonical_repo", "") else None,
             landscape=landscape,
             project_profile_id=str(profile.get("project_profile_id") or "typescript_fullstack_v1"),
             verification_policy_version=str(profile.get("verification_policy_version") or ""),

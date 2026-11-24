@@ -22,16 +22,10 @@ PHASE1_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
     "clarification_repair": {"label": "Clarification repair", "effort": "max", "max_tokens": 65536, "timeout": 300},
 }
 PHASE2_LLM_PROFILE_DEFAULTS: dict[str, dict[str, object]] = {
-    "designer_investigation": {
-        "label": "Designer investigation",
-        "effort": "low",
-        "max_tokens": 8192,
-        "timeout": 300,
-    },
     "designer_delta": {
         "label": "Designer graph delta",
         "effort": "high",
-        "max_tokens": 32768,
+        "max_tokens": 65536,
         "timeout": 300,
     },
     "designer_repair": {

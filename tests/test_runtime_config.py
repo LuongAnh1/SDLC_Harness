@@ -192,16 +192,7 @@ class RuntimeConfigTests(unittest.TestCase):
             },
         )
 
-        investigation = settings.phase2_llm_profiles["designer_investigation"]
-        self.assertEqual(
-            (
-                investigation.model,
-                investigation.thinking_effort,
-                investigation.max_tokens,
-                investigation.timeout_seconds,
-            ),
-            ("global-model", "low", 8192, 300),
-        )
+        self.assertNotIn("designer_investigation", settings.phase2_llm_profiles)
         delta = settings.phase2_llm_profiles["designer_delta"]
         self.assertEqual(
             (delta.model, delta.thinking_effort, delta.max_tokens, delta.timeout_seconds),

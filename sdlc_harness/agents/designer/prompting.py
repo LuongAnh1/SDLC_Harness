@@ -8,6 +8,7 @@ import json
 from ...core.coerce import dict_copies as _dicts
 from .graph import DELTA_VERSION, GRAPH_VERSION, SURFACE_CONTRACT_VERSION, is_composition_wiring
 from .projections import _merged_runtime_states
+from .tools import MAX_BATCH_READS
 from .ui_context import required_props
 from .uiux import RUNTIME_SURFACE_BINDING_VERSION, UI_EXPERIENCE_CONTRACT_V2
 from .facts import (
@@ -214,16 +215,37 @@ def _repair_source_inspection_prompt(
     }
     return (
         "SOURCE INSPECTION ONLY. Do not analyze the finding and do not propose a delta yet. Return exactly one "
-        "repo.read action for one existing suggested_source_path. If no suggested path exists, return one "
+        f"repo.read_batch action reading the existing suggested_source_paths (at most {MAX_BATCH_READS}; with one "
+        "path, repo.read is the same). If no suggested path exists, return one "
         "codegraph.query action scoped to the supplied component/profile roots. After a successful source inspection, "
-        "the Harness will provide the complete unsummarized Validator findings, exact graph context and write scope.\n\n"
-        "Allowed actions now: repo.read(path,start_line?,end_line?); "
+        "the Harness will provide the complete unsummarized Validator findings, exact graph context and write scope. "
+        "If a prior source/CodeGraph attempt could not establish a required binding and no remaining read can resolve it, "
+        "design.report_blocker(target_ref,missing_facts,reason) may stop with a diagnostic and no checkpoint.\n\n"
+        f"Allowed actions now: repo.read_batch(requests: 1-{MAX_BATCH_READS} objects {{path,start_line?,end_line?}}); "
+        "repo.read(path,start_line?,end_line?); "
         "codegraph.query(operation=explore|symbols|callers|callees|files,query?,symbol?,limit?,depth?,filter?,pattern?).\n"
         "Return exactly one of these JSON shapes, with no type/json_object wrapper and no extra text:\n"
+        '{"action":"repo.read_batch","arguments":{"requests":[{"path":"<exact existing suggested_source_path>"},'
+        '{"path":"<another one>"}]}}\n'
         '{"action":"repo.read","arguments":{"path":"<exact existing suggested_source_path>"}}\n'
         '{"action":"codegraph.query","arguments":{"operation":"explore","query":"<component-scoped query>"}}\n\n'
         + json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     )
+
+
+def _construction_next_actions(
+    *, source_inspected: bool, must_propose: bool
+) -> list[str]:
+    """The actions a construction call may take now, mirroring the loop's gates."""
+
+    if not source_inspected:
+        return ["repo.read_batch", "repo.read", "codegraph.query"]
+    if must_propose:
+        return ["design.propose_delta", "design.inspect_partition", "design.report_blocker"]
+    return [
+        "repo.read_batch", "repo.read", "repo.search", "codegraph.query", "landscape.search", "landscape.get_anchor",
+        "design.inspect_partition", "design.propose_delta", "design.report_blocker",
+    ]
 
 
 def _designer_prompt(
@@ -243,6 +265,7 @@ def _designer_prompt(
     active_guidance: list[dict[str, object]] | None = None,
     source_inspected: bool = False,
     actions_remaining: int | None = None,
+    design_notes: list[dict[str, object]] | None = None,
 ) -> str:
     if repair_task is not None and not source_inspected:
         return _repair_source_inspection_prompt(
@@ -309,10 +332,13 @@ def _designer_prompt(
             "limit_before_delta": observation_limit,
             "used_since_delta": observations_since_delta,
             "must_propose_delta_now": (active_partition is not None or repair_task is not None) and observations_since_delta >= observation_limit,
+            # Computed here so the Designer never re-derives it from three counters (design_v13: 11-20 times a call).
+            "counted_observations_left": max(0, observation_limit - observations_since_delta),
             "source_inspected": source_inspected,
             **({"actions_remaining_including_delta": actions_remaining} if actions_remaining is not None else {}),
         },
         "recent_observations": observations,
+        "design_notes": design_notes or [],
         "active_uiux_guidance": active_guidance or [],
         "uiux_mode": "enforce",
         "repair_feedback": (
@@ -328,7 +354,12 @@ def _designer_prompt(
         payload["requirement"] = requirement_model
     correction = (
         "Your previous action was rejected. Fix this exact error before doing anything else: "
-        f"{last_invalid_action} Do not resend the rejected delta unchanged.\n\n"
+        f"{last_invalid_action} When recent_observations contains the rejected action, "
+        "change only the fields or operations needed to fix that rejection; preserve unrelated nodes, edges, "
+        "mappings and design decisions. Reconsider topology only if the rejection requires it. A JSON parse "
+        "failure may supply only a diagnostic, not the decoded action: do not assume an unavailable action "
+        "can be patched or that earlier unsubmitted design choices are recorded. Return the complete corrected action, "
+        "not a partial patch. Do not resend the rejected delta unchanged.\n\n"
         if last_invalid_action
         else ""
     )
@@ -359,6 +390,16 @@ def _designer_prompt(
         if ui_guidance_required and not guidance_reused
         else {}
     )
+    payload["evidence_blocker_policy"] = {
+        "action": "design.report_blocker", "requires": "at least one active source/CodeGraph investigation attempt",
+        "effect": "stop with design_evidence_insufficient; no checkpoint or extra budget",
+    }
+    if active_partition is not None and repair_task is None and not uiux_status:
+        # A UI partition gets its menu from the UI/UX tool state; every other construction partition gets one here.
+        payload["observation_policy"]["allowed_next_actions"] = _construction_next_actions(
+            source_inspected=source_inspected,
+            must_propose=observations_since_delta >= observation_limit,
+        )
     payload["uiux_guidance_status"] = uiux_status
     if ui_guidance_required:
         payload["ui_runtime_context"] = _ui_runtime_prompt_context(
@@ -376,12 +417,25 @@ def _designer_prompt(
         "owner_path#owner_symbol must equal the hop just before the target; when that hop is an AS-IS component of "
         "ui_runtime_context.composition_chain, its ref (<repo path>#<symbol>) is a valid owner_ref, so no RLA lookup is "
         "needed. Nodes on the same screen share one screen_id; different screens use different screen_ids. "
-        "required_inputs lists every runtime input that must be handed to the screen before it is usable (records to "
-        "show or select, a session or auth value passed in, data loaded from another use case), including every required prop of an AS-IS "
-        "component a screen node modifies or reuses. Data the target component obtains by itself (a record it fetches "
-        "through one of ui_runtime_context.data_clients, or state it reads from a store) is not a required input: leave "
-        "it out of required_inputs and model its loading, ready and error states in runtime_states and transitions; "
-        "never route it through a hop that does not hold and pass it. source=existing_runtime when a provider in ui_runtime_context already supplies it; "
+        "required_inputs is a required key; use [] only when the target receives no value from a hop before it on "
+        "composition_path. "
+        "props_status=unknown or required_props=null means unverified, never zero required props: investigate the source "
+        "within the existing budget and report a blocker if the binding cannot be established. auth.status=unverified_hint "
+        "is only a navigation hint from identifiers, not proof of an authentication provider or missing authentication. "
+        "Decide required_inputs by how values enter the target, before classifying their source. Data the target "
+        "component obtains by itself (a record it fetches through one of ui_runtime_context.data_clients, or state "
+        "it reads from a store) is not a required input: leave it out of required_inputs and model its loading, "
+        "ready and error states in runtime_states and transitions; never route it through a hop that does not hold "
+        "and pass it. required_inputs lists every value the target receives from a hop before it on composition_path "
+        "(records to show or select, a session or auth value passed in, data loaded from another use case), "
+        "including every required prop of the AS-IS target component a node modifies or reuses: a required prop is a "
+        "required input even when the parent hop that passes it creates the value itself (for example a submit "
+        "handler the page defines), and its provided_by is that parent hop. A precondition "
+        "does not by itself turn store-read or self-fetched data into a passed input. For each genuinely passed "
+        "input, use source=existing_runtime when a provider in ui_runtime_context already supplies it, and then binding "
+        "is that provider's ref (<repo path>#<symbol> of the composition_chain hop, component or data client), which "
+        "for a value a page creates itself (such as its submit handler) is the page component's ref, never the name "
+        "of the function or variable; "
         "new_boundary when this Design adds the provider (binding is that node's VDN-* id); external_use_case when the "
         "approved Requirement says the data comes from another use case, citing the precondition or flow-step id from "
         "ui_runtime_context.dependency_refs whose text states that dependency, and then runnable_status=externally_blocked; "
@@ -389,14 +443,21 @@ def _designer_prompt(
         "authenticated session passed in) is likewise external_use_case citing that PRE-* id unless ui_runtime_context already "
         "has its provider; demo_fixture only with an accepted D-* decision listed in dependency_refs and "
         "runnable_status=fixture_required; otherwise runnable_status=bound. provided_by is the hop on composition_path "
-        "that supplies the input. When a new input must flow down to the screen, declare it only on the screen node "
-        "with provided_by set to the topmost hop that receives it. The Harness itself adds to your delta every "
-        "composition_wiring modify node and every nonterminal calls edge between consecutive AS-IS wiring hops "
-        "from provided_by down to the screen "
-        "(active_partition.harness_wiring_operations shows them, with <input names> filled from your required_inputs; "
-        "with no required_inputs it adds nothing); "
+        "that supplies the input. A hop that already passes the input to its child in the AS-IS code "
+        "(ui_runtime_context.composition_chain passes_props) needs no change, and the Harness adds nothing for it. "
+        "When an input must newly flow down to the screen, declare it only on the screen node "
+        "with provided_by set to the topmost hop that receives it. The Harness itself then adds to your delta a "
+        "composition_wiring modify node, and the nonterminal calls edge, for each AS-IS hop from provided_by down to "
+        "the screen that does not pass the input yet, but only for hops that active_partition.harness_wiring_operations "
+        "lists (with <input names> filled from your required_inputs; with no required_inputs it adds nothing); it "
+        "rejects the delta when any other hop would need wiring. These are conditional templates, not applied graph "
+        "operations and not a requirement to invent inputs; "
         "do not write those wiring nodes or their internal edges yourself. When it adds wiring, add only the semantic "
-        "edge from the final wiring hop to the screen, referencing that hop's temp_ref. An "
+        "edge from the final wiring hop to the screen, referencing that hop's temp_ref. A wiring node only forwards a "
+        "value; it never creates one. So when a screen needs a new value or handler that its page must create (for "
+        "example a second submit action), target that page with the node whose contract describes the new behavior "
+        "instead of the shared component the page renders; target the shared component only when the change lies "
+        "entirely inside it and its parent already passes every value it needs. An "
         "optional prop with an empty default never counts as a bound input; never invent a dependency that the "
         "Requirement does not state. "
         if ui_guidance_required
@@ -407,7 +468,9 @@ def _designer_prompt(
         f"{json.dumps(uiux_status, ensure_ascii=True, separators=(',', ':'))}\n"
         "When required_next_action is present, match its action, mode, and fixed selector exactly; choose only the "
         "query text yourself. When it is null, choose only from allowed_next_actions. A domain query asks for the "
-        "observable UX outcome; a stack query asks how React implements that outcome.\n\n"
+        "observable UX outcome; a stack query asks how React implements that outcome. Evidence-blocker exception: "
+        "after an active source/CodeGraph attempt, design.report_blocker may replace this next action when a required "
+        "binding fact remains unverifiable; it stops without a Design checkpoint.\n\n"
         if uiux_status
         else ""
     )
@@ -423,8 +486,10 @@ def _designer_prompt(
             "to the next mode shown in CURRENT UI/UX TOOL STATE. "
         )
         + f"Every UI node must include {experience_version} under "
-        "surface_contract.experience_contract with component_structure, feedback[{trigger,response}], accessibility, "
-        "responsive, focus_flow, and the successful uiux guidance_refs. Guidance informs UX only; Requirement and "
+        "surface_contract.experience_contract, and that one object holds all of these fields: screen, "
+        "component_structure, feedback[{trigger,response}], accessibility, responsive, focus_flow, focus_policies, "
+        "runtime_states, visual_contract, repo_evidence_refs and the successful uiux guidance_refs; none of them goes "
+        "directly under surface_contract. Guidance informs UX only; Requirement and "
         "repository source remain authoritative. "
         + (
             "Design the whole screen, not only this partition: reuse the screen-wide fields of feature_ux_decisions "
@@ -437,7 +502,8 @@ def _designer_prompt(
             "screen shows consistent with them (for example an action that stays unavailable while a request is "
             "pending). This surface's own work is set by allowed_requirement_refs. Mark a runtime state owned by another scenario as {not_applicable:true,reason:"
             "'owned by <scenario id>'} and never add another scenario's behavior (for example its cancel or success "
-            "outcome) to this node. Also fill screen{screen_id,purpose,entry_condition}; runtime_states for loading, "
+            "outcome) to this node. Inside experience_contract also fill screen{screen_id,purpose,entry_condition}; "
+            "runtime_states for loading, "
             "ready, empty, error and success, each as {presentation,trigger} or {not_applicable:true,reason}; "
             "visual_contract with hierarchy, "
             + "layout as {region,layer,content} items where layer is 'page' for regions in the page flow and "
@@ -451,7 +517,10 @@ def _designer_prompt(
             "announcement{target,moves_focus}} with one deterministic priority and never targeting the removed "
             "element. primary_target/fallback_target own keyboard focus; announcement.target owns the announced "
             "region. A status/live-region announcement never receives keyboard focus: set announcement.moves_focus=false "
-            "and restore focus to a stable surviving primary_target; and repo_evidence_refs from ui_runtime_context evidence. "
+            "and restore focus to a stable surviving primary_target. focus_policies may be [] when no focus policy "
+            "applies. Each policy requires event, boolean source_removed, primary_target, selection_strategy and "
+            "announcement{target,boolean moves_focus}. removed_element and fallback_target are required only when "
+            "source_removed=true; otherwise they may be omitted. Include repo_evidence_refs from ui_runtime_context evidence. "
         )
         + "Never add cancel/close behavior from another scenario; keep each alternative or exception in its own projection. "
         if ui_guidance_required
@@ -460,7 +529,10 @@ def _designer_prompt(
     construction_instruction = (
         "Use active_partition only to build missing surfaces. active_requirement_slice is the authoritative behavior "
         "source for this construction step: contracts, responses, outcomes, and edges may only implement IDs listed "
-        "in allowed_requirement_refs. active_requirement_slice.cross_cutting_conditions are approved use-case facts, "
+        "in allowed_requirement_refs. That list holds every scenario item this surface takes part in, which can include "
+        "items whose behavior another surface of the scenario implements (for example demo data the data surface "
+        "seeds): a node cites only the ids its own behavior implements, and the other surface's nodes carry the rest. "
+        "active_requirement_slice.cross_cutting_conditions are approved use-case facts, "
         "not behavior: account for each applicable condition in the Design and cite its id without inventing how the "
         "Requirement is implemented. "
         "graph holds the active scenario in full and graph.index lists every other designed node as one row; before "
@@ -468,13 +540,27 @@ def _designer_prompt(
         "design.inspect_partition(scenario_id?,component_id?,node_ids?) to see it in full. "
         "requirement_context.scenario_index is navigation-only; never copy behavior from "
         "a sibling scenario into the active projection. A runtime target may be shared by later projections, but this "
-        "projection must declare only the active scenario's behavior. delta_scaffold is the minimum operation skeleton "
-        "(one node per surface; add a node for every further operation or screen the scenario names), "
-        "not a node-only example, and it does not contain the ordered behavior path: add the calls/returns edges that "
-        "connect this projection to nodes of the same scenario already in the graph or in this delta, keeping exactly "
-        "one terminal edge last. Edge order follows add_edge operation order: to place new edges before an edge already "
-        "in the graph (for example the existing terminal edge, even one added by an earlier partition), remove that edge "
-        "with exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"} and add it again after the new edges. "
+        "projection must declare only the active scenario's behavior. delta_scaffold supplies node shapes and the "
+        "partition envelope, not a predetermined architecture or node count: add a node for every further operation "
+        "or screen the scenario names. Its sample node is a prototype for that surface, not a required extra node "
+        "alongside the concrete nodes you design. It does not contain the ordered behavior path. "
+        "Partition completion and scenario completion are different: this delta covers the active missing "
+        "surfaces and adds interactions whose endpoints already exist in the graph or this delta. The continuous "
+        "path and exactly one final terminal edge are obligations of the completed scenario, not of every "
+        "intermediate partition. A partition delta may have no behavior edges when their counterpart endpoints "
+        "are all left to later partitions; UI transitions still describe its required observable behavior. "
+        "Do not invent navigation or a terminal edge merely to make an intermediate delta look complete. "
+        "Add the calls/returns edges that can already connect this projection to the same scenario's nodes. "
+        "New edges are ordered after the scenario's existing edges, in add_edge operation order. To place them "
+        "between existing edges or move the terminal marker, give each new edge a temp_ref ('tmp:...') and add one "
+        "{\"op\":\"order_edges\",\"scenario_id\":\"SC-1\",\"edges\":[...],\"terminal\":\"...\"}: edges lists every "
+        "calls/returns/reads/writes edge of the scenario exactly once (VDE-* ids of existing edges, temp_refs of new "
+        "ones) in behavioral order, and the optional terminal names the last of them, which becomes the only "
+        "terminal=true edge. The Harness renumbers the order; never remove and re-add an edge only to move it. "
+        "The delta that designs a scenario's last required partition is rejected unless, ordered by order, each "
+        "behavior edge starts at the participant the previous one reached and the single terminal edge is last; where "
+        "the user moves from one screen to the next, that path needs a calls edge from the ui node the user leaves to "
+        "the ui node the user opens. "
         "Every edge endpoint must be an existing VDN-* id or a temp_ref added in this same delta; "
         "when the counterpart surface (for example the API a UI calls) is not designed yet, leave that edge to its later "
         "partition instead of inventing an endpoint. terminal=true belongs only on the edge that reaches the "
@@ -483,10 +569,14 @@ def _designer_prompt(
         "every edge of this delta terminal=false and let the later partition add the terminal edge. "
         "A scenario's business_rule belongs to the component whose code makes that decision at run time; "
         "surface_work[].placement or active_partition.placeable_surfaces shows the Harness routing guess, which comes "
-        "from the scenario's surface list and is not a decision. When this scenario sends a request the server must "
-        "accept or reject (for example an edit or delete request), its rule runs in the server component. When this "
-        "scenario only reads and another component decides what to show (for example the UI decides which actions to "
-        "show), add {\"op\":\"place_surface\",\"surface\":\"business_rule\",\"component_id\":\"<that "
+        "from the scenario's surface list and is not a decision. When this scenario sends any request the server must "
+        "accept or reject, or that creates or changes stored data (for example a save, publish, edit or delete "
+        "request), its rule runs in the server component, even when the UI also chooses which lists, labels or actions "
+        "to show; then a UI partition adds no place_surface and the server partition designs the rule. Showing or "
+        "hiding lists, labels or actions is part of the ui node's contract, never by itself a reason to place the "
+        "business_rule in the UI. Only when this scenario sends no such request and another component decides what to "
+        "show (for example the UI hides actions the reader may not use on a page it only reads), "
+        "add {\"op\":\"place_surface\",\"surface\":\"business_rule\",\"component_id\":\"<that "
         "component>\",\"reason\":\"<where the decision runs>\",\"evidence_refs\":[\"<the ref of that code>\"]} instead of "
         "inventing a call: placed in this delta's component, this delta also adds and covers the business_rule node; "
         "placed elsewhere, drop business_rule from this delta's set_partition_coverage and completion_claims, add no "
@@ -545,22 +635,25 @@ def _designer_prompt(
         "do not invent an API or try to mutate a node's component identity. The next construction partition will place "
         "the still-required surface in a runtime-feasible component. "
         "For other repairs, preserve required_coverage and add or update a node for every listed surface. In repair mode, assign every edge "
-        "to the scenario named by the finding, even when an endpoint is reused from another scenario partition. Edge "
-        "order is assigned from add_edge operation order. To change an existing scenario order, remove every "
-        "obsolete/current edge first using exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"}; never put an edge "
-        "object inside remove_edge. Then add the corrected edges in exact behavioral order. Use the IDs in "
-        "active_repair_task.edges_in_current_order. "
+        "to the scenario named by the finding, even when an endpoint is reused from another scenario partition. To "
+        "change an existing scenario order, use one order_edges operation listing every behavior edge of the scenario "
+        "in behavioral order (the IDs in active_repair_task.edges_in_current_order plus temp_refs of edges this delta "
+        "adds); remove an edge only when it is obsolete, using exactly {\"op\":\"remove_edge\",\"edge_id\":\"VDE-*\"}, "
+        "and never put an edge object inside remove_edge. "
         if repair_task is not None
         else ""
     )
     uiux_tool_instruction = (
         "uiux.search_guidance(query,mode=domain,domain=ux|icons|react) or "
-        "uiux.search_guidance(query,mode=stack,stack=react); "
+        "uiux.search_guidance(query,mode=stack,stack=react) (not counted in limit_before_delta); "
         if ui_guidance_required and not guidance_reused
         else ""
     )
     delta_scaffold_instruction = (
-        "Start from delta_scaffold and replace every angle-bracket placeholder.\n\n"
+        "Start from delta_scaffold as the shape reference and replace every angle-bracket placeholder in the "
+        "action you submit. In construction, instantiate its node prototypes for the required operations and "
+        "screens; their count is not fixed by the scaffold. In repair, obey the supplied write_scope and any "
+        "exact-repair instructions instead.\n\n"
         if active_partition is not None or repair_task is not None
         else ""
     )
@@ -573,55 +666,104 @@ def _designer_prompt(
         + uiux_instruction
         + runtime_surface_instruction
         + "Investigate frozen AS-IS evidence, identify GAP, and propose TO-BE one tool action at a time. "
+        "Choose the next action before planning its complete artifact. If concrete missing source facts need "
+        "observations, issue the reads/searches they need now (the files you can name together in one "
+        "repo.read_batch); defer node-by-node design and JSON drafting until the observations return. Earlier private reasoning is not replayed to the next call: only recorded "
+        "observations, the graph and your action summaries persist. Give every action a top-level \"summary\" "
+        "string next to action and arguments: one to three sentences recording the design conclusions reached so far "
+        "(chosen screens and runtime targets, required inputs and the hop that provides each, files still to read) "
+        "and why this action is next. DESIGN_NOTES_JSON.design_notes returns your earlier summaries for the active "
+        "work item in order; continue from them instead of re-deriving them. They are your own unverified notes, not "
+        "evidence: when an observation, the graph or a Harness rejection disagrees, follow that and write the "
+        "corrected conclusion in the new summary. Do not repeatedly draft the full design in calls that only read "
+        "source. Once evidence and required guidance suffice, submit design.propose_delta. "
         "A GAP is only behavior that active_requirement_slice.allowed_requirement_refs needs and the AS-IS target "
         "lacks; when the AS-IS target already provides all of it, use reuse and describe its current runtime states as "
         "they are. UI/UX guidance shapes how required behavior looks; it never adds behavior the Requirement does not "
         "ask for. "
-        "Use only the listed tools. Existing behavior must use reuse/modify/no_change with RLA evidence; "
-        "new behavior uses add with an evidence_reason. Every node needs requirement_refs, a concise contract, and a "
+        "Use only the listed tools. Choose disposition by the runtime target: reuse/modify/no_change require "
+        "an existing target grounded in observed repository evidence; use modify when required behavior changes "
+        "that target, and reuse when its current behavior already satisfies the slice. A new behavior in an "
+        "existing target does not require disposition=add. Use add only for a new runtime target and explain "
+        "the GAP in evidence_reason. Every node needs requirement_refs, a concise contract, and a "
         f"{SURFACE_CONTRACT_VERSION} surface_contract matching its surface. "
         "Candidate anchors are AS-IS evidence, not automatic TO-BE targets. For disposition=add, choose a concrete new "
-        "profile-owned target path/symbol for the required behavior and attach it to an inspected existing composition "
-        "owner; never bind new domain behavior to an unrelated health, smoke, demo, or test symbol. The add target must "
-        "not be identical to its owner or to an existing anchor. Use modify/reuse when the target itself already exists. "
-        "repo.read only accepts existing AS-IS files. When an add target does not exist yet, read its existing composition "
+        "profile-owned target path/symbol for the required behavior and attach it to the existing composition owner "
+        "that registers or renders it; never bind new domain behavior to an unrelated health, smoke, demo, or test "
+        "symbol. The add target must not be identical to its owner or to an existing anchor. Use modify/reuse when the "
+        "target itself already exists. An attachment names one owner: owner_ref, owner_path and owner_symbol all come "
+        "from that same owner, never from two different ones. A new api route is registered where its sibling routes "
+        "are, not by the app root that mounts their router: attach it with relation registered_by to the "
+        "surface_work.route_registration_modules entry whose routes it joins, with owner_ref its anchor_id, owner_path "
+        "its path and owner_symbol empty (the anchor is the whole file). "
+        "repo.read and repo.read_batch only accept existing AS-IS files. When an add target does not exist yet, read its existing composition "
         "owner or use an available CodeGraph call path instead of trying to read the TO-BE target. "
         "Never repeat an identical successful tool action. If a search returns zero matches, either broaden it once "
         "or model the required surface as add using a component/root from the frozen landscape. "
         + construction_instruction
         + repair_instruction
         + "For Graph V2, candidate anchors locate source but do not satisfy investigation. While observation_policy.source_inspected "
-        "is false, the next action must be repo.read or an available codegraph.query for the active component; a delta "
-        "proposed before that is rejected. observation_policy.actions_remaining_including_delta is the real budget of this "
-        "target or partition and includes the delta: make at most observation_policy.limit_before_delta distinct "
-        "observation actions (design.inspect_partition is not one of them: it only shows designed graph nodes), "
-        "then you must call design.propose_delta before investigating another partition. If must_propose_delta_now is true, "
-        "the only valid next actions are design.propose_delta, or design.inspect_partition of a node listed only in "
-        "graph.index. Call complete only when active_partition and active_repair_task are null.\n\n"
+        "is false, the next action must be repo.read_batch, repo.read or an available codegraph.query for the active "
+        "component; a delta proposed before that is rejected. observation_policy.actions_remaining_including_delta is "
+        "the real budget of this target or partition and counts every action, the delta included. "
+        "observation_policy.counted_observations_left is how many more counted observations you may make before the "
+        "delta; each call of landscape.search, landscape.get_anchor, repo.search, repo.read, repo.read_batch or "
+        "codegraph.query counts as one, any other tool is not counted. Read the files you already know you need in one "
+        "repo.read_batch instead of one repo.read per call. "
+        "Before proposing a node with disposition reuse, modify or no_change, "
+        "read its runtime_binding.target.path yourself in this session, and likewise the file of the provided_by "
+        "hop of every required input you declare: the Harness rejects a delta that designs from an existing file no "
+        "repo.read or repo.read_batch returned. observation_policy.allowed_next_actions (or the CURRENT UI/UX TOOL "
+        "STATE) lists what you may do now; record your conclusions in summary. When the evidence suffices, submit "
+        "design.propose_delta, or design.report_blocker if required binding evidence is still missing, before "
+        "investigating another partition. Choose add or modify from what the code is and what the Requirement needs, "
+        "never to save observations. A repair task proposes its delta directly. source_inspected=true records a "
+        "successful source or call-path observation, not proof that every target claim is supported. "
+        "CodeGraph symbols/files results are navigation_only and do not mark source inspected; read the located source "
+        "or request its call path. Read more source when concrete unresolved claims need it, the files you can name "
+        "together in one repo.read_batch. If must_propose_delta_now is true, "
+        "the valid next actions are design.propose_delta, design.report_blocker for missing required evidence, "
+        "or design.inspect_partition of a node listed only in "
+        "graph.index; after a design_target_not_read rejection, reading the paths it lists stays allowed. "
+        "Call complete only when active_partition and active_repair_task are null.\n\n"
         "Tools: landscape.search(query?,scenario_id?,surface?,component_id?,kind?); "
         "landscape.get_anchor(anchor_id); repo.search(query,component_id?); "
-        "repo.read(path,start_line?,end_line?); codegraph.query(operation=explore|symbols|callers|callees|impact|files,query?,symbol?,kind?,limit?,depth?,filter?,pattern?); "
+        "repo.read(path,start_line?,end_line?); "
+        f"repo.read_batch(requests) where requests is 1-{MAX_BATCH_READS} objects {{path,start_line?,end_line?}} and "
+        "each file comes back as repo.read returns it; "
+        "codegraph.query(operation=explore|symbols|callers|callees|impact|files,query?,symbol?,kind?,limit?,depth?,filter?,pattern?); "
         + uiux_tool_instruction
         + "design.inspect_partition(scenario_id?,component_id?,node_ids?); "
+        "design.report_blocker(target_ref,missing_facts,reason); "
+        "After a source/CodeGraph attempt, if a concrete required binding remains unverifiable, use remaining observations "
+        "for that fact or report it with nonempty missing_facts (string array) and a concise reason. Do not invent bindings "
+        "or repeat searches; this action stops the run with a diagnostic, consumes existing budget and creates no checkpoint. "
         f"design.propose_delta(delta); complete(). The delta requires schema_version={delta_contract}, "
         "base_graph_digest, partition{use_case_id,scenario_id,component_id}, operations, "
         "completion_claims, and unresolved_items. completion_claims must be objects shaped exactly like "
         "{\"scenario_id\":\"SC-1\",\"surfaces\":[\"ui\",\"api\"]}; allowed surface values are ui, api, "
         "business_rule, data, and interaction. The completion_claims array must never contain bare strings. "
         "Supported operations are set_partition_coverage, "
-        "add_node, update_node, remove_node, add_edge, remove_edge, place_surface, and not_exercised. An add_node contains "
+        "add_node, update_node, remove_node, add_edge, remove_edge, order_edges, place_surface, and not_exercised. An add_node contains "
         "temp_ref, semantic_key, name, kind, surface, disposition, requirement_refs, evidence_refs, "
-        "evidence_reason, contract, surface_contract, and for Graph V2 runtime_binding. node.evidence_refs accepts only "
-        "frozen repository evidence returned by Designer tools (RLA-* or repo:*), copied exactly: the #L line is part "
+        "evidence_reason, contract, surface_contract, and for Graph V2 runtime_binding. The node key list is "
+        "closed: do not add undeclared node keys, even with null values. Optional schema fields may be omitted "
+        "unless their stated condition makes them required; placeholders are explanations, not literal values. "
+        "node.evidence_refs accepts only "
+        "frozen repository evidence (RLA-* or repo:*) returned by Designer tools or listed in ui_runtime_context "
+        "(its evidence_ref values are valid as they are), copied exactly: the #L line is part "
         "of the ref, so never change it or write a new one; never put Requirement provenance E-*, "
-        "Requirement IDs, or uiux:* refs there. Reuse/modify/no_change need an observed repository evidence ref. For "
+        "Requirement IDs, or uiux:* refs there. Reuse/modify/no_change need such a repository evidence ref. For "
         "disposition=add, leave node.evidence_refs empty, explain the GAP in evidence_reason, and keep inspected "
         "composition-owner or entrypoint anchors under runtime_binding.evidence_refs. For a mutation, the complete outer envelope must be "
-        f"{{\"action\":\"design.propose_delta\",\"arguments\":{{\"delta\":{{\"schema_version\":\"{delta_contract}\",...}}}}}}; "
+        f"{{\"action\":\"design.propose_delta\",\"arguments\":{{\"delta\":{{\"schema_version\":\"{delta_contract}\",...}}}},\"summary\":\"...\"}}; "
         f"never use {graph_contract} as the delta schema and never put delta fields directly under arguments. "
         "set_partition_coverage must be exactly {\"op\":\"set_partition_coverage\",\"coverage\":{...}}. "
         "add_node must be exactly {\"op\":\"add_node\",\"node\":{...}}. temp_ref must start with 'tmp:'. "
-        "Node kind is the graph kind supplied by node_scaffolds, not a landscape anchor kind. Node contract must be "
+        "For a delta, use readable multiline JSON with each operation clearly separated. Close the node and its "
+        "operation object before starting the next operations array item; indentation does not replace closers. "
+        "Node kind is the graph kind supplied by the add_node prototypes in delta_scaffold.operations, not a "
+        "landscape anchor kind. Node contract must be "
         "one non-empty string, never an object. surface_contract must keep schema_version exactly "
         "design_surface_contract_v1 and keep surface unchanged. UI requires entrypoint, states, "
         "transitions[{from,action,to,outcome}], validations "
@@ -646,7 +788,8 @@ def _designer_prompt(
         "{\"op\":\"add_edge\",\"edge\":{\"from\":\"VDN-* or tmp:*\",\"to\":\"VDN-* or tmp:*\","
         "\"kind\":\"calls|reads|writes|returns|contains|realized_by|depends_on\",\"label\":\"specific interaction\","
         "\"scenario_id\":\"SC-*\",\"branch_group\":\"optional-safe-key\",\"guard\":\"optional condition\","
-        "\"terminal\":false}}. branch_group and guard must be supplied together on every consecutive edge belonging "
+        "\"terminal\":false,\"temp_ref\":\"optional tmp:* name for order_edges\"}}. branch_group and guard must be "
+        "supplied together on every consecutive edge belonging "
         "to a conditional error/alternative branch; set terminal=true on the final observable outcome edge. "
         "Multiple interactions between the same endpoints are allowed when labels differ. "
         "For Graph V2, every edge between nodes of different components uses the field boundary_contract; an edge "
@@ -658,7 +801,8 @@ def _designer_prompt(
         "otherwise the specific provider operation\",\"input_mapping\":[{\"from\":\"consumer field\","
         "\"to\":\"provider field\",\"required\":true}],\"auth_mapping\":[],"
         "\"response_mapping\":[{\"from\":\"provider success\",\"to\":\"consumer outcome\","
-        "\"required\":true}],\"error_mapping\":[]}}. Map every required API request field, required authentication "
+        "\"required\":true}],\"error_mapping\":[]}}. Map every API request field (required:false when the consumer "
+        "may omit it), required authentication "
         "or authorization, success response, and 4xx/5xx response; 4xx/5xx statuses go only in error_mapping, and "
         "response_mapping stays empty when the API declares no success response. This full provider mapping is required on both calls "
         "and returns edges when the provider is an API; a returns edge must not map only the response. The Harness copies "
@@ -678,20 +822,27 @@ def _designer_prompt(
         "explicit approved transport surface. Business rules do not imply backend placement: when UI is required and "
         "API/data are not applicable, keep the rule in the UI application or an importable shared package. Never add a "
         "server endpoint merely to repair a scenario whose approved API surface is not_applicable. "
-        "Sequence projections are linear within each scenario: only calls/reads/writes/returns become messages. Every "
-        "scenario with a UI surface needs actual behavior beyond depends_on, exactly one terminal edge at the "
+        "Sequence projections are linear within each scenario: only calls/reads/writes/returns become messages. "
+        "These are completed-scenario invariants, after all of its required partitions: every scenario with a UI "
+        "surface needs actual behavior beyond depends_on, exactly one terminal edge at the "
         "final observable outcome, and a continuous ordered message path. When the scenario names several operations "
         "with the same outcome (for example the same refusal of several different requests), give each operation its "
         "own api_contract node (one method and path each) and its own message path: every operation path except the "
         "last carries a branch_group with a guard naming that operation, and only the last path ends with the terminal "
         "edge. Never leave out an operation the scenario names. Likewise a scenario that the actor carries out on "
         "several screens (for example an editor and a list on another page) has one ui node per screen, each "
-        "attached where the AS-IS code renders that screen. If the requirement requires human confirmation "
+        "attached where the AS-IS code renders that screen. When two screens render the same AS-IS component (for "
+        "example a create page and an edit page that both render one form component), keep one ui node per screen, "
+        "each with its own screen_id and a composition_path through that screen's own page; a node targets its page "
+        "when that screen needs a new value or handler the page must create, and the shared component only when the "
+        "change lies entirely inside it and every value it needs is already passed to it. "
+        "If the requirement requires human confirmation "
         "before persistence, represent that confirmation in the UI surface contract before the outbound mutation call or "
         "in the interaction path before any writes edge. Do not invent a preliminary backend verification round trip unless "
         "the approved requirement explicitly requires it. "
         + delta_scaffold_instruction
-        + "Action JSON: {\"action\":\"tool.id\",\"arguments\":{...}}\n\n"
+        + "Action JSON: {\"action\":\"tool.id\",\"arguments\":{...},\"summary\":\"design conclusions so far and why "
+        "this action is next\"}\n\n"
         + _prompt_blocks(payload)
         + "".join(f"\n\n{text.rstrip()}" for text in (uiux_status_instruction, correction, review_correction) if text)
     )
@@ -711,6 +862,8 @@ _PROMPT_BLOCKS = (
          "ui_runtime_context", "feature_ux_decisions", "repair_feedback"),
     ),
     ("OBSERVATIONS_JSON", ("recent_observations",)),
+    # Append-only within a work item: after the observations, so a new note never shifts their prefix.
+    ("DESIGN_NOTES_JSON", ("design_notes",)),
 )
 
 
@@ -863,6 +1016,8 @@ def _ui_runtime_prompt_context(
     }
     return {
         "entrypoint": _dict(context.get("entrypoint")).get("ref"),
+        "extraction": context.get("extraction"),
+        "uncertainty": context.get("uncertainty", []),
         "composition_chain": [
             {
                 "ref": hop.get("ref"),
@@ -871,7 +1026,10 @@ def _ui_runtime_prompt_context(
                 **({"owner_ref": hop.get("ref")} if hop.get("renders") else {}),
                 "renders": hop.get("renders"),
                 "passes_props": hop.get("passes_props"),
-                "required_props": required_props(context, str(hop.get("ref") or "")),
+                "props_status": _dict(_dict(context.get("components")).get(str(hop.get("ref") or ""))).get("props_status", "legacy"),
+                "renders_status": hop.get("renders_status", "legacy"),
+                "required_props": (None if _dict(_dict(context.get("components")).get(str(hop.get("ref") or ""))).get("props_status") == "unknown"
+                                   else required_props(context, str(hop.get("ref") or ""))),
                 "evidence_ref": hop.get("evidence_ref"),
             }
             for hop in _dicts(context.get("composition_chain"))

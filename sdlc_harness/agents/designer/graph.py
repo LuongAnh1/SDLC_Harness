@@ -221,11 +221,14 @@ OPERATIONS = frozenset(
         "remove_node",
         "add_edge",
         "remove_edge",
+        "order_edges",
         "set_partition_coverage",
         "place_surface",
         "not_exercised",
     }
 )
+# Edge kinds that state structure; every other kind is an ordered behavior message of its scenario.
+STRUCTURAL_EDGE_KINDS = frozenset({"contains", "depends_on", "realized_by"})
 # A business rule may run in the UI or in the server; ui/api/data belong to fixed components.
 PLACEABLE_SURFACES = frozenset({"business_rule"})
 # A required backend surface a scenario never reaches (e.g. data behind a 401 refused before any access).
@@ -355,6 +358,9 @@ def validate_vertical_design_graph(
 
     nodes = _dict_items(value.get("nodes"), code="vertical_design_graph_invalid", run_id=run_id)
     node_ids: set[str] = set()
+    # One rejection names every node's surface contract problem: a large UI delta repeated the same misnesting on
+    # each node and was rejected one node at a time (design_v12 designer-0008).
+    contract_errors: list[str] = []
     for node in nodes:
         node_id = str(node.get("id") or "")
         if not node_id.startswith("VDN-") or node_id in node_ids:
@@ -377,16 +383,30 @@ def validate_vertical_design_graph(
         if not str(node.get("contract") or "").strip():
             raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} has no Design contract.", run_id=run_id)
         surface_contract = node.get("surface_contract")
+        node_ids.add(node_id)
         if surface_contract is not None:
-            _validate_surface_contract(
-                surface_contract,
-                surface=str(node.get("surface") or ""),
-                node_id=node_id,
-                run_id=run_id,
-            )
+            try:
+                _validate_surface_contract(
+                    surface_contract,
+                    surface=str(node.get("surface") or ""),
+                    node_id=node_id,
+                    run_id=run_id,
+                )
+            except HarnessError as exc:
+                if exc.error_code != "vertical_design_graph_invalid":
+                    raise
+                contract_errors.append(exc.message)
+                continue
         if node.get("runtime_binding") is not None:
             _validate_runtime_binding(node.get("runtime_binding"), node=node, run_id=run_id)
-        node_ids.add(node_id)
+    if contract_errors:
+        raise HarnessError(
+            "vertical_design_graph_invalid",
+            contract_errors[0]
+            if len(contract_errors) == 1
+            else f"{len(contract_errors)} nodes have invalid surface contracts: " + " | ".join(contract_errors),
+            run_id=run_id,
+        )
 
     edges = _dict_items(value.get("edges"), code="vertical_design_graph_invalid", run_id=run_id)
     edge_ids: set[str] = set()
@@ -492,7 +512,7 @@ def _sequence_behavior_findings(
                 edge
                 for edge in edges
                 if str(edge.get("scenario_id") or "") == scenario_id
-                and str(edge.get("kind") or "") not in {"contains", "depends_on", "realized_by"}
+                and str(edge.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
             ),
             key=lambda item: int(item.get("order") or 0),
         )
@@ -963,7 +983,13 @@ def _validate_runtime_binding(value: object, *, node: dict[str, object], run_id:
     owner_ref = str(attachment.get("owner_ref") or "")
     owner_path = str(attachment.get("owner_path") or "")
     owner_symbol = str(attachment.get("owner_symbol") or "")
-    if not owner_ref or (owner_path and not _is_repo_path(owner_path)) or (owner_path and not owner_symbol):
+    # A file anchor (RLA-* source_file, e.g. the router module that registers routes) is a whole-file owner with no
+    # symbol; the composition check compares owner_path/owner_symbol with that anchor.
+    if (
+        not owner_ref
+        or (owner_path and not _is_repo_path(owner_path))
+        or (owner_path and not owner_symbol and not owner_ref.startswith("RLA-"))
+    ):
         raise HarnessError("vertical_design_graph_invalid", f"Node {node_id} runtime attachment owner is invalid.", run_id=run_id)
     evidence_refs = value.get("evidence_refs")
     if not isinstance(evidence_refs, list) or any(not isinstance(item, str) or not item for item in evidence_refs):
@@ -1019,7 +1045,7 @@ def apply_designer_delta(
         # The Designer never saw the ids allocated for this delta: name its nodes and edges as it wrote them.
         message = exc.message
         for allocated, name in _delta_written_names(
-            graph, written.get("candidate") or {}, written.get("temp_refs") or {}
+            graph, written.get("candidate") or {}, written.get("temp_refs") or {}, written.get("edge_refs") or {}
         ).items():
             message = message.replace(allocated, name)
         exc.message = message
@@ -1053,10 +1079,14 @@ def _apply_designer_delta(
     candidate = json.loads(json.dumps(graph, ensure_ascii=False))
     candidate.pop("artifact_digest", None)
     temp_refs: dict[str, str] = {}
-    written.update(candidate=candidate, temp_refs=temp_refs)
+    edge_refs: dict[str, str] = {}
+    written.update(candidate=candidate, temp_refs=temp_refs, edge_refs=edge_refs)
     operations = _dict_items(delta.get("operations"), code="designer_delta_invalid", run_id=run_id)
     if not operations:
         raise HarnessError("designer_delta_invalid", "Designer delta must contain at least one operation.", run_id=run_id)
+    order_ops = [item for item in operations if str(item.get("op") or "") == "order_edges"]
+    if len(order_ops) > 1:
+        raise HarnessError("designer_delta_invalid", "A delta may contain at most one order_edges operation.", run_id=run_id)
     remove_ops = [item for item in operations if str(item.get("op") or "") == "remove_edge"]
     add_ops = [item for item in operations if str(item.get("op") or "") == "add_edge"]
     replacement_order: int | None = None
@@ -1096,6 +1126,8 @@ def _apply_designer_delta(
             edge = _dict_value(operation.get("edge"))
             if "order" not in edge:
                 operation = {**operation, "edge": {**edge, "order": replacement_order}}
+        if op == "order_edges":
+            continue  # applied below, once every add_edge and remove_edge of the delta exists
         _apply_operation(
             candidate,
             operation,
@@ -1105,7 +1137,10 @@ def _apply_designer_delta(
             valid_evidence_refs=valid_evidence_refs,
             valid_guidance_refs=valid_guidance_refs or set(),
             run_id=run_id,
+            edge_refs=edge_refs,
         )
+    if order_ops:
+        _apply_edge_order(candidate, order_ops[0], partition=partition, edge_refs=edge_refs, run_id=run_id)
     _resolve_attachment_temp_refs(candidate, temp_refs, before=graph, run_id=run_id)
     _validate_new_placements(candidate, before=graph, partition=partition, run_id=run_id)
     _validate_not_exercised(candidate, run_id=run_id)
@@ -1142,7 +1177,8 @@ def _apply_designer_delta(
         )
     candidate["artifact_digest"] = graph_digest(candidate)
     validate_vertical_design_graph(candidate, expected_run_id=run_id)
-    contract_findings = _new_boundary_contract_findings(graph, candidate)
+    new_findings = _new_boundary_contract_findings(graph, candidate)
+    contract_findings = [item for item in new_findings if item.get("category") == "boundary_contract_mismatch"]
     if contract_findings:
         details = "; ".join(
             f"{item.get('subject_ref')}: {item.get('message')}"
@@ -1153,20 +1189,35 @@ def _apply_designer_delta(
             f"Designer delta failed boundary contract validation: {details}",
             run_id=run_id,
         )
+    # Required props come from the frozen AS-IS source facts, so a missing declaration is known when the delta
+    # arrives; reporting it only at completion cost a later repair round (design_v10 designer-0006).
+    input_findings = [item for item in new_findings if item.get("category") == "ui_required_input_undeclared"]
+    if input_findings:
+        details = "; ".join(f"{item.get('subject_ref')}: {item.get('message')}" for item in input_findings)
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"Designer delta leaves required props undeclared: {details} Declare each required prop in "
+            "runtime_surface.required_inputs with its source, binding and the provided_by hop that passes it.",
+            run_id=run_id,
+        )
     return candidate, temp_refs
 
 
 def _delta_written_names(
-    before: dict[str, object], candidate: dict[str, object], temp_refs: dict[str, str]
+    before: dict[str, object],
+    candidate: dict[str, object],
+    temp_refs: dict[str, str],
+    edge_refs: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Ids the Harness allocated for this delta, named as the Designer wrote them: edges as from -> to (kind), then
-    nodes by temp_ref (edges first, so an edge name keeps the temp_refs it is written with)."""
+    """Ids the Harness allocated for this delta, named as the Designer wrote them: edges by their temp_ref or as
+    from -> to (kind), then nodes by temp_ref (edges first, so an edge name keeps the temp_refs it is written with)."""
 
     written = {node_id: temp_ref for temp_ref, node_id in temp_refs.items()}
+    written_edges = {edge_id: edge_ref for edge_ref, edge_id in (edge_refs or {}).items()}
     existing = {str(edge.get("id") or "") for edge in before.get("edges") or [] if isinstance(edge, dict)}
     return {
         **{
-            str(edge["id"]): (
+            str(edge["id"]): written_edges.get(str(edge["id"])) or (
                 f"{written.get(str(edge.get('from')), edge.get('from'))} -> "
                 f"{written.get(str(edge.get('to')), edge.get('to'))} ({edge.get('kind')})"
             )
@@ -1177,10 +1228,102 @@ def _delta_written_names(
     }
 
 
+def _apply_edge_order(
+    graph: dict[str, object],
+    operation: dict[str, object],
+    *,
+    partition: dict[str, object],
+    edge_refs: dict[str, str],
+    run_id: str,
+) -> None:
+    """Renumber the scenario's behavior edges in the listed order (design_v19 designer-0009: with append-only order
+    the only way to interleave a later partition's edges was to remove and re-add every edge with its contract)."""
+
+    unknown_keys = sorted(set(operation) - {"op", "scenario_id", "edges", "terminal"})
+    if unknown_keys:
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"order_edges accepts only scenario_id, edges and terminal; remove {unknown_keys}.",
+            run_id=run_id,
+        )
+    scenario_id = str(operation.get("scenario_id") or partition.get("scenario_id") or "")
+    if scenario_id != str(partition.get("scenario_id") or ""):
+        raise HarnessError(
+            "designer_delta_invalid", "order_edges can only order the scenario of the delta partition.", run_id=run_id
+        )
+    refs = operation.get("edges")
+    if not isinstance(refs, list) or not refs or any(not isinstance(ref, str) or not ref.strip() for ref in refs):
+        raise HarnessError(
+            "designer_delta_invalid",
+            "order_edges.edges must be a non-empty array of VDE-* edge ids and temp_refs of edges this delta adds.",
+            run_id=run_id,
+        )
+    ordered = [edge_refs.get(ref.strip(), ref.strip()) for ref in refs]
+    edges = _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id)
+    behavior = [
+        item
+        for item in edges
+        if str(item.get("scenario_id") or "") == scenario_id and str(item.get("kind") or "") not in STRUCTURAL_EDGE_KINDS
+    ]
+    behavior_ids = {str(item.get("id") or "") for item in behavior}
+    problems: list[str] = []
+    repeated = sorted({ref for ref, resolved in zip(refs, ordered) if ordered.count(resolved) > 1})
+    if repeated:
+        problems.append(f"listed more than once: {repeated}")
+    unknown = [ref for ref, resolved in zip(refs, ordered) if resolved not in behavior_ids]
+    if unknown:
+        problems.append(f"not a calls/returns/reads/writes edge of {scenario_id}: {unknown}")
+    missing = [item for item in behavior if str(item.get("id") or "") not in ordered]
+    if missing:
+        problems.append(
+            "missing: "
+            + ", ".join(f"{item.get('id')} ({item.get('from')} -> {item.get('to')} {item.get('kind')})" for item in missing)
+        )
+    if problems:
+        raise HarnessError(
+            "designer_delta_invalid",
+            f"order_edges must list every behavior edge of {scenario_id} exactly once; " + "; ".join(problems) + ".",
+            run_id=run_id,
+        )
+    terminal = operation.get("terminal")
+    if terminal is not None and (
+        not isinstance(terminal, str) or edge_refs.get(terminal.strip(), terminal.strip()) != ordered[-1]
+    ):
+        raise HarnessError(
+            "designer_delta_invalid", "order_edges.terminal must name the last edge of order_edges.edges.", run_id=run_id
+        )
+    position = {edge_id: index for index, edge_id in enumerate(ordered, start=1)}
+    structural = sorted(
+        (
+            item
+            for item in edges
+            if str(item.get("scenario_id") or "") == scenario_id and str(item.get("id") or "") not in position
+        ),
+        key=lambda item: int(item.get("order") or 0),
+    )
+    for index, item in enumerate(structural, start=len(ordered) + 1):
+        position[str(item.get("id") or "")] = index
+    graph["edges"] = [
+        {
+            **item,
+            "order": position[str(item.get("id") or "")],
+            **({"terminal": str(item.get("id") or "") == ordered[-1]} if terminal is not None else {}),
+        }
+        if str(item.get("scenario_id") or "") == scenario_id
+        else item
+        for item in edges
+    ]
+
+
+DELTA_TIME_COMPOSITION_CATEGORIES = frozenset({"boundary_contract_mismatch", "ui_required_input_undeclared"})
+
+
 def _new_boundary_contract_findings(
     current: dict[str, object],
     candidate: dict[str, object],
 ) -> list[dict[str, object]]:
+    """Delta-time composition findings the candidate adds (DELTA_TIME_COMPOSITION_CATEGORIES)."""
+
     def boundary_findings(graph: dict[str, object]) -> list[dict[str, object]]:
         return [
             item
@@ -1189,7 +1332,7 @@ def _new_boundary_contract_findings(
                 required_surfaces=None,
                 landscape=None,
             )
-            if str(item.get("category") or "") == "boundary_contract_mismatch"
+            if str(item.get("category") or "") in DELTA_TIME_COMPOSITION_CATEGORIES
         ]
 
     existing = {
@@ -1783,6 +1926,8 @@ def _ui_runtime_surface_findings(
         for parent, child in zip(path, path[1:]):
             parent_node = planned_targets.get(parent)
             parent_modified = parent_node is not None and str(parent_node.get("disposition") or "") in {"modify", "add"}
+            if parent in chain and chain[parent].get("renders_status") == "unknown" and not parent_modified:
+                invalid_hops.append(f"{parent}:render evidence unavailable")
             # Two AS-IS hops must already be a real render edge unless the Design modifies the parent to mount it.
             if parent in chain and child in chain and child not in _strings(chain[parent].get("renders")) and not parent_modified:
                 invalid_hops.append(f"{parent}->{child}")
@@ -1814,9 +1959,19 @@ def _ui_runtime_surface_findings(
         declared = {str(item.get("name") or "") for item in inputs}
         if str(node.get("disposition") or "") in {"modify", "reuse", "no_change"}:
             component = _dict_value(components.get(target_ref))
+            unknown = component.get("props_status") == "unknown" or (
+                context.get("extraction") and not component
+            )
+            if unknown:
+                findings.append(_composition_finding(
+                    "ui_source_facts_unresolved", node_id,
+                    f"Required props for {target_ref} could not be extracted from the frozen source.",
+                    "Investigate the target source or CodeGraph; report an evidence blocker if its contract remains unresolved.",
+                    node=node,
+                ))
             missing = [
                 str(prop.get("name") or "")
-                for prop in component.get("props", [])
+                for prop in (component.get("props") or [])
                 if isinstance(prop, dict)
                 and not prop.get("optional")
                 and not prop.get("has_default")
@@ -2248,7 +2403,9 @@ def _boundary_contract_diagnostics(
         mismatches.append(f"set provider_operation to {expected}")
     fields = _dict_items(surface.get("request_fields", []), code="vertical_design_graph_invalid", run_id="")
     input_mappings = _dict_items(contract.get("input_mapping", []), code="vertical_design_graph_invalid", run_id="")
-    mapped_targets = {str(item.get("to") or "") for item in input_mappings if bool(item.get("required"))}
+    # Every request field must be mapped; the mapping's own `required` says whether the consumer may omit it
+    # (design_v19 designer-0007: Conduit's optional tagList mapped with required=false was rejected).
+    mapped_targets = {str(item.get("to") or "") for item in input_mappings}
     required_targets = [str(item.get("name") or "") for item in fields if str(item.get("name") or "")]
     missing_targets = [name for name in required_targets if name not in mapped_targets]
     if missing_targets:
@@ -2424,6 +2581,7 @@ def _apply_operation(
     valid_evidence_refs: set[str],
     valid_guidance_refs: set[str],
     run_id: str,
+    edge_refs: dict[str, str] | None = None,
 ) -> None:
     op = str(operation.get("op") or "")
     if op == "set_partition_coverage":
@@ -2570,6 +2728,16 @@ def _apply_operation(
             raise HarnessError("designer_delta_invalid", "Design edge terminal must be boolean.", run_id=run_id)
         if not scenario_id or not _SAFE_KEY.fullmatch(scenario_id):
             raise HarnessError("designer_delta_invalid", "Design edge scenario_id is invalid.", run_id=run_id)
+        # A new edge may carry a temp_ref so order_edges of the same delta can place it among existing edges.
+        edge_ref = str(raw.get("temp_ref") or "").strip()
+        if edge_ref and (
+            edge_refs is None or not edge_ref.startswith("tmp:") or edge_ref in edge_refs or edge_ref in temp_refs
+        ):
+            raise HarnessError(
+                "designer_delta_invalid",
+                f"Design edge temp_ref {edge_ref} is invalid or repeated: give each new edge its own 'tmp:' name.",
+                run_id=run_id,
+            )
         edges = _dict_items(graph.get("edges"), code="designer_delta_invalid", run_id=run_id)
         requested_order = raw.get("order")
         if requested_order is None:
@@ -2595,10 +2763,12 @@ def _apply_operation(
                 f"Design edge already exists: {edge_id}. Remove this exact edge_id before re-adding it, or omit the duplicate add_edge.",
                 run_id=run_id,
             )
+        if edge_ref and edge_refs is not None:
+            edge_refs[edge_ref] = edge_id
         graph["edges"] = [
             *edges,
             {
-                **raw,
+                **{key: value for key, value in raw.items() if key != "temp_ref"},
                 "id": edge_id,
                 "from": source,
                 "to": target,

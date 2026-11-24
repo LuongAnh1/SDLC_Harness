@@ -18,6 +18,8 @@ MAX_RESULTS = 20
 MAX_READ_LINES = 200
 MAX_FILE_CHARS = 8_000
 MAX_OUTPUT_CHARS = 12_000
+# design_v17/v18: the first SC-1|web call wanted 8 files (664 lines) and filled a 4-file batch both times.
+MAX_BATCH_READS = 8
 _SAFE_SYMBOL = re.compile(r"^[A-Za-z0-9_.$:/# -]{1,200}$")
 _SAFE_FILE_FILTER = re.compile(r"^[A-Za-z0-9_./*-]{0,200}$")
 # A compound name: camelCase/PascalCase boundary, acronym run, separator or digit.
@@ -92,12 +94,22 @@ class DesignerToolRegistry:
             return self._record_evidence(self._repo_search(args))
         if tool_id == "repo.read":
             return self._record_evidence(self._repo_read(args))
+        if tool_id == "repo.read_batch":
+            return self._record_evidence(self._repo_read_batch(args))
         if tool_id == "codegraph.query":
             return self._record_evidence(self._codegraph_query(args))
         if tool_id == "uiux.search_guidance":
             return self._record_guidance(self._uiux_search(args))
         if tool_id == "design.inspect_partition":
             return self._record_evidence(self._inspect_partition(args))
+        if tool_id == "design.report_blocker":
+            if (set(args) != {"target_ref", "missing_facts", "reason"}
+                    or not isinstance(args.get("target_ref"), str) or not args["target_ref"].strip()
+                    or not isinstance(args.get("reason"), str) or not args["reason"].strip()
+                    or not isinstance(args.get("missing_facts"), list) or not args["missing_facts"]
+                    or not all(isinstance(x, str) and x.strip() for x in args["missing_facts"])):
+                raise HarnessError("designer_tool_input_invalid", "Evidence blocker needs target_ref, nonempty missing_facts and reason.", run_id=self.run_id)
+            return {"status": "evidence_blocked", **args}, []
         if tool_id == "design.propose_delta":
             candidate, temp_refs = apply_designer_delta(
                 self.graph,
@@ -221,7 +233,9 @@ class DesignerToolRegistry:
     def _repo_read(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         relative = str(args.get("path") or "").strip().replace("\\", "/")
         start = max(1, int(args.get("start_line") or 1))
-        end = max(start, int(args.get("end_line") or start + 79))
+        # Without end_line read up to the line/char cap: an 80-line default cut ProfilePage, ArticlesViewer and the
+        # API client of Conduit and cost another read each.
+        end = max(start, int(args.get("end_line") or start + MAX_READ_LINES - 1))
         end = min(end, start + MAX_READ_LINES - 1)
         path = self._safe_file(relative)
         if not path.is_file():
@@ -239,6 +253,40 @@ class DesignerToolRegistry:
             "truncated": len(excerpt) >= MAX_FILE_CHARS or end < len(lines),
             "evidence_ref": ref,
         }, [ref]
+
+    def _repo_read_batch(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
+        requests = args.get("requests")
+        if (
+            set(args) != {"requests"}
+            or not isinstance(requests, list)
+            or not 1 <= len(requests) <= MAX_BATCH_READS
+            or not all(isinstance(item, dict) and str(item.get("path") or "").strip() for item in requests)
+        ):
+            raise HarnessError(
+                "designer_tool_input_invalid",
+                f"repo.read_batch needs requests: 1-{MAX_BATCH_READS} objects {{path, start_line?, end_line?}}.",
+                run_id=self.run_id,
+            )
+        results: list[dict[str, object]] = []
+        refs: list[str] = []
+        for index, request in enumerate(requests):
+            try:
+                output, read_refs = self._repo_read(dict(request))
+            except HarnessError as exc:
+                if exc.error_code not in {"designer_evidence_not_found", "designer_repo_path_unsafe"}:
+                    raise
+                # One wrong path does not waste the other reads of the call.
+                results.append({"request_index": index, "path": str(request.get("path")), "error": exc.error_code, "message": exc.message})
+                continue
+            results.append({"request_index": index, **output})
+            refs.extend(read_refs)
+        if not refs:
+            raise HarnessError(
+                "designer_evidence_not_found",
+                "No file of repo.read_batch could be read: " + "; ".join(str(item["message"]) for item in results),
+                run_id=self.run_id,
+            )
+        return {"results": results}, refs
 
     def _codegraph_query(self, args: dict[str, object]) -> tuple[dict[str, object], list[str]]:
         operation = str(args.get("operation") or "explore").strip().lower()
@@ -296,6 +344,7 @@ class DesignerToolRegistry:
         return {
             "status": "available",
             "operation": operation,
+            "evidence_scope": "navigation_only" if operation in {"symbols", "files"} else "source_or_call_path",
             "query_digest": "sha256:" + hashlib.sha256(query.encode("utf-8")).hexdigest(),
             "evidence": sanitized[:MAX_OUTPUT_CHARS],
             "truncated": len(sanitized) > MAX_OUTPUT_CHARS,
